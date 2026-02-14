@@ -260,10 +260,11 @@ To maintain extreme context purity, `Shelve` operations possess **cascading fold
 
 ### 7.1 XML Synthesis vs. Semantic Gluing
 
-PCP does not simply "glue" text together but provides a perception interface for the Worker through **Ordered XML Synthesis**.
-*   **Deterministic Scaffolding**: Textual gluing (Semantic Gluing) easily leads to cognitive confusion (i.e., hallucination drift) between "metadata" and "dialogue content." XML provides clear logical isolation.
-*   **Cognitive Anchors**: Tags serve as "cognitive anchors," allowing the system to perform precise context pruning, folding, and reorganization without interfering with the model's semantic understanding.
-*   **Structured Tracing**: Machine-readable tags create a strict closed-loop mapping between function operations like `Consult/Shelve` and content presentation.
+PCP does not simply stack text physically (Plain Text Gluing) but builds a perceptional interface with structural determinism through **Ordered XML Synthesis**. The core design motivations include:
+
+*   **Structural Disambiguation**: When dealing with context containing complex metadata (e.g., ID, Timestamp, Page Type), XML provide explicit logical boundaries. This effectively prevents the LLM from cognitively confusing "protocol control instructions" with "actual dialogue content," reducing hallucination drift during reasoning.
+*   **Addressing Bus & Operational Closure**: XML tags provide deterministic addressing targets (IDs) for `Consult` and `Shelve` operators. This allows the external system to perform precise local insertions or deletions on the context—much like manipulating the DOM—without needing to refresh the entire context flow.
+*   **Parsing Determinism**: Modern long-context models exhibit excellent adherence to structural markers. Treating the context as an "addressable database" rather than a "flat text stream" helps the model maintain rigorous logical tracing capabilities.
 
 ### 7.2 Tag Specifications
 
