@@ -9,25 +9,26 @@ The design of PCP is inspired by the **Virtual Memory** management mechanisms of
 *   **Context Virtualization**: `Original Pages` simulate "Hot Data," filling the physical cache (Context Window) with high-resolution (Detail) content.
 *   **Physical Cache vs. Virtual Addressing**: RAG systems only solve the "presence" of information, whereas PCP solves the "resolution" of information. Through tiered pre-fetching of `Consolidated Pages`, the system implements a virtualized mapping of infinite logical space within a limited physical cache.
 *   **Demand Paging**: The Worker should not passively parse streaming tokens but should act as a **Memory Management Unit (MMU)**, triggering a **Consult (Page In)** exception to load deep raw data on demand.
+*   **Active Neural Logic**: PCP does not rely on rigid similarity thresholds or formulaic constraints. Instead, it treats the LLM as a fundamental operator with "dynamic common sense." All decisions regarding page relevance, display resolution, and memory pruning are governed dynamically by the operator through its vast neural calculation network, achieving a much higher "logical context awareness" than traditional vector search.
 *   **Logical Sovereignty (Resolution Control)**: Pages in a `Focused` state hold the highest addressing weight. Other background information maintains logical topology at low resolution (Summary), preventing "Context Overflow."
 
 ## II. Trio Actor Model
 
 The system operates based on the decoupled collaboration of three core roles, ensuring the separation of "governance" and "execution":
 
-1.  **Governance Actor (Router/MMU)**: 
+1.  **Governance Actor (Router-MMU)**: 
     *   **Responsibility**: Logical coordinate mapping (Logical Mapping). Handles intent recognition, logical page indexing, and two-stage relevance matching.
-    *   **Core Decision**: Performs real-time analysis of address space mappings, deciding which Pages to Cache in the physical context and in what resolution (Summary/Detail).
+    *   **Core Characteristic**: **Neural Addressing over Numerical Retrieval**. The Router utilizes the LLM's high-dimensional semantic space to evaluate deep logical correlations between Query and Page Summaries, rather than relying on fragile vector cosine similarity.
 
-2.  **Execution Actor (Worker/CPU)**: 
+2.  **Execution Actor (Worker-CPU)**: 
     *   **Responsibility**: Task execution. Possesses **addressing autonomy**.
-    *   **Core Action**: Analyzes the current context to decide whether to trigger a **Page Fault** via `Consult` to load deeper details or use `Shelve` to evict overloaded physical pages.
+    *   **Core Action**: As the reasoning core, it dynamically decides whether to trigger a **Page Fault** via `Consult` to load deeper details by analyzing current context entropy and deduction depth.
 
-3.  **Refinement Actor (Consolidator/Background GC)**: 
+3.  **Refinement Actor (Consolidator-Background GC)**: 
     *   **Responsibility**: Physical maintenance of storage space (Memory Manager).
     *   **Core Action**: 
-        1.  **Initial Freezing**: Monitors topic states and length thresholds, Swapping Out active `Original Pages` into `Consolidated Pages`.
-        2.  **Long-term Merging**: Scans adjacent, same-topic summary pages with a long interval between occurrence and current physical time ($T_{now}$) (reaching a staleness threshold) and performs logical merging to ensure extreme refinement of long-cycle logic.
+        1.  **Initial Freezing**: Monitors topic states and length thresholds. Its judgment of a "Topic Pivot" is based on inferential logic shifts rather than simple semantic distance.
+        2.  **Metabolic Merging**: Performs "merging metabolism" based on logical staleness.
 
 ## III. The Temporal Coordination System
 

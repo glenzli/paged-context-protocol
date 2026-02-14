@@ -9,6 +9,7 @@ PCP 的设计灵感来源于计算机系统的**虚拟内存（Virtual Memory）
 *   **上下文虚拟化 (Context Virtualization)**：`Original Pages` 模拟“热数据（Hot Data）”，通过高分辨率（Detail）填充物理缓存（Context Window）。
 *   **物理缓存 vs. 虚拟寻址**：RAG 仅解决了信息的“存在性”，而 PCP 解决了信息的“分辨率”。通过 `Consolidated Pages` 的分级预读，系统在有限的物理缓存内实现了无限逻辑空间的虚拟化映射。
 *   **按需分页 (Demand Paging)**：Worker 不应被动解析流式 Token，而应作为“内存管理单元 (MMU)”，通过 **Consult (Page In)** 触发异常处理，按需调取深层原始数据。
+*   **神经逻辑控制 (Active Neural Logic)**：PCP 不设定死板的相似度阈值或字数公式。系统将 LLM 视为具备“动态常识”的基础算子。所有关于页面相关性、展现分辨度以及记忆剪裁的决策，均由算子通过其庞大的神经计算网络动态决定，实现比向量检索更具“逻辑语境感”的精准控制。
 *   **逻辑主权 (Resolution Control)**：当前处于 `Focused` 状态的页面拥有最高寻址权重，其余背景信息以低分辨率（Summary）维持逻辑拓扑，防止“地址溢出（Context Overflow）”。
 
 
@@ -16,19 +17,19 @@ PCP 的设计灵感来源于计算机系统的**虚拟内存（Virtual Memory）
 
 系统运行依赖于三个核心角色的解耦协作，确保“管治”与“执行”的分离：
 
-1.  **管治算子 (Router/MMU)**: 
+1.  **管治算子 (Router-MMU)**: 
     *   **职责**: 逻辑坐标映射（Logical Mapping）。负责意图识别、逻辑页索引、以及两阶段相关性匹配。
-    *   **核心决策**: 负责实时分析地址空间的映射关系，决定哪些 Page 应该 Cache 到物理上下文，以及以何种分辨率（Summary/Detail）展现。
+    *   **核心特性**: **神经寻址而非数值检索**。Router 利用 LLM 的高维语义空间来评估 Query 与 Page Summary 之间的深层逻辑关联，而非依赖脆弱的向量余弦相似度。
 
-2.  **执行算子 (Worker/CPU)**: 
+2.  **执行算子 (Worker-CPU)**: 
     *   **职责**: 任务执行。具有**寻址自主权**。
-    *   **核心动作**: 通过分析当前上下文，决定是否通过 `Consult` 触发“页面异常（Page Fault）”并加载更深的细节，或使用 `Shelve` 释放过载的物理页面。
+    *   **核心动作**: 作为推理的核心，通过分析当前上下文的熵值与推导深度，动态决定是否通过 `Consult` 触发“页面异常（Page Fault）”并加载更深的细节。
 
-3.  **整理算子 (Consolidator/Background GC)**: 
+3.  **整理算子 (Consolidator-Background GC)**: 
     *   **职责**: 系统存储空间的后台维护（Memory Manager）。
     *   **核心动作**: 
-        1.  **初始固化 (Freezing)**：监听话题状态与长度阈值，将活跃的 `Original Pages` 交换（Swap Out）至 `Consolidated Pages`。
-        2.  **长效整合 (Merging)**：扫描发生时间与当前物理时间（$T_{now}$）间隔较长（达到陈旧度阈值）的相邻、同主题综述页，并执行逻辑合并，确保长周期逻辑的极致提炼。
+        1.  **初始固化 (Freezing)**：监听话题状态与长度阈值。其“话题转折（Topic Pivot）”的判定是基于推理逻辑的突变，而非简单的语义距离。
+        2.  **长效整合 (Merging)**：基于逻辑陈旧度执行“代谢合并”。
 
 
 ## III. 时间定标系统 (The Temporal Coordination System)
