@@ -38,4 +38,4 @@ Traditional context management often relies on blind sliding windows or simple s
 
 ## 🛠️ 技术详情 (Technical Specification)
 
-详细协议规范请查阅 / Please refer to: **[PROTOCOL.md](PROTOCOL.md)**.
+详细协议规范请查阅 / Please refer to: **[PROTOCOL.md (CN)](PROTOCOL.md)** | **[PROTOCOL-en.md (EN)](PROTOCOL-en.md)**.
