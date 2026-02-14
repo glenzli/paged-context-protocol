@@ -31,14 +31,13 @@ PCP 的设计灵感来源于计算机系统的**虚拟内存（Virtual Memory）
         1.  **初始固化 (Freezing)**：监听话题状态与长度阈值。其“话题转折（Topic Pivot）”的判定是基于推理逻辑的突变，而非简单的语义距离。
         2.  **长效整合 (Merging)**：基于逻辑陈旧度执行“代谢合并”。
 
-### 2.4 算子能力底线 (Operator Baseline Requirements)
+### 2.4 PCP 算子效能基准 (Operator Proficiency Baseline)
 
-PCP 是一类**“高熵/精英协议”**。由于协议将大量寻址与控制逻辑交由 LLM 完成，因此对作为算子的模型存在明确的基础能力底线要求。若模型能力未达标，协议的精密结构反而会增加推理负担。
+PCP 协议将逻辑寻址与状态控制高度解耦并下放至执行器。因此，作为算子的 LLM 必须满足以下“逻辑物理”底线，否则系统将因基础熵增过快而失效：
 
-*   **结构化契约能力 (Structured Adherence)**：模型必须具备极强的 XML 语法保持能力，能够严格遵循 Schema 执行输出。标签错位或语法截断将直接导致寻址总线崩溃。
-*   **逻辑保真总结 (Lossless Summarization)**：在 `Consolidator` 执行固化时，模型必须具备在高度压缩的同时保持核心推导链条不丢失的能力。模糊的、文学性的概括会导致背景分辨率丢失。
-*   **变焦决策精准度 (Zooming Precision)**：模型作为 `Worker` 必须能准确执行“神经判定”，在信息不足时主动触发 `Consult`，而非在当前视界下进行逻辑脑补（Hallucination）。
-*   **长窗口推理稳定性**：模型需在 128k+ 或更高的物理上下文窗口中保持稳定的指令遵循能力。
+*   **指令集一致性 (Instructional Consistency)**：模型需具备极高的 XML 语法鲁棒性。标签必须作为“物理边界”存在，任何非受控的语法截断或标签错位将被视为“寻址总线崩溃（Bus Fault）”，协议将强制中断任务。
+*   **语义熵压缩质量 (Semantic Entropy Compression)**：在执行 Consolidate 时，模型需维持 “逻辑锚点不失真”。它必须在压缩文本的同时，保留核心推导链与物理标识符（如 ID、数值、变量）。“文学性概括”在 PCP 中被视为无效载荷（Payload Error）。
+*   **主动压强判定 (Proactive Pressure Sensing)**：模型作为 Worker 需具备**“逻辑真空感知”**能力。在当前视界无法闭合逻辑链时，必须精准触发 Consult 指令，严禁在分辨率不足的情况下进行“语义脑补（Hallucination）”。主动穿透（Zooming）优于盲目推理。
 
 
 ## III. 时间定标系统 (The Temporal Coordination System)
