@@ -30,6 +30,15 @@ The system operates based on the decoupled collaboration of three core roles, en
         1.  **Initial Freezing**: Monitors topic states and length thresholds. Its judgment of a "Topic Pivot" is based on inferential logic shifts rather than simple semantic distance.
         2.  **Metabolic Merging**: Performs "merging metabolism" based on logical staleness.
 
+### 2.4 Operator Baseline Requirements
+
+PCP is a **"High-Entropy/Elite Protocol."** Since the protocol delegates massive addressing and control logic to the LLM, there are explicit baseline capability requirements for the models acting as operators. If the model's capabilities fall below these standards, the protocol's precision structure may instead increase the inferential burden.
+
+*   **Structured Adherence**: The model must possess exceptional XML syntax retention capabilities and strictly follow the output Schema. Misaligned tags or truncated syntax will directly cause the addressing bus to collapse.
+*   **Lossless Logical Summarization**: When the `Consolidator` performs freezing/merging, the model must be capable of maintaining core deduction chains without loss even under high compression. Vague or literary summaries will result in a loss of background resolution.
+*   **Zooming Decision Precision**: As a `Worker`, the model must accurately execute "neural judgments," actively triggering `Consult` when information is insufficient, rather than performing "logical filling" (hallucination) within the current scope.
+*   **Long-Context Reasoning Stability**: The model must maintain stable instruction following across physical context windows of 128k+ or higher.
+
 ## III. The Temporal Coordination System
 
 PCP uses a **Timeline** as the core specification for logical ordering and focus guidance:

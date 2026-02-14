@@ -31,6 +31,15 @@ PCP 的设计灵感来源于计算机系统的**虚拟内存（Virtual Memory）
         1.  **初始固化 (Freezing)**：监听话题状态与长度阈值。其“话题转折（Topic Pivot）”的判定是基于推理逻辑的突变，而非简单的语义距离。
         2.  **长效整合 (Merging)**：基于逻辑陈旧度执行“代谢合并”。
 
+### 2.4 算子能力底线 (Operator Baseline Requirements)
+
+PCP 是一类**“高熵/精英协议”**。由于协议将大量寻址与控制逻辑交由 LLM 完成，因此对作为算子的模型存在明确的基础能力底线要求。若模型能力未达标，协议的精密结构反而会增加推理负担。
+
+*   **结构化契约能力 (Structured Adherence)**：模型必须具备极强的 XML 语法保持能力，能够严格遵循 Schema 执行输出。标签错位或语法截断将直接导致寻址总线崩溃。
+*   **逻辑保真总结 (Lossless Summarization)**：在 `Consolidator` 执行固化时，模型必须具备在高度压缩的同时保持核心推导链条不丢失的能力。模糊的、文学性的概括会导致背景分辨率丢失。
+*   **变焦决策精准度 (Zooming Precision)**：模型作为 `Worker` 必须能准确执行“神经判定”，在信息不足时主动触发 `Consult`，而非在当前视界下进行逻辑脑补（Hallucination）。
+*   **长窗口推理稳定性**：模型需在 128k+ 或更高的物理上下文窗口中保持稳定的指令遵循能力。
+
 
 ## III. 时间定标系统 (The Temporal Coordination System)
 
