@@ -7,32 +7,36 @@
 <a name="chinese"></a>
 ## 🚀 简介 (Chinese)
 
-**Paged-Context-Protocol (PCP)** 是一种专注于 LLM **逻辑寻址**与**多主题并行处理**的上下文管理协议。它通过将碎片化的 Token 流转化为离散、可寻址的**逻辑页（Logical Pages）**，模拟人类记忆的“短期工作记忆”与“长期提炼记忆”，解决了超长对话中话题偏移导致的认知污染。
+**Paged-Context-Protocol (PCP)** 是一种将 LLM 上下文建模为**地址空间（Address Space）**而非单纯“缓存”的管理协议。
+
+与传统的 RAG 或滑动窗口（其本质是将上下文视为不稳定的缓存）不同，PCP 引入了**虚拟内存（Virtual Memory）**的设计哲学。它将碎片化的 Token 流转化为离散、可寻址的**逻辑页（Logical Pages）**，并允许 Worker 通过动态变焦来控制每一个页面的**展现分辨率**。
 
 ### 核心特性
-*   **🧠 类脑记忆模型**：区分瞬时思维（Original Pages）与固化共识（Consolidated Pages）。
-*   **🔍 4级递归变焦**：支持从全局视角（L1）到原子对话（L4）的深度穿透。
-*   **🛡️ XML 有序合成**：采用确定性的 XML 支架防止模型产生幻觉漂移。
-*   **⚖️ 三位一体算子**：Router（管治）、Worker（执行）、Consolidator（整理）三权分立。
+*   **💾 上下文虚拟化**：将存储索引视为“虚拟磁盘”，将物理上下文窗口视为“一级缓存 (L1 Cache)”。
+*   **🔍 需求分页 (Demand Paging)**：通过 `Consult` 算子实现类似 Page Fault Handler 的按需加载，动态调取细节。
+*   **🛡️ 确定性寻址**：使用 XML 支架作为逻辑寻址的总线结构，防止模型在长程推理中产生地址偏移（幻觉）。
+*   **⚖️ 三位一体内核**：Router（MMU/寻址）、Worker（CPU/执行）、Consolidator（GC/后台整理）。
 
 ### 为什么选择 PCP？
-传统的上下文管理往往依赖盲目的滑动窗口或语义搜索，容易丢失推导链条。PCP 强调**逻辑主权**，让模型具备主动操控上下文“重中之重”的变焦能力。
+现有方案本遵循“进场/出场”的**物理缓存逻辑**，而 PCP 遵循“缩放/穿透”的**地址寻址逻辑**。这种视角转变允许模型在有限的窗口内保持对“全域空间”的感知，同时精准定位“局部原子详情”。
 
 ---
 
 <a name="english"></a>
 ## 🚀 Introduction (English)
 
-**Paged-Context-Protocol (PCP)** is a context management protocol optimized for LLM **logical addressing** and **multi-topic parallel processing**. By transforming fragmented Token streams into discrete, addressable **Logical Pages**, it mimics human memory patterns (Working vs. Long-term Memory) to eliminate cognitive pollution caused by topic drift in long-range interactions.
+**Paged-Context-Protocol (PCP)** is a context management protocol that models the LLM context as an **Address Space** rather than a mere "Cache."
+
+While traditional RAG or sliding window approaches treat context as a volatile cache (information is either "in" or "out"), PCP introduces the philosophy of **Virtual Memory**. It transforms fragmented Token streams into discrete, addressable **Logical Pages**, allowing the Worker to control the **display resolution** of each page via dynamic zooming.
 
 ### Key Features
-*   **🧠 Brain-Inspired Memory**: Distinguishes between fleeting sparks (Original Pages) and solidified consensus (Consolidated Pages).
-*   **🔍 4-Level Recursive Zooming**: Supports deep penetration from Global Perception (L1) down to Atomic Reconstruction (L4).
-*   **🛡️ XML-Based Synthesis**: Uses deterministic XML scaffolding to prevent hallucination drift during context construction.
-*   **⚖️ Trio Actor Model**: Separation of duties between the Router (Governance), Worker (Execution), and Consolidator (Memory Management).
+*   **💾 Context Virtualization**: Treats long-term storage as "Disk" and the physical context window as an "L1 Cache."
+*   **🔍 Demand Paging**: Implements `Consult` as a Page Fault Handler to load details on-demand without losing global awareness.
+*   **🛡️ Deterministic Addressing**: Uses XML scaffolding as a logical address bus to prevent "address drift" (hallucination) during long-range reasoning.
+*   **⚖️ Trio Kernel Model**: Separation of duties between the Router (MMU/Adressing), Worker (Execution), and Consolidator (Background GC/Refinement).
 
 ### Why PCP?
-Traditional context management often relies on blind sliding windows or simple semantic search, leading to the loss of derivation chains. PCP prioritizes **Logical Sovereignty**, granting the model the autonomy to zoom in on critical evidence while shelving secondary noise.
+Conventional solutions follow a **Physical Cache Logic** (Presence/Absence), whereas PCP follows an **Address Space Logic** (Resolution/Drill-down). This shift enables the model to maintain perception of the "Global Space" within a limited window while precisely locking onto "Local Atomic Details."
 
 ---
 

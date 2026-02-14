@@ -4,29 +4,29 @@ PagedContext (PCP) is a context management protocol focused on **logical address
 
 ## I. Vision & Philosophy
 
-The design of PCP is inspired by intuitive observations of human memory patterns. We aim to simulate an intuitive memory management approach:
-*   **Analogous to Working Memory**: `Original Pages` simulate instantaneous sparks of thought, retained only in the most active local context.
-*   **Analogous to Long-term Memory**: `Consolidated Pages` refine and solidify scattered experiences, maintaining logical consistency through high-density syntheses.
-*   **From "Memory" to "Perception"**: LLMs should not passively carry all information but should possess the ability to **actively zoom** on logical focal points.
-*   **Physical Isolation over Semantic Gluing**: Different logical topics should be isolated by strong structural physical boundaries, rather than relying on the model's fragile semantic associations.
-*   **Logical Sovereignty**: Detail pages currently in a `Focused` state hold absolute deductive sovereignty; other information serves only as signposts or auxiliary data.
+The design of PCP is inspired by the **Virtual Memory** management mechanisms of computer systems. We believe that context management for LLMs is essentially maintaining a **Context Address Space**:
+
+*   **Context Virtualization**: `Original Pages` simulate "Hot Data," filling the physical cache (Context Window) with high-resolution (Detail) content.
+*   **Physical Cache vs. Virtual Addressing**: RAG systems only solve the "presence" of information, whereas PCP solves the "resolution" of information. Through tiered pre-fetching of `Consolidated Pages`, the system implements a virtualized mapping of infinite logical space within a limited physical cache.
+*   **Demand Paging**: The Worker should not passively parse streaming tokens but should act as a **Memory Management Unit (MMU)**, triggering a **Consult (Page In)** exception to load deep raw data on demand.
+*   **Logical Sovereignty (Resolution Control)**: Pages in a `Focused` state hold the highest addressing weight. Other background information maintains logical topology at low resolution (Summary), preventing "Context Overflow."
 
 ## II. Trio Actor Model
 
 The system operates based on the decoupled collaboration of three core roles, ensuring the separation of "governance" and "execution":
 
-1.  **Governance Actor (Router LLM)**: 
-    *   **Responsibility**: Logical coordinate mapping. Handles intent recognition (especially reconstruction of low-entropy inputs), logical page indexing, and two-stage relevance matching.
-    *   **Core Decision**: Real-time analysis of the mapping between user intent and address space, deciding which Pages to inject into the context and in what form (Summary/Detail).
+1.  **Governance Actor (Router/MMU)**: 
+    *   **Responsibility**: Logical coordinate mapping (Logical Mapping). Handles intent recognition, logical page indexing, and two-stage relevance matching.
+    *   **Core Decision**: Performs real-time analysis of address space mappings, deciding which Pages to Cache in the physical context and in what resolution (Summary/Detail).
 
-2.  **Execution Actor (Worker LLM)**: 
-    *   **Responsibility**: Task execution. Possesses **zooming autonomy**.
-    *   **Core Action**: Decides whether to call `Consult` to penetrate deeper logical details or `Shelve` to release overloaded memory based on the current context analysis.
+2.  **Execution Actor (Worker/CPU)**: 
+    *   **Responsibility**: Task execution. Possesses **addressing autonomy**.
+    *   **Core Action**: Analyzes the current context to decide whether to trigger a **Page Fault** via `Consult` to load deeper details or use `Shelve` to evict overloaded physical pages.
 
-3.  **Refinement Actor (Consolidator LLM)**: 
+3.  **Refinement Actor (Consolidator/Background GC)**: 
     *   **Responsibility**: Physical maintenance of storage space (Memory Manager).
     *   **Core Action**: 
-        1.  **Initial Freezing**: Monitors topic states and length thresholds, solidifying active `Original Pages` into `Consolidated Pages`.
+        1.  **Initial Freezing**: Monitors topic states and length thresholds, Swapping Out active `Original Pages` into `Consolidated Pages`.
         2.  **Long-term Merging**: Scans adjacent, same-topic summary pages with a long interval between occurrence and current physical time ($T_{now}$) (reaching a staleness threshold) and performs logical merging to ensure extreme refinement of long-cycle logic.
 
 ## III. The Temporal Coordination System

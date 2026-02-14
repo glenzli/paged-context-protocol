@@ -4,30 +4,30 @@ PagedContext (PCP) 是一种专注于 LLM **逻辑寻址**与**多主题并行�
 
 ## I. 核心愿景 (Vision & Philosophy)
 
-PCP 的设计灵感来源于对人类记忆规律的一些直观感受。我们试图模拟一种更符合直觉的记忆管理方式：
-*   **类比工作记忆 (Working Memory)**：`Original Pages` 模拟瞬时的思维火花，只保留在最活跃的局部上下文中。
-*   **类比长期记忆 (Long-term Memory)**：`Consolidated Pages` 将零散的经验进行提炼和固化，通过高浓度的综述保持逻辑的一致性。
-*   **从“记忆”到“感知”**：LLM 不应被动地承载所有信息，而应具备对逻辑焦点的**主动变焦**能力。
-*   **物理隔离优于语义黏合**：不同逻辑主题应通过强结构的物理边界进行隔离，而非依赖模型脆弱的语义关联。
-*   **逻辑主权**：当前处于 `Focused` 状态的细节页面拥有绝对的推导主权，其余信息仅作为路标或辅助。
+PCP 的设计灵感来源于计算机系统的**虚拟内存（Virtual Memory）**管理机制。我们认为，LLM 的上下文管理本质上是在维护一个**地址空间（Address Space）**：
+
+*   **上下文虚拟化 (Context Virtualization)**：`Original Pages` 模拟“热数据（Hot Data）”，通过高分辨率（Detail）填充物理缓存（Context Window）。
+*   **物理缓存 vs. 虚拟寻址**：RAG 仅解决了信息的“存在性”，而 PCP 解决了信息的“分辨率”。通过 `Consolidated Pages` 的分级预读，系统在有限的物理缓存内实现了无限逻辑空间的虚拟化映射。
+*   **按需分页 (Demand Paging)**：Worker 不应被动解析流式 Token，而应作为“内存管理单元 (MMU)”，通过 **Consult (Page In)** 触发异常处理，按需调取深层原始数据。
+*   **逻辑主权 (Resolution Control)**：当前处于 `Focused` 状态的页面拥有最高寻址权重，其余背景信息以低分辨率（Summary）维持逻辑拓扑，防止“地址溢出（Context Overflow）”。
 
 
 ## II. 算子角色模型 (Trio Actor Model)
 
 系统运行依赖于三个核心角色的解耦协作，确保“管治”与“执行”的分离：
 
-1.  **管治算子 (Router LLM)**: 
-    *   **职责**: 逻辑坐标映射。负责意图识别（尤其是低熵输入的重构）、逻辑页索引、以及两阶段相关性匹配。
-    *   **核心决策**: 负责实时分析用户意图与地址空间的映射关系，决定哪些 Page 应该注入上下文，以及以何种形式（Summary/Detail）展现。
+1.  **管治算子 (Router/MMU)**: 
+    *   **职责**: 逻辑坐标映射（Logical Mapping）。负责意图识别、逻辑页索引、以及两阶段相关性匹配。
+    *   **核心决策**: 负责实时分析地址空间的映射关系，决定哪些 Page 应该 Cache 到物理上下文，以及以何种分辨率（Summary/Detail）展现。
 
-2.  **执行算子 (Worker LLM)**: 
-    *   **职责**: 任务执行。具有**变焦自主权**。
-    *   **核心动作**: 通过分析当前上下文，决定是否调用 `Consult` 穿透至更深的逻辑细节，或使用 `Shelve` 释放过载的记忆。
+2.  **执行算子 (Worker/CPU)**: 
+    *   **职责**: 任务执行。具有**寻址自主权**。
+    *   **核心动作**: 通过分析当前上下文，决定是否通过 `Consult` 触发“页面异常（Page Fault）”并加载更深的细节，或使用 `Shelve` 释放过载的物理页面。
 
-3.  **整理算子 (Consolidator LLM)**: 
-    *   **职责**: 存储空间的物理维护者（Memory Manager）。
+3.  **整理算子 (Consolidator/Background GC)**: 
+    *   **职责**: 系统存储空间的后台维护（Memory Manager）。
     *   **核心动作**: 
-        1.  **初始固化 (Freezing)**：监听话题状态与长度阈值，将活跃的 `Original Pages` 固化为 `Consolidated Pages`。
+        1.  **初始固化 (Freezing)**：监听话题状态与长度阈值，将活跃的 `Original Pages` 交换（Swap Out）至 `Consolidated Pages`。
         2.  **长效整合 (Merging)**：扫描发生时间与当前物理时间（$T_{now}$）间隔较长（达到陈旧度阈值）的相邻、同主题综述页，并执行逻辑合并，确保长周期逻辑的极致提炼。
 
 
