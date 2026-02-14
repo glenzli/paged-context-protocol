@@ -39,6 +39,18 @@ PCP 协议将逻辑寻址与状态控制高度解耦并下放至执行器。因�
 *   **语义熵压缩质量 (Semantic Entropy Compression)**：在执行 Consolidate 时，模型需维持 “逻辑锚点不失真”。它必须在压缩文本的同时，保留核心推导链与物理标识符（如 ID、数值、变量）。“文学性概括”在 PCP 中被视为无效载荷（Payload Error）。
 *   **主动压强判定 (Proactive Pressure Sensing)**：模型作为 Worker 需具备**“逻辑真空感知”**能力。在当前视界无法闭合逻辑链时，必须精准触发 Consult 指令，严禁在分辨率不足的情况下进行“语义脑补（Hallucination）”。主动穿透（Zooming）优于盲目推理。
 
+### 2.5 异构部署展望 (Heterogeneous Deployment — Proposal)
+
+> **本节为前瞻性提案，非协议强制规范。**
+
+PCP 的三算子架构天然支持**异构部署（Heterogeneous Deployment）**。其中，Router 的核心任务是语义分类与相关性排序，而非深层创造性推理。这一特性使其成为轻量级模型的理想候选。
+
+随着 **1.58-bit 极端量化模型**（如 BitNet b1.58）的成熟，一种可行的成本优化路径是：
+*   **Router (MMU)**：采用本地部署的 1.58-bit 模型。其极低的计算成本与高吞吐量非常适合执行高频次的寻址与匹配操作。
+*   **Worker (CPU) & Consolidator (GC)**：继续使用高阶商用模型（如 GPT-4o, Claude Sonnet, Gemini Pro），确保推理与压缩的精度不受损。
+
+这种“轻量寻址 + 重型推理”的组合可大幅降低协议的整体运行成本，同时保留其核心的逻辑精度。
+
 
 ## III. 时间定标系统 (The Temporal Coordination System)
 

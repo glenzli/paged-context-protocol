@@ -38,6 +38,18 @@ The PCP protocol highly decouples logical addressing and state control, delegati
 *   **Semantic Entropy Compression**: When performing Consolidation, the model must maintain "**Logical Anchor Distortion-Free**." It must preserve core deduction chains and physical identifiers (e.g., IDs, values, variables) while compressing text. "Literary summaries" are treated as **Payload Errors** in PCP.
 *   **Proactive Pressure Sensing**: As a Worker, the model must possess **"Logic Vacuum Perception"** capabilities. When the current horizon cannot close the logic chain, it must precisely trigger the `Consult` command. Performing "semantic filling" (hallucination) under insufficient resolution is strictly prohibited. Proactive **Zooming** is prioritized over blind reasoning.
 
+### 2.5 Heterogeneous Deployment — Proposal
+
+> **This section is a forward-looking proposal, not a mandatory protocol specification.**
+
+PCP's Trio Actor architecture naturally supports **Heterogeneous Deployment**. The Router's core task is semantic classification and relevance ranking, not deep creative reasoning. This characteristic makes it an ideal candidate for lightweight models.
+
+With the maturation of **1.58-bit extreme quantization models** (e.g., BitNet b1.58), a viable cost optimization path emerges:
+*   **Router (MMU)**: Deploy a locally-hosted 1.58-bit model. Its extremely low computational cost and high throughput make it well-suited for high-frequency addressing and matching operations.
+*   **Worker (CPU) & Consolidator (GC)**: Continue using top-tier commercial models (e.g., GPT-4o, Claude Sonnet, Gemini Pro) to ensure precision in reasoning and compression remains uncompromised.
+
+This "Lightweight Addressing + Heavy Reasoning" combination can drastically reduce the protocol's overall operational cost while preserving its core logical precision.
+
 ## III. The Temporal Coordination System
 
 PCP uses a **Timeline** as the core specification for logical ordering and focus guidance:
