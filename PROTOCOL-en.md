@@ -120,8 +120,9 @@ graph LR
 ```
 
 ### 2. Cascade: Intent Awareness & Two-Stage Matching
-*   **Intent Detection & Reconstruction**:
-    *   If the entropy of $U_{now}$ is too low (e.g., "continue"), the system forces **Intent Reconstruction**: merging the previous page's `Summary` with the current input to form a high-entropy reconstructed query.
+*   **Intent Detection & Reconstruction (Deterministic Reconstruction)**:
+    *   **Trigger**: Triggered when the entropy of $U_{now}$ is too low (e.g., "continue", "next step", "anything else") such that the Router cannot directly perform semantic matching.
+    *   **Logic**: This process is enforced by the **External System Scaffolding (Host Code)** rather than the Router LLM's inference. The system deterministically concatenates the `Summary` of the previous round with the current input to generate a high-entropy reconstructed query. This ensures addressing determinism and avoids reliance on model hallucinations.
 *   **Stage 1: Broad Semantic Match**:
     *   The Router first performs a broad initial screening of the candidate pool $\mathcal{S}$ based on `Semantic Clusters`, excluding logically unrelated topics.
 *   **Stage 2: Precision Relevance Selection**:

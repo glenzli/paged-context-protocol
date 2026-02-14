@@ -123,8 +123,9 @@ graph LR
 ```
 
 ### 2. 级联分压 (Cascade: 意图感知与两阶段匹配)
-*   **意图检测与重构**:
-    *   如果 $U_{now}$ 熵值过低（例如“继续”），系统强制启动**意图重构**：将上一页的 `Summary` 与当前输入合并，形成高熵重构查询。
+*   **意图检测与重构 (Deterministic Reconstruction)**:
+    *   **触发**: 当 $U_{now}$ 熵值过低（例如“继续”、“下一步”、“还有吗”）导致 Router 无法直接匹配语义时。
+    *   **处理逻辑**: 此过程由**外部系统宿主代码 (Host Scaffolding)** 强制执行，而非 Router LLM 的推理。系统直接调取上一轮的 `Summary` 与当前输入拼接，生成预设的高熵重构查询。这确保了寻址的确定性，不依赖模型的发散理解。
 *   **第一阶段：广义语义匹配 (Broad Match)**:
     *   Router 算子首先根据 `Semantic Clusters` 对候选池 $\mathcal{S}$ 进行广义初筛，排除逻辑无关的主题。
 *   **第二阶段：精细关联度选择 (Relevance Selection)**:
