@@ -1,91 +1,137 @@
-# Paged-Context-Protocol (PCP) v1.0
+# Paged-Context-Protocol (PCP) - v0.1.0-alpha
 
-PagedContext (PCP) is a context management protocol focused on **logical addressing** and **multi-topic parallel processing** for LLMs. At its core, it transforms continuous Token streams into discrete, addressable **Logical Pages**, solving context pollution caused by abrupt topic shifts in long-range interactions and achieving high-density information precision.
+Paged-Context-Protocol (PCP) is a low-level protocol focused on **Unified Logical Addressing** and **Distributed Context Governance** for LLMs. It treats the LLM as a **Flexible Execution Logic CPU**, mapping fragmented dialogue streams and massive heterogeneous data sources (files, streams, repositories) into discrete, addressable **Logical Pages**. It physically resolves context pollution and information overload in long-range interactions, empowering models to exercise **Logical Sovereignty** within an infinite address space.
 
-## I. Vision & Philosophy
+## I. Core Philosophy: Flexible Compute & Logical Virtual Memory (LVM)
 
-The design of PCP is inspired by the **Virtual Memory** management mechanisms of computer systems. We believe that context management for LLMs is essentially maintaining a **Context Address Space**:
+The PCP protocol treats the LLM as a **Flexible Execution Logic CPU** and defines this specification as the **Logical Virtual Memory (LVM)** protocol for that processor. Its core objective is to achieve deep decoupling between intelligent logic and its physical vehicle.
 
-*   **Context Virtualization**: `Original Pages` simulate "Hot Data," filling the physical cache (Context Window) with high-resolution (Detail) content.
-*   **Physical Cache vs. Virtual Addressing**: RAG systems only solve the "presence" of information, whereas PCP solves the "resolution" of information. Through tiered pre-fetching of `Consolidated Pages`, the system implements a virtualized mapping of infinite logical space within a limited physical cache.
-*   **Demand Paging**: The Worker should not passively parse streaming tokens but should act as a **Memory Management Unit (MMU)**, triggering a **Consult (Page In)** exception to load deep raw data on demand.
-*   **Active Neural Logic**: PCP does not rely on rigid similarity thresholds or formulaic constraints. Instead, it treats the LLM as a fundamental operator with "dynamic common sense." All decisions regarding page relevance, display resolution, and memory pruning are governed dynamically by the operator through its vast neural calculation network, achieving a much higher "logical context awareness" than traditional vector search.
-*   **Logical Sovereignty (Resolution Control)**: Pages in a `Focused` state hold the highest addressing weight. Other background information maintains logical topology at low resolution (Summary), preventing "Context Overflow."
+### 1.1 Linear Logic vs. External Systems
+PCP defines two categories of external systems with different coupling requirements:
+*   **RAG System (Generic Cold Storage)**: A generalized, non-linear external database. PCP is **entirely indifferent** to its internal design, treating it only as a physical provider of PBlocks.
+*   **Memory System (Logic Extended Cache)**: The **Logic Extended Cache** of PCP. Memory is a critical "plug-in" that stores structured logic processed by PCP. PCP has **strong coupling requirements** for it: Memory must be able to provide high-relevance content matching the PCP page definition based on semantic keywords, serving as a constant input for the Router's intent matching.
+*   **The PCP Protocol (Linear Logic Stream)**: The **intent-driven "Runtime Hot Stream"**. It handles logical closure on the task's Timeline, utilizing historical logic assets provided by Memory to assist current derivation.
 
-## II. Trio Actor Model
+### 1.2 Core Pillars
+*   **Role Refactoring (LLM as CPU)**: No longer viewing the LLM as a "Memory-heavy Encyclopedia" but defining it as a **Logic Processor** focused on instruction execution and logical flow management. Its primary task is handling the topological relationships between Pages rather than mere text generation.
+*   **Context Virtualization**: Treating all logical assets (history, documents, codebases) as "Backing Store." The physical context window serves only as a **"Hot Cache (L1/L2 Cache)"** for displaying high-resolution details, enabling "infinite-length" logical perception.
+*   **Unified Addressing Logic**: Achieving the logical union of "Memory and Storage" through Pages. Whether it's real-time dialogue or massive archives, all are identified and scheduled within a unified Logical Address Space (LAS).
+*   **Demand Paging**: The Worker should not passively carry all information but act as a **Memory Management Unit (MMU)**, autonomously retrieving deep details from the address space via the **Consult** command.
+*   **Logical Sovereignty**: PCP grants the execution actor absolute authority over judgment. As a logic processor, the model is strictly prohibited from "semantic filling" (hallucinating) unknown information outside the address space; all logical gaps must be resolved through physical penetration (Zooming/Mapping).
+
+## II. Trio Processor Model
 
 The system operates based on the decoupled collaboration of three core roles, ensuring the separation of "governance" and "execution":
 
-1.  **Governance Actor (Router-MMU)**: 
+1.  **Addressing Processor (Router-MMU)**: 
     *   **Responsibility**: Logical coordinate mapping (Logical Mapping). Handles intent recognition, logical page indexing, and two-stage relevance matching.
-    *   **Core Characteristic**: **Neural Addressing over Numerical Retrieval**. The Router utilizes the LLM's high-dimensional semantic space to evaluate deep logical correlations between Query and Page Summaries, rather than relying on fragile vector cosine similarity.
+    *   **Intent Anchoring**: Extracts the current **Intent Focus** by analyzing the "Head" (System Instructions/Global Context) and "Tail" (Current User Query) of the active context.
+    *   **Core Characteristic**: **Neural Addressing over Numerical Retrieval**. The Router utilizes high-dimensional semantic space to evaluate logical correlations and generates **Addressing Instructions** to drive Mapping.
 
-2.  **Execution Actor (Worker-CPU)**: 
-    *   **Responsibility**: Task execution. Possesses **addressing autonomy**.
-    *   **Core Action**: As the reasoning core, it dynamically decides whether to trigger a **Page Fault** via `Consult` to load deeper details by analyzing current context entropy and deduction depth.
+2.  **Execution Processor (Worker-CPU)**: 
+    *   **Responsibilities**: Task execution and **JIT Mapping**. The execution processor is no longer a simple generator but is deconstructed as an execution unit with high-dimensional logical perception, managing logical inference and exercising mapping sovereignty.
+    *   **Mapping Sovereignty**: As the exerciser of logical sovereignty, the Worker is responsible for deconstructing and mapping the **Raw PBlocks** provided by the Host into logical Pages.
+    *   **Core Actions**: Dynamically determines the logical boundaries of physical data; triggers "Demand Paging"; executes zooming and diffusion algorithms.
 
-3.  **Refinement Actor (Consolidator-Background GC)**: 
+3.  **Consolidation Processor (Consolidator-Background GC)**: 
     *   **Responsibility**: Physical maintenance of storage space (Memory Manager).
     *   **Core Action**: 
         1.  **Initial Freezing**: Monitors topic states and length thresholds. Its judgment of a "Topic Pivot" is based on inferential logic shifts rather than simple semantic distance.
         2.  **Metabolic Merging**: Performs "merging metabolism" based on logical staleness.
 
-### 2.4 Operator Proficiency Baseline
+### 2.4 Processor Proficiency Baseline
 
-The PCP protocol highly decouples logical addressing and state control, delegating them to the executor. Therefore, the LLM acting as an operator must meet the following "Logic Physics" baselines; otherwise, the system will fail due to rapid foundational entropy increase:
+The PCP protocol highly decouples logical addressing and state control, delegating them to the executor. Therefore, the LLM acting as a processor must meet the following "Logic Physics" baselines to ensure effective logical inference in complex environments:
 
-*   **Instructional Consistency**: The model must possess extreme XML syntax robustness. Tags must exist as "physical boundaries"—any uncontrolled syntax truncation or tag misalignment will be treated as a **Bus Fault**, and the protocol will force a task interruption.
+*   **Instructional Consistency**: The model must possess extreme **Structural Output Robustness**. The markers defined by the protocol (such as the currently adopted XML tags) must be strictly followed as "physical boundaries." Any uncontrolled syntax truncation, format misalignment, or structural breach will be treated as a **Bus Fault**, forcing a protocol task interruption.
 *   **Semantic Entropy Compression**: When performing Consolidation, the model must maintain "**Logical Anchor Distortion-Free**." It must preserve core deduction chains and physical identifiers (e.g., IDs, values, variables) while compressing text. "Literary summaries" are treated as **Payload Errors** in PCP.
-*   **Proactive Pressure Sensing**: As a Worker, the model must possess **"Logic Vacuum Perception"** capabilities. When the current horizon cannot close the logic chain, it must precisely trigger the `Consult` command. Performing "semantic filling" (hallucination) under insufficient resolution is strictly prohibited. Proactive **Zooming** is prioritized over blind reasoning.
+*   **Proactive Pressure Sensing**: As a Worker, the model must possess **"Logic Vacuum Perception"** capabilities. When the current horizon cannot close the logic chain, it must precisely trigger the `Consult` instruction. Performing "semantic filling" (hallucination) under insufficient resolution is strictly prohibited. Proactive **Zooming** is prioritized over blind reasoning.
 
-### 2.5 Heterogeneous Deployment — Proposal
+### 2.5 Heterogeneous & Parallel Deployment Strategy
 
-> **This section is a forward-looking proposal, not a mandatory protocol specification.**
+The Trio Processor Model of PCP supports a **Dual-LLM Parallel Deployment Strategy**:
 
-PCP's Trio Actor architecture naturally supports **Heterogeneous Deployment**. The Router's core task is semantic classification and relevance ranking, not deep creative reasoning. This characteristic makes it an ideal candidate for lightweight models.
+1.  **Addressing Layer (Router)**:
+    *   **Recommendation**: Use a lightweight, high-throughput model. Since addressing is a "relative semantic task," throughput requirements outweigh deep reasoning precision.
+    *   **Future Proposal**: With the maturation of **1.58-bit extreme quantization models** (e.g., BitNet b1.58), the Router is an ideal candidate for local deployment of such models, enabling near-zero-cost, high-frequency logical addressing collaboration.
+2.  **Logic Layer (Worker + Consolidator)**:
+    *   **Consistency Requirement**: Both **must share the same high-performance Main LLM**. Because JIT Mapping and Consolidation both involve "absolute logical summarization/extraction" of data, they must use the same logical metrics to prevent semantic drift.
+    *   **Parallel Deployment (Parallel Instances)**: Although the model is consistent, they should be deployed via parallel physical instances.
+        - **Worker (Synchronous)**: Responds to the main user interaction loop, ensuring immediacy.
+        - **Consolidator (Asynchronous)**: Runs as a "background GC process" in a separate parallel instance. It is reactively triggered by the Host upon Token pressure or Topic Pivots, performing index merging and freezing in the background to prevent maintenance tasks from blocking the user's main cycle.
 
-With the maturation of **1.58-bit extreme quantization models** (e.g., BitNet b1.58), a viable cost optimization path emerges:
-*   **Router (MMU)**: Deploy a locally-hosted 1.58-bit model. Its extremely low computational cost and high throughput make it well-suited for high-frequency addressing and matching operations.
-*   **Worker (CPU) & Consolidator (GC)**: Continue using top-tier commercial models (e.g., GPT-4o, Claude Sonnet, Gemini Pro) to ensure precision in reasoning and compression remains uncompromised.
+This deployment scheme—combining "Efficient Addressing + Logically Consistent Main Model + Asynchronous Maintenance Parallelization"—ensures system logical closure while achieving excellent responsive performance.
 
-This "Lightweight Addressing + Heavy Reasoning" combination can drastically reduce the protocol's overall operational cost while preserving its core logical precision.
+## III. The Host System Model
 
-## III. The Temporal Coordination System
+The Host system provides the "rigid" physical environment for protocol execution. As the infrastructure of PCP, it handles resource management and message synthesis, ensuring the physical safety and logical consistency of the protocol:
+
+1.  **Index Engine (Index Manager)**:
+    *   **Page Registration & ID Allocation**: Responsible for the globally unique `Short Hash` allocation of all pages within the Logical Address Space (LAS).
+    *   **Heat Level & State Tracking**: Maintains the activation status (Hot/Indexed/Shelved) and logical weight of pages in the index.
+    *   **PBlock Governance**: Fully manages the addressing handles for physical blocks and the cold/hot exchange of physical resources.
+
+2.  **Synthesis Controller (XML Engine)**:
+    *   **View Pipeline**: Materializes structured XML messages for injection into the Worker processor based on addressing results.
+    *   **Overflow Governance**: The core safeguard logic. When the Worker triggers a `Consult` or `Mapping Pulse` that risks overflowing the physical context, the controller dynamically evaluates window pressure. It enforces "Dynamic Dehydration" on non-intent-focus pages—mandating a `view="Detail" -> "Summary"` degradation before injection.
+
+3.  **Bus Mediator**:
+    *   **Instruction Translation**: Receives directives like `Consult(id)` or `Shelve(id)` from the Worker and translates them into physical I/O (storage reads) or index state updates.
+    *   **Atomicity Assurance**: Ensures the integrity of each interaction round, preventing logic state hangs due to partial I/O failures.
+
+4.  **Intent Scaffolding**:
+    *   **Logical Self-Healing**: In cases of extremely low input entropy, automatically extracts prefix Page Summaries to aid intent reconstruction, ensuring the Worker always operates within a closed logical plane.
+
+5.  **Unified Export Manager**:
+    *   **Logical Net Value Export**: Listens for the extraction actions of the Consolidator or task completion signals.
+    *   **Responsibility Boundary**: PCP is not responsible for deciding the final destination of knowledge. The Export Manager only provides high-quality logical assets (such as Consolidated Page Summaries and Keywords) via the `Export_Logic_NetValue` interface.
+    *   **Stateless Processing**: The export process is asynchronous and one-way. PCP's responsibility ends once the logical assets are delivered to the external system, which then independently decides whether to store them in Memory or sediment them into RAG.
+
+
+## IV. The Temporal Coordination System
 
 PCP uses a **Timeline** as the core specification for logical ordering and focus guidance:
 
-*   **Timestamp Anchoring**: Every logical page (Original/Consolidated) must carry an absolute timestamp anchor.
-*   **Current Time Injection**: `Current_Time` is explicitly injected at the top of the context for every interaction.
-*   **Worker's Temporal Awareness**: The Worker compares Page timestamps with `Current_Time` to judge logical sequence, aiding in the execution of `Consult` (tracing history) or `Shelve` (jumping out of the current discussion).
+*   **Timestamp Anchoring**: Every logical page (Original/Consolidated) must carry an absolute timestamp. For static storage blocks, **Physical Modification Time** or **Logical Load Sequence** is used as the anchor.
+*   **Current Time Injection**: At the top of each interaction's context, `Current_Time` is explicitly injected.
+*   **Temporal Awareness**: The Worker compares Page timestamps with `Current_Time` to determine logical order or data freshness.
 
-## IV. Logical Entities & Manifests
+## V. Logical Entities & Address Space
 
-All logical pages (Original/Consolidated) consist of both **Content** and a **Manifest**:
+PCP maintains two layers of address space, interacting through the Worker's mapping behavior:
 
-### 4.1 Original Page
-The smallest unit recording a single dialogue or microscopic logical fragment, **retained only in the latest active context**.
+### 5.0 Physical Block (PBlock) — PAS Layer
+*   **Responsibility**: Represents the physical address space (Physical Address Space, PAS). The **Host (System)** is responsible for the generation, lifecycle management, and handle allocation of physical blocks; the processor itself does not have the authority to create PBlocks.
+*   **PBlock Types**: `Dialogue`, `File`, `Stream`.
+*   **Mapping Characteristics**:
+    *   **Structured PBlocks**: e.g., code repositories, book chapters. These physical blocks typically map to a **Consolidated Page**.
+    *   **Unstructured PBlocks**: e.g., plain text streams. Degrade to fixed-size blocks, mapping to an **Original Page**.
 
-*   **Content**: Contains the original dialogue stream of that logical fragment ($U_{now} + W_{now}$).
+### 5.1 Logical Pages — LAS Layer
+Represents the **Logical Address Space (LAS)**. Generated through **JIT Mapping** of PBlocks by the Worker.
+
+#### 5.1.1 Original Page
+The smallest logical unit (leaf node).
 *   **Manifest**:
-    *   `ID`: Short Hash (8-12 hex characters, e.g., `8a1b2c3d`).
-    *   `Timestamp`: Absolute physical time.
-    *   `Semantic Clusters`: A set of core keywords.
-    *   `Summary`: **Minimum refinement preserving the original logical thread**. No strict word limit; the core requirement is to fully preserve the chain of reasoning, clear conclusions, and conceptual negations or corrections (logical negative proof), strictly prohibiting the cutting of effective information due to length constraints.
+    *   `id`: Short Hash identifier.
+    *   `origin`: `History | Storage`.
+    *   `depth`: **Logical Depth (Integer)**.
+    *   `timestamp`: **Temporal Anchor (ISO-8601)**. Every page must carry an absolute time origin for sequence ordering and staleness judgment.
+    *   `keywords`: **Semantic Keywords (Optional)**. Serves as high-dimensional index keys for broad match retrieval.
+    *   `summary`: **Logical Essence extraction**. Requirement: **Semantic Entropy Compression**. Literary descriptions are prohibited; must preserve core deductions, key variables, and causal chains as the sole retrieval basis for the Router.
+    *   `content`: **High-Resolution Evidence Block**. Requirement: **Physical Fidelity**. Presents the original dialogue or data in full without uncontrolled semantic truncation, serving as the logical bedrock for final derivation by the Worker.
 
-### 4.2 Consolidated Page
-Solidified consensus points for logical units.
-
-*   **Generation Logic**: 
-    1.  **Topic Pivot**: Triggered when the Router detects a drastic shift in user intent.
-    2.  **Length Overflow**: Triggered when active Original Pages accumulate beyond a certain Token length.
-*   **Content**: Logical synthesis and consensus solidification of all contained original pages.
+#### 5.1.2 Consolidated Page
+Serves as a container node for **Logic Indexing**. Supports `Unpacked` zooming.
 *   **Manifest**:
-    *   `ID`: Short Hash.
-    *   `Source Page Ids**: An array of IDs of all included sub-pages.
-    *   `Summary**: **Minimum refinement preserving the entire logical thread**. Requires full preservation of logical conflict points, reasoning evolution, and final consensus conclusions.
-*   **Post-processing Logic**: Adjacent same-topic summary pages are scanned and merged by the Consolidator.
+    *   `id`: Short Hash identifier.
+    *   `depth`: **Logical Depth (Integer)**.
+    *   `timestamp`: **Temporal Anchor (ISO-8601)**.
+    *   `keywords`: **Consensus Keywords**. Represents the semantic intersection of all child pages within the container.
+    *   `source_ids`: Array of contained child Page IDs or sub-block addresses. **Supports Recursive Nesting**: Child IDs can point to another Consolidated Page, forming a **Logic Tree**.
+    *   `summary`: **Consensus Semantic Compression**. Generated after the Consolidator performs logical merging of multiple sub-pages (whether Original or Consolidated), representing the "collective will" of the container.
 
-### 4.3 Page Index Management System
+### 5.3 Page Index Management System
 
 To support second-level retrieval and logical zooming of massive Pages, PCP maintains a lightweight **index management system**:
 
@@ -93,137 +139,80 @@ To support second-level retrieval and logical zooming of massive Pages, PCP main
 *   **State Maintenance**: The index tracks the **heat level**, **staleness**, and **current activation status** (whether it's injected into the context) of Pages in real-time.
 *   **Parallel Topic Topology**: When multiple topics are reasoned in parallel, the index partitions logical space via `Topic ID`, ensuring the Router can quickly perform isolation and pressure relief during retrieval.
 
-```mermaid
-graph TD
-    Registry["Index Registry"] --> OP_Index["OP Index"]
-    Registry --> CP_Index["CP Index"]
-    
-    OP_Index --> OP1[ID: a1b2c3d4]
-    OP_Index --> OP2[ID: e5f6g7h8]
-    
-    CP_Index --> CP1[Topic: AI Path]
-    CP_Index --> CP2[Topic: Bio Ethics]
-    
-    CP1 --> Source1[Source: OP1, OP2...]
-```
 
-## V. The Lifecycle
+## VI. Intent-Driven Lifecycle
 
-When a user inputs $U_{now}$, the system performs a complete "breath" cycle. This process ensures the model sees both the panorama and precisely located details:
+PCP employs an inference loop centered around **Intent**. Every interaction performs a complete addressing diffusion and materialization process:
 
-```mermaid
-sequenceDiagram
-    participant U as User Input
-    participant R as Router: Mapping
-    participant W as Worker: Execution
-    participant C as Consolidator: Manager
+### 1. Intent Anchoring
+*   **Responsibility**: Defines the semantic pole for addressing.
+*   **Action**: The system analyzes the **Head** (System instructions/Global variables) and **Tail** (Latest user input) of the current horizon to extract the **Intent Focus** driving this round.
+*   **Reconstruction**: If input entropy is too low (e.g., "continue"), the **Host Scaffolding** automatically concatenates the previous round's Summary to perform deterministic semantic reconstruction.
 
-    U->>R: Input Entropy Trace
-    R->>R: Search, Match & Synthesis
-    R->>W: Load Context: XML
-    W->>W: Reasoning & Zooming
-    W-->>U: Response
-    Note over C: Background Loop
-    C->>C: Freeze & Merge
-```
+### 2. Neural Addressing
+*   **Responsibility**: Locates Pages and Physical Blocks (PBlock) within the Unified Address Space.
 
-### 1. Perception: Building Logical Radar
-*   **Task**: Define the boundaries of all information currently "visible" to the system.
-*   **Action**: Scan all `IndexPages` (Consolidated Pages) and current active `OriginalPages` (Original Pages) that have not yet been summarized.
-*   **Output**: Retrieval Candidate Pool $\mathcal{S}$.
+#### 2.1 Logical Page Addressing (LAS)
+*   **Mechanism**: Two-stage semantic matching based on the **Page Index**.
+    - **Broad Semantic Match**: The Router performs coarse-grained filtering in the index based on the Intent Focus and the Page's **Semantic Keywords**, recalling Logical Pages with relevance potential.
+    - **Precision Selection**: Performs deep semantic alignment, comparing Intent Focus with Page Summary to determine Page activation states (**Hot** for direct injection / **Indexed** for summary only).
 
-```mermaid
-graph LR
-    Scan[Scan Store] --> OP[Active OP]
-    Scan --> CP[All CP]
-    OP --> S((Candidate Pool S))
-    CP --> S
-```
+#### 2.2 Physical Block Addressing — PAS
+*   **Mechanism**: Preliminary semantic retrieval based on **Intent-Driven** guidance.
+    - **Recall Strategy**: The Router uses Intent Focus as a search key to pre-retrieve potentially relevant **PBlock attachment points** within the PAS space.
+    - **Speculative Materialization**: To solve the "blind box" perception problem of PBlocks, the Host drives the **Consolidator** to perform an immediate scan of recalled PBlocks, generating **Draft Pages** based on the Intent Focus.
+    - **Draft Page**: 
+        - **Form**: Original or Consolidated Page in a `draft` state.
+        - **Manifest**: Contains basic `id`, `summary`, and `keywords`.
+        - **Role**: Allows the Worker to perceive the logical distribution of physical blocks without materializing the full content.
+    - **Injection State**: Draft Pages are attached to the horizon. **Equalized Presentation Strategy**:
+        - High Relevance: Displayed directly as `view="Detail"` (speculative full materialization).
+        - Low Relevance: Displayed as `view="Summary"` (index reservation).
+    - **Status**: At this stage, PBlocks are in a **"detectable"** state.
 
-### 2. Cascade: Intent Awareness & Two-Stage Matching
-*   **Intent Detection & Reconstruction (Deterministic Reconstruction)**:
-    *   **Trigger**: Triggered when the entropy of $U_{now}$ is too low (e.g., "continue", "next step", "anything else") such that the Router cannot directly perform semantic matching.
-    *   **Logic**: This process is enforced by the **External System Scaffolding (Host Code)** rather than the Router LLM's inference. The system deterministically concatenates the `Summary` of the previous round with the current input to generate a high-entropy reconstructed query. This ensures addressing determinism and avoids reliance on model hallucinations.
-*   **Stage 1: Broad Semantic Match**:
-    *   The Router first performs a broad initial screening of the candidate pool $\mathcal{S}$ based on `Semantic Clusters`, excluding logically unrelated topics.
-*   **Stage 2: Precision Relevance Selection**:
-    *   Performs a secondary relevance match on the initial results based on the `Summary`.
-    *   **Criterion: Only inject content with actual relevance**.
-*   **Display Decision**:
-    *   **Full Injection (Detail)**: Pages judged to be highly relevant.
-    *   **Summary Injection (Summary)**: Pages judged to be moderately relevant or serving as background references.
+#### 2.3 Memory Acquisition
+*   **Responsibility**: Retrieves relevant historical logic entities from the external Memory system.
+*   **Mechanism**: Parallel keyword retrieval.
+    - **Action**: While performing LAS/PAS addressing, the Router extracts semantic keywords from the Intent Focus and initiates concurrent interface calls to the external Memory system.
+    - **Materialization**: High-relevance Pages returned by Memory (compliant with PCP standard messaging) are directly injected into the context as "logical background" for the current round, participating in subsequent execution.
 
-```mermaid
-graph LR
-    Intent[Intent Reconstruction] --> BM[Broad Match]
-    BM --> RS[Relevance Selection]
-    RS --> Decision[Display Decision]
-    Decision --> Detail((Detail))
-    Decision --> Summary((Summary))
-```
 
-### 3. Synthesis: Physical Structuring & Overflow Governance
-*   **Ordering**: Strictly physically order the screened content according to **Timestamps**.
-*   **Overflow Control**:
-    *   When the total Tokens after assembly exceed the context threshold, the system triggers a **Dual-Decay Algorithm**: considering both **Timestamp** and **Relevance**.
-    *   **Background Compression**: For pages that are distant in time and low in relevance, the system summarizes them into a unified `<Background_Context>` description. This simulates the brain's "summary-style forgetting" of past minor details, freeing up physical window space.
-*   **Structuring**: Packetize content using specific XML tags (see Chapter VII).
-*   **Injection**: Inject the synthesized XML Context into the Worker's input buffer, explicitly injecting the `Current_Time` scale.
+### 3. Synthesis & XML Construction
+*   **Responsibility**: Builds the Worker's perception interface.
+*   **Action**: Order Pages chronologically and enforce **Overflow Governance**.
+*   **Backgrounding**: Perform "summary-style forgetting" on far-field or low-relevance content, merging it into `<Background_Context>` to maintain window signal-to-noise ratio.
 
-```mermaid
-graph LR
-    Sort[Temporal Sort] --> OC[Overflow Control]
-    OC -->|Background Compression| XML[XML Synthesis]
-    XML --> Buffer((Buffer))
-```
+### 4. Execution & Proactive Mapping
+*   **Responsibility**: Task execution, address penetration, and unknown exploration.
+*   **Logical Deconstruction (LAS Logic)**: The Worker uses the `Consult` instruction on existing Pages (including Draft Pages) in the horizon to upgrade resolution, which is then fulfilled by the Host.
+*   **Physical Probing (PAS Probing)**: When the Worker perceives that the current LAS cannot close the logic chain and Draft Pages suggest critical clues within a physical block, it performs proactive probing via the `Explore` instruction.
+*   **Mapping Sovereignty**: The Worker reads and deconstructs PBlocks using the Intent Focus or Explicit Keywords as a "filter," extracting only highly relevant Page entities.
+*   **Recursive Diffusion**: Newly materialized Pages may generate new physical references. The Router performs **Reactive Diffusion**, triggering a new round of addressing.
 
-### 4. Execution: Zooming & Tracing
-*   **Execution**: Worker receives the context.
-*   **Tracing**: Faithfully record the derivation process after each summary reading in the `<Reasoning_Trace>` tag.
-*   **Zooming**: If the current context information is insufficient, the Worker actively calls `Consult` to expand a Summary. If information is overloaded, call `Shelve` to fold nodes.
-
-```mermaid
-graph LR
-    Input[XML Context] --> Trace[Reasoning_Trace]
-    Trace --> Zoom[Zooming Tasks]
-    Zoom --> Response((Response))
-```
-
-### 5. Memory Consolidation & Archiving
-
-The Consolidator actor handles system storage maintenance. Its actions are divided into **event-driven** and **independent scheduled-driven** modes:
-
-*   **Initial Freezing**: 
-    *   **Trigger**: Real-time monitoring of derivation entropy. When a Topic Pivot or Token overflow is detected, trigger the `Original -> Consolidated` conversion.
-    
-    ```mermaid
-    graph LR
-        OP[Original Pages] -->|Pivot or Overflow| C1[Freezing]
-        C1 --> CP[Consolidated Pages]
-    ```
-
-*   **Metabolic Merging**:
-    *   **Trigger**: **Independent scheduled background tasks** (e.g., executed every 12 hours or during system idle periods).
-    *   **Logic**: Perform **logical pruning** on far-field memory along the timeline. When the generational gap between adjacent same-topic summary pages and the current physical time ($T_{now}$) exceeds a staleness threshold, perform physical merging.
-    
-    ```mermaid
-    graph LR
-        CP1[Recent CP] -- Over Time --> CP2[Old CP]
-        CP2 -->|Staleness Threshold| C2[Merging]
-        C3[Adjacent Same-Topic CP] --> C2
-        C2 --> MA[Merged Archive]
-    ```
-
-> [!TIP]
-> **Practical Reference**: For a detailed simulation of the above full-lifecycle process in complex dialogues, please refer to: [Lifecycle Walkthrough Case Study: Global Energy Transition Strategy Analysis](./examples/LIFECYCLE_WALKTHROUGH-en.md).
+### 5. Metabolism, Solidification & GC
+*   **Action**: Real-time monitoring for topic pivots and resource pressure.
+*   **Consolidated Page (CP) Generation Triggers**:
+    - **Semantic Trigger (Topic Pivot)**: When logical deduction enters a new phase or a shift in topic is detected, preceding `Original Pages` are merged.
+    - **Physical Trigger (Threshold)**: When the accumulation of original pages in the active horizon exceeds a set threshold, a mandatory merge is performed to free up Token space.
+*   **Draft Solidification**:
+    - **Resolution Filter**: At the end of each interaction round, evaluate the view state of all Draft Pages.
+    - **Solidification Logic**: Any Draft Page in a non-`Summary` state (i.e., `Detail` or `Unpacked`) is deemed to have made a substantial logical contribution and is automatically solidified as a formal LAS Page.
+    - **Form Transformation**: 
+        - `Draft CP (Detail)` -> Solidified as `Original Page` (Logical endpoint reached).
+        - `Draft CP (Unpacked)` -> Solidified as `Consolidated Page` (Logical topology adopted).
+    - **Discarding**: Any other Draft Pages remaining in the `Summary` state are discarded at the end of the round and do not enter persistence.
+*   **Long-term Metabolism & Evolution**: 
+    - **Horizontal Merge (CP Defragmentation)**: Performs merging for far-field, stale, and **same-topic** adjacent Consolidated Pages. The resulting node maintains the same depth level, with its source IDs being the union of the originals.
+    - **Vertical Branching (Logic Tree Evolution)**: When an old topic is revisited across time and generates a new logical fork, a "CP of CPs" is established above the branch point, preserving historical conclusions and current deductions through **tree-like branching**.
+*   **Architectural Topology**: Drives the address space to evolve from a "flat temporal stream" into a **"Temporal Backbone + Logical Tree Branches"** model, ensuring precise positioning and recursive addressing for large-scale complex logic.
 
 ---
 
-## VI. Zooming Mechanics
+## VII. Zooming Mechanics
 
 Zooming is the core path for PCP to maintain "both seeing the forest and clearly seeing every tree" during extremely long interactions.
 
-### 6.1 Semantic View States
+### 7.1 Semantic View States
 
 To allow the model to intuitively perceive reading depth and physical attributes (atomic level vs. container level), PCP employs a semantic view system:
 
@@ -235,61 +224,73 @@ To allow the model to intuitively perceive reading depth and physical attributes
     *   **Constraint**: **Only applicable to `type="Consolidated"` nodes**. Must satisfy the "Active Zoom" constraint: it must contain **at least one** sub-node in a state other than `Summary` (i.e., `Detail` or deeper), otherwise it should automatically trigger a `Shelve` back to the `Detail` state to keep the context compact.
     *   **Behavior**: Removes the synthesis text and directly nests internal sub-pages (`Node`).
 
-### 6.2 Recursive Zooming Path Mapping
+### 7.2 Recursive Zooming Path Mapping
 
-*   **Level 1: Global Perception**: Pages (Original/Consolidated) in view are presented in the `Summary` state.
-*   **Level 2: Single Page Penetration**: `Consult(id)` moves the target into `Detail`.
-*   **Level 3: Container Deconstruction**: For a **Consolidated** node already in `Detail`, calling `Consult` moves it into `Unpacked`, revealing the `Summary` of internal sub-pages.
-*   **Level 4: Atomic Restoration**: For a revealed sub-page (Original), calling `Consult` moves it into `Detail`, reaching the original evidence.
+*   **Level 1: Global Perception**: Root pages in the horizon are presented in the `Summary` state to build a logical overview.
+*   **Level 2: Node Penetration**: `Consult(id)` moves the target into `Detail`.
+    *   **Original**: Reveals materialized full content.
+    *   **Consolidated**: Reveals the full text of the container summary.
+*   **Level 3: Sub-tree Unpacking**: Calls `Consult` on a **Consolidated** node that is already in `Detail` state, moving it to `Unpacked` to reveal the `Summaries` of its internal child pages.
+    *   **Recursive Trait**: Since child pages can be new Consolidated nodes, this process supports **infinite recursive zooming**, allowing for vertical searches within multi-level logic trees.
+*   **Level 4: Atomic Restoration**: Calling `Consult` to move an `Original` page at the edge of the tree into `Detail`, reaching the logical endpoint.
 
-```mermaid
-graph LR
-    L1[Level 1: Summary] -->|Consult| L2[Level 2: Detail]
-    L2 -->|Consult iff Consolidated| L3[Level 3: Unpacked]
-    L3 -->|Consult Sub-node| L4[Level 4: Atomic Detail]
+### 7.3 Protocol Instruction Specs
 
-    L4 -.->|Shelve| L3
-    L3 -.->|Shelve| L2
-    L2 -.->|Shelve| L1
-```
-
-> [!TIP]
-> **Practical Reference**: For a pathfinding simulation of Level-4 Zooming in extremely complex scenarios, please refer to: [Zooming Deep Dive Case Study: Vision Zooming in Complex Philosophical Deduction](./examples/ZOOMING_DEEP_DIVE-en.md).
-
-### 6.2 Dynamic Zooming via Function Calling
-
-Zooming operations are implemented via the system's **Function Calling** mechanism, which is key for the Worker to achieve dynamic zooming.
-
-| Action | Call Format | Trigger Condition | Effect |
+| Instruction | Call Format | Trigger Condition | Effect |
 | :--- | :--- | :--- | :--- |
-| **Consult** | `Consult(reason, id)` | Current view depth is insufficient for conclusion | **View Upgrade**: `Summary -> Detail` or `Detail -> Unpacked`. |
+| **Consult** | `Consult(reason, id)` | Resolution of an existing logical entity is insufficient | **Logical Upgrade**: `Summary -> Detail` or `Detail -> Unpacked`. Target is a known LAS ID. |
+| **Explore** | `Explore(reason, handle, keywords)` | Need to extract specific logic from an unknown physical block | **Physical Materialization**: Filters and generates new Pages from a PBlock handle based on keywords. Target is a PAS handle. |
 | **Shelve** | `Shelve(reason, id)` | Current detail node is no longer relevant | **View Downgrade**: `Unpacked -> Detail` or `Detail -> Summary`. |
 
-**Parameter Descriptions**:
-*   **reason**: Logical reason for zooming. **Must be truthful and specific**; it will be automatically recorded in the `<Reasoning_Trace>` of the next round to provide pathfinding reference for the model.
-*   **ids**: One or more Page IDs to operate on.
-
-### 6.3 Cascading Shelve / Auto-Folding
+### 7.4 Cascading Shelve / Auto-Folding
 
 To maintain extreme context purity, `Shelve` operations possess **cascading folding** characteristics:
 *   **Atomic-level Trigger**: When an atomic Page in a `Detail` state is `Shelved`, it immediately reverts to `Summary`.
 *   **Container-level Collapse**: When a summary page in Level 3 (Unpacked state) has all its internal sub-page IDs successfully `Shelved` (folded) by the Worker, the summary page node must **automatically collapse upward**, reverting to the Level 2 (Detail) state.
 *   **Logical Goal**: Ensure that only "explicitly needed details" exist in the cognitive horizon, leaving no logical redundancy.
 
-## VII. XML Spec
+## VIII. Physical Mapping & Search Logic
 
-### 7.1 XML Synthesis vs. Semantic Gluing
+This section defines how PBlocks are transformed into Pages and the physical search details behind the `Explore` instruction.
+
+### 8.1 Keyword-Driven Entropy Suppression
+*   **Semantic Filter**: `Explore` does not blindly load full physical content. The Host performs semantic retrieval (BM25 or Vector) within the PBlock based on `keywords`, extracting only segments strongly relevant to the keys.
+*   **Entropy Suppression**: Physical noise falling below relevance thresholds is forcibly kept in the "physical space" and not materialized. This ensures an extremely high signal-to-noise ratio in the logical address space.
+
+### 8.2 Structural Awareness
+The Host determines the materialization form based on the physical attributes of the PBlock:
+*   **Atomic Physical Block** (e.g., text logs, function snippets) -> Materialized as an **Original Page**.
+*   **Structured Physical Block** (e.g., repository directories, complex document chapters) -> Materialized as a **Consolidated Page (Draft)**.
+    *   **Physical Zoomming**: Calling `Consult` on a structured Draft triggers a **sub-physical block scan**, producing the next level of draft pages, unifying physical and logical paths during zooming.
+
+### 8.3 Recursive Synthesis
+When materializing a complex structured PBlock, the Consolidator performs **recursive synthesis**:
+1.  Calculates key summaries of sub-physical blocks bottom-up.
+2.  Summaries at each level are merged step-by-step, eventually producing the `summary` and `keywords` for the Root Consolidated Page.
+3.  This process is highly **intent-dependent**—the emphasis of the Summary is determined by the current `Intent Focus`.
+
+**Parameter Descriptions**:
+*   **reason**: Logical reason for the operation.
+*   **id / handle**: Target Logic ID or Physical Handle.
+*   **keywords**: Exclusive to `Explore`, defines the semantic filter for physical probing.
+
+*   **Logical Goal**: Ensure that only "explicitly needed details" exist in the cognitive horizon, leaving no logical redundancy.
+
+## IX. XML Spec
+
+### 9.1 XML Synthesis vs. Semantic Gluing
 
 PCP does not simply stack text physically (Plain Text Gluing) but builds a perceptional interface with structural determinism through **Ordered XML Synthesis**. The core design motivations include:
 
 *   **Structural Disambiguation**: When dealing with context containing complex metadata (e.g., ID, Timestamp, Page Type), XML provide explicit logical boundaries. This effectively prevents the LLM from cognitively confusing "protocol control instructions" with "actual dialogue content," reducing hallucination drift during reasoning.
-*   **Addressing Bus & Operational Closure**: XML tags provide deterministic addressing targets (IDs) for `Consult` and `Shelve` operators. This allows the external system to perform precise local insertions or deletions on the context—much like manipulating the DOM—without needing to refresh the entire context flow.
+*   **Addressing Bus & Operational Closure**: XML tags provide deterministic addressing targets (IDs) for `Consult` and `Shelve` instructions. This allows the external system to perform precise local insertions or deletions on the context—much like manipulating the DOM—without needing to refresh the entire context flow.
 *   **Parsing Determinism**: Modern long-context models exhibit excellent adherence to structural markers. Treating the context as an "addressable database" rather than a "flat text stream" helps the model maintain rigorous logical tracing capabilities.
 
-### 7.2 Tag Specifications
+### 9.2 Tag Specifications
 
 *   **`<PagedContext>`**: Protocol root container, carries `version` number.
 *   **`<Static_Registry>`**: Static registry. Injects global constants and **runtime instructions** that do not change with the dialogue.
+    *   **`<ST-Node>`**: **Status Node**. Stores system states or global parameters that do not change during the dialogue. Includes `id` and `value`.
     *   **`<System_Instructions>`**: **Core instruction injection**. Informs the Worker of the protocol's operating manual, defining triggers and logical goals for `Consult/Shelve`.
 *   **`<Query>`**: **Current user input**. The system performs intent recognition and cascading matching based on this input.
 *   **`<Reasoning_Trace>`**: **Reasoning process record**. Consists of a series of `<Step>` nodes recording all zooming actions taken by the Worker in previous rounds.
@@ -299,16 +300,19 @@ PCP does not simply stack text physically (Plain Text Gluing) but builds a perce
     *   `id`: unique Short Hash identifier.
     *   `type`: **Physical page attribute (Original | Consolidated)**.
     *   `view`: **Semantic view (Summary | Detail | Unpacked)**.
+    *   `depth`: **Hierarchy Scale (Integer)**.
+    *   `origin`: **Origin Tracking (History | Storage)**.
+    *   `keywords`: **Semantic Index Keys (Comma-separated string)**.
     *   `timestamp`: The time origin of the logical occurrence.
 
 ---
 
-### 7.3 Abstract Boilerplate
+### 9.3 Abstract Boilerplate
 
 Standard generation template for system integration:
 
 ```xml
-<PagedContext version="1.0">
+<PagedContext version="0.1.0-alpha">
   <Static_Registry>
     <ST-Node id="CURRENT_TIME" value="YYYY-MM-DDTHH:mm:ss" />
     <System_Instructions>
@@ -327,32 +331,66 @@ Standard generation template for system integration:
 
   <Linear_Flow>
     <!-- 1. Original Summary -->
-    <Node id="f1a2b3c4" type="Original" view="Summary" timestamp="2026-02-14T10:00:00">
+    <Node id="f1a2b3c4" type="Original" view="Summary" depth="1" keywords="CS, Addressing" origin="History" timestamp="2026-02-14T10:00:00">
       <Summary>Background reference summary...</Summary>
     </Node>
 
     <!-- 2. Original Detail - Logical Endpoint -->
-    <Node id="d4e5f6a1" type="Original" view="Detail" timestamp="2026-02-14T10:05:00">
+    <Node id="d4e5f6a1" type="Original" view="Detail" depth="2" origin="Storage" timestamp="2026-02-14T10:05:00">
       <Content>Full bottom-level dialogue text or hardware raw logs...</Content>
     </Node>
 
     <!-- 3. Consolidated Summary -->
-    <Node id="b2c3d4e5" type="Consolidated" view="Summary" timestamp="2026-02-14T10:10:00">
+    <Node id="b2c3d4e5" type="Consolidated" view="Summary" depth="1" timestamp="2026-02-14T10:10:00">
       <Summary>Preliminary consensus summary synthesized from 10 OP pages.</Summary>
     </Node>
 
     <!-- 4. Consolidated Detail - Recursive Transit -->
-    <Node id="c3d4e5f6" type="Consolidated" view="Detail" timestamp="2026-02-14T10:15:00">
+    <Node id="c3d4e5f6" type="Consolidated" view="Detail" depth="1" timestamp="2026-02-14T10:15:00">
       <Content>Consolidated full text, containing complete logical deductions. Drilling down is possible here.</Content>
     </Node>
 
     <!-- 5. Consolidated Unpacked - Direct Nesting -->
-    <Node id="e5f6a7b8" type="Consolidated" view="Unpacked" timestamp="2026-02-14T10:20:00">
-       <Node id="a7b8c9d0" type="Original" view="Summary" timestamp="..." />
-       <Node id="f9e8d7c6" type="Original" view="Summary" timestamp="..." />
+    <Node id="e5f6a7b8" type="Consolidated" view="Unpacked" depth="1" timestamp="2026-02-14T10:20:00">
+       <Node id="a7b8c9d0" type="Original" view="Summary" depth="2" origin="Storage" timestamp="..." />
+       <Node id="f9e8d7c6" type="Original" view="Summary" depth="2" origin="Storage" timestamp="..." />
     </Node>
   </Linear_Flow>
 </PagedContext>
 ```
+
+---
+
+## X. Sentry Mechanism & Logic Collapse
+
+### 10.1 Sentry Logic
+The system monitors token pressure $P_{token}$ and input entropy in real-time. When over-limit pressure or massive new file input is detected, the Sentry forces the system from "Chat Mode" to "Protocol Mode."
+
+### 10.2 Retroactive Transition (Logic Collapse)
+At the moment of transition, the system performs a **dehydration process** on the previous linear dialogue history:
+*   **Retroactive Paging**: Retrospectively applies PCP paging logic to the previous linear history. Depending on topic pivots, token budgets, and logic density, it collapses the history into a series of protocol-compliant `Original/Consolidated Pages`, ensuring logical continuity.
+*   **Physical Cleansing**: Clears physical cache and establishes a formal XML addressing bus.
+*   **Identity Collapse**: The Worker's identity formally collapses from "chat partner" into a **"Logic Processor."**
+
+---
+
+## XI. Logic Persistence & Write-back
+
+PCP is not responsible for maintaining a networked cold knowledge base, but as a "Logic Processor," it must provide a mechanism to sediment the "Logical Net Value" generated during real-time processing back into external systems.
+
+### 11.1 Memory Interface Requirements
+PCP is indifferent to the internal implementation of the Memory system, but as an external "logic plug-in," it must satisfy the following calling contracts:
+*   **Page Message Compatibility**: The content returned by Memory must comply with the `Original/Consolidated Page` XML definition, containing core `summary` and `keywords` for further alignment by the Router.
+*   **Keyword Interface**: Memory must expose an interface that supports Recall based on semantic keywords. The Router extracts intent keywords during the Addressing phase and calls this interface in parallel.
+*   **Instant Input Role**: Memory acquisition is part of the addressing flow. Retrieved Pages are treated as valid extensions of the current LAS, enjoying the same logical processing weight as local cache.
+
+### 11.2 Unified Logic Export
+When the task stream reaches a stable logical conclusion or significant "logical extraction" occurs (such as generating high-depth Consolidated Pages), the **Unified Export Manager** of the Host system is triggered:
+*   **Export Assets**: PCP throws out the `summary`, `keywords`, and established `source_ids` logical associations processed by the processor.
+*   **External Sedimentation Policy**: Whether the content is stored in Memory for real-time addressing in subsequent sessions or sedimented to generic RAG as non-linear background facts is **entirely decided by the receiver (Memory/RAG system)**. PCP acts only as a producer of logical net value and does not interfere with the policy execution of external storage systems.
+
+### 11.3 State Isolation
+*   **Non-blocking Write-back**: The persistence process is transparent and asynchronous to the real-time PCP task stream.
+*   **Side-effect Free**: Updates to the external networked knowledge base do not cause real-time changes to the current PCP Linear_Flow unless the Worker explicitly addresses these new sedimented physical blocks via the Router in the next round.
 
 ---
