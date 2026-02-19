@@ -7,36 +7,38 @@
 <a name="chinese"></a>
 ## 🚀 简介 (Chinese)
 
-**Paged-Context-Protocol (PCP)** 是一种将 LLM 上下文建模为**地址空间（Address Space）**而非单纯“缓存”的管理协议。
+**Paged-Context-Protocol (PCP)** 是一种将 LLM 上下文建模为**地址空间（Address Space）**而非单纯“线性缓存”的指令集架构协议。
 
-与传统的 RAG 或滑动窗口（其本质是将上下文视为不稳定的缓存）不同，PCP 引入了**虚拟内存（Virtual Memory）**的设计哲学。它将碎片化的 Token 流与海量静态数据转化为统一、离散、可寻址的**逻辑页（Logical Pages）**，并允许 Worker 通过动态变焦来控制每一个页面的**展现分辨率**。
+在本协议中，LLM 不再是简单的文本生成器，而是被解构为具备**逻辑虚拟内存（LVM）**管理能力的**逻辑处理器（Logic Processor）**。PCP 将碎片化的 Token 流与海量原始数据转化为统一、离散、可寻址的**逻辑页（Logical Pages）**，并通过**递归逻辑树（Logic Trees）**拓扑实现对海量语境的精准变焦与探测。
 
 ### 核心特性
-*   **💾 上下文虚拟化与映射 (Mapping)**：将存储索引视为“虚拟磁盘”，实现对话流与大規模静态数据源（Raw Pool）的混合映射。
-*   **🔍 需求分页 (Demand Paging)**：由 Worker 发起，实现无限深度的逻辑变焦。
-*   **🛡️ 确定性寻址与逻辑主权**：以 XML 标签作为物理地址总线，严禁语义脑补，寻址错误即总线崩溃（Bus Fault）。
-*   **🚦 哨兵与逻辑坍缩**：自动监控 Token 压强，通过动态“脱水”维持活跃视界的极高信噪比。
+*   **💾 逻辑虚拟内存 (LVM)**：将物理存储（PBlock）与逻辑地址空间（LAS）解耦，支持超长历史与海量文件的混合变焦映射。
+*   **🔍 指令驱动寻址 (ISA)**：定义 `Consult`、`Explore`、`Shelve` 指令。由 Processor 自主驱动物理探测与逻辑解析，实现“按需分页”。
+*   **🌲 递归逻辑树 (Logic Trees)**：地址空间从“扁平流”进化为“树形分支”，支持通过 `Unpacked` 状态进行无限深度的纵向逻辑下钻。
+*   **⚡ 投机物化与草稿页**：引入 **Draft Pages** 机制，支持在不物化全文的情况下感知识识读物理块的逻辑分布。
+*   **🛡️ 总线主权与低熵保护**：以 XML 作为物理寻址总线，严禁语义幻觉。内置**低熵保护策略**，自动重构模糊意图，确保寻址的确定性。
 
 ### 为什么选择 PCP？
-现有方案本遵循“进场/出场”的**物理缓存逻辑**，而 PCP 遵循“缩放/穿透”的**地址寻址逻辑**。这种视角转变允许模型在有限的窗口内保持对“全域空间”的感知，同时精准定位“局部原子详情”。
+现有方案遵循“缓存置换”的**物理逻辑**，而 PCP 遵循“缩放/穿透”的**处理器逻辑**。这种视角转变允许模型在有限的窗口内保持对“全域空间”的逻辑连续性感知，将 LLM 转化为真正的长文本执行引擎。
 
 ---
 
 <a name="english"></a>
 ## 🚀 Introduction (English)
 
-**Paged-Context-Protocol (PCP)** is a context management protocol that models the LLM context as an **Address Space** rather than a mere "Cache."
+**Paged-Context-Protocol (PCP)** is an Instruction Set Architecture (ISA) protocol that models LLM context as an **Address Space** rather than a mere "linear cache."
 
-While traditional RAG or sliding window approaches treat context as a volatile cache (information is either "in" or "out"), PCP introduces the philosophy of **Virtual Memory**. It transforms fragmented Token streams and massive static data into a unified, discrete, and addressable **Logical Pages** space, allowing the Worker to control the **display resolution** of each page via dynamic zooming.
+Under PCP, the LLM is no longer just a text generator but is deconstructed into a **Logic Processor** with **Logic Virtual Memory (LVM)** management capabilities. PCP transforms fragmented Token streams and massive raw data into a unified, discrete, and addressable **Logical Pages** space, utilizing a **Hierarchical Logic Tree** topology for precise context zooming and probing.
 
 ### Key Features
-*   **💾 Context Virtualization & Mapping**: Treats storage as a "Backing Store," enabling hybrid mapping of dialogue flows and massive raw data pools.
-*   **🔍 Demand Paging**: Worker-driven recursive mapping, enabling infinite logical zooming depth.
-*   **🛡️ Deterministic Addressing & Sovereignty**: XML address bus ensures zero-hallucination; addressing errors are treated as "Bus Faults."
-*   **🚦 Sentry & Logic Collapse**: Monitors token pressure and performs dynamic "dehydration" to maintain a high signal-to-noise ratio.
+*   **💾 Logic Virtual Memory (LVM)**: Decouples physical storage (PBlocks) from the Logical Address Space (LAS), enabling hybrid mapping of massive data sources and long-term history.
+*   **🔍 Instruction-Driven Addressing (ISA)**: Defines `Consult`, `Explore`, and `Shelve` instructions. The Processor autonomously drives physical probing and logical parsing, achieving "Demand Paging."
+*   **🌲 Recursive Logic Trees**: Evolves context from a "flat stream" into "hierarchical branches," supporting infinite vertical drill-down via the `Unpacked` state.
+*   **⚡ Speculative Materialization & Draft Pages**: Introduces **Draft Pages** for perceiving the logical distribution of physical blocks without full materialization.
+*   **🛡️ Bus Sovereignty & Low-Entropy Protection**: Uses XML as the physical addressing bus to eliminate hallucinations. Includes a **Low-Entropy Protection** strategy to automatically reconstruct ambiguous intents.
 
 ### Why PCP?
-Conventional solutions follow a **Physical Cache Logic** (Presence/Absence), whereas PCP follows an **Address Space Logic** (Resolution/Drill-down). This shift enables the model to maintain perception of the "Global Space" within a limited window while precisely locking onto "Local Atomic Details."
+Conventional solutions follow the **Physical Logic** of cache replacement, whereas PCP follows the **Processor Logic** of resolution and penetration. This shift enables the model to maintain logical continuity across the "Global Space" within a limited window, transforming the LLM into a true long-context execution engine.
 
 ---
 
