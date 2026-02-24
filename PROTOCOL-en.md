@@ -76,7 +76,7 @@ The Host system provides the "rigid" physical environment for protocol execution
     *   **Overflow Governance**: The core safeguard logic. When the Worker triggers a `Consult` or `Mapping Pulse` that risks overflowing the physical context, the controller dynamically evaluates window pressure. It enforces "Dynamic Dehydration" on non-intent-focus pages—mandating a `view="Detail" -> "Summary"` degradation before injection.
 
 3.  **Bus Mediator**:
-    *   **Instruction Translation**: Receives directives like `Consult(id)` or `Shelve(id)` from the Worker and translates them into physical I/O (storage reads) or index state updates.
+    *   **Instruction Translation**: Receives directives like `Consult/Shelve/Purge` from the Worker and translates them into physical I/O (storage reads) or index state updates (e.g., applying negative weight feedback).
     *   **Atomicity Assurance**: Ensures the integrity of each interaction round, preventing logic state hangs due to partial I/O failures.
 
 4.  **Intent Scaffolding**:
@@ -240,7 +240,8 @@ To allow the model to intuitively perceive reading depth and physical attributes
 | :--- | :--- | :--- | :--- |
 | **Consult** | `Consult(reason, id)` | Resolution of an existing logical entity is insufficient | **Logical Upgrade**: `Summary -> Detail` or `Detail -> Unpacked`. Target is a known LAS ID. |
 | **Explore** | `Explore(reason, handle, keywords)` | Need to extract specific logic from an unknown physical block | **Physical Materialization**: Filters and generates new Pages from a PBlock handle based on keywords. Target is a PAS handle. |
-| **Shelve** | `Shelve(reason, id)` | Current detail node is no longer relevant | **View Downgrade**: `Unpacked -> Detail` or `Detail -> Summary`. |
+| **Shelve** | `Shelve(reason, id)` | Current detail node information is absorbed or temporarily unneeded | **View Downgrade**: `Unpacked -> Detail` or `Detail -> Summary`. |
+| **Purge** | `Purge(reason, id)` | Current node contains misjudged content, is completely irrelevant, or is obsolete redundancy | **Physical Eviction & Immunity**: Completely removes the node from `<Linear_Flow>` and applies strong negative feedback weight to this ID in the current topic retrieval layer to prevent subsequent repeated recall. |
 
 ### 7.4 Cascading Shelve / Auto-Folding
 
@@ -248,6 +249,13 @@ To maintain extreme context purity, `Shelve` operations possess **cascading fold
 *   **Atomic-level Trigger**: When an atomic Page in a `Detail` state is `Shelved`, it immediately reverts to `Summary`.
 *   **Container-level Collapse**: When a summary page in Level 3 (Unpacked state) has all its internal sub-page IDs successfully `Shelved` (folded) by the Worker, the summary page node must **automatically collapse upward**, reverting to the Level 2 (Detail) state.
 *   **Logical Goal**: Ensure that only "explicitly needed details" exist in the cognitive horizon, leaving no logical redundancy.
+
+### 7.5 Logical Eviction & Negative Feedback
+
+If `Shelve` means "folding a used tool and putting it back in the drawer", then `Purge` is "throwing a completely wrong blueprint into the wastebasket".
+*   **Horizon Cleansing**: The `Purge` instruction mandates the system to completely erase the corresponding `<Node>` from the current `<Linear_Flow>` list, freeing up precious Context Tokens without leaving any logical noise.
+*   **Retrieval Isolation (Active Immunity)**: For node IDs `Purge`d by the Worker, the Host will immediately tag them with **Strong Negative Weighting** within the current intent/topic flow. This effectively prevents the Router module from repeatedly recalling it into the context during subsequent retrieval cycles due to "erroneous high semantic similarity", breaking the retrieval infinite loop.
+*   **Reasoning Anti-Error Tracing**: The act of executing a `Purge` itself (with an extremely short reason) will be sedimented into the `<Reasoning_Trace>` at a very low Token cost (e.g., "Checked document A, it is an old version, purged"), serving as a cognitive memory anti-error mechanism for the model during long derivations.
 
 ## VIII. Physical Mapping & Search Logic
 
@@ -291,7 +299,7 @@ PCP does not simply stack text physically (Plain Text Gluing) but builds a perce
 *   **`<PagedContext>`**: Protocol root container, carries `version` number.
 *   **`<Static_Registry>`**: Static registry. Injects global constants and **runtime instructions** that do not change with the dialogue.
     *   **`<ST-Node>`**: **Status Node**. Stores system states or global parameters that do not change during the dialogue. Includes `id` and `value`.
-    *   **`<System_Instructions>`**: **Core instruction injection**. Informs the Worker of the protocol's operating manual, defining triggers and logical goals for `Consult/Shelve`.
+    *   **`<System_Instructions>`**: **Core instruction injection**. Informs the Worker of the protocol's operating manual, defining triggers and logical goals for `Consult/Shelve/Purge`.
 *   **`<Query>`**: **Current user input**. The system performs intent recognition and cascading matching based on this input.
 *   **`<Reasoning_Trace>`**: **Reasoning process record**. Consists of a series of `<Step>` nodes recording all zooming actions taken by the Worker in previous rounds.
     *   **`<Step>`**: Specific action item. Includes `action` (action name), `target` (target ID), and `reason` (logical motivation).
@@ -319,7 +327,7 @@ Standard generation template for system integration:
       - Original: original evidence/dialogue node (non-deconstructible).
       - Consolidated: logical synthesis node (can be Unpacked).
       - view="Summary": abstract; view="Detail": full text; view="Unpacked": expand container internals.
-      - Consult(reason, id): upgrade view for details/sub-items; Shelve(reason, id): downgrade view to clean horizon.
+      - Consult(reason, id): upgrade view for details/sub-items; Shelve(reason, id): downgrade view to clean horizon; Purge(reason, id): completely evict irrelevant nodes.
     </System_Instructions>
   </Static_Registry>
 

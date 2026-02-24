@@ -77,7 +77,7 @@ PCP 的三处理器架构支持 **异构双模型 + 并行部署 (Dual-LLM Paral
     *   **物理溢出治理 (Overflow Governance)**：此为核心守护逻辑。当 Worker 触发 `Consult` 或 `Mapping Pulse` 导致新 Page 注入时，控制器必须动态评估窗口压强。若越限风险增加，控制器强制对非意图重心的 Page 执行“动态脱水”——即在注入前强制执行 `view="Detail" -> "Summary"` 的降阶处理。
 
 3.  **总线中继器 (Bus Mediator)**:
-    *   **指令翻译层**：接收 Worker 输出的 `Consult(id)` 或 `Shelve(id)` 等指令，并将其翻译为具体的物理存储读取（I/O）或索引状态修改动作。
+    *   **指令翻译层**：接收 Worker 输出的 `Consult/Shelve/Purge` 等指令，并将其翻译为具体的物理存储读取（I/O）或索引状态修改动作（如施加负反馈权重）。
     *   **原子性保障**：确保每一轮指令执行的完整性，防止因局部读取失败导致逻辑状态机挂死。
 
 4.  **意图脚手架 (Intent Scaffolding)**:
@@ -241,7 +241,8 @@ PCP 采用以**意图 (Intent)** 为核心的寻址推演循环。每轮交互�
 | :--- | :--- | :--- | :--- |
 | **Consult** | `Consult(reason, id)` | 现有逻辑实体的分辨率不足以支撑结论 | **逻辑升级**：`Summary -> Detail` 或 `Detail -> Unpacked`。对象为 LAS 已知 ID。 |
 | **Explore** | `Explore(reason, handle, keywords)` | 需要从未知物理块中提取特定逻辑 | **物理物化**：从 PBlock 句柄中根据 keywords 过滤并生成新 Page。对象为 PAS 句柄。 |
-| **Shelve** | `Shelve(reason, id)` | 当前细节节点不再相关 | **视图降级**：`Unpacked -> Detail` 或 `Detail -> Summary`。 |
+| **Shelve** | `Shelve(reason, id)` | 当前细节节点信息已吸收或暂时不需要 | **视图降级**：`Unpacked -> Detail` 或 `Detail -> Summary`。 |
+| **Purge** | `Purge(reason, id)` | 当前节点存在内容误判、与意图彻底无关或属废弃冗余 | **物理剔除与免疫**：将节点从 `<Linear_Flow>` 彻底删除，并在当前话题检索层对该 ID 施加强负反馈权重，防止后续重复召回。 |
 
 ### 7.4 级联折叠逻辑 (Cascading Shelve / Auto-Folding)
 
@@ -249,6 +250,13 @@ PCP 采用以**意图 (Intent)** 为核心的寻址推演循环。每轮交互�
 *   **原子级触发**：当一个处于 `Detail` 状态的原子 Page 被 `Shelve` 后，它立即回退为 `Summary`。
 *   **容器级坍缩**：当一个处于 Level 3（综述解构状态）的综述页，其内部包含的所有子页面 ID 都被 Worker 成功 `Shelve`（折叠）后，该综述页节点必须**自动向上坍缩**，回退到 Level 2（综述全文摘要）状态。
 *   **逻辑目标**：确保思维视界中只存在“被明确需要的细节”，不留任何逻辑冗余。
+
+### 7.5 逻辑驱逐与负反馈机制 (Logical Eviction & Negative Feedback)
+
+如果 `Shelve` 意为“将用过的工具折叠放回抽屉”，那么 `Purge` 则是“将彻底错误的图纸扔进废纸篓”。
+*   **视界清理**：`Purge` 指令强制要求系统从当前的 `<Linear_Flow>` 列表中完全抹除对应的 `<Node>`，释放宝贵的 Context Token 并不留任何逻辑杂音。
+*   **检索隔离 (主动免疫)**：被 Worker `Purge` 掉的节点 ID，Host 将立刻在当前的意图/话题流内对其打上**强负面权重 (Negative Weighting)**。这可以有效防止 Router 模块在接下来的检索循环中因为“错误的高语义相似度”而将其反复召回上下文，打破检索死循环。
+*   **推理防错寻迹**：执行 `Purge` 的动作本身（带上极短的 reason）将以极低的 Token 成本沉淀在 `<Reasoning_Trace>` 中（例如：已检查文档 A，系旧版设定，已清除），作为模型在漫长推演中的认知记忆防错。
 
 ## VIII. 物理映射与搜索逻辑 (Physical Mapping & Search Logic)
 
@@ -291,7 +299,7 @@ PCP 并不直接将文本进行物理堆叠（Plain Text Gluing），而是通�
 *   **`<PagedContext>`**: 协议根容器，携带 `version` 版本号。
 *   **`<Static_Registry>`**: 静态注册表。注入不随对话变动的全局常量及**运行时指令**。
     *   **`<ST-Node>`**: **状态节点**。用于存储不随对话变动的系统状态或全局参量。包含 `id` 和 `value`。
-    *   **`<System_Instructions>`**: **核心指令注入**。告知 Worker 该协议的操作守则（Manual），明确 `Consult/Shelve` 的触发时机与逻辑目标。
+    *   **`<System_Instructions>`**: **核心指令注入**。告知 Worker 该协议的操作守则（Manual），明确 `Consult/Shelve/Purge` 的触发时机与逻辑目标。
 *   **`<Query>`**: **用户当前输入**。系统基于此输入执行意图识别与级联匹配。
 *   **`<Reasoning_Trace>`**: **推理过程记录**。由一系列 `<Step>` 组成，记录 Worker 在之前轮次中执行的所有变焦动作。
     *   **`<Step>`**: 具体的动作项。包含 `action` (动作名), `target` (目标 ID) 和 `reason` (逻辑动机)。
@@ -319,7 +327,7 @@ PCP 并不直接将文本进行物理堆叠（Plain Text Gluing），而是通�
       - Original: 原始证据/对话节点 (不可拆解)。
       - Consolidated: 逻辑综述节点 (可 Unpacked)。
       - view="Summary": 摘要；view="Detail": 全文；view="Unpacked": 展开容器内部。
-      - Consult(reason, id): 升级视图获取详情/子项；Shelve(reason, id): 降级视图清理视界。
+      - Consult(reason, id): 升级视图获取详情/子项；Shelve(reason, id): 降级视图清理视界；Purge(reason, id): 彻底剔除无关节点。
     </System_Instructions>
   </Static_Registry>
 
