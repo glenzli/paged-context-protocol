@@ -9,7 +9,7 @@ PCP 协议将 LLM 视为一种具备**柔性执行能力的逻辑 CPU (Flexible 
 ### 1.1 线性逻辑流 vs. 外部系统 (Linear Logic vs. External)
 PCP 定义了两类外部系统，并对其有不同的耦合要求：
 *   **RAG 系统 (Generic Cold Storage)**：泛化的、非线性的外部数据库。PCP **完全不关心**其内部设计，仅将其视为 PBlock 的物理提供方。
-*   **记忆系统 (Memory - Logic Extended Cache)**：PCP 的**逻辑扩展缓存**。Memory 是 PCP 的关键“外挂”，它存储经由 PCP 处理后的结构化逻辑。PCP 对其有**强耦合要求**：Memory 必须能基于语义关键词给出符合 PCP 页面定义的高相关性内容，作为 Router 意图匹配的恒定输入。
+*   **记忆系统 (Memory - Logic Extended Cache)**：PCP 的**逻辑扩展缓存**。Memory 是 PCP 的关键“外挂”，它存储经由 PCP 处理后的结构化逻辑。PCP 对其有**强耦合要求**：Memory 必须能接受**完整的意图 Prompt/Focus** 进行查询，并支持**分级兼容**（轻度：单次搜索返回原始页；深度：原生支持包含逻辑树嵌套的综述页及按 ID 变焦拉取），作为 Router 意图匹配的恒定输入。
 *   **PCP 协议 (Linear Logic Stream)**：则是**意图驱动的“运行热流”**。它在任务 Timeline 上处理逻辑闭合，利用 Memory 提供的历史逻辑资产来辅助当前的推演。
 
 ### 1.2 核心支柱
@@ -138,7 +138,7 @@ PCP 维护两个层级的地址空间，通过 Worker 的映射行为实现交�
 
 *   **唯一寻址**: 每一个 Page（OP/CP）在索引中拥有全局唯一的 `Short Hash ID`。
 *   **状态维护**: 索引实时跟踪 Page 的**热度**、**陈旧度**以及**当前激活状态**（是否已注入上下文）。
-*   **并行主题拓扑**: 当多个主题并行推导时，索引通过 `Topic ID` 划分逻辑空间，确保 Router 在检索时能够快速执行隔离分压。
+*   **主题拓扑 (Topic Topology)**: 由于 Consolidated Page 具有无限嵌套能力，在逻辑树中，最顶层的 Root Page 自然代表了一个独立的主题空间。系统通过管理不同逻辑树的 Root 节点，即可直接实现多主题并行推导与话题级的隔离。
 
 
 ## VI. 意图驱动生命周期 (Intent-Driven Lifecycle)
@@ -173,9 +173,11 @@ PCP 采用以**意图 (Intent)** 为核心的寻址推演循环。每轮交互�
 
 #### 2.3 记忆获取 (Memory Acquisition)
 *   **职责**: 从外部 Memory 系统调取相关的历史逻辑实体。
-*   **机制**: 并行关键词检索。
-    - **动作**: Router 在进行 LAS/PAS 寻址的同时，提取 Intent Focus 中的语义关键词（Keywords），并发向外部 Memory 系统发起接口调用。
-    - **物化**: Memory 返回的高相关性 Page（符合 PCP 标准报文）直接作为本轮推演的“逻辑背景”注入上下文，参与后续的执行过程。
+*   **机制**: 完整意图查询与多级兼容。
+    - **动作**: Router 在进行 LAS/PAS 寻址的同时，直接使用**完整的意图 Prompt/Focus** 向外部 Memory 系统发起查询（而非截取语义关键词）。
+    - **分级物化与变焦支持**:
+        - **轻度兼容 (Light Compatibility)**: 记忆系统提供的是单次搜索，返回高相关内容并将其包装为符合 PCP 定义的**原始页 (Original Page)** 规范。这些 Page 直接作为“逻辑背景”注入，参与后续推演。
+        - **深度兼容 (Deep Compatibility)**: 记忆系统能原生返回支持 **原始页 / 综述页 (OP/CP)** 的混合嵌套结构。当返回物化的是综述页时，记忆系统必须提供按 ID 查询的端点。若 Worker 对该记忆综述页执行 `Consult`，外部系统将直接通过 ID 返回被请求页面的下钻内容。这实现了一个从“当前 Context 无缝切换并穿透至外部 Memory 空间”的透明寻址体验。
 
 
 ### 3. 视界合成与注入 (Synthesis & XML Construction)
@@ -388,9 +390,13 @@ PCP 并不负责维护网状的冷知识库，但它作为“逻辑处理器”�
 
 ### 11.1 记忆系统接口规范 (Memory Interface Requirements)
 PCP 不关心 Memory 系统的内部实现，但其作为外部“逻辑插件”，必须满足以下调用契约：
-*   **页兼容性报文 (Page Message Compatibility)**：Memory 的返回内容必须符合 `Original/Consolidated Page` 的 XML 定义，包含核心的 `summary` 与 `keywords` 用于 Router 进一步对齐。
-*   **关键词检索接口 (Keyword Interface)**：Memory 必须暴露一个支持按语义关键词进行 Recall 的接口。Router 在 Addressing 阶段会提取意图关键词并行调用此接口。
-*   **即时注入角色 (Instant Input Role)**：记忆获取是寻址流的一部分。检索到的 Pages 被视为当前 LAS 的有效延伸，享有与本地缓存同等的逻辑处理权重。
+*   **页兼容性分级 (Page Compatibility Tier)**：
+    - **轻度兼容**：返回内容符合 `Original Page` 的 XML 定义，代表基于意图的碎片化事实单次搜索与召回。
+    - **深度兼容**：返回内容支持原生 `Original/Consolidated Page` 的任意层级混合结构，代表系统具备完整逻辑树的存储与透传能力。
+*   **查询与拉取接口 (Query & Fetch Interfaces)**：
+    - **Query (意图查询)**：必须暴露支持**完整意图 Prompt** 查询的入口。Router 会直接传递其锚定的 Intent Focus 发起宽泛召回。
+    - **Fetch (按需拉取 - 深度兼容必需)**：当外部引入了 Consolidated Page 之后，系统必须提供按 `Short Hash ID` 直接拉取目标页面的接口，以响应 Worker 触发的 `Consult(id)` 从记忆中主动变焦的指令。
+*   **即时注入角色 (Instant Input Role)**：记忆获取是寻址流的一部分。检索到的 Pages 被视为当前 LAS 的有效延伸，享有与本地感知态同等的逻辑处理权重。
 
 ### 11.2 统一逻辑导出 (Unified Logic Export)
 当任务流达到稳定逻辑终点或发生显著的“逻辑提取”行为（如生成高深度 Consolidated Page）时，宿主系统的 **Unified Export Manager** 被触发：

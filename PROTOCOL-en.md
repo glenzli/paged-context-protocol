@@ -9,7 +9,7 @@ The PCP protocol treats the LLM as a **Flexible Execution Logic CPU** and define
 ### 1.1 Linear Logic vs. External Systems
 PCP defines two categories of external systems with different coupling requirements:
 *   **RAG System (Generic Cold Storage)**: A generalized, non-linear external database. PCP is **entirely indifferent** to its internal design, treating it only as a physical provider of PBlocks.
-*   **Memory System (Logic Extended Cache)**: The **Logic Extended Cache** of PCP. Memory is a critical "plug-in" that stores structured logic processed by PCP. PCP has **strong coupling requirements** for it: Memory must be able to provide high-relevance content matching the PCP page definition based on semantic keywords, serving as a constant input for the Router's intent matching.
+*   **Memory System (Logic Extended Cache)**: The **Logic Extended Cache** of PCP. Memory is a critical "plug-in" that stores structured logic processed by PCP. PCP has **strong coupling requirements** for it: Memory must be able to accept **complete Intent Prompts/Focus** for queries, and support **tiered compatibility** (Light: a single search returning Original Pages; Deep: natively supporting logical tree nesting of Consolidated Pages and direct pull via ID), serving as a constant input for the Router's intent matching.
 *   **The PCP Protocol (Linear Logic Stream)**: The **intent-driven "Runtime Hot Stream"**. It handles logical closure on the task's Timeline, utilizing historical logic assets provided by Memory to assist current derivation.
 
 ### 1.2 Core Pillars
@@ -137,7 +137,7 @@ To support second-level retrieval and logical zooming of massive Pages, PCP main
 
 *   **Unique Addressing**: Every Page (OP/CP) has a globally unique `Short Hash ID` in the index.
 *   **State Maintenance**: The index tracks the **heat level**, **staleness**, and **current activation status** (whether it's injected into the context) of Pages in real-time.
-*   **Parallel Topic Topology**: When multiple topics are reasoned in parallel, the index partitions logical space via `Topic ID`, ensuring the Router can quickly perform isolation and pressure relief during retrieval.
+*   **Topic Topology**: Because the Consolidated Page features infinite nesting capabilities, the top-most Root Page in a logical tree naturally represents an independent topic space. The system achieves multi-topic parallel reasoning and topic-level isolation simply by managing the Root nodes of different logical trees.
 
 
 ## VI. Intent-Driven Lifecycle
@@ -172,9 +172,11 @@ PCP employs an inference loop centered around **Intent**. Every interaction perf
 
 #### 2.3 Memory Acquisition
 *   **Responsibility**: Retrieves relevant historical logic entities from the external Memory system.
-*   **Mechanism**: Parallel keyword retrieval.
-    - **Action**: While performing LAS/PAS addressing, the Router extracts semantic keywords from the Intent Focus and initiates concurrent interface calls to the external Memory system.
-    - **Materialization**: High-relevance Pages returned by Memory (compliant with PCP standard messaging) are directly injected into the context as "logical background" for the current round, participating in subsequent execution.
+*   **Mechanism**: Complete intent query and tiered compatibility.
+    - **Action**: While performing LAS/PAS addressing, the Router directly uses the **complete Intent Prompt/Focus** to query the external Memory system (instead of extracting semantic keywords).
+    - **Tiered Materialization and Zoom Support**:
+        - **Light Compatibility**: The memory system provides a single-shot search, returning highly relevant content wrapped in the **Original Page** specification defined by PCP. These Pages are directly injected into the context as "logical background", participating in subsequent execution.
+        - **Deep Compatibility**: The memory system natively returns a mixed nested structure supporting both **Original Pages and Consolidated Pages (OP/CP)**. When a materialized return is a Consolidated Page, the memory system must provide an endpoint for querying by ID. If the Worker executes a `Consult` against this memory Consolidated Page, the external system will directly return the drill-down content of the requested page via ID. This achieves a seamless addressing experience, enabling smooth transition from the current Context and penetration into the external Memory space.
 
 
 ### 3. Synthesis & XML Construction
@@ -388,9 +390,13 @@ PCP is not responsible for maintaining a networked cold knowledge base, but as a
 
 ### 11.1 Memory Interface Requirements
 PCP is indifferent to the internal implementation of the Memory system, but as an external "logic plug-in," it must satisfy the following calling contracts:
-*   **Page Message Compatibility**: The content returned by Memory must comply with the `Original/Consolidated Page` XML definition, containing core `summary` and `keywords` for further alignment by the Router.
-*   **Keyword Interface**: Memory must expose an interface that supports Recall based on semantic keywords. The Router extracts intent keywords during the Addressing phase and calls this interface in parallel.
-*   **Instant Input Role**: Memory acquisition is part of the addressing flow. Retrieved Pages are treated as valid extensions of the current LAS, enjoying the same logical processing weight as local cache.
+*   **Page Compatibility Tier**:
+    - **Light Compatibility**: Returned content complies with the `Original Page` XML definition, representing a single search and recall of fragmented intent-based facts.
+    - **Deep Compatibility**: Returned content supports any mixed hierarchy of native `Original/Consolidated Pages`, representing the system's ability to store and pass-through complete logical trees.
+*   **Query & Fetch Interfaces**:
+    - **Query (Intent Query)**: Must expose an entry point supporting queries via the **complete Intent Prompt**. The Router directly passes its anchored Intent Focus to initiate broad recall.
+    - **Fetch (On-Demand Fetch - Required for Deep Compatibility)**: When Consolidated Pages are introduced externally, the system must provide an interface to directly fetch target pages via `Short Hash ID` in response to the Worker's `Consult(id)` instruction for proactive zooming from memory.
+*   **Instant Input Role**: Memory acquisition is part of the addressing flow. Retrieved Pages are treated as valid extensions of the current LAS, enjoying the same logical processing weight as local perceivable states.
 
 ### 11.2 Unified Logic Export
 When the task stream reaches a stable logical conclusion or significant "logical extraction" occurs (such as generating high-depth Consolidated Pages), the **Unified Export Manager** of the Host system is triggered:
