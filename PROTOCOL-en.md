@@ -54,6 +54,8 @@ The Trio Processor Model of PCP supports a **Dual-LLM Parallel Deployment Strate
 1.  **Addressing Layer (Router)**:
     *   **Recommendation**: Use a lightweight, high-throughput model. Since addressing is a "relative semantic task," throughput requirements outweigh deep reasoning precision.
     *   **Future Proposal**: With the maturation of **1.58-bit extreme quantization models** (e.g., BitNet b1.58), the Router is an ideal candidate for local deployment of such models, enabling near-zero-cost, high-frequency logical addressing collaboration.
+        > [!NOTE]
+        > Currently, native 1.58-bit models are only seen in 2B versions, and the 3B/7B versions mentioned in the paper remain unreleased. From the perspective of commercial development, engineering influence, and ecosystem positioning, this is highly irrational. This leads to the speculation that the conclusion regarding 1.58-bit 3B models matching high-precision performance may face generalization challenges in certain scenarios and still requires more extensive engineering verification. If 1.58-bit performance fails to meet expectations, addressing via local 4-bit quantization or even "physicalized LLM" solutions like Taalas remains a viable path. Edge models will eventually provide low-cost semantic gateways.
 2.  **Logic Layer (Worker + Consolidator)**:
     *   **Consistency Requirement**: Both **must share the same high-performance Main LLM**. Because JIT Mapping and Consolidation both involve "absolute logical summarization/extraction" of data, they must use the same logical metrics to prevent semantic drift.
     *   **Parallel Deployment (Parallel Instances)**: Although the model is consistent, they should be deployed via parallel physical instances.
