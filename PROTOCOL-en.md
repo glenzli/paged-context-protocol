@@ -26,6 +26,7 @@ The system operates based on the decoupled collaboration of three core roles, en
 1.  **Addressing Processor (Router-MMU)**: 
     *   **Responsibility**: Logical coordinate mapping (Logical Mapping). Handles intent recognition, logical page indexing, and two-stage relevance matching.
     *   **Intent Anchoring**: Extracts the current **Intent Focus** by analyzing the "Head" (System Instructions/Global Context) and "Tail" (Current User Query) of the active context.
+    *   **Strategy CoT**: Before executing Keywords/Summary matching, the Router first reads the `schema` field of the currently active Topic Tree Root CP (if present) and declares the **weighting dimension** for this round of addressing (e.g., `code_evolution` Schema → prioritize technical symbols and interface names; `reasoning_chain` Schema → prioritize causal connectors and key variables). The Router **does not infer Schema**—it acts only as a passive consumer of Consolidator output, applying schema-differentiated weight matching. Falls back to universal weight matching if the schema field is absent.
     *   **Core Characteristic**: **Neural Addressing over Numerical Retrieval**. The Router utilizes high-dimensional semantic space to evaluate logical correlations and generates **Addressing Instructions** to drive Mapping.
 
 2.  **Execution Processor (Worker-CPU)**: 
@@ -38,6 +39,9 @@ The system operates based on the decoupled collaboration of three core roles, en
     *   **Core Action**: 
         1.  **Initial Freezing**: Monitors topic states and length thresholds. Its judgment of a "Topic Pivot" is based on inferential logic shifts rather than simple semantic distance.
         2.  **Metabolic Merging**: Performs "merging metabolism" based on logical staleness.
+    *   **Two-Phase Schema CoT**: Before executing any `summary` generation or merging, the Consolidator must complete the following two-phase inference:
+        -   **Phase 1 — Schema Recognition**: Declares the `Logic Schema` of the current logic flow (valid values: `code_evolution | reasoning_chain | creative_world | tool_trace | mixed`) and identifies the **high-logic-density but low-semantic-entropy** anchor types for that Schema—i.e., information categories that appear infrequent from a generic entropy-compression standpoint but are logically irreplaceable (e.g., "rejected alternative paths" in code tasks, "pivot variables appearing only once" in reasoning chains, "world state deltas" in creative tasks).
+        -   **Phase 2 — Anchor-Driven Compression**: Executes compression with the Phase 1 Schema constraints as a filter. **The preservation priority of Schema anchors overrides the generic urge to compress by semantic entropy.** The Phase 1 recognition result is written to the `schema` metadata field of the generated CP, for consumption by the Router's Strategy CoT.
 
 ### 2.4 Processor Proficiency Baseline
 
@@ -130,8 +134,9 @@ Serves as a container node for **Logic Indexing**. Supports `Unpacked` zooming.
     *   `depth`: **Logical Depth (Integer)**.
     *   `timestamp`: **Temporal Anchor (ISO-8601)**.
     *   `keywords`: **Consensus Keywords**. Represents the semantic intersection of all child pages within the container.
+    *   `schema`: **Logic Structure Type (Optional)**. Inferred and written by the Consolidator's Two-Phase Schema CoT (Phase 1). **Only Root-level CPs must populate this field**; child CPs inherit the parent's Schema without redundant annotation. Used by the Router's Strategy CoT as a weighting parameter. Valid values: `code_evolution | reasoning_chain | creative_world | tool_trace | mixed`.
     *   `source_ids`: Array of contained child Page IDs or sub-block addresses. **Supports Recursive Nesting**: Child IDs can point to another Consolidated Page, forming a **Logic Tree**.
-    *   `summary`: **Consensus Semantic Compression**. Generated after the Consolidator performs logical merging of multiple sub-pages (whether Original or Consolidated), representing the "collective will" of the container.
+    *   `summary`: **Consensus Semantic Compression**. Generated after the Consolidator performs anchor-driven compression (Phase 2) on multiple sub-pages (whether Original or Consolidated), representing the "collective will" of the container.
 
 ### 5.3 Page Index Management System
 
@@ -140,6 +145,7 @@ To support second-level retrieval and logical zooming of massive Pages, PCP main
 *   **Unique Addressing**: Every Page (OP/CP) has a globally unique `Short Hash ID` in the index.
 *   **State Maintenance**: The index tracks the **heat level**, **staleness**, and **current activation status** (whether it's injected into the context) of Pages in real-time.
 *   **Topic Topology**: Because the Consolidated Page features infinite nesting capabilities, the top-most Root Page in a logical tree naturally represents an independent topic space. The system achieves multi-topic parallel reasoning and topic-level isolation simply by managing the Root nodes of different logical trees.
+*   **Schema Scoping**: The `schema` field's scope is bound to the **Topic Tree's Root CP**, not the global session state. When the Consolidator detects a **Topic Pivot** and creates a new CP branch, it must run an independent Phase 1 Schema recognition on the new Root CP, **without inheriting the Schema of the preceding logic tree**. This ensures that cross-topic intent shifts (e.g., switching from a code discussion to an architecture design) produce no Schema interference. When reading Schema, the Router always defers to the **currently active Topic Tree's Root CP**.
 
 
 ## VI. Intent-Driven Lifecycle
@@ -278,8 +284,9 @@ The Host determines the materialization form based on the physical attributes of
 ### 8.3 Recursive Synthesis
 When materializing a complex structured PBlock, the Consolidator performs **recursive synthesis**:
 1.  Calculates key summaries of sub-physical blocks bottom-up.
-2.  Summaries at each level are merged step-by-step, eventually producing the `summary` and `keywords` for the Root Consolidated Page.
+2.  Summaries at each level are merged step-by-step, eventually producing the `summary`, `keywords`, and `schema` for the Root Consolidated Page.
 3.  This process is highly **intent-dependent**—the emphasis of the Summary is determined by the current `Intent Focus`.
+4.  Before executing any merge, the Consolidator must first complete **Phase 1 Schema Recognition** (without exception, even during Draft materialization). **The preservation priority of Schema anchors overrides the generic urge to compress by semantic entropy**—information that appears redundant from a generic standpoint but holds critical logical status within the Schema must remain traceable after compression.
 
 **Parameter Descriptions**:
 *   **reason**: Logical reason for the operation.
@@ -316,6 +323,7 @@ PCP does not simply stack text physically (Plain Text Gluing) but builds a perce
     *   `origin`: **Origin Tracking (History | Storage)**.
     *   `keywords`: **Semantic Index Keys (Comma-separated string)**.
     *   `timestamp`: The time origin of the logical occurrence.
+    *   `schema`: **Logic Structure Type (Optional, Root-level Consolidated only)**. Written by the Consolidator's Phase 1, read by the Router's Strategy CoT. Valid values: `code_evolution | reasoning_chain | creative_world | tool_trace | mixed`.
 
 ---
 
@@ -352,9 +360,9 @@ Standard generation template for system integration:
       <Content>Full bottom-level dialogue text or hardware raw logs...</Content>
     </Node>
 
-    <!-- 3. Consolidated Summary -->
-    <Node id="b2c3d4e5" type="Consolidated" view="Summary" depth="1" timestamp="2026-02-14T10:10:00">
-      <Summary>Preliminary consensus summary synthesized from 10 OP pages.</Summary>
+    <!-- 3. Root Consolidated Summary — carries schema field -->
+    <Node id="b2c3d4e5" type="Consolidated" view="Summary" depth="1" schema="code_evolution" timestamp="2026-02-14T10:10:00">
+      <Summary>Preliminary consensus summary synthesized from 10 OP pages; Schema anchors preserved: function interface change deltas and rejected alternative paths.</Summary>
     </Node>
 
     <!-- 4. Consolidated Detail - Recursive Transit -->

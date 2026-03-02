@@ -26,7 +26,8 @@ PCP 定义了两类外部系统，并对其有不同的耦合要求：
 
 1.  **寻址处理器 (Router-MMU)**: 
     *   **职责**: 逻辑坐标映射（Logical Mapping）。负责意图识别、逻辑页面索引、两阶段相关性匹配。
-    *   **意图锚定**: 通过分析活跃上下文的“Head”（系统指令/全局上下文）与“Tail”（当前用户查询），提取当前**意图重心 (Intent Focus)**。
+    *   **意图锚定**: 通过分析活跃上下文的"Head"（系统指令/全局上下文）与"Tail"（当前用户查询），提取当前**意图重心 (Intent Focus)**。
+    *   **策略 CoT (Strategy CoT)**：在执行 Keywords/Summary 匹配前，Router 先读取当前活跃 Topic Tree Root CP 的 `schema` 字段（若存在），声明本轮寻址的「加权维度」（如 `code_evolution` Schema → 优先权重技术符号与接口名；`reasoning_chain` Schema → 优先权重因果连词与关键变量）。Router **不推断 Schema**，仅作为 Consolidator 下游产出的「被动消费者」，利用已有 Schema 执行差异化权重匹配。Schema 字段为空时退回通用权重匹配。
     *   **核心特征**: **神经寻址优于数值检索**。Router 利用高维语义空间评估逻辑相关性，并生成**寻址指令**驱动 Mapping。
 
 2.  **执行处理器 (Worker-CPU)**: 
@@ -39,6 +40,9 @@ PCP 定义了两类外部系统，并对其有不同的耦合要求：
     *   **核心动作**: 
         1.  **初始固化 (Freezing)**：监听话题状态与长度阈值。其“话题转折（Topic Pivot）”的判定是基于推理逻辑的突变，而非简单的语义距离。
         2.  **长效整合 (Merging)**：基于逻辑陈旧度执行“代谢合并”。
+    *   **两阶段 Schema CoT (Two-Phase Schema CoT)**：Consolidator 在执行任何 `summary` 生成或合并前，必须先完成以下两阶段推断：
+        -   **Phase 1 — Schema 识别**：声明当前逻辑流的 `Logic Schema`（合法值：`code_evolution | reasoning_chain | creative_world | tool_trace | mixed`），并识别该 Schema 下「高逻辑密度但低语义熵」的锚点类型——即在通用熵压缩视角下看似低频、但逻辑上绝对不可丢失的信息类别（如代码任务中的「方案排除路径」、推理链中的「单次出现的枢纽变量」、创作任务中的「世界状态 delta」）。
+        -   **Phase 2 — 锚点导向压缩**：以 Phase 1 的 Schema 约束为滤镜执行压缩。**Schema 锚点的保留优先级高于通用语义熵压缩的精简冲动。** Phase 1 的识别结果写入所生成 CP 的 `schema` 元字段，供 Router 策略 CoT 使用。
 
 ### 2.4 PCP 处理器效能基准 (Processor Proficiency Baseline)
 
@@ -131,8 +135,9 @@ PCP 维护两个层级的地址空间，通过 Worker 的映射行为实现交�
     *   `depth`: **逻辑深度 (Integer)**。
     *   `timestamp`: **逻辑定标 (ISO-8601)**。
     *   `keywords`: **共识关键词**。代表容器内所有子页的语义交集。
+    *   `schema`: **逻辑结构类型标注 (Optional)**。由 Consolidator 两阶段 CoT 的 Phase 1 推断并写入。**仅 Root-level CP 必须填写**；子 CP 继承父级 Schema，无需重复标注。Router 在执行策略 CoT 时以此字段为权重参数。合法值：`code_evolution | reasoning_chain | creative_world | tool_trace | mixed`。
     *   `source_ids`: 所含子页 ID 或子物理块地址。**支持递归嵌套**：子页 ID 可以指向另一个 Consolidated Page，形成 **逻辑树 (Logic Tree)**。
-    *   `summary`: **共识性语义压缩**。由 Consolidator 对多个子页面（无论 Original 还是 Consolidated）执行逻辑归并后生成，代表该容器的“整理意志”。
+    *   `summary`: **共识性语义压缩**。由 Consolidator 对多个子页面（无论 Original 还是 Consolidated）执行锚点导向压缩（Phase 2）后生成，代表该容器的"整理意志"。
 
 ### 5.3 页索引管理系统 (Page Index Management System)
 
@@ -141,6 +146,7 @@ PCP 维护两个层级的地址空间，通过 Worker 的映射行为实现交�
 *   **唯一寻址**: 每一个 Page（OP/CP）在索引中拥有全局唯一的 `Short Hash ID`。
 *   **状态维护**: 索引实时跟踪 Page 的**热度**、**陈旧度**以及**当前激活状态**（是否已注入上下文）。
 *   **主题拓扑 (Topic Topology)**: 由于 Consolidated Page 具有无限嵌套能力，在逻辑树中，最顶层的 Root Page 自然代表了一个独立的主题空间。系统通过管理不同逻辑树的 Root 节点，即可直接实现多主题并行推导与话题级的隔离。
+*   **Schema 作用域 (Schema Scoping)**：`schema` 字段的作用域与 **Topic Tree 的 Root CP** 绑定，而非全局会话状态。当 Consolidator 检测到 **Topic Pivot** 并创建新 CP 分支时，必须在新 Root CP 上执行独立的 Phase 1 Schema 识别，**不继承前序逻辑树的 Schema**。这确保跨话题的意图流转（如从代码讨论切换至架构设计）不会产生 Schema 干扰。Router 在读取 Schema 时，始终以**当前活跃 Topic Tree 的 Root CP** 为准。
 
 
 ## VI. 意图驱动生命周期 (Intent-Driven Lifecycle)
@@ -279,8 +285,9 @@ Host 根据 PBlock 的物理属性决定其物化形态：
 ### 8.3 递归摘要合成 (Recursive Synthesis)
 当物化一个复杂的结构化 PBlock 时，Consolidator 执行**递归综述合成**：
 1.  自下而上计算子物理块的关键摘要。
-2.  各层级摘要逐级归并，最终产出 Root Consolidated Page 的 `summary` 和 `keywords`。
+2.  各层级摘要逐级归并，最终产出 Root Consolidated Page 的 `summary`、`keywords` 和 `schema`。
 3.  该过程是高度**意图相关**的——Summary 的侧重点由当前的 `Intent Focus` 决定。
+4.  在执行归并前，Consolidator 必须先完成 **Phase 1 Schema 识别**（即使是 Draft 物化阶段亦不例外）。**Schema 锚点的保留优先级高于通用语义熵的精简冲动**——对于在通用视角下看似冗余但在该 Schema 中具有关键逻辑地位的信息，必须在压缩后保持可追溯性。
 
 **参数说明**:
 *   **reason**: 操作的逻辑原因。
@@ -316,6 +323,7 @@ PCP 并不直接将文本进行物理堆叠（Plain Text Gluing），而是通�
     *   `origin`: **来源追踪 (History | Storage)**。
     *   `keywords`: **语义索引键 (Comma-separated string)**。
     *   `timestamp`: 逻辑发生的时间原点。
+    *   `schema`: **逻辑结构类型 (Optional, Root-level Consolidated only)**。由 Consolidator Phase 1 写入，Router 策略 CoT 读取。合法值：`code_evolution | reasoning_chain | creative_world | tool_trace | mixed`。
 
 ---
 
@@ -352,9 +360,9 @@ PCP 并不直接将文本进行物理堆叠（Plain Text Gluing），而是通�
       <Content>最底层的对话全文或硬件原始日志...</Content>
     </Node>
 
-    <!-- 3. 容器节点摘要 (Consolidated Summary) -->
-    <Node id="b2c3d4e5" type="Consolidated" view="Summary" depth="1" timestamp="2026-02-14T10:10:00">
-      <Summary>由 10 个 OP 页面合成的初步共识摘要。</Summary>
+    <!-- 3. 根级容器节点摘要，携带 schema 字段 (Root Consolidated Summary) -->
+    <Node id="b2c3d4e5" type="Consolidated" view="Summary" depth="1" schema="code_evolution" timestamp="2026-02-14T10:10:00">
+      <Summary>由 10 个 OP 页面合成的初步共识摘要；Schema 锚点保留：函数接口变更 delta 及方案排除路径。</Summary>
     </Node>
 
     <!-- 4. 容器节点详情 (Consolidated Detail - 递归中转) -->
