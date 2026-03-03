@@ -51,6 +51,9 @@ PCP 协议将逻辑寻址与状态控制高度解耦并下放至执行器。作�
 *   **语义熵压缩 (Semantic Entropy Compression)**：执行整理 (Consolidation) 时，模型必须保持“**逻辑锚点无畸变**”。在压缩文本的同时，必须保留核心推演链条和物理标识符（如 ID、变量、参数）。“文学化摘要”将被视为 PCP 中的**载荷错误 (Payload Error)**。
 *   **主动压力感知 (Proactive Pressure Awareness)**：Worker 必须具备**“逻辑真空感知”**能力。当当前视界无法闭合逻辑链条时，必须精确触发 `Consult` 指令。在分辨率不足的情况下执行“语义填充”（幻觉）是被严格禁止的。主动**变焦 (Zooming)** 优先于盲目推演。
 
+> [!NOTE]
+> **理论溯源**：以上三项基准与 LLM 幻觉的结构性治理直接对应。本协议对 **Type IV-a（位置注意力稀释）** 与 **Type IV-b（特征注意力误路由）** 的缓解效果已有形式化数学分析（命题 A–C 严格，命题 F/G 时序维度严格），详见 [llm-logic-fragments / Type IV](https://github.com/glenzli/llm-logic-fragments/blob/main/hallucination/type-iv-attention-dilution.md)。`Shelve`/`Purge` 指令在 IV-b 的 SNR 框架下起噪声抑制作用。
+
 ### 2.5 异构与并行部署策略
 
 PCP 的三处理器架构支持 **异构双模型 + 并行部署 (Dual-LLM Parallel Strategy)**：

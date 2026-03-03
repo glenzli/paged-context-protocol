@@ -51,6 +51,9 @@ The PCP protocol highly decouples logical addressing and state control, delegati
 *   **Semantic Entropy Compression**: When performing Consolidation, the model must maintain "**Logical Anchor Distortion-Free**." It must preserve core deduction chains and physical identifiers (e.g., IDs, values, variables) while compressing text. "Literary summaries" are treated as **Payload Errors** in PCP.
 *   **Proactive Pressure Sensing**: As a Worker, the model must possess **"Logic Vacuum Perception"** capabilities. When the current horizon cannot close the logic chain, it must precisely trigger the `Consult` instruction. Performing "semantic filling" (hallucination) under insufficient resolution is strictly prohibited. Proactive **Zooming** is prioritized over blind reasoning.
 
+> [!NOTE]
+> **Theoretical Grounding**: The three baselines above correspond directly to the structural governance of LLM hallucinations. The formal mathematical analysis of this protocol's mitigation of **Type IV-a (Positional Attention Dilution)** and **Type IV-b (Feature Attention Misrouting)** is documented in [llm-logic-fragments / Type IV](https://github.com/glenzli/llm-logic-fragments/blob/main/hallucination/type-iv-attention-dilution.md) (Propositions A–C strictly proven; F/G strictly proven for temporal dimension). The `Shelve`/`Purge` instructions act as noise suppressors in the IV-b SNR framework.
+
 ### 2.5 Heterogeneous & Parallel Deployment Strategy
 
 The Trio Processor Model of PCP supports a **Dual-LLM Parallel Deployment Strategy**:

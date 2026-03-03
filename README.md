@@ -21,6 +21,20 @@
 ### 为什么选择 PCP？
 现有方案遵循“缓存置换”的**物理逻辑**，而 PCP 遵循“缩放/穿透”的**处理器逻辑**。这种视角转变允许模型在有限的窗口内保持对“全域空间”的逻辑连续性感知，将 LLM 转化为真正的长文本执行引擎。
 
+### 理论基础
+
+PCP 对 LLM 幻觉问题（特别是 **Type IV 注意力预算约束**）的缓解已有形式化数学分析，详见 [llm-logic-fragments / Type IV — 注意力预算的结构性约束](https://github.com/glenzli/llm-logic-fragments/blob/main/hallucination/type-iv-attention-dilution.md)，核心结论如下：
+
+| 命题 | 内容 | 证明状态 |
+|---|---|---|
+| A — 有效竞争者数量减少 | PCP 将 Worker 所见的有效 token 数压缩为 $N_\text{eff} \leq N_\text{hot} + r \cdot N_\text{raw}$，$r < 1$ | ✅ 严格 |
+| B — 循环依赖被架构打破 | Router 独立承担路由，Worker 不依赖自身注意力决定上下文组成 | ✅ 严格 |
+| C — Router 自身避免严重 IV-a | Router 处理页面索引规模 $P \ll N_\text{raw}$，稀释程度远低于无 PCP 时 | ✅ 严格 |
+| F/G — 时间维度不变性 | PCP Memory 使历史信息可达性与时间距离 $\Delta$ 无关 | ✅ 严格 |
+
+> [!NOTE]
+> 分析同时涵盖 **IV-a（位置注意力稀释）** 与 **IV-b（特征注意力误路由）**。`Shelve`/`Purge` 指令在 IV-b 的 SNR 框架下起信号增强 + 噪声抑制的双重作用。
+
 ---
 
 <a name="english"></a>
@@ -39,6 +53,20 @@ Under PCP, the LLM is no longer just a text generator but is deconstructed into 
 
 ### Why PCP?
 Conventional solutions follow the **Physical Logic** of cache replacement, whereas PCP follows the **Processor Logic** of resolution and penetration. This shift enables the model to maintain logical continuity across the "Global Space" within a limited window, transforming the LLM into a true long-context execution engine.
+
+### Theoretical Grounding
+
+The formal mathematical analysis of PCP's mitigation of LLM hallucinations (specifically **Type IV: Attention Budget Structural Constraints**) is documented in [llm-logic-fragments / Type IV — Attention Budget Structural Constraints](https://github.com/glenzli/llm-logic-fragments/blob/main/hallucination/type-iv-attention-dilution.md). Key conclusions:
+
+| Proposition | Content | Proof Status |
+|---|---|---|
+| A — Effective competitor reduction | PCP compresses Worker's effective token count to $N_\text{eff} \leq N_\text{hot} + r \cdot N_\text{raw}$, $r < 1$ | ✅ Strict |
+| B — Cyclic dependency broken by architecture | Router handles routing independently; Worker never depends on its own attention to determine context composition | ✅ Strict |
+| C — Router avoids severe IV-a | Router operates at page-index scale $P \ll N_\text{raw}$; attention dilution far lower | ✅ Strict |
+| F/G — Temporal invariance | PCP Memory makes historical info recall independent of time distance $\Delta$ | ✅ Strict |
+
+> [!NOTE]
+> The analysis covers both **IV-a (Positional Attention Dilution)** and **IV-b (Feature Attention Misrouting)**. `Shelve`/`Purge` instructions act as dual-mode signal amplifiers + noise suppressors in the IV-b SNR framework.
 
 ---
 
