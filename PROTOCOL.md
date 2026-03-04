@@ -1,4 +1,4 @@
-# Paged-Context-Protocol (PCP) - v0.1.0-alpha
+# Paged-Context-Protocol (PCP) - v0.2.0-alpha
 
 Paged-Context-Protocol (PCP) 是一种专注于 LLM **统一逻辑寻址**与**分布式上下文治理**的底层协议。它将 LLM 视为一种**柔性执行的逻辑 CPU (Flexible Logic CPU)**，通过将碎片化的对话流与海量异构数据源（文件、流、仓库）统一映射为离散、可寻址的**逻辑页（Logical Pages）**，从物理上解决了长程交互中的上下文污染与信息过载，赋予模型在无限地址空间内行使**逻辑主权**的能力。
 
@@ -20,9 +20,9 @@ PCP 定义了两类外部系统，并对其有不同的耦合要求：
 *   **逻辑主权 (Logical Sovereignty)**：PCP 赋予执行体绝对的判定权力。处理器作为逻辑单元，严禁对地址空间外的未知信息进行“语义脑补”，所有逻辑缺口必须通过协议指令触发物理穿透（Zooming）解决。
 
 
-## II. 逻辑处理器模型 (Trio Processor Model)
+## II. 逻辑处理器模型 (Quad Processor Model)
 
-系统基于三个核心角色的解耦协作运行，确保“治理”与“执行”的分离：
+系统基于四个核心角色的解耦协作运行，确保“治理”、“安全”与“执行”的分离：
 
 1.  **寻址处理器 (Router-MMU)**: 
     *   **职责**: 逻辑坐标映射（Logical Mapping）。负责意图识别、逻辑页面索引、两阶段相关性匹配。
@@ -43,6 +43,16 @@ PCP 定义了两类外部系统，并对其有不同的耦合要求：
     *   **两阶段 Schema CoT (Two-Phase Schema CoT)**：Consolidator 在执行任何 `summary` 生成或合并前，必须先完成以下两阶段推断：
         -   **Phase 1 — Schema 识别**：声明当前逻辑流的 `Logic Schema`（合法值：`code_evolution | reasoning_chain | creative_world | tool_trace | mixed`），并识别该 Schema 下「高逻辑密度但低语义熵」的锚点类型——即在通用熵压缩视角下看似低频、但逻辑上绝对不可丢失的信息类别（如代码任务中的「方案排除路径」、推理链中的「单次出现的枢纽变量」、创作任务中的「世界状态 delta」）。
         -   **Phase 2 — 锚点导向压缩**：以 Phase 1 的 Schema 约束为滤镜执行压缩。**Schema 锚点的保留优先级高于通用语义熵压缩的精简冲动。** Phase 1 的识别结果写入所生成 CP 的 `schema` 元字段，供 Router 策略 CoT 使用。
+    *   **固化产物信任约束 (Crystallized Trust Gate)**：Consolidator 生成 Consolidated Page 时，若所有输入源节点的 `trust` 均为 `system | history | audited`，则产物标记为 `trust="sealed"`；否则产物降级为 `trust="audited"`，下次召回时仍须经过运行时审查。
+
+4.  **审计处理器 (Auditor-Security Gate)**:
+    *   **职责**：截面①→②的强制安全关卡。在任何外部来源的内容（经由 `Explore` 物化的 PBlock 数据）进入 `<Linear_Flow>` 之前，Auditor 对其执行逐单元的二值语义判断（`PASS / BLOCK`）。
+    *   **无执行权限约束**：Auditor **无权访问 `<Linear_Flow>` 的整体上下文，无权执行任何协议指令，无外部系统访问能力**。此约束是 Auditor 防御价值的结构性根基——对 Auditor 的注入尝试毫无意义，因为 Auditor 没有可被利用的执行能力。
+    *   **结构性博弈原理**：攻击者在构造注入内容时面临语义空间内天然对立的双重约束：内容必须足够「像数据」才能骗过 Auditor（通过 PASS）；同时必须足够「像指令」才能骗过 Worker（注入成功执行）。这两个要求在语义空间内无法同时满足，将攻击复杂度从「欺骗单个 LLM」大幅提升为「在两个冲突约束下同时欺骗两个独立 LLM」。
+    *   **审计结果**：
+        - `PASS`：内容加盖 `trust="audited"` 印记后由 Host 注入 Linear_Flow。
+        - `BLOCK`：内容永久隔离，拒绝理由写入 `<Static_Registry>` 的 `<Security_Log>` 节点，本会话内不再召回。
+    *   **部署独立性**：Auditor 与其他处理器物理隔离部署，可使用安全特化模型或轻量级判别模型，无需与 Worker/Consolidator 共享主模型实例。
 
 ### 2.4 PCP 处理器效能基准 (Processor Proficiency Baseline)
 
@@ -56,7 +66,7 @@ PCP 协议将逻辑寻址与状态控制高度解耦并下放至执行器。作�
 
 ### 2.5 异构与并行部署策略
 
-PCP 的三处理器架构支持 **异构双模型 + 并行部署 (Dual-LLM Parallel Strategy)**：
+PCP 的四处理器架构支持 **异构多模型 + 并行部署 (Multi-LLM Parallel Strategy)**：
 
 1.  **寻址层 (Router)**：
     *   **建议**：采用轻量级、高吞吐的高效模型。由于寻址属于“相对语义任务”，对吞吐量的要求远高于推理精度。
@@ -69,7 +79,10 @@ PCP 的三处理器架构支持 **异构双模型 + 并行部署 (Dual-LLM Paral
         - **Worker (同步)**：响应用户主交互链路，确保即时性。
         - **Consolidator (异步)**：作为“后台 GC 进程”运行在独立并行实例中。它由 Host 监听 Token 压强或话题转折（Topic Pivot）后反应式触发，在后台完成索引合并与固化，从而避免后台维护任务阻塞用户主循环。
 
-这种“高效寻址 + 逻辑一致主模型 + 异步维护并行化”的部署方案，在确保系统逻辑闭合的同时，实现了极佳的响应性能。
+3.  **安全层 (Auditor)**：
+    *   **建议**：Auditor 作为独立进程部署，与主模型链路完全隔离。可采用安全特化的判别模型（二值分类任务），也可使用经过安全微调的轻量模型，在低延迟条件下完成逐页审查。其响应延迟应低于 Explore 物化延迟，不成为系统瓶颈。
+
+这种“高效寻址 + 逻辑一致主模型 + 异步维护并行化 + 独立安全门控”的部署方案，在确保系统逻辑闭合与信任隔离的同时，实现了极佳的响应性能。
 
 
 ## III. 宿主系统模型 (The Host System Model)
@@ -124,7 +137,7 @@ PCP 维护两个层级的地址空间，通过 Worker 的映射行为实现交�
 最小逻辑单元（叶子节点）。
 *   **清单 (Manifest)**:
     *   `id`: Short Hash。
-    *   `origin`: `History | Storage`。
+    *   `trust`: **信任级别**。合法值：`system | history | audited | sealed`。详见第 XII 章。
     *   `depth`: **逻辑深度 (Integer)**。
     *   `timestamp`: **逻辑定标 (ISO-8601)**。每一页必须携带绝对时间原点，用于时序排序与陈旧度判定。
     *   `keywords`: **语义关键词 (Optional)**。作为海选匹配的高维索引键。
@@ -135,6 +148,7 @@ PCP 维护两个层级的地址空间，通过 Worker 的映射行为实现交�
 作为**逻辑索引 (Logic Index)** 的容器节点。支持 `Unpacked` 变焦。
 *   **清单 (Manifest)**:
     *   `id`: Short Hash。
+    *   `trust`: **信任级别**。合法值：`system | history | audited | sealed`。Consolidator 根据输入源的 `trust` 值决定产物信任级别，规则见第 XII 章。
     *   `depth`: **逻辑深度 (Integer)**。
     *   `timestamp`: **逻辑定标 (ISO-8601)**。
     *   `keywords`: **共识关键词**。代表容器内所有子页的语义交集。
@@ -321,9 +335,9 @@ PCP 并不直接将文本进行物理堆叠（Plain Text Gluing），而是通�
 *   **`<Node>`**: 逻辑页容器。
     *   `id`: 唯一识别 Short Hash。
     *   `type`: **页面物理属性 (Original | Consolidated)**。
+    *   `trust`: **信任级别 (system | history | audited | sealed)**。决定本节点在 Linear_Flow 中的语义权威性，详见第 XII 章。
     *   `view`: **语意视图 (Summary | Detail | Unpacked)**。
     *   `depth`: **层级定标 (Integer)**。
-    *   `origin`: **来源追踪 (History | Storage)**。
     *   `keywords`: **语义索引键 (Comma-separated string)**。
     *   `timestamp`: 逻辑发生的时间原点。
     *   `schema`: **逻辑结构类型 (Optional, Root-level Consolidated only)**。由 Consolidator Phase 1 写入，Router 策略 CoT 读取。合法值：`code_evolution | reasoning_chain | creative_world | tool_trace | mixed`。
@@ -335,7 +349,7 @@ PCP 并不直接将文本进行物理堆叠（Plain Text Gluing），而是通�
 用于系统集成的标准生成模板：
 
 ```xml
-<PagedContext version="0.1.0-alpha">
+<PagedContext version="0.2.0-alpha">
   <Static_Registry>
     <ST-Node id="CURRENT_TIME" value="YYYY-MM-DDTHH:mm:ss" />
     <System_Instructions>
@@ -353,30 +367,30 @@ PCP 并不直接将文本进行物理堆叠（Plain Text Gluing），而是通�
   </Reasoning_Trace>
 
   <Linear_Flow>
-    <!-- 1. 原子节点摘要 (Original Summary) -->
-    <Node id="f1a2b3c4" type="Original" view="Summary" depth="1" keywords="CS, Addressing" origin="History" timestamp="2026-02-14T10:00:00">
+    <!-- 1. 系统级/历史节点摘要 (trust=system or trust=history) -->
+    <Node id="f1a2b3c4" type="Original" view="Summary" depth="1" keywords="CS, Addressing" trust="history" timestamp="2026-02-14T10:00:00">
       <Summary>背景参考摘要...</Summary>
     </Node>
 
-    <!-- 2. 原子资料详情 (Original Detail - 逻辑终点) -->
-    <Node id="d4e5f6a1" type="Original" view="Detail" depth="2" origin="Storage" timestamp="2026-02-14T10:05:00">
+    <!-- 2. 历史推理详情节点 (trust=history, 逻辑终点) -->
+    <Node id="d4e5f6a1" type="Original" view="Detail" depth="2" trust="audited" timestamp="2026-02-14T10:05:00">
       <Content>最底层的对话全文或硬件原始日志...</Content>
     </Node>
 
-    <!-- 3. 根级容器节点摘要，携带 schema 字段 (Root Consolidated Summary) -->
-    <Node id="b2c3d4e5" type="Consolidated" view="Summary" depth="1" schema="code_evolution" timestamp="2026-02-14T10:10:00">
+    <!-- 3. 根级固化综述，携带 schema 字段 (trust=sealed, Root Consolidated) -->
+    <Node id="b2c3d4e5" type="Consolidated" trust="sealed" view="Summary" depth="1" schema="code_evolution" timestamp="2026-02-14T10:10:00">
       <Summary>由 10 个 OP 页面合成的初步共识摘要；Schema 锚点保留：函数接口变更 delta 及方案排除路径。</Summary>
     </Node>
 
     <!-- 4. 容器节点详情 (Consolidated Detail - 递归中转) -->
-    <Node id="c3d4e5f6" type="Consolidated" view="Detail" depth="1" timestamp="2026-02-14T10:15:00">
+    <Node id="c3d4e5f6" type="Consolidated" trust="sealed" view="Detail" depth="1" timestamp="2026-02-14T10:15:00">
       <Content>综述全文，包含了完整的逻辑推论。此处可以继续下钻。</Content>
     </Node>
 
     <!-- 5. 容器节点解构 (Consolidated Unpacked - 直接嵌套) -->
-    <Node id="e5f6a7b8" type="Consolidated" view="Unpacked" depth="1" timestamp="2026-02-14T10:20:00">
-       <Node id="a7b8c9d0" type="Original" view="Summary" depth="2" origin="Storage" timestamp="..." />
-       <Node id="f9e8d7c6" type="Original" view="Summary" depth="2" origin="Storage" timestamp="..." />
+    <Node id="e5f6a7b8" type="Consolidated" trust="sealed" view="Unpacked" depth="1" timestamp="2026-02-14T10:20:00">
+       <Node id="a7b8c9d0" type="Original" view="Summary" depth="2" trust="audited" timestamp="..." />
+       <Node id="f9e8d7c6" type="Original" view="Summary" depth="2" trust="audited" timestamp="..." />
     </Node>
   </Linear_Flow>
 </PagedContext>
@@ -421,3 +435,78 @@ PCP 不关心 Memory 系统的内部实现，但其作为外部“逻辑插件�
 *   **无副作用**：外部网状知识库（Memory/RAG）的更新不会实时导致 PCP 当前 Linear_Flow 的变化，除非 Worker 下一轮再次通过 Router 显式寻址到这些新沉淀的物理块。
 
 ---
+
+---
+
+## XII. 安全模型 (Security Model)
+
+### 12.1 核心前提与威胁截面定位
+
+AI-Native 系统的安全前提不同于传统工程：**整个上下文窗口既是执行空间，也是数据空间，数据与指令完全等价**（即 LLM 作为全局 `eval`，被训练为尽可能顺从执行所有输入），因此不存在独立的"代码/数据"物理边界。
+
+PCP 作为上下文组装与治理协议，直接覆盖 AI-Native 执行管道的以下风险截面：
+
+```
+[外部世界 — 不可信]
+       ↓ ── 截面①  摄入口：Explore 从 PBlock 摄入外部数据
+[原始 PBlock 数据]
+       ↓ ── 截面②  组装口：Synthesis Controller 将 Page 组装为 XML 报文
+[<Linear_Flow> 上下文]
+       ↓ ── 截面③  推理口：Worker 消费 Linear_Flow 产出 Intent
+[Intent 输出]
+       ↓ ── 截面⑤  落盘口：Consolidator 产物写入 Memory
+[长期存储 — sealed 固化层]
+```
+
+### 12.2 trust 类型系统
+
+`trust` 是 PCP 协议的安全类型系统的核心字段，取代先前的 `origin` 字段。**进入 `<Linear_Flow>` 的节点的 `trust` 值必须是且仅是以下四者之一**：
+
+| `trust` 值 | 含义 | 来源 | 进入方式 |
+| :--- | :--- | :--- | :--- |
+| `system` | 系统级常量，最高信任 | `<Static_Registry>` / System Instructions | Host 直接注入 |
+| `history` | 当前对话的 Worker 推理产物 | 对话历史 | 由 Host 标记注入 |
+| `audited` | 来自外部 PBlock，已通过 Auditor 审查 | `Explore` 物化后 Auditor PASS | Auditor 门控后注入 |
+| `sealed` | Consolidator 对可信内容的压缩固化产物 | Consolidator 处理纯可信输入后生成 | Consolidator 产出 |
+
+> **协议级不变式**：任何 `trust` 值不在以上四者内的节点，**禁止进入 `<Linear_Flow>`**。Host 负责在注入前完成此检查。
+
+### 12.3 Auditor 关卡规范（截面①→②）
+
+Auditor 是 PCP 在截面①→②处的强制安全门控，其核心规范如下：
+
+1. **触发时机**：Worker 发出 `Explore` 指令后，Host 物化 PBlock 数据为 Draft Page，此时**必须经过 Auditor 审查后方可注入 Linear_Flow**，不可绕过。
+2. **Auditor 的上下文隔离**：Auditor 只接收**待审查的单个 Draft Page 内容**，不接收 `<Linear_Flow>` 的其他节点，不接收系统指令，无外部系统调用能力。
+3. **输出格式**：`PASS` 或 `BLOCK`，附 `reason` 字段。
+4. **PASS 处理**：Host 将 Draft Page 的 `trust` 字段设置为 `"audited"` 后注入 Linear_Flow。
+5. **BLOCK 处理**：Draft Page 永久丢弃；Host 将 `<Block id="..." reason="..." timestamp="..."/>` 记录写入 `<Static_Registry>` 内的 `<Security_Log>` 节点；对应 PBlock 句柄在当前话题检索层施加强负面权重。
+6. **结构性博弈保证**：Auditor 无执行权限这一约束确保了——即使 Auditor 被欺骗（输出 PASS），Auditor 本身也无法被利用执行任何危险操作。攻击者因此面临的双重语义约束（「像数据」 vs「像指令」）在语义空间内天然对立，无法同时满足。
+
+### 12.4 Consolidator 固化约束（截面⑤）
+
+Consolidated Page 写入 Memory 后作为历史推理共识被召回，享有更高的语义权威性。为防止污染内容被“蒸馏”进固化层，协议规定：
+
+*   **`trust="sealed"` 的充要条件**：Consolidator 处理的所有输入节点的 `trust` 值均属于 `{system, history, audited, sealed}`，即全部来自已清洁的可信链路。
+*   **降级规则**：若存在任意输入节点不满足上述条件，产物 `trust` 降级为 `"audited"`，表明该 CP 在未来召回时不可作为固化指令无条件执行，需继续受语义审查约束。
+*   **意义**：切断“攻击成功 → 语义蒸馏 → 固化持久化 → 后门永久生效”的攻击链。
+
+### 12.5 Linear_Flow 信任不变式（协议保证）
+
+PCP 协议给出以下可在协议层验证的安全不变式：
+
+> **[不变式 S1]** `<Linear_Flow>` 内所有节点的 `trust` 值必须属于 `{system, history, audited, sealed}`。任何 `trust` 值缺失或越界的节点进入 `<Linear_Flow>` 均视为协议违规（Bus Fault 级别）。
+
+> **[不变式 S2]** `trust="audited"` 的节点已通过 Auditor 审查，但仍属于**不可信数据**（非指令）。Worker 的 System_Instructions 明确禁止将 `audited` 节点的内容解读为协议指令；如 Worker 在 `audited` 内容中发现明显指令语义，必须立即 `Purge` 并在 `<Reasoning_Trace>` 中记录。
+
+> **[不变式 S3]** `trust="sealed"` 节点的产生，要求其全部输入来源已处于可信链路（`system | history | audited | sealed`）。Consolidator 不得绕过此约束生成 `sealed` 产物。
+
+### 12.6 PCP 在防御体系中的分层定位
+
+PCP 的安全机制属于**软防御（语义层，概率性）**，负责大幅提高攻击成本、过滤绝大多数注入威胁。硬边界（应用层权限系统，确定性）负责限制最坏情况下的爆炸半径。两者互为补充，不可替代：
+
+| 防御层次 | 实施者 | 防御性质 | 覆盖截面 |
+| :--- | :--- | :--- | :--- |
+| trust 类型系统 | PCP Host（协议级标注） | 确定性协议约束 | 截面①② |
+| Auditor 语义沙箱 | Auditor 处理器 | 概率性（大幅提升攻击代价） | 截面①→② |
+| Consolidator 固化约束 | Consolidator 处理器 | 概率性 + 确定性规则 | 截面⑤固化层 |
+| 应用层权限封装 | AI-Native 应用自实现 | **形式化确定** | 截面④ |
