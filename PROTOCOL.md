@@ -1,23 +1,23 @@
 # Paged-Context-Protocol (PCP) - v0.2.0-alpha
 
-Paged-Context-Protocol (PCP) 是一种专注于 LLM **统一逻辑寻址**与**分布式上下文治理**的底层协议。它将 LLM 视为一种**柔性执行的逻辑 CPU (Flexible Logic CPU)**，通过将碎片化的对话流与海量异构数据源（文件、流、仓库）统一映射为离散、可寻址的**逻辑页（Logical Pages）**，从物理上解决了长程交互中的上下文污染与信息过载，赋予模型在无限地址空间内行使**逻辑主权**的能力。
+Paged-Context-Protocol (PCP) 是一种面向 LLM 应用的**统一逻辑寻址**与**分布式上下文治理**协议。它将碎片化的对话流与异构数据源（文件、流、仓库）映射为离散、可寻址的**逻辑页（Logical Pages）**，通过显式索引、按需下钻、后台整理和安全标注，在有限上下文窗口内提高信息召回、溯源和噪声控制能力。
 
-## I. 核心哲学：柔性算力与逻辑虚拟内存 (Core Philosophy)
+## I. 核心目标：上下文虚拟化与逻辑地址空间 (Core Objectives)
 
-PCP 协议将 LLM 视为一种具备**柔性执行能力的逻辑 CPU (Flexible Logic CPU)**，而将本规格定义为该处理器的**逻辑虚拟内存 (Logical Virtual Memory, LVM)** 协议。其核心目标是实现智能逻辑与物理载体的深度解耦。
+PCP 将 LLM 视为可调用的逻辑处理组件，将外部上下文组织为可寻址、可压缩、可回溯的逻辑地址空间。其核心目标是把模型推理所需的信息边界从临时拼接的文本窗口中分离出来，使上下文管理成为可审计的系统过程。
 
 ### 1.1 线性逻辑流 vs. 外部系统 (Linear Logic vs. External)
 PCP 定义了两类外部系统，并对其有不同的耦合要求：
 *   **RAG 系统 (Generic Cold Storage)**：泛化的、非线性的外部数据库。PCP **完全不关心**其内部设计，仅将其视为 PBlock 的物理提供方。
-*   **记忆系统 (Memory - Logic Extended Cache)**：PCP 的**逻辑扩展缓存**。Memory 是 PCP 的关键“外挂”，它存储经由 PCP 处理后的结构化逻辑。PCP 对其有**强耦合要求**：Memory 必须能接受**完整的意图 Prompt/Focus** 进行查询，并支持**分级兼容**（轻度：单次搜索返回原始页；深度：原生支持包含逻辑树嵌套的综述页及按 ID 变焦拉取），作为 Router 意图匹配的恒定输入。
-*   **PCP 协议 (Linear Logic Stream)**：则是**意图驱动的“运行热流”**。它在任务 Timeline 上处理逻辑闭合，利用 Memory 提供的历史逻辑资产来辅助当前的推演。
+*   **记忆系统 (Memory - PCP-native Logic Cache)**：PCP 的同源逻辑扩展缓存。Memory 存储经由 PCP 处理后的结构化逻辑，并尽量使用与运行时上下文相同的 Page Manifest、ID、`source_ids`、`trust` 与 Fetch 语义。这个强结构要求是有意设计：它使“当前上下文中的页”和“未注入上下文的历史页”可以在同一逻辑地址空间内被 Router 统一寻址、比较和下钻。非同源 Memory 可以通过 Adapter 包装为轻度兼容页；若声明为 PCP-native Memory，则应支持完整 Intent Prompt/Focus 查询、OP/CP 混合返回、按 ID/Source Span 拉取以及版本/溯源信息。
+*   **PCP 协议 (Linear Logic Stream)**：当前任务的运行时线性流。它在任务 Timeline 上处理当前推理闭包，并利用 Memory 提供的历史逻辑资产辅助当前推演。
 
 ### 1.2 核心支柱
-*   **角色重构 (LLM as CPU)**：不再将 LLM 视为存储事实的“百科全书”（Memory-heavy），而是将其定义为专注于指令执行与逻辑流管理的**逻辑处理器 (Logic Processor)**。其核心任务是处理 Page 间的拓扑关系，而非单纯的文本生成。
-*   **上下文虚拟化 (Context Virtualization)**：将所有逻辑资产（历史、文档、代码）视为“后台存储”。物理窗口（Context Window）仅作为展示高分辨率细节的“热缓存 (L1/L2 Cache)”，实现“无限长”的逻辑感知。
+*   **角色重构 (LLM as Logic Processor)**：不将 LLM 视为事实存储器，而将其作为处理指令、推理关系和上下文状态的逻辑处理组件。其核心任务是消费 Page 间的拓扑关系和证据内容，而非被动承载全部文本。
+*   **上下文虚拟化 (Context Virtualization)**：将历史、文档、代码等逻辑资产视为后台存储。物理窗口（Context Window）仅作为展示高分辨率细节的热缓存，用于在预算内维持可追溯的上下文视界。
 *   **统一寻址逻辑 (Unified Addressing)**：通过 Pages 实现“内存与存储”的逻辑合一。无论是即时对话还是海量归档，均在同一套逻辑地址空间（LAS）内进行统一坐标定标与调度。
-*   **按需分页 (Demand Paging)**：Worker 不应被动承载所有信息，而应动态行使**映射权 (Mapping)**，通过 **Consult** 指令在地址空间中自主按需调取深层细节。
-*   **逻辑主权 (Logical Sovereignty)**：PCP 赋予执行体绝对的判定权力。处理器作为逻辑单元，严禁对地址空间外的未知信息进行“语义脑补”，所有逻辑缺口必须通过协议指令触发物理穿透（Zooming）解决。
+*   **按需分页 (Demand Paging)**：Worker 不应被动承载所有信息，而应通过 **Consult** 指令在地址空间中按需调取深层细节。
+*   **证据约束推理 (Evidence-Bound Reasoning)**：当当前视界无法支撑结论时，Worker 应通过协议指令请求更多证据，而不是对地址空间外的信息进行无依据补全。
 
 
 ## II. 逻辑处理器模型 (Quad Processor Model)
@@ -28,11 +28,11 @@ PCP 定义了两类外部系统，并对其有不同的耦合要求：
     *   **职责**: 逻辑坐标映射（Logical Mapping）。负责意图识别、逻辑页面索引、两阶段相关性匹配。
     *   **意图锚定**: 通过分析活跃上下文的"Head"（系统指令/全局上下文）与"Tail"（当前用户查询），提取当前**意图重心 (Intent Focus)**。
     *   **策略 CoT (Strategy CoT)**：在执行 Keywords/Summary 匹配前，Router 先读取当前活跃 Topic Tree Root CP 的 `schema` 字段（若存在），声明本轮寻址的「加权维度」（如 `code_evolution` Schema → 优先权重技术符号与接口名；`reasoning_chain` Schema → 优先权重因果连词与关键变量）。Router **不推断 Schema**，仅作为 Consolidator 下游产出的「被动消费者」，利用已有 Schema 执行差异化权重匹配。Schema 字段为空时退回通用权重匹配。
-    *   **核心特征**: **神经寻址优于数值检索**。Router 利用高维语义空间评估逻辑相关性，并生成**寻址指令**驱动 Mapping。
+    *   **核心特征**: **模型辅助的逻辑相关性判断**。Router 可以利用模型对意图、摘要、关键词、时间和结构元数据进行综合判断，避免只依赖向量相似度或关键词命中。
 
 2.  **执行处理器 (Worker-CPU)**: 
-    *   **职责**: 任务执行与**即时映射 (JIT Mapping)**。Worker 不再是简单的内容生成器，而是被解构为具备高维逻辑感知能力的执行单元，执掌逻辑推演并行使映射主权。
-    *   **映射主权**: 作为逻辑主权的行使者，Worker 负责解构和映射 Host 提供的**原始物理块 (Raw PBlocks)** 为逻辑页面。
+    *   **职责**: 任务执行与**即时映射 (JIT Mapping)**。Worker 负责在当前视界内执行任务，并在证据不足时提出下钻、探索或折叠请求。
+    *   **映射决策**: Worker 负责将 Host 提供的**原始物理块 (Raw PBlocks)** 解构并映射为逻辑页面，Host 负责执行实际 I/O 与状态更新。
     *   **核心动作**: 动态确定物理数据的逻辑边界；触发“按需分页”指令；执行变焦与扩散算法。
 
 3.  **整理处理器 (Consolidator-Background GC)**: 
@@ -41,14 +41,14 @@ PCP 定义了两类外部系统，并对其有不同的耦合要求：
         1.  **初始固化 (Freezing)**：监听话题状态与长度阈值。其“话题转折（Topic Pivot）”的判定是基于推理逻辑的突变，而非简单的语义距离。
         2.  **长效整合 (Merging)**：基于逻辑陈旧度执行“代谢合并”。
     *   **两阶段 Schema CoT (Two-Phase Schema CoT)**：Consolidator 在执行任何 `summary` 生成或合并前，必须先完成以下两阶段推断：
-        -   **Phase 1 — Schema 识别**：声明当前逻辑流的 `Logic Schema`（合法值：`code_evolution | reasoning_chain | creative_world | tool_trace | mixed`），并识别该 Schema 下「高逻辑密度但低语义熵」的锚点类型——即在通用熵压缩视角下看似低频、但逻辑上绝对不可丢失的信息类别（如代码任务中的「方案排除路径」、推理链中的「单次出现的枢纽变量」、创作任务中的「世界状态 delta」）。
+        -   **Phase 1 — Schema 识别**：声明当前逻辑流的 `Logic Schema`（合法值：`code_evolution | reasoning_chain | creative_world | tool_trace | mixed`），并识别该 Schema 下「高逻辑密度但低语义熵」的锚点类型——即在通用熵压缩视角下看似低频、但对后续推理具有关键约束作用的信息类别（如代码任务中的「方案排除路径」、推理链中的「单次出现的枢纽变量」、创作任务中的「世界状态 delta」）。
         -   **Phase 2 — 锚点导向压缩**：以 Phase 1 的 Schema 约束为滤镜执行压缩。**Schema 锚点的保留优先级高于通用语义熵压缩的精简冲动。** Phase 1 的识别结果写入所生成 CP 的 `schema` 元字段，供 Router 策略 CoT 使用。
     *   **固化产物信任约束 (Crystallized Trust Gate)**：Consolidator 生成 Consolidated Page 时，若所有输入源节点的 `trust` 均为 `system | history | audited`，则产物标记为 `trust="sealed"`；否则产物降级为 `trust="audited"`，下次召回时仍须经过运行时审查。
 
 4.  **审计处理器 (Auditor-Security Gate)**:
     *   **职责**：截面①→②的强制安全关卡。在任何外部来源的内容（经由 `Explore` 物化的 PBlock 数据）进入 `<Linear_Flow>` 之前，Auditor 对其执行逐单元的二值语义判断（`PASS / BLOCK`）。
-    *   **无执行权限约束**：Auditor **无权访问 `<Linear_Flow>` 的整体上下文，无权执行任何协议指令，无外部系统访问能力**。此约束是 Auditor 防御价值的结构性根基——对 Auditor 的注入尝试毫无意义，因为 Auditor 没有可被利用的执行能力。
-    *   **结构性博弈原理**：攻击者在构造注入内容时面临语义空间内天然对立的双重约束：内容必须足够「像数据」才能骗过 Auditor（通过 PASS）；同时必须足够「像指令」才能骗过 Worker（注入成功执行）。这两个要求在语义空间内无法同时满足，将攻击复杂度从「欺骗单个 LLM」大幅提升为「在两个冲突约束下同时欺骗两个独立 LLM」。
+    *   **无执行权限约束**：Auditor **无权访问 `<Linear_Flow>` 的整体上下文，无权执行任何协议指令，无外部系统访问能力**。此约束降低了 Auditor 被注入后直接执行危险操作的风险。
+    *   **分层防御原则**：外部内容必须先通过独立审查，再由 Worker 在带有 `trust` 标注的上下文中消费。Auditor 不是形式化安全边界，而是用于降低注入内容进入运行时视界的概率；应用层权限系统仍然负责限制最坏情况下的影响范围。
     *   **审计结果**：
         - `PASS`：内容加盖 `trust="audited"` 印记后由 Host 注入 Linear_Flow。
         - `BLOCK`：内容永久隔离，拒绝理由写入 `<Static_Registry>` 的 `<Security_Log>` 节点，本会话内不再召回。
@@ -56,13 +56,10 @@ PCP 定义了两类外部系统，并对其有不同的耦合要求：
 
 ### 2.4 PCP 处理器效能基准 (Processor Proficiency Baseline)
 
-PCP 协议将逻辑寻址与状态控制高度解耦并下放至执行器。作为处理器的 LLM 必须满足以下“逻辑物理”底线，以确保在复杂环境下进行有效的逻辑推演：
-*   **指令一致性 (Instruction Consistency)**：模型必须具备极高的**结构化输出鲁棒性**。协议定义的标记（如当前采用的 XML 标签）必须被严格遵守，视为“物理边界”。任何失控的语法截断、格式错位或结构性破坏，都将被视为**总线故障 (Bus Fault)**，强制中断协议任务。
-*   **语义熵压缩 (Semantic Entropy Compression)**：执行整理 (Consolidation) 时，模型必须保持“**逻辑锚点无畸变**”。在压缩文本的同时，必须保留核心推演链条和物理标识符（如 ID、变量、参数）。“文学化摘要”将被视为 PCP 中的**载荷错误 (Payload Error)**。
-*   **主动压力感知 (Proactive Pressure Awareness)**：Worker 必须具备**“逻辑真空感知”**能力。当当前视界无法闭合逻辑链条时，必须精确触发 `Consult` 指令。在分辨率不足的情况下执行“语义填充”（幻觉）是被严格禁止的。主动**变焦 (Zooming)** 优先于盲目推演。
-
-> [!NOTE]
-> **理论溯源**：以上三项基准与 LLM 幻觉的结构性治理直接对应。本协议对 **Type IV-a（位置注意力稀释）** 与 **Type IV-b（特征注意力误路由）** 的缓解效果已有形式化数学分析（命题 A–C 严格，命题 F/G 时序维度严格），详见 [llm-logic-fragments / Type IV](https://github.com/glenzli/llm-logic-fragments/blob/main/hallucination/type-iv-attention-dilution.md)。`Shelve`/`Purge` 指令在 IV-b 的 SNR 框架下起噪声抑制作用。
+PCP 协议将逻辑寻址与状态控制拆分给多个角色。作为处理组件的 LLM 应满足以下工程要求：
+*   **指令一致性 (Instruction Consistency)**：模型应具备稳定的结构化输出能力。协议定义的标记（如当前采用的 XML 标签）必须被遵守；语法截断、格式错位或结构破坏应被 Host 视为协议错误，并触发重试或中断。
+*   **锚点保持压缩 (Anchor-Preserving Compression)**：执行整理 (Consolidation) 时，模型应在压缩文本的同时保留核心推演链条和物理标识符（如 ID、变量、参数）。不保留条件、否定路径或关键变量的摘要不应进入高信任索引层。
+*   **缺口识别 (Gap Detection)**：当当前视界无法支撑结论时，Worker 应触发 `Consult` 或 `Explore` 请求更多证据。协议设计目标是鼓励下钻与溯源，而不是在证据不足时直接补全。
 
 ### 2.5 异构与并行部署策略
 
@@ -70,11 +67,11 @@ PCP 的四处理器架构支持 **异构多模型 + 并行部署 (Multi-LLM Para
 
 1.  **寻址层 (Router)**：
     *   **建议**：采用轻量级、高吞吐的高效模型。由于寻址属于“相对语义任务”，对吞吐量的要求远高于推理精度。
-    *   **未来提案 (Proposal)**：随着 **1.58-bit 极端量化模型**（如 BitNet b1.58）的成熟，Router 是本地化部署该类模型的理想场景，可实现近乎零成本、极高频次的逻辑寻址协同。
+    *   **未来提案 (Proposal)**：随着低比特量化模型（如 BitNet b1.58）和端侧模型的发展，Router 是本地化部署的合适候选，可用于降低高频寻址成本。
         > [!NOTE]
-        > 目前原生 1.58-bit 模型仅见 2B 版本，而论文提及的 3B/7B 版本仍未发布。从商业、工程影响力和 1.58-bit 生态位占领角度看，这都是极其不合理的。由此推测，目前关于 1.58-bit 3B 模型性能追平高精度模型的结论，在某些场景下可能存在泛化性挑战，仍需更广泛的工程验证。若 1.58-bit 性能无法达到预期，基于本地 4-bit 量化甚至类似 Taalas 的“物理化 LLM”方案进行寻址仍然是可行的路径。端侧模型终将提供低成本的语义网关。
+        > 低比特模型能否稳定承担复杂路由任务仍需工程验证。若该路线效果不足，本地 4-bit 量化模型、专用 reranker 或远端轻量模型仍可作为 Router 的实现选项。
 2.  **逻辑层 (Worker + Consolidator)**：
-    *   **特性**：二者**必须共享同一款高性能主模型**（Main LLM）。由于 JIT Mapping 与 Consolidation 均属于对数据进行“绝对逻辑提取”的任务，必须使用同一套逻辑度量衡以防止语义漂移。
+    *   **特性**：二者建议共享同一款高性能主模型（Main LLM）。由于 JIT Mapping 与 Consolidation 都涉及对数据进行结构化逻辑提取，使用一致的模型或一致的评测约束有助于降低语义漂移。
     *   **并行部署 (Parallel Instances)**：虽然模型一致，但物理上应通过并行实例部署。
         - **Worker (同步)**：响应用户主交互链路，确保即时性。
         - **Consolidator (异步)**：作为“后台 GC 进程”运行在独立并行实例中。它由 Host 监听 Token 压强或话题转折（Topic Pivot）后反应式触发，在后台完成索引合并与固化，从而避免后台维护任务阻塞用户主循环。
@@ -82,7 +79,7 @@ PCP 的四处理器架构支持 **异构多模型 + 并行部署 (Multi-LLM Para
 3.  **安全层 (Auditor)**：
     *   **建议**：Auditor 作为独立进程部署，与主模型链路完全隔离。可采用安全特化的判别模型（二值分类任务），也可使用经过安全微调的轻量模型，在低延迟条件下完成逐页审查。其响应延迟应低于 Explore 物化延迟，不成为系统瓶颈。
 
-这种“高效寻址 + 逻辑一致主模型 + 异步维护并行化 + 独立安全门控”的部署方案，在确保系统逻辑闭合与信任隔离的同时，实现了极佳的响应性能。
+这种“高效寻址 + 一致的逻辑处理模型 + 异步维护并行化 + 独立安全门控”的部署方案，目标是在响应性能、上下文质量和信任隔离之间取得可控平衡。
 
 
 ## III. 宿主系统模型 (The Host System Model)
@@ -115,7 +112,7 @@ PCP 的四处理器架构支持 **异构多模型 + 并行部署 (Multi-LLM Para
 
 PCP 采用**时间轴 (Timeline)** 作为逻辑排序与关注度引导的核心规范：
 
-*   **时间戳锚定**: 每一个逻辑页（Original/Consolidated）都必须携带绝对时间戳锚点。对于静态存储块，采用其**物理修改时间**或**逻辑加载序号**作为定标。
+*   **时间戳锚定**: 每一个逻辑页（Original/Consolidated）都必须携带明确的时间戳锚点。对于静态存储块，采用其**物理修改时间**或**逻辑加载序号**作为定标。
 *   **当前时间注入**: 在每次交互的上下文顶部，显式注入 `Current_Time`。
 *   **时序感知**: Worker 通过对比 Page 时间戳与 `Current_Time` 判断逻辑的先后顺序或数据的陈旧度。
 
@@ -139,10 +136,21 @@ PCP 维护两个层级的地址空间，通过 Worker 的映射行为实现交�
     *   `id`: Short Hash。
     *   `trust`: **信任级别**。合法值：`system | history | audited | sealed`。详见第 XII 章。
     *   `depth`: **逻辑深度 (Integer)**。
-    *   `timestamp`: **逻辑定标 (ISO-8601)**。每一页必须携带绝对时间原点，用于时序排序与陈旧度判定。
+    *   `timestamp`: **逻辑定标 (ISO-8601)**。每一页必须携带明确时间原点，用于时序排序与陈旧度判定。
     *   `keywords`: **语义关键词 (Optional)**。作为海选匹配的高维索引键。
-    *   `summary`: **逻辑脉络提炼**。要求：**语义熵压缩**。严禁文学化描述，必须保留核心推论、关键变量及因果链条，作为 Router 检索的唯一依据。
-    *   `content`: **高分辨率证据块**。要求：**物理保真**。完整呈现原始对话或数据，不进行任何非受控的语义删减，作为 Worker 最终推导的逻辑基石。
+    *   `summary`: **逻辑脉络提炼**。要求：**锚点保持压缩**。摘要应避免文学化改写，必须保留核心推论、关键变量及因果链条，作为 Router 检索的主要依据；它不是最终证据本体。
+    *   `anchors`: **关键锚点 (Optional)**。记录摘要中必须可回溯的变量、条件、否定路径、接口名、定理编号、文件路径等低频但关键的信息。
+    *   `source_ref`: **物理来源引用**。指向 PBlock 句柄、文件路径、流 offset、对话轮次或外部 Memory Fetch 端点。
+    *   `source_spans`: **来源范围 (Optional)**。用于记录行号、字节范围、token 范围、时间范围或结构化 AST 路径。数学、代码和审计场景中建议强制填写。
+    *   `excerpt`: **中分辨率证据片段 (Optional)**。当全文过长或当前任务只需要局部证据时，Host 可只物化被选中的 source spans。
+    *   `content`: **高分辨率证据块 (Optional / Materialized)**。仅在预算允许且任务需要时物化完整内容。Original Page 是逻辑原子，但不要求每次注入都携带完整物理全文；Host 必须保留可回拉的 `source_ref` / `source_spans`。
+    *   `available_modes`: **可拉回分辨率集合 (Optional)**。声明该 Page 能够按需提供哪些证据层级，例如 `SummaryOnly,AnchoredSummary,Excerpt,Full`。这只是能力声明，不代表这些内容都已注入当前上下文。
+*   **证据分辨率阶梯**：Original Page 的回拉不应被简化为“摘要 / 全文”二元状态，而应支持以下层级：
+    - `SummaryOnly`：仅提供用于路由的锚点保持摘要，不作为最终证据。
+    - `AnchoredSummary`：在摘要之外提供 `anchors`、`source_ref` 与可定位的 `source_spans`，适合先判断是否值得继续下钻。
+    - `Excerpt`：返回与当前 Intent Focus 对齐的局部证据片段。
+    - `Full`：返回完整物理内容，仅在局部片段不足或任务明确需要全文时使用。
+*   **分辨率常驻原则**：分级是可用能力，不是默认载荷。当前 `<Linear_Flow>` 中只应放入当前所需的 `content_mode`；`available_modes` 与 `source_ref/source_spans` 留在索引或 Memory 中，用于后续按需升级。并非所有 Page 都必须支持所有分辨率，只有定义、命题、证明关键步、反例、接口变更、依赖枢纽等高价值节点才需要完整分级。
 
 #### 5.1.2 综述页 (Consolidated Page)
 作为**逻辑索引 (Logic Index)** 的容器节点。支持 `Unpacked` 变焦。
@@ -162,7 +170,7 @@ PCP 维护两个层级的地址空间，通过 Worker 的映射行为实现交�
 
 *   **唯一寻址**: 每一个 Page（OP/CP）在索引中拥有全局唯一的 `Short Hash ID`。
 *   **状态维护**: 索引实时跟踪 Page 的**热度**、**陈旧度**以及**当前激活状态**（是否已注入上下文）。
-*   **主题拓扑 (Topic Topology)**: 由于 Consolidated Page 具有无限嵌套能力，在逻辑树中，最顶层的 Root Page 自然代表了一个独立的主题空间。系统通过管理不同逻辑树的 Root 节点，即可直接实现多主题并行推导与话题级的隔离。
+*   **主题拓扑 (Topic Topology)**: Consolidated Page 支持递归嵌套。在逻辑树中，最顶层的 Root Page 代表一个主题空间。系统通过管理不同逻辑树的 Root 节点，实现多主题并行推导与话题级隔离。
 *   **Schema 作用域 (Schema Scoping)**：`schema` 字段的作用域与 **Topic Tree 的 Root CP** 绑定，而非全局会话状态。当 Consolidator 检测到 **Topic Pivot** 并创建新 CP 分支时，必须在新 Root CP 上执行独立的 Phase 1 Schema 识别，**不继承前序逻辑树的 Schema**。这确保跨话题的意图流转（如从代码讨论切换至架构设计）不会产生 Schema 干扰。Router 在读取 Schema 时，始终以**当前活跃 Topic Tree 的 Root CP** 为准。
 
 
@@ -173,15 +181,16 @@ PCP 采用以**意图 (Intent)** 为核心的寻址推演循环。每轮交互�
 ### 1. 意图锚定 (Intent Anchoring)
 *   **职责**: 为寻址确定语义极点。
 *   **操作**: 系统分析当前视界的 **Head**（系统指令/全局变量）与 **Tail**（最新用户输入），提取出驱动本轮寻址的 **意图重心 (Intent Focus)**。
-*   **重构**: 若输入熵过低（如“继续”），由 **Host Scaffolding** 自动拼接前轮 Summary 执行确定性语义重构，严禁依赖模型发散。
+*   **重构**: 若输入熵过低（如“继续”），由 **Host Scaffolding** 自动拼接前轮 Summary 执行确定性语义重构，避免仅依赖模型自由推断。
 
-### 2. 神经寻址 (Neural Addressing)
+### 2. 模型辅助寻址 (Model-Assisted Addressing)
 *   **职责**: 在 Unified Address Space 中定位 Page 与物理块 (PBlock)。
 
 #### 2.1 逻辑页寻址 (Logical Page Addressing — LAS)
 *   **机制**: 基于 **Page Index** 的二级语义匹配。
     - **海选 (Broad Semantic Match)**：Router 根据 Intent Focus 与 Page 的 **语义关键词 (Keywords)** 在索引中快速召回具备相关性潜力的 Logical Pages。
     - **精选 (Precision Selection)**：通过高维语义对齐，深度对比 Intent Focus 与 Page Summary，决定 Pages 的激活状态（Hot 直接注入 / Indexed 仅摘要）。
+    - **分辨率规划 (Resolution Planning)**：Router 同时给出建议的 `desired_content_mode`。低相关或背景页通常为 `SummaryOnly`；需要确认锚点但暂不阅读证据时为 `AnchoredSummary`；强相关证据为 `Excerpt`；明确需要整体语境时才建议 `Full`。该建议不是最终物化命令，Host 仍根据 token 预算、`available_modes`、来源可访问性与安全策略决定实际注入的 `content_mode`。
 
 #### 2.2 物理块寻址 (Physical Block Addressing — PAS)
 *   **机制**: 基于 **意图引导 (Intent-Driven)** 的初步语义检索。
@@ -192,7 +201,7 @@ PCP 采用以**意图 (Intent)** 为核心的寻址推演循环。每轮交互�
         - **清单**: 包含基本 `id`、`summary` 及 `keywords`。
         - **作用**: 让 Worker 在不物化全文的情况下感知识别物理块的逻辑分布。
     - **注入态**: Draft Pages 挂接至视界。**平权展示策略**：
-        - 高相关度：直接以 `view="Detail"` 展示（投机性全量物化）。
+        - 高相关度：直接以 `view="Detail"` 展示（通常投机性 `Excerpt`，只有在任务明确需要且预算允许时才 `Full` 物化）。
         - 低相关度：以 `view="Summary"` 展示（索引预留）。
     - **状态**: 此时 PBlock 处于“可探测态”。
 
@@ -201,8 +210,8 @@ PCP 采用以**意图 (Intent)** 为核心的寻址推演循环。每轮交互�
 *   **机制**: 完整意图查询与多级兼容。
     - **动作**: Router 在进行 LAS/PAS 寻址的同时，直接使用**完整的意图 Prompt/Focus** 向外部 Memory 系统发起查询（而非截取语义关键词）。
     - **分级物化与变焦支持**:
-        - **轻度兼容 (Light Compatibility)**: 记忆系统提供的是单次搜索，返回高相关内容并将其包装为符合 PCP 定义的**原始页 (Original Page)** 规范。这些 Page 直接作为“逻辑背景”注入，参与后续推演。
-        - **深度兼容 (Deep Compatibility)**: 记忆系统能原生返回支持 **原始页 / 综述页 (OP/CP)** 的混合嵌套结构。当返回物化的是综述页时，记忆系统必须提供按 ID 查询的端点。若 Worker 对该记忆综述页执行 `Consult`，外部系统将直接通过 ID 返回被请求页面的下钻内容。这实现了一个从“当前 Context 无缝切换并穿透至外部 Memory 空间”的透明寻址体验。
+        - **轻度兼容 (Light Compatibility)**: 记忆系统提供单次搜索，Adapter 将返回内容包装为符合 PCP 定义的**原始页 (Original Page)**。这些 Page 至少应包含 `summary`、`source_ref`、`trust` 和可回拉的来源信息。
+        - **同源兼容 (PCP-native Compatibility)**: 记忆系统原生返回支持 **原始页 / 综述页 (OP/CP)** 的混合嵌套结构，并保留与当前上下文一致的 ID、`source_ids`、`source_ref`、`source_spans`、`trust` 与版本信息。当返回物化的是综述页时，记忆系统必须提供按 ID 或 source span 查询的端点。若 Worker 对该记忆综述页执行 `Consult`，外部系统将直接返回被请求页面的摘要、局部 `excerpt` 或完整 `content`。这实现了从当前 Context 穿透至外部 Memory 空间的透明寻址体验。
 
 
 ### 3. 视界合成与注入 (Synthesis & XML Construction)
@@ -214,7 +223,7 @@ PCP 采用以**意图 (Intent)** 为核心的寻址推演循环。每轮交互�
 *   **职责**: 任务执行、地址穿透与未知探索。
 *   **逻辑解构 (LAS Logic)**: Worker 通过 `Consult` 指令对视界内已有的 Page（包含 Draft Pages）执行分辨率提升，由 Host 完成物化填充。
 *   **物理探测 (PAS Probing)**: 当 Worker 感知到当前 LAS 无法闭合逻辑链，且 Draft Page 提示物理块内存在关键线索时，通过 `Explore` 指令进行主动探测。
-*   **映射权 (Mapping Sovereignty)**: Worker 以 Intent Focus 或 Explicit Keywords 为“滤镜”读取并解构 PBlock，仅提取出高度相关的 Page 实体。
+*   **映射决策 (Mapping Decision)**: Worker 以 Intent Focus 或 Explicit Keywords 为过滤条件读取并解构 PBlock，仅提取出高度相关的 Page 实体。
 *   **递归扩散 (Recursive Diffusion)**: 新物化的 Page 可能产生新的物理引用。Router 执行 **反应式扩散 (Reactive Diffusion)**，触发新一轮寻址。
 
 ### 5. 代谢、固化与归档 (Metabolism, Solidification & GC)
@@ -245,44 +254,51 @@ PCP 采用以**意图 (Intent)** 为核心的寻址推演循环。每轮交互�
 为了让模型直观感知识读深度与物理属性（原子级 vs 容器级），PCP 采用语意视图系统：
 
 1.  **`view="Summary"` (摘要)**: 展示逻辑提炼，隐藏底层数据。
-2.  **`view="Detail"` (详情)**: 展示页面的完整内容。
-    *   **Original 节点 (原子)**: 此为逻辑终点，不可再解构。
+2.  **`view="Detail"` (详情)**: 展示页面的已物化证据内容。
+    *   **Original 节点 (原子)**: 此为逻辑终点，不可再解构；Detail 可展示 `excerpt` 或完整 `content`，由任务需求与预算决定。
     *   **Consolidated 节点 (容器)**: 此为逻辑支点，可进一步解构。
 3.  **`view="Unpacked"` (解构)**: 
     *   **约束**: **仅适用于 `type="Consolidated"` 节点**。且必须满足“激活变焦”约束：其内部必须**至少有一个**子节点处于非 `Summary` 状态（即 `Detail` 或更深），否则应自动执行 `Shelve` 回退至 `Detail` 态以保持视界紧凑。
     *   **表现**: 移除综述全文，直接嵌套展示其内部包含的子页面 (`Node`)。
+*   **视图与载荷正交**：`view` 描述 Worker 看到的逻辑形态，`content_mode` 描述当前注入的证据分辨率。`view="Detail"` 不等于 `content_mode="Full"`；一个 Detail 节点可以只携带 `AnchoredSummary` 或 `Excerpt`。
 
 ### 7.2 递归变焦路径映射
 
 *   **Level 1: 全局感知 (Global)**: 视界内的根页面以 `Summary` 呈现，构建逻辑概览。
-*   **Level 2: 节点下钻 (Node Penetration)**: `Consult(id)` 使目标进入 `Detail`。
-    *   **Original**: 露出物化全文。
+*   **Level 2: 节点下钻 (Node Penetration)**: `Consult(reason, id, target_view="Detail")` 使目标进入 `Detail`。
+    *   **Original**: 露出相关 `excerpt` 或完整 `content`。
     *   **Consolidated**: 露出容器综述全文。
-*   **Level 3: 子树解构 (Sub-tree Unpacking)**: 对已处于 `Detail` 的 **Consolidated** 节点（综述态）再次调用 `Consult`，使其进入 `Unpacked` 露出内部子页面的 `Summary`。
-    *   **递归特性**: 由于子页面可以是新的 Consolidated 节点，此过程支持**无限递归变焦**，允许在多级逻辑树中进行纵向搜索。
-*   **Level 4: 原子还原 (Atomic Restoration)**: 对树末端的 `Original` 页面调用 `Consult` 成 `Detail`，触达逻辑终点。
+*   **Level 3: 子树解构 (Sub-tree Unpacking)**: 对已处于 `Detail` 的 **Consolidated** 节点（综述态）再次调用 `Consult(reason, id, target_view="Unpacked")`，使其进入 `Unpacked` 露出内部子页面的 `Summary`。
+    *   **递归特性**: 由于子页面可以是新的 Consolidated 节点，此过程支持多级递归变焦，允许在逻辑树中进行纵向搜索。
+*   **Level 4: 原子还原 (Atomic Restoration)**: 对树末端的 `Original` 页面调用 `Consult` 成 `Detail`，触达逻辑终点。Host 可先返回相关 `excerpt`，在 Worker 继续请求或证据不足时再升级为完整 `content`。
+
+### 7.2.1 证据分辨率责任划分 (Evidence Resolution Responsibilities)
+
+*   **Consolidator**：负责生产可路由的 `summary`、关键 `anchors`、候选 `source_spans`，并判断 Page 是否值得声明更高的 `available_modes`。它不应为低价值正文默认生成全套分级载荷。
+*   **Router**：负责在召回时提出 `desired_content_mode`，用于排序和初始注入规划。
+*   **Host / Context Manager**：负责最终物化决策。Host 根据 token 预算、`available_modes`、来源可访问性、Auditor 结果和当前窗口压强决定实际 `content_mode`，并可返回低于 Router/Worker 请求的分辨率。
+*   **Worker**：只负责判断当前证据是否足以支撑推理。若不足，Worker 通过 `Consult` 请求更高分辨率或更精确的 `span_hint`。
 
 ### 7.3 协议指令定义 (Protocol Instruction Specs)
 
 | 指令 | 调用格式 | 触发条件 | 效果 |
 | :--- | :--- | :--- | :--- |
-| **Consult** | `Consult(reason, id)` | 现有逻辑实体的分辨率不足以支撑结论 | **逻辑升级**：`Summary -> Detail` 或 `Detail -> Unpacked`。对象为 LAS 已知 ID。 |
+| **Consult** | `Consult(reason, id, target_view?, content_mode?, span_hint?)` | 现有逻辑实体的视图或证据分辨率不足以支撑结论 | **逻辑/证据升级**：`Summary -> Detail`、`Detail -> Unpacked`，或在同一视图内提升 `content_mode`。对象为 LAS 已知 ID；`content_mode` 不应超过该 Page 的 `available_modes`。 |
 | **Explore** | `Explore(reason, handle, keywords)` | 需要从未知物理块中提取特定逻辑 | **物理物化**：从 PBlock 句柄中根据 keywords 过滤并生成新 Page。对象为 PAS 句柄。 |
 | **Shelve** | `Shelve(reason, id)` | 当前细节节点信息已吸收或暂时不需要 | **视图降级**：`Unpacked -> Detail` 或 `Detail -> Summary`。 |
 | **Purge** | `Purge(reason, id)` | 当前节点存在内容误判、与意图彻底无关或属废弃冗余 | **物理剔除与免疫**：将节点从 `<Linear_Flow>` 彻底删除，并在当前话题检索层对该 ID 施加强负反馈权重，防止后续重复召回。 |
 
 ### 7.4 级联折叠逻辑 (Cascading Shelve / Auto-Folding)
 
-为了保持上下文的极致纯净，`Shelve` 操作具备**级联折叠**特性：
+为了控制上下文规模，`Shelve` 操作具备**级联折叠**特性：
 *   **原子级触发**：当一个处于 `Detail` 状态的原子 Page 被 `Shelve` 后，它立即回退为 `Summary`。
 *   **容器级坍缩**：当一个处于 Level 3（综述解构状态）的综述页，其内部包含的所有子页面 ID 都被 Worker 成功 `Shelve`（折叠）后，该综述页节点必须**自动向上坍缩**，回退到 Level 2（综述全文摘要）状态。
 *   **逻辑目标**：确保思维视界中只存在“被明确需要的细节”，不留任何逻辑冗余。
 
 ### 7.5 逻辑驱逐与负反馈机制 (Logical Eviction & Negative Feedback)
 
-如果 `Shelve` 意为“将用过的工具折叠放回抽屉”，那么 `Purge` 则是“将彻底错误的图纸扔进废纸篓”。
 *   **视界清理**：`Purge` 指令强制要求系统从当前的 `<Linear_Flow>` 列表中完全抹除对应的 `<Node>`，释放宝贵的 Context Token 并不留任何逻辑杂音。
-*   **检索隔离 (主动免疫)**：被 Worker `Purge` 掉的节点 ID，Host 将立刻在当前的意图/话题流内对其打上**强负面权重 (Negative Weighting)**。这可以有效防止 Router 模块在接下来的检索循环中因为“错误的高语义相似度”而将其反复召回上下文，打破检索死循环。
+*   **检索隔离 (Negative Feedback)**：被 Worker `Purge` 掉的节点 ID，Host 将在当前的意图/话题流内对其施加负权重。这可以降低 Router 在后续检索循环中因错误相关性判断而重复召回该节点的概率。
 *   **推理防错寻迹**：执行 `Purge` 的动作本身（带上极短的 reason）将以极低的 Token 成本沉淀在 `<Reasoning_Trace>` 中（例如：已检查文档 A，系旧版设定，已清除），作为模型在漫长推演中的认知记忆防错。
 
 ## VIII. 物理映射与搜索逻辑 (Physical Mapping & Search Logic)
@@ -291,13 +307,13 @@ PCP 采用以**意图 (Intent)** 为核心的寻址推演循环。每轮交互�
 
 ### 8.1 关键词驱动的熵抑制 (Keyword-Driven Search)
 *   **语义滤镜**: `Explore` 并非盲目加载物理全文。Host 根据 `keywords` 在 PBlock 内部执行语义检索（BM25 或向量），仅提取与关键词强相关的片段。
-*   **熵抑制**: 低于相关性阈值的物理噪音被强制保留在“物理空间”中，不被物化。这确保了逻辑地址空间的极高信躁比。
+*   **噪声控制**: 低于相关性阈值的物理噪音保留在物理空间中，不被物化。这有助于维持逻辑地址空间的信噪比。
 
 ### 8.2 结构敏感性物化 (Structural Awareness)
 Host 根据 PBlock 的物理属性决定其物化形态：
 *   **原子物理块** (如：文本日志、函数片段) -> 物化为 **Original Page**。
 *   **结构化物理块** (如：代码仓库目录、复杂文档章节) -> 物化为 **Consolidated Page (Draft)**。
-    *   **物理变焦**：对结构化 Draft 调用 `Consult` 会触发 **子物理块扫描**，产出下一级的草稿页，实现物理与逻辑在变焦路径上的统一。
+    *   **结构下钻**：对结构化 Draft 调用 `Consult` 会触发 **子物理块扫描**，产出下一级的草稿页，使物理结构与逻辑变焦路径保持一致。
 
 ### 8.3 递归摘要合成 (Recursive Synthesis)
 当物化一个复杂的结构化 PBlock 时，Consolidator 执行**递归综述合成**：
@@ -341,6 +357,10 @@ PCP 并不直接将文本进行物理堆叠（Plain Text Gluing），而是通�
     *   `keywords`: **语义索引键 (Comma-separated string)**。
     *   `timestamp`: 逻辑发生的时间原点。
     *   `schema`: **逻辑结构类型 (Optional, Root-level Consolidated only)**。由 Consolidator Phase 1 写入，Router 策略 CoT 读取。合法值：`code_evolution | reasoning_chain | creative_world | tool_trace | mixed`。
+    *   `source_ref`: **来源引用 (Optional)**。指向可回拉的 PBlock、文件、流、对话轮次或外部 Memory Fetch 端点。
+    *   `source_spans`: **来源范围 (Optional)**。以紧凑字符串或结构化路径记录行号、字节范围、token 范围、时间范围或 AST 路径，用于按需拉回局部证据。
+    *   `content_mode`: **当前注入证据分辨率 (Optional)**。合法值：`SummaryOnly | AnchoredSummary | Excerpt | Full`。用于说明当前节点实际携带的是摘要、锚点化摘要、局部证据片段还是完整内容。
+    *   `available_modes`: **可拉回证据分辨率 (Optional)**。合法值同 `content_mode`，可逗号分隔；用于声明该节点后续可通过 `Consult`/`Fetch` 升级到哪些分辨率。该字段不代表这些内容已经注入当前上下文。
 
 ---
 
@@ -355,8 +375,8 @@ PCP 并不直接将文本进行物理堆叠（Plain Text Gluing），而是通�
     <System_Instructions>
       - Original: 原始证据/对话节点 (不可拆解)。
       - Consolidated: 逻辑综述节点 (可 Unpacked)。
-      - view="Summary": 摘要；view="Detail": 全文；view="Unpacked": 展开容器内部。
-      - Consult(reason, id): 升级视图获取详情/子项；Shelve(reason, id): 降级视图清理视界；Purge(reason, id): 彻底剔除无关节点。
+      - view="Summary": 摘要；view="Detail": 已物化证据详情；view="Unpacked": 展开容器内部。
+      - Consult(reason, id, target_view?, content_mode?, span_hint?): 升级视图或证据分辨率；Shelve(reason, id): 降级视图清理视界；Purge(reason, id): 彻底剔除无关节点。
     </System_Instructions>
   </Static_Registry>
 
@@ -373,8 +393,8 @@ PCP 并不直接将文本进行物理堆叠（Plain Text Gluing），而是通�
     </Node>
 
     <!-- 2. 历史推理详情节点 (trust=history, 逻辑终点) -->
-    <Node id="d4e5f6a1" type="Original" view="Detail" depth="2" trust="audited" timestamp="2026-02-14T10:05:00">
-      <Content>最底层的对话全文或硬件原始日志...</Content>
+    <Node id="d4e5f6a1" type="Original" view="Detail" depth="2" trust="audited" timestamp="2026-02-14T10:05:00" source_ref="pblock://log/a7" source_spans="L18-L35" content_mode="Excerpt" available_modes="SummaryOnly,AnchoredSummary,Excerpt,Full">
+      <Excerpt>从原始日志中按 source span 选出的相关证据片段...</Excerpt>
     </Node>
 
     <!-- 3. 根级固化综述，携带 schema 字段 (trust=sealed, Root Consolidated) -->
@@ -416,13 +436,14 @@ PCP 并不直接将文本进行物理堆叠（Plain Text Gluing），而是通�
 PCP 并不负责维护网状的冷知识库，但它作为“逻辑处理器”，必须提供一种机制将实时处理产生的“逻辑净值 (Logical Net Value)”沉淀回外部系统。
 
 ### 11.1 记忆系统接口规范 (Memory Interface Requirements)
-PCP 不关心 Memory 系统的内部实现，但其作为外部“逻辑插件”，必须满足以下调用契约：
+PCP 不关心 Memory 系统的内部实现，但如果 Memory 被声明为 PCP-native 同源逻辑缓存，则必须满足以下调用契约。非同源系统可以通过 Adapter 以轻度兼容方式接入。
 *   **页兼容性分级 (Page Compatibility Tier)**：
-    - **轻度兼容**：返回内容符合 `Original Page` 的 XML 定义，代表基于意图的碎片化事实单次搜索与召回。
-    - **深度兼容**：返回内容支持原生 `Original/Consolidated Page` 的任意层级混合结构，代表系统具备完整逻辑树的存储与透传能力。
+    - **轻度兼容**：返回内容由 Adapter 包装为 `Original Page`，至少包含 `summary`、`source_ref`、`trust` 和可回拉的来源信息。适用于普通搜索、文件检索或外部 RAG。
+    - **同源兼容**：返回内容原生支持 `Original/Consolidated Page` 的任意层级混合结构，保留稳定 ID、`source_ids`、`source_ref`、`source_spans`、`trust`、版本和来源链。适用于希望与当前上下文抹平寻址差异的 PCP-native Memory。
+*   **身份与驻留状态解耦 (Identity / Residency Decoupling)**：同源 Memory 中的 Page 身份由 `id`、`source_ids`、`source_ref`、版本与溯源链共同确定；该 Page 当前是否注入 `<Linear_Flow>` 只是 Host 维护的驻留状态（如 `in_context`、`indexed`、`external_memory`），不改变其逻辑身份。Router 与 Worker 因此可以用同一套 LAS 语义处理“当前上下文页”和“未注入的历史页”。
 *   **查询与拉取接口 (Query & Fetch Interfaces)**：
     - **Query (意图查询)**：必须暴露支持**完整意图 Prompt** 查询的入口。Router 会直接传递其锚定的 Intent Focus 发起宽泛召回。
-    - **Fetch (按需拉取 - 深度兼容必需)**：当外部引入了 Consolidated Page 之后，系统必须提供按 `Short Hash ID` 直接拉取目标页面的接口，以响应 Worker 触发的 `Consult(id)` 从记忆中主动变焦的指令。
+    - **Fetch (按需拉取 - 同源兼容必需)**：当外部引入了 Consolidated Page 或延迟物化的 Original Page 之后，系统必须提供按 `Short Hash ID`、`source_ref` 或 `source_spans` 直接拉取目标页面的接口，以响应 Worker 触发的 `Consult(id, content_mode?, span_hint?)` 从记忆中主动变焦的指令。Fetch 应支持返回 `SummaryOnly`、`AnchoredSummary`、`Excerpt` 或 `Full` 分辨率，并在返回节点中标明实际 `content_mode` 与可继续升级的 `available_modes`。若请求分辨率不可用或超过预算，Host/Memory 应返回不超过请求的最高可用分辨率并给出降级原因。
 *   **即时注入角色 (Instant Input Role)**：记忆获取是寻址流的一部分。检索到的 Pages 被视为当前 LAS 的有效延伸，享有与本地感知态同等的逻辑处理权重。
 
 ### 11.2 统一逻辑导出 (Unified Logic Export)
@@ -442,7 +463,7 @@ PCP 不关心 Memory 系统的内部实现，但其作为外部“逻辑插件�
 
 ### 12.1 核心前提与威胁截面定位
 
-AI-Native 系统的安全前提不同于传统工程：**整个上下文窗口既是执行空间，也是数据空间，数据与指令完全等价**（即 LLM 作为全局 `eval`，被训练为尽可能顺从执行所有输入），因此不存在独立的"代码/数据"物理边界。
+AI-Native 系统的安全前提不同于传统工程：上下文窗口同时承载指令、数据、工具结果和外部内容。模型可能把外部数据中的指令性文本误当成应执行的要求，因此不能依赖传统意义上的代码/数据物理边界。
 
 PCP 作为上下文组装与治理协议，直接覆盖 AI-Native 执行管道的以下风险截面：
 
@@ -480,7 +501,7 @@ Auditor 是 PCP 在截面①→②处的强制安全门控，其核心规范如�
 3. **输出格式**：`PASS` 或 `BLOCK`，附 `reason` 字段。
 4. **PASS 处理**：Host 将 Draft Page 的 `trust` 字段设置为 `"audited"` 后注入 Linear_Flow。
 5. **BLOCK 处理**：Draft Page 永久丢弃；Host 将 `<Block id="..." reason="..." timestamp="..."/>` 记录写入 `<Static_Registry>` 内的 `<Security_Log>` 节点；对应 PBlock 句柄在当前话题检索层施加强负面权重。
-6. **结构性博弈保证**：Auditor 无执行权限这一约束确保了——即使 Auditor 被欺骗（输出 PASS），Auditor 本身也无法被利用执行任何危险操作。攻击者因此面临的双重语义约束（「像数据」 vs「像指令」）在语义空间内天然对立，无法同时满足。
+6. **分层防御效果**：Auditor 无执行权限这一约束确保了——即使 Auditor 被欺骗（输出 PASS），Auditor 本身也无法直接执行危险操作。攻击者仍可能构造同时通过审查且影响 Worker 的内容，因此 Auditor 只能降低风险，不能替代应用层权限控制和运行时策略。
 
 ### 12.4 Consolidator 固化约束（截面⑤）
 
@@ -494,7 +515,7 @@ Consolidated Page 写入 Memory 后作为历史推理共识被召回，享有更
 
 PCP 协议给出以下可在协议层验证的安全不变式：
 
-> **[不变式 S1]** `<Linear_Flow>` 内所有节点的 `trust` 值必须属于 `{system, history, audited, sealed}`。任何 `trust` 值缺失或越界的节点进入 `<Linear_Flow>` 均视为协议违规（Bus Fault 级别）。
+> **[不变式 S1]** `<Linear_Flow>` 内所有节点的 `trust` 值必须属于 `{system, history, audited, sealed}`。任何 `trust` 值缺失或越界的节点进入 `<Linear_Flow>` 均视为协议违规。
 
 > **[不变式 S2]** `trust="audited"` 的节点已通过 Auditor 审查，但仍属于**不可信数据**（非指令）。Worker 的 System_Instructions 明确禁止将 `audited` 节点的内容解读为协议指令；如 Worker 在 `audited` 内容中发现明显指令语义，必须立即 `Purge` 并在 `<Reasoning_Trace>` 中记录。
 
