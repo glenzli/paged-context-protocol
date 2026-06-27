@@ -1,4 +1,4 @@
-# Paged-Context-Protocol (PCP) - v0.2.0-alpha
+# Paged-Context-Protocol (PCP) - v0.3.0-alpha
 
 Paged-Context-Protocol (PCP) is a protocol for **Unified Logical Addressing** and **Distributed Context Governance** in LLM applications. It maps fragmented dialogue streams and heterogeneous data sources (files, streams, repositories) into discrete, addressable **Logical Pages**. Through explicit indexing, demand-driven drill-down, background consolidation, and trust labels, PCP aims to improve recall, traceability, and noise control within finite context windows.
 
@@ -369,7 +369,7 @@ PCP does not simply stack text physically (Plain Text Gluing) but builds a perce
 Standard generation template for system integration:
 
 ```xml
-<PagedContext version="0.2.0-alpha">
+<PagedContext version="0.3.0-alpha">
   <Static_Registry>
     <ST-Node id="CURRENT_TIME" value="YYYY-MM-DDTHH:mm:ss" />
     <Security_Log>

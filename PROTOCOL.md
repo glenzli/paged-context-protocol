@@ -1,4 +1,4 @@
-# Paged-Context-Protocol (PCP) - v0.2.0-alpha
+# Paged-Context-Protocol (PCP) - v0.3.0-alpha
 
 Paged-Context-Protocol (PCP) 是一种面向 LLM 应用的**统一逻辑寻址**与**分布式上下文治理**协议。它将碎片化的对话流与异构数据源（文件、流、仓库）映射为离散、可寻址的**逻辑页（Logical Pages）**，通过显式索引、按需下钻、后台整理和安全标注，在有限上下文窗口内提高信息召回、溯源和噪声控制能力。
 
@@ -369,7 +369,7 @@ PCP 并不直接将文本进行物理堆叠（Plain Text Gluing），而是通�
 用于系统集成的标准生成模板：
 
 ```xml
-<PagedContext version="0.2.0-alpha">
+<PagedContext version="0.3.0-alpha">
   <Static_Registry>
     <ST-Node id="CURRENT_TIME" value="YYYY-MM-DDTHH:mm:ss" />
     <System_Instructions>

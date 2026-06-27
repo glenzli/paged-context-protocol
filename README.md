@@ -1,4 +1,4 @@
-# Paged-Context-Protocol (PCP) - v0.2.0-alpha
+# Paged-Context-Protocol (PCP) - v0.3.0-alpha
 
 [中文版](#chinese) | [English Version](#english)
 
