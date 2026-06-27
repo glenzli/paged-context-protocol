@@ -437,6 +437,9 @@ PCP 并不负责维护网状的冷知识库，但它作为“逻辑处理器”�
 
 ### 11.1 记忆系统接口规范 (Memory Interface Requirements)
 PCP 不关心 Memory 系统的内部实现，但如果 Memory 被声明为 PCP-native 同源逻辑缓存，则必须满足以下调用契约。非同源系统可以通过 Adapter 以轻度兼容方式接入。
+
+> PCP-native Memory 的独立 Profile 见 [memory/SPEC.md](memory/SPEC.md)。本节只定义核心协议约束。
+
 *   **页兼容性分级 (Page Compatibility Tier)**：
     - **轻度兼容**：返回内容由 Adapter 包装为 `Original Page`，至少包含 `summary`、`source_ref`、`trust` 和可回拉的来源信息。适用于普通搜索、文件检索或外部 RAG。
     - **同源兼容**：返回内容原生支持 `Original/Consolidated Page` 的任意层级混合结构，保留稳定 ID、`source_ids`、`source_ref`、`source_spans`、`trust`、版本和来源链。适用于希望与当前上下文抹平寻址差异的 PCP-native Memory。

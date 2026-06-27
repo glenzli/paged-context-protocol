@@ -25,6 +25,10 @@ PCP 将碎片化的 Token 流与外部数据源转化为离散、可寻址的**�
 
 PCP 目前是协议与工程设计草案。它提出的效果应通过实现和评测验证，例如证据召回率、上下文污染率、摘要损失率、`Consult` 成功率、成本和延迟。
 
+### 同源记忆层
+
+PCP-native Memory profile 已并入本仓库，见 [memory/SPEC.md](memory/SPEC.md)。它定义了同源持久化 Page Store 的基本契约，包括 `QueryMemory`、`FetchMemory`、`content_mode`、`available_modes`、版本与溯源。
+
 ---
 
 <a name="english"></a>
@@ -48,8 +52,12 @@ Long-context models, sliding windows, one-shot RAG, and rolling summaries can st
 
 PCP is currently a protocol and engineering design draft. Its claims should be validated empirically with implementation benchmarks such as evidence recall, context pollution, summary loss, `Consult` success rate, cost, and latency.
 
+### Same-Origin Memory Layer
+
+The PCP-native Memory profile now lives in this repository. See [memory/SPEC.md](memory/SPEC.md) for the same-origin persistent Page Store contract, including `QueryMemory`, `FetchMemory`, `content_mode`, `available_modes`, versioning, and provenance.
+
 ---
 
 ## 技术详情 (Technical Specification)
 
-详细协议规范请查阅 / Please refer to: **[PROTOCOL.md (CN)](PROTOCOL.md)** | **[PROTOCOL-en.md (EN)](PROTOCOL-en.md)**.
+详细协议规范请查阅 / Please refer to: **[PROTOCOL.md (CN)](PROTOCOL.md)** | **[PROTOCOL-en.md (EN)](PROTOCOL-en.md)** | **[memory/SPEC.md](memory/SPEC.md)**.

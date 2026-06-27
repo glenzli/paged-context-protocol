@@ -447,6 +447,9 @@ PCP is not responsible for maintaining a networked cold knowledge base, but as a
 
 ### 11.1 Memory Interface Requirements
 PCP is indifferent to the internal implementation of the Memory system. However, if Memory declares itself a PCP-native same-origin logic cache, it must satisfy the following calling contracts. Non-native systems may connect through an Adapter in light compatibility mode.
+
+> See [memory/SPEC.md](memory/SPEC.md) for the standalone PCP-native Memory profile. This section defines only the core protocol constraints.
+
 *   **Page Compatibility Tier**:
     - **Light Compatibility**: Returned content is wrapped by an Adapter as an `Original Page`, at minimum containing `summary`, `source_ref`, `trust`, and fetchable source information. Suitable for ordinary search, file retrieval, or external RAG.
     - **PCP-native Compatibility**: Returned content natively supports arbitrary mixed hierarchies of `Original/Consolidated Pages`, preserving stable IDs, `source_ids`, `source_ref`, `source_spans`, `trust`, versions, and provenance chains. Suitable for PCP-native Memory that aims to erase addressing differences between current context and historical context.
