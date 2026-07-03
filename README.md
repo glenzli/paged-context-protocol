@@ -1,5 +1,7 @@
 # Paged-Context-Protocol (PCP) - v0.3.0-alpha
 
+![Paged-Context-Protocol banner](assets/banner.png)
+
 A page-based protocol for managing long-horizon LLM context as a logical address space, with demand paging, evidence resolution, and same-origin memory.
 
 一个基于 Page 的长程 LLM 上下文管理协议，将上下文建模为逻辑地址空间，并支持按需分页、证据分辨率和同源记忆。
