@@ -336,7 +336,7 @@ Phase 3: Consolidator jobs
 Phase 4: adapters
 
 - file-system adapter;
-- markdown-formal adapter;
+- structured-document adapter;
 - generic search/RAG adapter.
 
 ## 13. Open Questions
@@ -346,4 +346,4 @@ Phase 4: adapters
   sublabels.
 - How much Router reasoning trace should be persisted for audit.
 - Whether high-value page detection should be domain-specific, for example
-  mathematics dependency centrality in `markdown-formal`.
+  dependency-graph centrality in a domain-owned structured corpus.
