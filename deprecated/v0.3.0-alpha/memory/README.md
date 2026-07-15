@@ -1,5 +1,9 @@
 # PCP-Native Memory Profile
 
+> **Deprecated with PCP v0.3.0-alpha.** See [../README.md](../README.md) for the
+> redesign rationale and [../../../PROTOCOL-en.md](../../../PROTOCOL-en.md) for
+> the current draft.
+
 This directory defines the PCP-native Memory profile, previously explored as
 `glenzli/paged-memory`.
 

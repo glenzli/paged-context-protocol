@@ -1,10 +1,12 @@
-# Paged-Context-Protocol (PCP) - v0.3.0-alpha
+# Paged-Context-Protocol (PCP) - v0.4.0-draft
 
 ![Paged-Context-Protocol banner](assets/banner.png)
 
-A page-based protocol for managing long-horizon LLM context as a logical address space, with demand paging, evidence resolution, and same-origin memory.
+A model-agnostic protocol for a user-owned, cross-session and cross-project
+logical context space composed of persistent, addressable Pages.
 
-一个基于 Page 的长程 LLM 上下文管理协议，将上下文建模为逻辑地址空间，并支持按需分页、证据分辨率和同源记忆。
+一个模型无关的上下文协议，以持久、可寻址的 Page 构成由用户拥有的跨会话、跨项目逻辑
+上下文空间。
 
 [中文版](#chinese) | [English Version](#english)
 
@@ -13,57 +15,90 @@ A page-based protocol for managing long-horizon LLM context as a logical address
 <a name="chinese"></a>
 ## 简介 (Chinese)
 
-**Paged-Context-Protocol (PCP)** 是一种将 LLM 上下文建模为**地址空间（Address Space）**而非单纯线性缓存的上下文治理协议。
+现代模型已经能够自主搜索文件、调用工具并管理当前上下文，但它们通常只能看到当前会话和
+当前项目。历史讨论、其他项目、旧任务分支以及用户尚未写入文件的想法，仍然被封锁在模型
+可见范围之外。
 
-PCP 将碎片化的 Token 流与外部数据源转化为离散、可寻址的**逻辑页（Logical Pages）**，并通过**递归逻辑树（Logic Trees）**、按需下钻和后台整理，在有限上下文窗口内提高召回、溯源和噪声控制能力。
+**Paged-Context-Protocol (PCP)** 为模型提供一个用户拥有的外部逻辑 Page 空间。任何经授权
+的模型都可以按照自己的工具习惯搜索、读取、写入、修订和组合 Page，而不需要遵循 PCP
+规定的路由、摘要、变焦或推理流程。
 
-### 核心特性
-*   **逻辑地址空间 (LAS)**：将物理存储（PBlock）与逻辑页面（Logical Pages）解耦，支持长历史、文件和仓库的统一寻址。
-*   **指令驱动寻址**：定义 `Consult`、`Explore`、`Shelve`、`Purge` 等指令，用于按需下钻、物理探测、上下文折叠和错误召回隔离。
-*   **递归逻辑树 (Logic Trees)**：通过 `Summary`、`Detail`、`Unpacked` 视图在章节、主题或页面层级之间切换。
-*   **草稿页 (Draft Pages)**：在不直接注入全文的情况下，让 Worker 感知候选物理块的逻辑分布。
-*   **结构化上下文合成**：以 XML 或等价结构化格式提供页面边界、ID、时间戳和信任标注，降低上下文混淆风险。
+### 核心原则
 
-### 为什么选择 PCP？
-普通长上下文、滑动窗口、一次性 RAG 和滚动摘要都容易在长程任务中丢失低频但关键的逻辑锚点。PCP 的目标是让上下文成为可寻址、可下钻、可折叠、可追溯的系统状态，而不是每轮临时拼接的一段文本。
+- **模型拥有当前上下文**：窗口内的 working set、搜索计划和压缩策略由模型或 Harness 管理。
+- **用户拥有长期上下文**：历史不会绑定在单一模型、服务商、会话或项目目录中。
+- **稳定逻辑身份**：Page 与 Revision 拥有稳定 ID，进入或离开模型窗口不改变其身份。
+- **原始历史可恢复**：在授权范围内保留可搜索来源；摘要和模型整理是可重建的派生层。
+- **显式作用域**：统一地址空间不等于全局注入，跨项目召回必须由 Scope、权限或关系允许。
+- **策略中立**：实现可以同时提供 grep、全文、语义、时间和图查询，由模型自行选择。
 
-### 验证状态
+### PCP 不规定什么
 
-PCP 目前是协议与工程设计草案。它提出的效果应通过实现和评测验证，例如证据召回率、上下文污染率、摘要损失率、`Consult` 成功率、成本和延迟。
+PCP 不再规定四处理器、Intent Focus、固定四级变焦、XML Linear Flow、Chain-of-Thought 或
+`Consult/Explore/Shelve/Purge` 状态机。它只定义 Page、Scope、Revision、Provenance、
+Relation 和基础上下文 I/O 语义。
 
-### 同源记忆层
+### 当前状态
 
-PCP-native Memory profile 已并入本仓库，见 [memory/SPEC.md](memory/SPEC.md)。它定义了同源持久化 Page Store 的基本契约，包括 `QueryMemory`、`FetchMemory`、`content_mode`、`available_modes`、版本与溯源。
+`v0.4.0-draft` 是一次不向后兼容的协议重构。当前重点是确定最小 Core 与接口边界；实现、
+跨模型行为和百万级高密度上下文仍需通过评测验证。
+
+旧 `v0.3.0-alpha` 作为一次重要的设计阶段被完整保留，并附有淘汰原因和迁移说明：
+[deprecated/v0.3.0-alpha](deprecated/v0.3.0-alpha/README.md)。
 
 ---
 
 <a name="english"></a>
 ## Introduction (English)
 
-**Paged-Context-Protocol (PCP)** is a context governance protocol that models LLM context as an **Address Space** rather than a linear cache.
+Modern models can autonomously search files, call tools, and manage their active
+context, but their visibility usually ends at the current session and project.
+Past discussions, other projects, old task branches, and ideas that were never
+written into files remain outside the model's world.
 
-PCP transforms fragmented token streams and external data sources into discrete, addressable **Logical Pages**. It uses recursive logic trees, demand-driven drill-down, and background consolidation to improve recall, traceability, and noise control within a finite context window.
+**Paged-Context-Protocol (PCP)** provides a user-owned external logical Page
+space. Any authorized model can search, read, write, revise, and compose Pages
+using its own tool habits without following a PCP-defined routing,
+summarization, zooming, or reasoning workflow.
 
-### Key Features
-*   **Logical Address Space (LAS)**: Decouples physical storage (PBlocks) from addressable logical pages.
-*   **Instruction-Driven Addressing**: Defines `Consult`, `Explore`, `Shelve`, and `Purge` for drill-down, physical probing, context folding, and negative feedback.
-*   **Recursive Logic Trees**: Switches between `Summary`, `Detail`, and `Unpacked` views across topic and page levels.
-*   **Draft Pages**: Exposes the logical distribution of candidate physical blocks without immediately injecting full source content.
-*   **Structured Context Synthesis**: Uses XML or an equivalent structured format to preserve page boundaries, IDs, timestamps, and trust labels.
+### Core Principles
 
-### Why PCP?
-Long-context models, sliding windows, one-shot RAG, and rolling summaries can still lose low-frequency but critical logical anchors in long-horizon tasks. PCP aims to make context addressable, drillable, foldable, and auditable instead of rebuilding it as ad hoc text each turn.
+- **The model owns active context**: the model or harness controls its working
+  set, search plan, and compaction strategy.
+- **The user owns long-term context**: history is not bound to one model,
+  provider, session, or project directory.
+- **Stable logical identity**: Pages and Revisions keep stable IDs across model
+  windows and storage locations.
+- **Recoverable raw history**: authorized sources remain searchable; summaries
+  and model organization are rebuildable derived layers.
+- **Explicit scope**: a unified address space is not global injection;
+  cross-project recall requires Scope, permission, or explicit Relations.
+- **Strategy neutrality**: Stores may expose grep, full-text, semantic, temporal,
+  and graph access surfaces for models to choose among.
 
-### Validation Status
+### What PCP Does Not Prescribe
 
-PCP is currently a protocol and engineering design draft. Its claims should be validated empirically with implementation benchmarks such as evidence recall, context pollution, summary loss, `Consult` success rate, cost, and latency.
+PCP no longer mandates four processors, Intent Focus, fixed zoom levels, an XML
+Linear Flow, Chain-of-Thought, or a `Consult/Explore/Shelve/Purge` state machine.
+It defines only Page, Scope, Revision, Provenance, Relation, and basic context I/O
+semantics.
 
-### Same-Origin Memory Layer
+### Current Status
 
-The PCP-native Memory profile now lives in this repository. See [memory/SPEC.md](memory/SPEC.md) for the same-origin persistent Page Store contract, including `QueryMemory`, `FetchMemory`, `content_mode`, `available_modes`, versioning, and provenance.
+`v0.4.0-draft` is a backward-incompatible redesign focused on the minimal Core
+and interface boundary. Implementations, cross-model behavior, and evaluation on
+millions of tokens of high-density context remain future work.
+
+The complete `v0.3.0-alpha` generation is preserved as a significant design
+stage, together with its deprecation rationale and migration notes:
+[deprecated/v0.3.0-alpha](deprecated/v0.3.0-alpha/README.md).
 
 ---
 
 ## 技术详情 (Technical Specification)
 
-详细协议规范请查阅 / Please refer to: **[PROTOCOL.md (CN)](PROTOCOL.md)** | **[PROTOCOL-en.md (EN)](PROTOCOL-en.md)** | **[memory/SPEC.md](memory/SPEC.md)**.
+当前协议 / Current specification:
+**[PROTOCOL.md (CN)](PROTOCOL.md)** | **[PROTOCOL-en.md (EN)](PROTOCOL-en.md)**
+
+历史版本 / Historical generations:
+**[deprecated/](deprecated/README.md)**

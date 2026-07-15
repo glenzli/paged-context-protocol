@@ -1,5 +1,9 @@
 # PCP-Native Memory Profile (P-Mem) - v0.1-draft
 
+> **Deprecated with PCP v0.3.0-alpha.** This profile is preserved as a design
+> record. See [../README.md](../README.md) and the current
+> [PCP specification](../../../PROTOCOL-en.md).
+
 ## 0. Scope
 
 PCP-native Memory, also called Paged Memory or P-Mem, is the same-origin
