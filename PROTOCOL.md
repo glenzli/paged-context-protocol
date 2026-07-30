@@ -3,13 +3,15 @@
 > **状态：草案。** 本文重新定义 PCP Core。它与已归档的
 > [v0.3.0-alpha](deprecated/v0.3.0-alpha/README.md) 不向后兼容。
 
-Paged-Context-Protocol（PCP）是一套面向模型的、用户拥有的逻辑上下文存储协议。
-它使不同模型能够通过普通工具接口访问和维护跨会话、跨项目、跨时间的上下文，而不要求
-模型遵循固定的路由、压缩、变焦或推理流程。
+Paged-Context-Protocol（PCP）是一套面向模型的、用户拥有的逻辑上下文基础协议。这里的
+Context 不仅指模型当前窗口，也包括跨会话、跨项目、跨时间存在于 Storage、Memory 与
+active attention 中的连续信息空间。PCP 使不同模型能够通过普通工具接口访问和维护这一
+空间，而不要求模型遵循固定的路由、压缩、变焦或推理流程。
 
 PCP 的核心定位是：
 
-> **定义可被模型寻址的上下文 backing store，而不是定义模型应当如何运行。**
+> **定义跨持久 Storage、模型 Memory 与 active attention 的统一 Page 空间，以及内容在
+> 其中被发现、投影和物化的语义；不定义模型应当如何推理。**
 
 ## 0. 规范语言与范围
 
@@ -19,13 +21,16 @@ SHOULD 和 MAY。
 PCP Core 定义：
 
 - Page、Revision、Scope、Provenance 和 Relation 的语义；
+- 可选 Summary Projection 与 Detail 读取的寻址和来源约束；
+- 总结、派生与聚合关系所形成的可回溯无环子图；
+- 有界候选结果、读取结果与 Context Bundle 进入模型注意力时的物化边界；
 - Page 的写入、读取、搜索、修订、关联和生命周期操作；
 - 原始历史与模型派生内容之间的可恢复边界；
 - 不同模型和不同存储实现之间的互操作约束。
 
 PCP Core 不定义：
 
-- 模型何时搜索或写入；
+- 模型或 Host 使用何种策略决定何时搜索、读取、写入或纳入注意力；
 - 模型使用 grep、全文检索、语义检索还是图遍历；
 - 当前上下文窗口如何压缩、折叠或排序；
 - 固定的 Router、Worker、Consolidator 或 Auditor 拓扑；
@@ -58,6 +63,13 @@ Page 是否正在某个模型窗口中、是否被缓存、是否仅存在于持
 协议应严格约束身份、版本、作用域、来源和写入行为，同时允许模型自由选择搜索与上下文
 组织策略。模型能力越强，协议操作手册应越薄，而持久化边界不应因此变弱。
 
+### 1.6 注意力物化必须可识别
+
+候选元数据、Summary、payload 或 source span 一旦被 Host 暴露给 Model Client，就已经以
+相应分辨率进入模型可见注意力。PCP 不决定哪些内容此刻应被选中，但必须区分 Store 内部
+候选、已返回的有界发现结果和已读取的 Detail，并保留它们对应的 Page、Revision 与
+Projection 身份。
+
 ## II. 系统角色与边界
 
 PCP 只定义逻辑角色，不规定部署拓扑。
@@ -75,7 +87,7 @@ PCP 只定义逻辑角色，不规定部署拓扑。
 - 在允许时捕获原始事件；
 - 执行 Token、延迟和结果数量预算；
 - 将 PCP 接口暴露为 MCP、function tools、CLI、HTTP 或本地函数；
-- 将检索结果注入模型当前上下文。
+- 将选定的 Page Projection 物化到模型当前上下文，并按 Continuity Host 要求记录该边界。
 
 ### 2.3 PCP Store
 
@@ -84,7 +96,7 @@ PCP 只定义逻辑角色，不规定部署拓扑。
 
 ### 2.4 Adapter
 
-把外部文件、仓库、消息、数据库或其他 Memory 系统映射到 PCP Page 的组件。Adapter 必须
+把外部文件、仓库、消息、数据库或其他内容与知识系统映射到 PCP Page 的组件。Adapter 必须
 保留可回溯的来源信息，不得把一次模型摘要伪装成原始来源。
 
 ## III. 逻辑地址空间与 Scope
@@ -202,7 +214,6 @@ Page 可以表示：
     "content": "..."
   },
   "facets": {
-    "summary": "...",
     "keywords": ["compactness", "finite product"],
     "anchors": ["Theorem 4.7", "Definition 2.1"],
     "symbols": ["X", "K_i"]
@@ -210,10 +221,37 @@ Page 可以表示：
 }
 ```
 
-`facets` 全部可选。模型不生成 Summary 时，Page 仍然符合协议。Facet 是索引或读取辅助，
-不得被解释为原始证据的替代品。
+`facets` 全部可选。Facet 是索引或读取辅助，不得被解释为原始证据的替代品。
 
-### 4.5 Source Page 与 Derived Page
+### 4.5 Summary Projection 与 Detail 读取
+
+`summary` 是由模型、规则或用户为目标 Revision 生成的可选路由 Projection。Detail 则是
+从目标 Revision 读取 `payload`、`source_spans` 或其他高分辨率证据的统称，不要求存在一个
+名为 `detail` 的持久 Projection。Summary 的主要用途是让模型在有限 Token 预算内判断是否
+继续读取 Detail；它不是原始证据，也不得成为唯一可恢复副本。
+
+不是每个 Page 都必须拥有 Summary。Host 可以根据内容长度、密度或模型判断安排摘要任务，
+但协议不规定固定阈值，也不要求模型为低价值或短内容生成摘要。没有 Summary 的 Page 仍可
+通过 payload 全文、精确字符串、时间、来源和 Relation 被召回。
+
+Summary 在逻辑上必须表示为一个独立 Derived Page Revision，通过 `summarizes` Relation
+绑定到精确的目标 `revision_id`，并至少保留：
+
+- Summary 内容；
+- 创建者与创建时间；
+- 生成它的模型、工具或规则（若适用）；
+- 指向目标 Revision 和其他输入 Revision 的 provenance。
+
+实现可以在物理上内联、sidecar 存储或单独持久化 Summary，但逻辑接口必须暴露其独立
+`page_id`、`revision_id`、`summarizes` Relation 和 provenance。Summary 可以与目标
+Revision 在同一事务中创建，但不得作为目标 Revision 的可变 facet。Read 接口必须把可用
+Summary 作为目标 Revision 的可发现 `summary` Projection 暴露。生成或更新 Summary 不得
+原地修改目标 Revision 或既有 Summary Revision。
+
+Summary 与 Detail 是可按需选择的读取分辨率，不是强制运行时状态。PCP 不规定模型必须先
+读 Summary，也不规定固定的 `Summary -> Detail -> Unpacked` 调度流程。
+
+### 4.6 Source Page 与 Derived Page
 
 PCP 不要求固定 Page 类型枚举，但实现必须能够区分：
 
@@ -261,7 +299,9 @@ Relation 是带类型、可寻址来源和创建者的有向边：
 Core 推荐但不封闭以下类型：
 
 - `contains`
+- `aggregates`
 - `derived_from`
+- `summarizes`
 - `depends_on`
 - `defines`
 - `uses`
@@ -274,7 +314,17 @@ Core 推荐但不封闭以下类型：
 领域 Adapter 可以增加新的 Relation 类型。Store 必须保留类型原文，不得把所有关系折叠为
 无类型相似度边。
 
+普通 Relation 图可以包含环，例如互相 `related_to` 的节点。由 provenance 输入和
+`derived_from`、`summarizes`、`aggregates` 形成的整理子图必须保持无环。`contains` 保留为
+一般成员关系，不自动具有无环语义；派生聚合层级必须使用 `aggregates`。Store 必须拒绝会在
+整理子图中引入直接或传递环的写入。这样模型可以从 Summary 或聚合 Page 逐层回到精确来源，
+而不会进入无限整理环。
+
 ## VI. 原始事件与模型记忆
+
+本节中的“模型记忆”指由 Summary、Derived Page 和 Relation 构成的逻辑组织层，不表示 PCP
+依赖一个独立 Memory 服务、数据库或 Profile。相同 PCP Store 可以同时承载原始来源、派生
+组织和供 active context 读取的 Projection。
 
 ### 6.1 原始事件流
 
@@ -302,7 +352,20 @@ Source-backed Page 或可搜索 Event 保存：
 
 后台维护模型与前台工作模型使用同一套接口。PCP 不定义独立 Consolidator 处理器。
 
-### 6.3 非破坏性整理
+### 6.3 稀疏 Summary Index 与渐进整理
+
+实现可以只为模型认为值得建立语义入口的 Revision 生成 Summary。由这些 Summary 构成的
+索引是对原始 Page 空间的稀疏派生视图，而不是完整历史的替代品。
+
+模型或后台任务可以进一步把一组相关 Source-backed 或 Derived Page 整理成新的聚合
+Derived Page。聚合 Page 必须通过 provenance 与 `aggregates` 指向精确输入 Revision；其
+内容若由输入推导，还应使用 `derived_from`，它自身也可以拥有可选 Summary。多层聚合形成
+可逐层下钻的 DAG，而不是必须覆盖全部 Page 的单一树。
+
+是否生成单页 Summary、是否建立聚合 Page、从 Summary 下钻 Detail 还是绕过索引直接搜索
+payload，均由 Model Client 或 Host 策略决定。协议只保证这些路径可以组合、追溯和重建。
+
+### 6.4 非破坏性整理
 
 摘要、合并、去重和重组必须产生新 Revision、Relation 或 Derived Page。它们不得删除唯一的
 原始来源。物理删除只由用户授权和 Host 保留策略决定。
@@ -316,7 +379,7 @@ Source-backed Page 或可搜索 Event 保存：
 让 Model Client 发现 Store 能力。结果应包括：
 
 - 支持的搜索模式；
-- 支持的 Projection；
+- 支持的 Projection，包括是否支持独立写入 Summary；
 - 支持的 Scope 类型、Policy 与发现能力；
 - 分页、结果大小和 payload 限制；
 - 支持的 Relation 与 schema 扩展；
@@ -346,6 +409,7 @@ ListScopes 只暴露授权元数据，不应因为列出 Scope 就读取其中�
   "query": "此前是否讨论过有限乘积保持紧致性的证明路线？",
   "scopes": ["project:formal-math", "user:user_01"],
   "mode": "auto",
+  "projections": ["summary", "payload"],
   "filters": {
     "relation_types": ["depends_on", "inspired_by"],
     "created_before": null,
@@ -366,6 +430,10 @@ ListScopes 只暴露授权元数据，不应因为列出 Scope 就读取其中�
 - `hybrid`：多通道组合；
 - `auto`：由 Store 或 Model Client Adapter 选择。
 
+待搜索的 Projection 与匹配方法是正交维度。`summary`、`payload` 和显式 facets 属于搜索
+表面，不是搜索模式；例如调用者可以对 `summary` 执行 `text` 或 `semantic` 搜索。实现可以
+允许空 query 配合 `temporal` 或 `auto`，有界浏览近期 Summary Index。
+
 PCP 不规定最终相关性算法。语义分数、全文分数和图距离不得被假装为天然可比较的统一真值。
 
 Search 结果至少应返回：
@@ -373,23 +441,29 @@ Search 结果至少应返回：
 - `page_id` 与 `revision_id`；
 - Scope；
 - 匹配片段或可用 facets；
-- 匹配通道与简短 match metadata；
+- 实际命中的 Projection（例如 `summary` 或 `payload`）、匹配通道与简短 match metadata；
 - 可继续读取的 Projection；
 - 分页 cursor。
+
+Search 是有界发现与路由接口，不得隐式物化目标 Detail。返回给模型的匹配片段本身已经是
+低分辨率 attention materialization，因此必须声明命中的 Revision、Projection 和范围，并
+计入结果预算。实现不得通过 `contentParts`、trace 或其他元数据字段夹带完整 Detail。若命中
+`summary` Projection，除有界匹配片段外，完整 payload 应只通过后续显式 Read 获取。
 
 ### 7.4 ReadPages
 
 读取已知 Page。推荐的 Projection：
 
 - `manifest`：Envelope 与可用能力；
+- `summary`：与目标 Revision 绑定的可选路由摘要及其 provenance；
 - `payload`：当前 Revision 的内容；
 - `source_spans`：指定来源范围；
 - `relations`：入边、出边或指定类型关系；
-- `facets`：Summary、anchors、symbols 等可选索引；
+- `facets`：keywords、anchors、symbols 等可选索引；
 - `history`：Revision 历史。
 
-Projection 是一次读取请求，不是 Page 的持久状态。PCP 不定义
-`Summary -> Detail -> Unpacked` 状态机。
+Projection 是一次读取请求的视图，不是目标 Page 的驻留状态。Summary 与 Detail 可以形成
+自然的按需读取路径，但 PCP 不定义固定的 `Summary -> Detail -> Unpacked` 状态机。
 
 ### 7.5 WritePage
 
@@ -414,18 +488,38 @@ Revision 分叉。Store 不得原地覆盖已发布 Revision。
 在 Revision 之间创建 typed Relation。实现可以允许 Relation 自身拥有 Revision，但至少必须
 保留创建者、时间和来源端点。
 
-### 7.8 SuppressPages
+### 7.8 WriteSummary
+
+为一个精确目标 Revision 创建或修订可选 Summary Projection。请求应支持：
+
+- `target_revision_id`；
+- 修订既有 Summary 时的 `summary_page_id`；
+- Summary 内容；
+- 创建者、模型或工具标识；
+- 指向目标 Revision 和其他输入 Revision 的 provenance；
+- 可选 `expected_summary_revision_id`；
+- idempotency key。
+
+Store 必须返回 Summary Derived Page 的 `summary_page_id` 与 `summary_revision_id`。修订
+既有 Summary 时，调用者未提供正确的 `expected_summary_revision_id`，Store 应报告冲突，
+而不是静默覆盖。创建另一个 Summary 不得静默替换目标已有 Summary。Summary 的写入权限
+不得高于读取其目标和输入 Revision 的权限。
+
+实现可以采用不同物理布局，但必须维持 Derived Page、`summarizes` Relation 与独立 Revision
+的逻辑语义，不得原地修改已经发布的目标 Revision。
+
+### 7.9 SuppressPages
 
 在指定任务、会话或查询范围内降低或禁止 Page 召回。Suppress 不改变 Page 的 durable
 状态，不应自动传播为全局负反馈。
 
-### 7.9 TombstonePage 与 DeletePage
+### 7.10 TombstonePage 与 DeletePage
 
 - `TombstonePage` 表示 Page 已废弃、撤回或不应进入普通召回，但保留审计和关系完整性。
 - `DeletePage` 表示物理删除，必须受用户权限、保留策略和法规要求控制。
 - Model Client 可以建议 tombstone，不应默认拥有不可恢复删除用户历史的权限。
 
-### 7.10 IngestEvent
+### 7.11 IngestEvent
 
 Host-facing 接口，用于写入原始消息、工具事件或项目状态变化。Ingest 必须支持幂等键，以避免
 重试产生重复历史。
@@ -450,7 +544,16 @@ Host-facing 接口，用于写入原始消息、工具事件或项目状态变�
 先计算定理依赖闭包，再让模型补充类比、历史讨论和隐藏前提。PCP 不强制哪一种结果拥有最终
 优先级，但接口必须保留结果来源与关系类型。
 
-### 8.3 Context Bundle
+### 8.3 Attention Materialization 与 Context Bundle
+
+任何 Search 匹配片段或 Read Projection 被 Host 暴露给 Model Client 时，都发生了一次
+attention materialization。仍停留在 Store 内部的候选不算已进入模型注意力。PCP 不规定
+Host 或模型采用何种准入算法，但 Continuity Host 应能够记录：
+
+- `context_id`、任务或会话标识；
+- `page_id`、`revision_id`、Projection 与可选 source span；
+- 物化时间与可选 Token 估算；
+- 可选选择原因、查询或上游候选引用。
 
 模型或 Host 可以把多个 Page Projection 组合成一次上下文输入。Context Bundle 可以是临时
 响应，也可以被写成 Derived Page，但它不是 PCP Core 的固定运行时容器。
@@ -524,7 +627,7 @@ Store 必须在检索和读取前执行访问控制。未授权 Page 即使高�
 ### 10.5 用户控制
 
 用户必须能够查看、导出、限制和删除其长期上下文。模型生成的隐藏摘要不得成为无法审计的
-唯一记忆副本。
+唯一长期副本。
 
 ## XI. 传输与访问表面
 
@@ -546,11 +649,13 @@ structured tools 的模型可以使用 JSON API；它们必须指向同一 Page 
 
 1. 持久化稳定 `page_id` 与不可变 `revision_id`；
 2. 强制 Scope 与访问控制；
-3. 支持 Describe、ListScopes、Search、Read、Write 和 Revise 的逻辑语义；
+3. 支持 Describe、ListScopes、Search、Read、Write、Revise 和 WriteSummary 的逻辑语义；
 4. 保留 provenance 与 source references；
 5. 区分持久 Page 与单次读取 Projection；
-6. 不以摘要替换唯一原始来源；
-7. 支持分页或结果预算，避免一次返回无界上下文。
+6. 保留调用者写入的 Summary、其目标 Revision 和派生来源，并作为可发现 Projection 返回；
+7. 阻止总结与派生子图中的直接或传递环；
+8. 不以摘要替换唯一原始来源；
+9. 支持分页或结果预算，避免一次返回无界上下文。
 
 一个 **PCP Continuity Host** 还应：
 
@@ -558,7 +663,8 @@ structured tools 的模型可以使用 JSON API；它们必须指向同一 Page 
 2. 把当前模型身份、Scope 和权限传递给 Store；
 3. 为模型暴露能力发现与基本 Page 操作；
 4. 保留检索结果的 Page/Revision 引用；
-5. 将不可恢复删除留给用户或明确的保留策略。
+5. 区分内部候选与已暴露给模型的 Projection，并记录可用的 attention materialization 引用；
+6. 将不可恢复删除留给用户或明确的保留策略。
 
 一个 **PCP Adapter** 至少必须：
 
@@ -572,7 +678,8 @@ structured tools 的模型可以使用 JSON API；它们必须指向同一 Page 
 PCP 不试图：
 
 - 替代模型提供商的上下文窗口或原生 compaction；
-- 保证模型一定会在正确时间调用 Memory；
+- 替模型或 Host 决定具体内容何时应进入注意力；
+- 保证模型一定会在最佳时机搜索或读取；
 - 规定唯一的检索、索引或排序算法；
 - 把所有历史自动注入每次请求；
 - 通过存储时间或模型总结自动确定事实真伪；
@@ -582,7 +689,7 @@ PCP 不试图：
 
 - Page payload 的通用 schema 是否应保持完全开放，或提供少量标准 profile；
 - Relation 是否需要独立 Revision 与权限模型；
-- Context Bundle 是否需要标准化的预算和排序元数据；
+- Attention Materialization 与 Context Bundle 是否需要标准化的预算、排序和保留元数据；
 - 如何表达多模型对同一 Derived Page 的分歧；
 - 如何在用户可控删除与来源图完整性之间取得一致行为；
 - 哪些事件应由 Continuity Host 默认摄入，哪些必须显式授权；

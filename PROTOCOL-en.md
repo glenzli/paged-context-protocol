@@ -5,14 +5,17 @@
 > [v0.3.0-alpha](deprecated/v0.3.0-alpha/README.md) generation.
 
 Paged-Context-Protocol (PCP) is a model-facing, user-owned logical context
-storage protocol. It allows different models to access and maintain context
-across sessions, projects, and time through ordinary tool interfaces without
-requiring a fixed routing, compaction, zooming, or reasoning workflow.
+infrastructure protocol. Here, Context means more than the model's current
+window: it is a continuous information space spanning Storage, Memory, and
+active attention across sessions, projects, and time. PCP allows different
+models to access and maintain that space through ordinary tool interfaces
+without requiring a fixed routing, compaction, zooming, or reasoning workflow.
 
 PCP's core position is:
 
-> **Define a model-addressable backing store for context, not a procedure for
-> running the model.**
+> **Define a unified Page space across persistent Storage, model Memory, and
+> active attention, together with the semantics by which content is discovered,
+> projected, and materialized; do not define how the model reasons.**
 
 ## 0. Normative Language and Scope
 
@@ -22,6 +25,11 @@ normative requirements.
 PCP Core defines:
 
 - the semantics of Pages, Revisions, Scopes, Provenance, and Relations;
+- addressing and provenance constraints for optional Summary Projections and
+  Detail reads;
+- a traceable acyclic subgraph for summarization, derivation, and aggregation;
+- the materialization boundary through which bounded candidate results, read
+  results, and Context Bundles enter model attention;
 - operations for writing, reading, searching, revising, linking, and managing
   the lifecycle of Pages;
 - the recovery boundary between raw history and model-derived content;
@@ -29,7 +37,8 @@ PCP Core defines:
 
 PCP Core does not define:
 
-- when a model searches or writes;
+- the policy by which a model or Host decides when to search, read, write, or
+  admit content into attention;
 - whether a model uses grep, full-text search, semantic retrieval, or graph
   traversal;
 - how the active context window is compacted, folded, or ordered;
@@ -70,6 +79,15 @@ write behavior while allowing models to choose retrieval and context assembly
 strategies. As models become more capable, the protocol manual should become
 thinner without weakening persistence boundaries.
 
+### 1.6 Attention Materialization Must Be Identifiable
+
+Once candidate metadata, a Summary, a payload, or a source span is exposed by
+the Host to a Model Client, it has entered model-visible attention at that
+resolution. PCP does not decide what should be selected at a given moment, but
+it MUST distinguish Store-internal candidates, bounded discovery results that
+were returned, and Detail that was read, while preserving the corresponding
+Page, Revision, and Projection identities.
+
 ## II. System Roles and Boundaries
 
 PCP defines logical roles only. It does not prescribe deployment topology.
@@ -89,7 +107,8 @@ a PCP Store. The Host is responsible for:
 - capturing raw events when permitted;
 - enforcing token, latency, and result-count budgets;
 - exposing PCP as MCP tools, function tools, a CLI, HTTP, or local functions;
-- injecting retrieved results into the model's active context.
+- materializing selected Page Projections into active context and recording that
+  boundary when conforming as a Continuity Host.
 
 ### 2.3 PCP Store
 
@@ -100,8 +119,9 @@ object stores, or hybrid backends.
 ### 2.4 Adapter
 
 A component that maps external files, repositories, messages, databases, or
-other memory systems into PCP Pages. An Adapter MUST preserve retrievable source
-information and MUST NOT present a model-generated summary as the raw source.
+other content and knowledge systems into PCP Pages. An Adapter MUST preserve
+retrievable source information and MUST NOT present a model-generated summary
+as the raw source.
 
 ## III. Logical Address Space and Scope
 
@@ -229,7 +249,6 @@ declare a media type or schema identifier, for example:
     "content": "..."
   },
   "facets": {
-    "summary": "...",
     "keywords": ["compactness", "finite product"],
     "anchors": ["Theorem 4.7", "Definition 2.1"],
     "symbols": ["X", "K_i"]
@@ -237,11 +256,46 @@ declare a media type or schema identifier, for example:
 }
 ```
 
-Every member of `facets` is optional. A Page remains conforming when a model does
-not generate a summary. Facets are retrieval and reading aids and MUST NOT be
-treated as replacements for source evidence.
+Every member of `facets` is optional. Facets are retrieval and reading aids and
+MUST NOT be treated as replacements for source evidence.
 
-### 4.5 Source-Backed and Derived Pages
+### 4.5 Summary Projections and Detail Reads
+
+`summary` is an optional routing Projection generated for a target Revision by a
+model, rule, or user. Detail is the general act of reading that target
+Revision's `payload`, `source_spans`, or other high-resolution evidence; PCP does
+not require a persistent Projection named `detail`. A Summary's primary purpose
+is to let a model decide, within a bounded token budget, whether to read Detail.
+It is not source evidence and MUST NOT become the only recoverable copy.
+
+Not every Page needs a Summary. A Host may schedule summarization based on
+content length, density, or model judgment, but PCP does not prescribe a fixed
+threshold and does not require summaries for short or low-value content. A Page
+without a Summary remains retrievable through payload text, exact strings, time,
+source metadata, and Relations.
+
+A Summary MUST logically be represented as an independent Derived Page Revision
+with a `summarizes` Relation binding it to an exact target `revision_id`. It
+must preserve at least:
+
+- the Summary content;
+- creator and creation time;
+- the model, tool, or rule that produced it, when applicable;
+- provenance linking the target Revision and any other input Revisions.
+
+An implementation may physically inline, sidecar, or separately persist a
+Summary, but its logical interface MUST expose an independent `page_id`,
+`revision_id`, `summarizes` Relation, and provenance. A Summary may be created in
+the same transaction as its target Revision, but it MUST NOT be a mutable facet
+of that target. Read MUST expose available Summaries as discoverable `summary`
+Projections of the target Revision. Generating or updating a Summary MUST NOT
+mutate either the target Revision or an existing Summary Revision in place.
+
+Summary and Detail are selectable read resolutions, not mandatory runtime
+states. PCP does not require a model to read Summary first and does not prescribe
+a fixed `Summary -> Detail -> Unpacked` schedule.
+
+### 4.6 Source-Backed and Derived Pages
 
 PCP does not require a closed Page-type enum, but implementations MUST be able to
 distinguish:
@@ -294,7 +348,9 @@ A Relation is a typed, directed edge with addressable endpoints and authorship:
 Core recommends, but does not close, the following vocabulary:
 
 - `contains`
+- `aggregates`
 - `derived_from`
+- `summarizes`
 - `depends_on`
 - `defines`
 - `uses`
@@ -307,7 +363,22 @@ Core recommends, but does not close, the following vocabulary:
 Domain Adapters may add Relation types. A Store MUST preserve the original type
 and MUST NOT collapse all relationships into untyped similarity edges.
 
+The general Relation graph may contain cycles, for example between mutually
+`related_to` nodes. The organization subgraph formed by provenance inputs,
+`derived_from`, `summarizes`, and `aggregates` MUST remain acyclic. `contains`
+remains a general membership Relation and does not automatically carry acyclic
+semantics; derivational aggregation hierarchies MUST use `aggregates`. A Store
+MUST reject writes that introduce a direct or transitive cycle in the
+organization subgraph. This allows a model to descend from summaries and
+aggregate Pages to exact sources without entering an infinite organization
+loop.
+
 ## VI. Raw Events and Model Memory
+
+In this section, model Memory means the logical organization layer formed by
+Summaries, Derived Pages, and Relations. It does not require a separate Memory
+service, database, or profile. The same PCP Store may hold raw sources, derived
+organization, and Projections read into active context.
 
 ### 6.1 Raw Event Stream
 
@@ -339,7 +410,25 @@ quality long-term Pages, including:
 Background maintenance models and foreground working models use the same
 interfaces. PCP does not define a separate Consolidator processor.
 
-### 6.3 Non-Destructive Organization
+### 6.3 Sparse Summary Index and Progressive Organization
+
+An implementation may generate Summaries only for Revisions that a model judges
+worth a semantic entry point. The resulting Summary index is a sparse derived
+view over the raw Page space, not a replacement for complete history.
+
+A model or background task may further organize related Source-backed or
+Derived Pages into a new aggregate Derived Page. The aggregate Page MUST point
+to exact input Revisions through provenance and `aggregates`; when its content
+is inferred from those inputs, it SHOULD also use `derived_from`. It may have
+its own optional Summary. Multi-level aggregation forms a drill-down DAG rather
+than a single tree that must cover every Page.
+
+Whether to generate a local Summary, create an aggregate Page, descend from
+Summary to Detail, or bypass the index and search payload directly remains a
+Model Client or Host policy. PCP guarantees only that these paths are
+composable, traceable, and rebuildable.
+
+### 6.4 Non-Destructive Organization
 
 Summarization, merging, deduplication, and reorganization MUST produce new
 Revisions, Relations, or Derived Pages. They MUST NOT remove the only raw source.
@@ -355,7 +444,7 @@ fields but MUST preserve the core behavior.
 Allows a Model Client to discover Store capabilities. The result SHOULD include:
 
 - supported search modes;
-- supported Projections;
+- supported Projections, including independently writable Summary support;
 - supported Scope types, policies, and discovery capabilities;
 - pagination, result-size, and payload limits;
 - supported Relations and schema extensions;
@@ -387,6 +476,7 @@ Returns candidate Page Revisions from authorized Scopes.
   "query": "Did we previously discuss a proof that finite products preserve compactness?",
   "scopes": ["project:formal-math", "user:user_01"],
   "mode": "auto",
+  "projections": ["summary", "payload"],
   "filters": {
     "relation_types": ["depends_on", "inspired_by"],
     "created_before": null,
@@ -407,6 +497,12 @@ Search modes may include:
 - `hybrid`: multiple retrieval channels;
 - `auto`: selected by the Store or a Model Client Adapter.
 
+The Projections being searched and the matching method are orthogonal
+dimensions. `summary`, `payload`, and explicit facets are search surfaces, not
+search modes; for example, a caller may apply `text` or `semantic` search to
+`summary`. An implementation may allow an empty query with `temporal` or `auto`
+to browse a bounded recent Summary index.
+
 PCP does not define the final relevance algorithm. Semantic scores, full-text
 scores, and graph distance MUST NOT be presented as a naturally comparable
 single ground-truth value.
@@ -416,23 +512,36 @@ Search results MUST include at least:
 - `page_id` and `revision_id`;
 - Scope;
 - a matching excerpt or available facets;
-- the match channel and compact match metadata;
+- the Projection actually matched, such as `summary` or `payload`, together
+  with the match channel and compact match metadata;
 - available read Projections;
 - a pagination cursor.
+
+Search is a bounded discovery and routing interface; it MUST NOT implicitly
+materialize target Detail. A matching excerpt returned to a model is itself a
+low-resolution attention materialization, so it MUST declare the matched
+Revision, Projection, and range and count against the result budget.
+Implementations MUST NOT smuggle complete Detail through `contentParts`, traces,
+or other metadata fields. When the matched Projection is `summary`, the complete
+payload SHOULD be obtained only through a later explicit Read, apart from the
+bounded matching excerpt.
 
 ### 7.4 ReadPages
 
 Reads known Pages. Recommended Projections include:
 
 - `manifest`: Envelope and available capabilities;
+- `summary`: the optional routing summary bound to the target Revision and its
+  provenance;
 - `payload`: content of the current Revision;
 - `source_spans`: selected source ranges;
 - `relations`: incoming, outgoing, or typed Relations;
-- `facets`: optional summaries, anchors, symbols, and indexes;
+- `facets`: optional keywords, anchors, symbols, and indexes;
 - `history`: Revision history.
 
-A Projection belongs to a read request, not to persistent Page state. PCP does
-not define a `Summary -> Detail -> Unpacked` state machine.
+A Projection is a view requested by a read operation, not a residency state of
+the target Page. Summary and Detail may form a natural on-demand read path, but
+PCP does not define a fixed `Summary -> Detail -> Unpacked` state machine.
 
 ### 7.5 WritePage
 
@@ -459,13 +568,37 @@ Creates a typed Relation between Revisions. An implementation may version
 Relations independently, but it MUST at least preserve authorship, time, and both
 endpoints.
 
-### 7.8 SuppressPages
+### 7.8 WriteSummary
+
+Creates or revises an optional Summary Projection for one exact target Revision.
+A request SHOULD support:
+
+- `target_revision_id`;
+- `summary_page_id` when revising an existing Summary;
+- Summary content;
+- creator and model or tool identity;
+- provenance linking the target and any other input Revisions;
+- an optional `expected_summary_revision_id`;
+- an idempotency key.
+
+The Store MUST return the Summary Derived Page's `summary_page_id` and
+`summary_revision_id`. When revising an existing Summary, an incorrect or absent
+`expected_summary_revision_id` SHOULD produce a conflict instead of a silent
+overwrite. Creating another Summary MUST NOT silently replace an existing
+Summary for the target. Authority to write a Summary MUST NOT exceed authority
+to read its target and input Revisions.
+
+Implementations may use different physical layouts, but they MUST preserve the
+logical semantics of a Derived Page, a `summarizes` Relation, and an independent
+Revision. They MUST NOT mutate the published target Revision in place.
+
+### 7.9 SuppressPages
 
 Reduces or prevents recall within a specified task, conversation, or query
 scope. Suppression does not change durable Page state and MUST NOT automatically
 become global negative feedback.
 
-### 7.9 TombstonePage and DeletePage
+### 7.10 TombstonePage and DeletePage
 
 - `TombstonePage` marks a Page as obsolete, withdrawn, or excluded from ordinary
   recall while preserving audit and graph integrity.
@@ -474,7 +607,7 @@ become global negative feedback.
 - A Model Client may recommend a tombstone but should not have default authority
   to irreversibly delete user history.
 
-### 7.10 IngestEvent
+### 7.11 IngestEvent
 
 A Host-facing interface for raw messages, tool events, and project-state
 changes. Ingest MUST support idempotency keys to avoid duplicate history after
@@ -503,7 +636,18 @@ model to add analogies, historical discussions, and hidden premises. PCP does
 not mandate which result has final priority, but interfaces MUST preserve result
 origin and Relation type.
 
-### 8.3 Context Bundle
+### 8.3 Attention Materialization and Context Bundles
+
+Whenever a Search matching excerpt or Read Projection is exposed by the Host to
+a Model Client, an attention materialization has occurred. Candidates that
+remain internal to the Store have not entered model attention. PCP does not
+prescribe an admission algorithm, but a Continuity Host SHOULD be able to
+record:
+
+- `context_id` and a task or conversation identifier;
+- `page_id`, `revision_id`, Projection, and an optional source span;
+- materialization time and an optional token estimate;
+- an optional selection reason, query, or upstream candidate reference.
 
 A model or Host may compose several Page Projections into one model input. A
 Context Bundle may be an ephemeral response or a persisted Derived Page, but it
@@ -588,7 +732,7 @@ content is factually true.
 
 Users MUST be able to inspect, export, restrict, and delete their long-term
 context. Hidden model-generated summaries MUST NOT become the only unauditable
-copy of memory.
+long-term copy.
 
 ## XI. Transport and Access Surfaces
 
@@ -613,11 +757,15 @@ A **PCP Core Store** MUST at minimum:
 1. persist stable `page_id` values and immutable `revision_id` values;
 2. enforce Scope and access control;
 3. support the logical semantics of Describe, ListScopes, Search, Read, Write,
-   and Revise;
+   Revise, and WriteSummary;
 4. preserve provenance and source references;
 5. distinguish persistent Pages from per-read Projections;
-6. avoid replacing the only raw source with a summary;
-7. support pagination or result budgets so that no request returns unbounded
+6. preserve caller-supplied Summaries, their target Revisions, and derivation
+   provenance, and return them as discoverable Projections;
+7. prevent direct and transitive cycles in the summarization and derivation
+   subgraph;
+8. avoid replacing the only raw source with a summary;
+9. support pagination or result budgets so that no request returns unbounded
    context.
 
 A **PCP Continuity Host** SHOULD additionally:
@@ -626,7 +774,9 @@ A **PCP Continuity Host** SHOULD additionally:
 2. pass the current model identity, Scope, and permissions to the Store;
 3. expose capability discovery and basic Page operations to models;
 4. preserve Page and Revision references in retrieval results;
-5. reserve irreversible deletion for users or explicit retention policy.
+5. distinguish internal candidates from Projections exposed to the model and
+   record available attention-materialization references;
+6. reserve irreversible deletion for users or explicit retention policy.
 
 A **PCP Adapter** MUST at minimum:
 
@@ -640,7 +790,8 @@ A **PCP Adapter** MUST at minimum:
 PCP does not attempt to:
 
 - replace provider context windows or native compaction;
-- guarantee that a model calls memory at the correct time;
+- decide for a model or Host exactly when content should enter attention;
+- guarantee that a model searches or reads at the optimal time;
 - prescribe one retrieval, indexing, or ranking algorithm;
 - automatically inject all history into every request;
 - determine truth from storage age or model summaries;
@@ -651,7 +802,8 @@ PCP does not attempt to:
 - Should Page payload schemas remain fully open, or should PCP define a small set
   of standard profiles?
 - Do Relations need independent revision and permission models?
-- Should Context Bundles standardize budget and ordering metadata?
+- Should Attention Materializations and Context Bundles standardize budget,
+  ordering, and retention metadata?
 - How should multiple models express disagreement over the same Derived Page?
 - How should user-controlled deletion preserve graph consistency?
 - Which events should a Continuity Host ingest by default, and which require
