@@ -7,11 +7,39 @@ use std::{
 use anyhow::{Context, Result};
 use pcp_client::PcpApi;
 use tokio::net::{UnixListener, UnixStream};
+use tokio::task::JoinSet;
 
 use crate::wire::{
     PcpDescriptor, RpcOperation, RpcOutcome, RpcRequest, RpcResponse, RpcValue, read_frame,
     write_frame,
 };
+
+#[derive(Clone)]
+pub struct RuntimeEndpoint {
+    pub socket_path: PathBuf,
+    pub client: Arc<dyn PcpApi>,
+}
+
+pub async fn serve_unix_endpoints(endpoints: Vec<RuntimeEndpoint>) -> Result<()> {
+    anyhow::ensure!(
+        !endpoints.is_empty(),
+        "PCP runtime requires at least one endpoint"
+    );
+    let mut tasks = JoinSet::new();
+    for endpoint in endpoints {
+        tasks.spawn(serve_unix(endpoint.socket_path, endpoint.client));
+    }
+    let outcome = tasks
+        .join_next()
+        .await
+        .context("PCP runtime endpoint set ended unexpectedly")?;
+    tasks.abort_all();
+    match outcome {
+        Ok(Ok(())) => anyhow::bail!("PCP runtime endpoint stopped unexpectedly"),
+        Ok(Err(error)) => Err(error),
+        Err(error) => Err(error).context("PCP runtime endpoint task failed"),
+    }
+}
 
 pub async fn serve_unix(socket_path: impl AsRef<Path>, client: Arc<dyn PcpApi>) -> Result<()> {
     let socket_path = socket_path.as_ref().to_path_buf();

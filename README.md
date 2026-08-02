@@ -189,13 +189,29 @@ Operator ----> CLI -----> PcpApi
 ```
 
 The runtime is optional. It gives one Store an independent lifecycle and keeps
-the AccessSession on the server side; RPC requests never carry a caller-chosen
-Principal. A single socket is one fixed trust identity. Run separate endpoints
-for symbiont-d, Codex, or another client instead of sharing a privileged Host
-socket. Socket mode is `0600`; this is a local user boundary, not protection
-against a hostile process already running as the same OS user.
+AccessSessions on the server side; RPC requests never carry a caller-chosen
+Principal. A single socket is one fixed trust identity. One broker process can
+share one Store across several separately configured sockets for symbiont-d,
+Codex, or other clients. Socket mode is `0600`; this is a local user boundary,
+not protection against a hostile process already running as the same OS user.
 
-Start an identity-bound endpoint:
+For multiple clients, start the broker from a TOML file. Relative Store and
+socket paths resolve from the config location, and `{owner_id}` inside a Scope
+is replaced after the Store opens:
+
+```bash
+cargo build --release -p pcp-runtime
+target/release/pcp-runtime --config examples/runtime.toml
+```
+
+See [`examples/runtime.toml`](examples/runtime.toml) for separate symbiont-d and
+Codex endpoints. Duplicate socket paths and Principal IDs, empty Scope sets,
+unknown fields, and unsupported access modes fail startup. If any endpoint
+cannot start or later exits, the broker stops the remaining endpoints instead
+of continuing in a partially available state.
+
+The original environment form remains available for one identity-bound
+endpoint:
 
 ```bash
 cargo build --release -p pcp-runtime -p pcp-cli -p pcp-mcp
