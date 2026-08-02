@@ -1,12 +1,13 @@
 use std::{env, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
+use pcp_client::{EmbeddedPcpClient, PcpApi};
 use pcp_core::{
     AccessPrincipal, AccessPrincipalType, AccessSession, Projection, ReadPage, ReadPagesRequest,
     SearchFilters, SearchMode, SearchPagesRequest,
 };
 use pcp_sqlite::SqlitePcpStore;
-use pcp_store::{PcpClient, PcpStore};
+use pcp_store::PcpStore;
 use serde_json::json;
 
 #[tokio::main]
@@ -37,7 +38,7 @@ async fn main() -> Result<()> {
         scopes.clone(),
     );
     let store: Arc<dyn PcpStore> = store;
-    let client = PcpClient::new(store, access);
+    let client = EmbeddedPcpClient::shared(store, access);
     match command.as_str() {
         "describe" => print_json(&client.capabilities())?,
         "scopes" => {
@@ -90,7 +91,7 @@ async fn main() -> Result<()> {
             print_json(&json!({"pages": pages}))?;
         }
         "export" => {
-            let pages = export_pages(&client, scopes).await?;
+            let pages = export_pages(client.as_ref(), scopes).await?;
             print_json(&json!({
                 "protocolVersion": client.capabilities().protocol_version,
                 "ownerId": client.owner_id(),
@@ -115,7 +116,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn export_pages(store: &PcpClient, scopes: Vec<String>) -> Result<Vec<ReadPage>> {
+async fn export_pages(store: &dyn PcpApi, scopes: Vec<String>) -> Result<Vec<ReadPage>> {
     let mut cursor = None;
     let mut revision_ids = Vec::new();
     loop {

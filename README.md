@@ -143,6 +143,7 @@ Host 行为变成协议要求：
 
 - `pcp-core`：Page、Revision、Projection、Relation 与请求类型。
 - `pcp-store`：与具体数据库无关、携带 AccessSession 的异步 Store 契约。
+- `pcp-client`：面向 Host 的传输无关能力接口，以及当前的 embedded 适配器。
 - `pcp-sqlite`：本地持久化、修订、检索、Summary、有效性与 DAG 关系。
 - `pcp-cli`：面向本地 Store 的检查、搜索、读取与导出工具。
 - `pcp-mcp`：基于官方 Rust MCP SDK 的本地 stdio 工具服务器。
@@ -154,6 +155,8 @@ behavior normative:
 - `pcp-core`: Page, Revision, Projection, Relation, and request types.
 - `pcp-store`: a database-independent async Store contract with AccessSession
   enforcement.
+- `pcp-client`: the transport-independent Host API and the current embedded
+  adapter.
 - `pcp-sqlite`: local persistence, revisioning, retrieval, Summaries, validity,
   and DAG Relations.
 - `pcp-cli`: inspection, search, read, and export commands for a local Store.
@@ -167,6 +170,24 @@ PCP_STORE_PATH=data/context.sqlite3 cargo run -p pcp-cli -- doctor
 模型如何决定写入、召回、总结或让信息进入注意力，仍属于 Model Client 或 Host 策略。
 The decision to write, recall, summarize, or admit information into attention
 remains Model Client or Host policy.
+
+### Deployment shapes
+
+PCP is a composable capability framework, not one mandatory client or daemon.
+`PcpApi` is the consumer boundary. `EmbeddedPcpClient` currently binds an
+AccessSession directly to a `PcpStore`; CLI and MCP use that same API rather
+than defining separate storage behavior:
+
+```text
+Host --------> PcpApi --> EmbeddedPcpClient --> PcpStore
+Codex -------> MCP -----> PcpApi
+Operator ----> CLI -----> PcpApi
+```
+
+A remote runtime can implement `PcpApi` without changing Host policy. That
+runtime is an optional deployment shape for shared storage, centralized access
+control, and independent lifecycle; it is not required for a single local Host
+and is not part of the protocol's normative behavior.
 
 ### Codex / MCP
 

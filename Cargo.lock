@@ -380,12 +380,23 @@ name = "pcp-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "pcp-client",
  "pcp-core",
  "pcp-sqlite",
  "pcp-store",
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "pcp-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "pcp-core",
+ "pcp-store",
 ]
 
 [[package]]
@@ -402,6 +413,7 @@ name = "pcp-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "pcp-client",
  "pcp-core",
  "pcp-sqlite",
  "pcp-store",
@@ -419,6 +431,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "pcp-client",
  "pcp-core",
  "pcp-store",
  "rusqlite",

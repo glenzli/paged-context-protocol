@@ -6,10 +6,11 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use pcp_client::EmbeddedPcpClient;
 use pcp_core::{AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, ScopeGrant};
 use pcp_mcp::PcpMcpServer;
 use pcp_sqlite::SqlitePcpStore;
-use pcp_store::{PcpClient, PcpStore};
+use pcp_store::PcpStore;
 use rmcp::{ServiceExt, transport::stdio};
 
 #[tokio::main]
@@ -72,7 +73,7 @@ async fn main() -> Result<()> {
             .await
             .with_context(|| format!("open PCP Store {}", path.display()))?,
     );
-    let service = PcpMcpServer::new(PcpClient::new(store, access))
+    let service = PcpMcpServer::new(EmbeddedPcpClient::shared(store, access))
         .serve(stdio())
         .await
         .context("start PCP MCP stdio server")?;

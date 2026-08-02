@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"
+pcp-client = { path = "../pcp-client" }
 pcp-core = { path = "../pcp-core" }
 pcp-sqlite = { path = "../pcp-sqlite" }
 pcp-store = { path = "../pcp-store" }

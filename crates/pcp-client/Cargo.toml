@@ -1,0 +1,11 @@
+[package]
+name = "pcp-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+pcp-core = { path = "../pcp-core" }
+pcp-store = { path = "../pcp-store" }

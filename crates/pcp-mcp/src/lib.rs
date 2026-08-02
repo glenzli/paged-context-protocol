@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
+use pcp_client::PcpApi;
 use pcp_core::{
     AccessAuditEvent, AccessSession, AssessPageValidityRequest, Capabilities, CreateScopeRequest,
     LinkPagesRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest, Scope,
     SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
     WriteSummaryResult, WriteValidityResult,
 };
-use pcp_store::PcpClient;
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::wrapper::{Json, Parameters},
@@ -18,7 +20,7 @@ const SERVER_INSTRUCTIONS: &str = "PCP is a durable Page/Revision context store.
 
 #[derive(Clone)]
 pub struct PcpMcpServer {
-    client: PcpClient,
+    client: Arc<dyn PcpApi>,
 }
 
 #[derive(Debug, JsonSchema, Serialize)]
@@ -111,7 +113,7 @@ pub struct AccessLogResult {
 }
 
 impl PcpMcpServer {
-    pub fn new(client: PcpClient) -> Self {
+    pub fn new(client: Arc<dyn PcpApi>) -> Self {
         Self { client }
     }
 }
@@ -457,13 +459,14 @@ fn operation_error(context: &str, error: impl std::fmt::Display) -> McpError {
 mod tests {
     use std::{sync::Arc, time::SystemTime};
 
+    use pcp_client::{EmbeddedPcpClient, PcpApi};
     use pcp_core::{
         AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType, CreateScopeRequest,
         LifecycleStatus, PagePayload, Projection, SearchFilters, SearchMode, SearchPagesRequest,
         SearchTermMatch, WritePageRequest,
     };
     use pcp_sqlite::SqlitePcpStore;
-    use pcp_store::{PcpClient, PcpStore};
+    use pcp_store::PcpStore;
     use rmcp::{ServiceExt, handler::server::wrapper::Parameters, model::CallToolRequestParams};
 
     use super::{AccessLogParams, PcpMcpServer};
@@ -626,7 +629,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    fn full_client(store: Arc<SqlitePcpStore>, scopes: Vec<String>) -> PcpClient {
+    fn full_client(store: Arc<SqlitePcpStore>, scopes: Vec<String>) -> Arc<dyn PcpApi> {
         let access = AccessSession::full_control(
             AccessPrincipal {
                 principal_id: "client:pcp-mcp-test".to_owned(),
@@ -637,6 +640,6 @@ mod tests {
             scopes,
         );
         let store: Arc<dyn PcpStore> = store;
-        PcpClient::new(store, access)
+        EmbeddedPcpClient::shared(store, access)
     }
 }

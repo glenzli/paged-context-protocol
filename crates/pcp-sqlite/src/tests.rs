@@ -3,6 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use pcp_client::{EmbeddedPcpClient, PcpApi};
 use pcp_core::{
     AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
     AssessPageValidityRequest, CreateScopeRequest, LifecycleStatus, LinkPagesRequest, PagePayload,
@@ -10,7 +11,7 @@ use pcp_core::{
     SearchMode, SearchPagesRequest, SearchTermMatch, SourceRef, ValidityStanding, WritePageRequest,
     WriteSummaryRequest,
 };
-use pcp_store::{PcpClient, PcpStore};
+use pcp_store::PcpStore;
 use serde_json::json;
 
 use super::SqlitePcpStore;
@@ -1477,9 +1478,9 @@ fn principal(principal_id: &str, principal_type: AccessPrincipalType) -> AccessP
     }
 }
 
-fn pcp_client(store: Arc<SqlitePcpStore>, access: AccessSession) -> PcpClient {
+fn pcp_client(store: Arc<SqlitePcpStore>, access: AccessSession) -> Arc<dyn PcpApi> {
     let store: Arc<dyn PcpStore> = store;
-    PcpClient::new(store, access)
+    EmbeddedPcpClient::shared(store, access)
 }
 
 #[tokio::test]
