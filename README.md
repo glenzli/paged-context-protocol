@@ -144,8 +144,9 @@ Host 行为变成协议要求：
 - `pcp-core`：Page、Revision、Projection、Relation 与请求类型。
 - `pcp-store`：与具体数据库无关、携带 AccessSession 的异步 Store 契约。
 - `pcp-client`：面向 Host 的传输无关能力接口，以及当前的 embedded 适配器。
+- `pcp-rpc`：轻量 Unix socket wire、远端 client 与通用 server transport。
 - `pcp-sqlite`：本地持久化、修订、检索、Summary、有效性与 DAG 关系。
-- `pcp-runtime`：可选的本地 Unix socket runtime 与 remote client。
+- `pcp-runtime`：打开 Store、固定接入身份并管理多端点 broker 生命周期。
 - `pcp-cli`：面向本地 Store 的检查、搜索、读取与导出工具。
 - `pcp-mcp`：基于官方 Rust MCP SDK 的本地 stdio 工具服务器。
 
@@ -158,9 +159,12 @@ behavior normative:
   enforcement.
 - `pcp-client`: the transport-independent Host API and the current embedded
   adapter.
+- `pcp-rpc`: the lightweight Unix socket wire, remote client, and generic
+  server transport.
 - `pcp-sqlite`: local persistence, revisioning, retrieval, Summaries, validity,
   and DAG Relations.
-- `pcp-runtime`: the optional local Unix socket runtime and remote client.
+- `pcp-runtime`: Store composition, fixed endpoint identities, and the
+  multi-endpoint broker lifecycle.
 - `pcp-cli`: inspection, search, read, and export commands for a local Store.
 - `pcp-mcp`: a local stdio tool server built on the official Rust MCP SDK.
 
@@ -177,9 +181,10 @@ remains Model Client or Host policy.
 
 PCP is a composable capability framework, not one mandatory client or daemon.
 `PcpApi` is the consumer boundary. `EmbeddedPcpClient` binds an AccessSession
-directly to a `PcpStore`; `RemotePcpClient` reaches the same complete API over a
-local Unix socket. CLI and MCP can use either shape without defining separate
-storage behavior:
+directly to a `PcpStore`; the lightweight `pcp-rpc` crate provides
+`RemotePcpClient` over a local Unix socket without linking SQLite or the daemon
+composition. CLI and MCP can use either shape without defining separate storage
+behavior:
 
 ```text
 Host --------> PcpApi --> EmbeddedPcpClient --> PcpStore

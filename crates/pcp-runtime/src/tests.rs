@@ -6,10 +6,11 @@ use pcp_core::{
     CreateScopeRequest, LifecycleStatus, PagePayload, Projection, SearchFilters, SearchMode,
     SearchPagesRequest, SearchTermMatch, WritePageRequest,
 };
+use pcp_rpc::{RemotePcpClient, RuntimeEndpoint, serve_unix, serve_unix_endpoints};
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 
-use crate::{RemotePcpClient, RuntimeConfig, RuntimeEndpoint, serve_unix, serve_unix_endpoints};
+use crate::RuntimeConfig;
 
 #[test]
 fn runtime_config_resolves_paths_and_owner_scope_placeholders() {

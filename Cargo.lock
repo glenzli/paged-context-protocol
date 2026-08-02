@@ -409,7 +409,7 @@ dependencies = [
  "anyhow",
  "pcp-client",
  "pcp-core",
- "pcp-runtime",
+ "pcp-rpc",
  "pcp-sqlite",
  "pcp-store",
  "serde",
@@ -443,7 +443,7 @@ dependencies = [
  "anyhow",
  "pcp-client",
  "pcp-core",
- "pcp-runtime",
+ "pcp-rpc",
  "pcp-sqlite",
  "pcp-store",
  "rmcp",
@@ -454,17 +454,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "pcp-runtime"
+name = "pcp-rpc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "pcp-client",
  "pcp-core",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "pcp-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "pcp-client",
+ "pcp-core",
+ "pcp-rpc",
  "pcp-sqlite",
  "pcp-store",
  "serde",
- "serde_json",
  "tokio",
  "toml",
 ]

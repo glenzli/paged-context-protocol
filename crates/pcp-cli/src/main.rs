@@ -6,7 +6,7 @@ use pcp_core::{
     AccessPrincipal, AccessPrincipalType, AccessSession, Projection, ReadPage, ReadPagesRequest,
     SearchFilters, SearchMode, SearchPagesRequest,
 };
-use pcp_runtime::RemotePcpClient;
+use pcp_rpc::RemotePcpClient;
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 use serde_json::json;

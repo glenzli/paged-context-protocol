@@ -8,7 +8,8 @@ use std::{
 use anyhow::{Context, Result};
 use pcp_client::{AccessMode, EmbeddedPcpClient};
 use pcp_core::{AccessPrincipal, AccessPrincipalType};
-use pcp_runtime::{RuntimeConfig, RuntimeEndpoint, serve_unix, serve_unix_endpoints};
+use pcp_rpc::{RuntimeEndpoint, serve_unix, serve_unix_endpoints};
+use pcp_runtime::RuntimeConfig;
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 

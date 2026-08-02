@@ -3,6 +3,7 @@ members = [
     "crates/pcp-core",
     "crates/pcp-store",
     "crates/pcp-client",
+    "crates/pcp-rpc",
     "crates/pcp-sqlite",
     "crates/pcp-cli",
     "crates/pcp-mcp",

@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use pcp_client::{AccessMode, EmbeddedPcpClient, PcpApi};
 use pcp_core::{AccessPrincipal, AccessPrincipalType};
 use pcp_mcp::PcpMcpServer;
-use pcp_runtime::RemotePcpClient;
+use pcp_rpc::RemotePcpClient;
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 use rmcp::{ServiceExt, transport::stdio};
