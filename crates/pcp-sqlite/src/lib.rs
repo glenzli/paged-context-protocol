@@ -1,3 +1,4 @@
+mod access;
 mod adapter;
 mod inventory;
 mod read;

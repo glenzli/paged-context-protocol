@@ -137,6 +137,34 @@ Host 可以提供以下策略，但它们不是 Core 的固定枚举：
 - `linked`：当前 Scope 加显式关联的 Scope；
 - `global`：用户授权的全局范围。
 
+### 3.4 接入端身份与访问会话
+
+PCP 必须区分内容的 `Actor` 与访问 Store 的 `AccessPrincipal`：
+
+- `Actor` 表示谁产生、修订或总结了内容，并进入 Provenance；
+- `AccessPrincipal` 表示哪个 Host、模型客户端、CLI 或服务正在访问 Store；
+- `AccessSession` 由受信任的接入层建立，绑定 Principal、会话 ID 和精确的 Scope Grant；
+- `ScopeGrant` 声明该 Principal 在一个 Scope 中可执行的操作，例如 Search、读取 Summary、
+  读取 Detail、Write、Revise、Summarize、Link、Assess 或管理 Scope。
+
+模型不得通过普通工具参数自行声明或扩大 AccessSession。MCP stdio 实现可以将一项服务器配置
+视为一个 Principal；远程传输则必须由认证层把凭据映射为 AccessSession。
+
+Store 必须把 Grant 作为强制上限，并在相关性排序、图遍历和 Projection 物化之前执行授权。
+Relation 不授予另一端的读取权限；无权读取另一端时，关系投影和图搜索不得泄露其 Revision。
+
+将一个 Scope 的内容派生、总结或判断到另一个 Scope，可能构成信息降级。实现必须默认拒绝，
+除非 AccessSession 对目标 Scope 拥有显式的跨 Scope 派生权限。普通的跨 Scope Relation 不等于
+内容派生，也不得自动获得该权限。
+
+Grant 不能撤销已经进入同一模型上下文的信息。需要强信息流隔离时，Host 不得让同一
+AccessSession 同时拥有敏感来源 Scope 的读取权和另一目标 Scope 的写入权；应使用不同接入
+实例、不同模型上下文或等价的受信任信息流控制。`derive_across_scopes` 约束标准 PCP 派生
+操作，但不能把一个已经同时获得读写能力的模型变成安全的去分类器。
+
+兼容实现应记录不含查询正文和 Page 内容的访问元数据，包括 Principal、Session、操作、Scope、
+时间与结果。访问日志本身仍受 Scope 和 Audit 权限约束。
+
 ## IV. Page 与 Revision
 
 ### 4.1 Page

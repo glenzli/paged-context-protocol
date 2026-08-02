@@ -1,6 +1,11 @@
+mod access;
 mod model;
 mod request;
 
+pub use access::{
+    AccessAuditEvent, AccessDecision, AccessPermission, AccessPrincipal, AccessPrincipalType,
+    AccessSession, ScopeGrant,
+};
 pub use model::{
     Actor, ActorType, Capabilities, LifecycleStatus, PagePayload, PageRevision, PageSummary,
     PageValidity, PageValidityHint, Projection, ProvenanceEvent, ReadPage, Relation, Scope,

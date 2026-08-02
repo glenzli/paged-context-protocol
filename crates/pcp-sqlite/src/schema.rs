@@ -147,6 +147,17 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 PRIMARY KEY (actor_id, operation, idempotency_key)
             );
 
+            CREATE TABLE IF NOT EXISTS pcp_access_log (
+                event_id TEXT PRIMARY KEY,
+                occurred_at TEXT NOT NULL,
+                principal_json TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                scopes_json TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                detail TEXT
+            );
+
             CREATE VIRTUAL TABLE IF NOT EXISTS pcp_revision_fts USING fts5(
                 revision_id UNINDEXED,
                 page_id UNINDEXED,
@@ -181,6 +192,8 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 ON pcp_validity_assessments(target_revision_id, assessed_at DESC);
             CREATE INDEX IF NOT EXISTS pcp_validity_standing
                 ON pcp_validity_assessments(standing, assessed_at DESC);
+            CREATE INDEX IF NOT EXISTS pcp_access_log_time
+                ON pcp_access_log(occurred_at DESC, event_id DESC);
 
             INSERT OR IGNORE INTO pcp_metadata (key, value)
             VALUES ('provenance_input_index_version', '0');

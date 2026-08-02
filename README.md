@@ -142,7 +142,7 @@ stage, together with its deprecation rationale and migration notes:
 Host 行为变成协议要求：
 
 - `pcp-core`：Page、Revision、Projection、Relation 与请求类型。
-- `pcp-store`：与具体数据库无关、可供 Host 注入的异步 Store 契约。
+- `pcp-store`：与具体数据库无关、携带 AccessSession 的异步 Store 契约。
 - `pcp-sqlite`：本地持久化、修订、检索、Summary、有效性与 DAG 关系。
 - `pcp-cli`：面向本地 Store 的检查、搜索、读取与导出工具。
 - `pcp-mcp`：基于官方 Rust MCP SDK 的本地 stdio 工具服务器。
@@ -152,7 +152,8 @@ the protocol boundary without making one database, retrieval policy, or Host
 behavior normative:
 
 - `pcp-core`: Page, Revision, Projection, Relation, and request types.
-- `pcp-store`: a database-independent async Store contract for Host injection.
+- `pcp-store`: a database-independent async Store contract with AccessSession
+  enforcement.
 - `pcp-sqlite`: local persistence, revisioning, retrieval, Summaries, validity,
   and DAG Relations.
 - `pcp-cli`: inspection, search, read, and export commands for a local Store.
@@ -169,21 +170,15 @@ remains Model Client or Host policy.
 
 ### Codex / MCP
 
-Build the local stdio server, then opt in from Codex with the exact Store path:
+Build the local stdio server, then opt in with one explicit client identity,
+access mode, and Scope set:
 
 ```bash
 cargo build --release -p pcp-mcp
 codex mcp add pcp \
   --env PCP_STORE_PATH=/absolute/path/to/context.sqlite3 \
-  -- /absolute/path/to/paged-context-protocol/target/release/pcp-mcp
-```
-
-Limit the server to specific namespaces when a task should not see the entire
-Store:
-
-```bash
-codex mcp add pcp-project \
-  --env PCP_STORE_PATH=/absolute/path/to/context.sqlite3 \
+  --env PCP_CLIENT_ID=codex:project-example \
+  --env PCP_ACCESS_MODE=read \
   --env PCP_ALLOWED_SCOPES=project:example,conversation:example-main \
   -- /absolute/path/to/paged-context-protocol/target/release/pcp-mcp
 ```
@@ -193,9 +188,19 @@ The equivalent project or user configuration is:
 ```toml
 [mcp_servers.pcp]
 command = "/absolute/path/to/paged-context-protocol/target/release/pcp-mcp"
-env = { PCP_STORE_PATH = "/absolute/path/to/context.sqlite3" }
+env = { PCP_STORE_PATH = "/absolute/path/to/context.sqlite3", PCP_CLIENT_ID = "codex:project-example", PCP_ACCESS_MODE = "read", PCP_ALLOWED_SCOPES = "project:example,conversation:example-main" }
 default_tools_approval_mode = "writes"
 ```
+
+`PCP_ACCESS_MODE` is `read`, `write`, or `admin`. Cross-Scope derivation remains
+disabled even in admin mode; a trusted integration must separately set
+`PCP_ALLOW_CROSS_SCOPE_DERIVATION=1`. `pcp_whoami` shows the server-injected
+Principal and grants. `pcp_access_log` returns metadata-only events when the
+session has Audit permission.
+
+For strong isolation, use separate MCP entries and model contexts instead of a
+single `write` client spanning mutually private Scopes. Storage authorization
+cannot retract information that is already visible in one model context.
 
 Read tools search and materialize context without mutation. Page, Summary,
 Relation, Scope, and validity tools are marked as writes so Codex can apply the

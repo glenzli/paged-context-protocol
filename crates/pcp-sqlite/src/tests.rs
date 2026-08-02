@@ -1,14 +1,321 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use pcp_core::{
-    Actor, ActorType, AssessPageValidityRequest, CreateScopeRequest, LifecycleStatus,
-    LinkPagesRequest, PagePayload, Projection, ProvenanceEvent, ReadPagesRequest,
-    RevisePageRequest, SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch, SourceRef,
-    ValidityStanding, WritePageRequest, WriteSummaryRequest,
+    AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
+    AssessPageValidityRequest, CreateScopeRequest, LifecycleStatus, LinkPagesRequest, PagePayload,
+    Projection, ProvenanceEvent, ReadPagesRequest, RevisePageRequest, ScopeGrant, SearchFilters,
+    SearchMode, SearchPagesRequest, SearchTermMatch, SourceRef, ValidityStanding, WritePageRequest,
+    WriteSummaryRequest,
 };
+use pcp_store::{PcpClient, PcpStore};
 use serde_json::json;
 
 use super::SqlitePcpStore;
+
+#[tokio::test]
+async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-sqlite-access-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("pcp.sqlite3"))
+            .await
+            .expect("open store"),
+    );
+    let owner_id = store.owner_id().to_owned();
+    let scope_a = "project:access-a".to_owned();
+    let scope_b = "project:access-b".to_owned();
+    let admin = pcp_client(
+        Arc::clone(&store),
+        AccessSession::full_control(
+            principal("host:access-admin", AccessPrincipalType::Host),
+            "session:access-admin",
+            vec![scope_a.clone(), scope_b.clone()],
+        ),
+    );
+    for namespace in [&scope_a, &scope_b] {
+        admin
+            .create_scope(CreateScopeRequest {
+                owner_id: owner_id.clone(),
+                namespace: namespace.clone(),
+                scope_type: "project".to_owned(),
+                display_name: namespace.clone(),
+                description: None,
+                parent_namespace: None,
+                visibility: "private".to_owned(),
+            })
+            .await
+            .expect("create access test Scope");
+    }
+    let actor = Actor {
+        actor_type: ActorType::Model,
+        actor_id: "model:access-test".to_owned(),
+    };
+    let page_a = admin
+        .write_page(write_request(
+            &owner_id,
+            &scope_a,
+            actor.clone(),
+            "Visible only to client A.",
+            "access:a",
+        ))
+        .await
+        .expect("write Scope A page");
+    let page_b = admin
+        .write_page(write_request(
+            &owner_id,
+            &scope_b,
+            actor.clone(),
+            "Private beta launch detail.",
+            "access:b",
+        ))
+        .await
+        .expect("write Scope B page");
+    admin
+        .link_pages(LinkPagesRequest {
+            from_revision_id: page_a.revision_id.clone(),
+            relation_type: "related_to".to_owned(),
+            to_revision_id: page_b.revision_id.clone(),
+            created_by: actor.clone(),
+            idempotency_key: Some("access:cross-link".to_owned()),
+        })
+        .await
+        .expect("link across authorized Scopes");
+
+    let client_a = pcp_client(
+        Arc::clone(&store),
+        AccessSession::read_only(
+            principal("client:access-a", AccessPrincipalType::ModelClient),
+            "session:access-a",
+            vec![scope_a.clone()],
+        ),
+    );
+    let search = client_a
+        .search_pages(SearchPagesRequest {
+            query: "beta launch".to_owned(),
+            scopes: Vec::new(),
+            mode: SearchMode::Text,
+            term_match: SearchTermMatch::All,
+            projections: vec![Projection::Payload],
+            filters: SearchFilters::default(),
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .expect("search authorized Scope");
+    assert!(search.hits.is_empty());
+    assert!(
+        client_a
+            .read_pages(ReadPagesRequest {
+                revision_ids: vec![page_b.revision_id.clone()],
+                projections: vec![Projection::Payload],
+                max_chars: 4_000,
+            })
+            .await
+            .is_err()
+    );
+    assert!(
+        client_a
+            .current_revision_id(page_b.page_id.clone())
+            .await
+            .is_err()
+    );
+    let page_with_relations = client_a
+        .read_pages(ReadPagesRequest {
+            revision_ids: vec![page_a.revision_id.clone()],
+            projections: vec![Projection::Relations],
+            max_chars: 4_000,
+        })
+        .await
+        .expect("read Scope A relations");
+    assert!(page_with_relations[0].relations.is_empty());
+    let graph = client_a
+        .search_pages(SearchPagesRequest {
+            query: page_a.revision_id.clone(),
+            scopes: Vec::new(),
+            mode: SearchMode::Graph,
+            term_match: SearchTermMatch::All,
+            projections: vec![Projection::Payload],
+            filters: SearchFilters::default(),
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .expect("traverse only authorized graph neighbors");
+    assert!(graph.hits.is_empty());
+
+    let summary_only_client = pcp_client(
+        Arc::clone(&store),
+        AccessSession::new(
+            principal("client:summary-only", AccessPrincipalType::ModelClient),
+            "session:summary-only",
+            vec![ScopeGrant {
+                namespace: scope_a.clone(),
+                permissions: vec![AccessPermission::Search, AccessPermission::ReadSummary],
+            }],
+        ),
+    );
+    assert!(
+        summary_only_client
+            .search_pages(SearchPagesRequest {
+                query: "visible".to_owned(),
+                scopes: Vec::new(),
+                mode: SearchMode::Text,
+                term_match: SearchTermMatch::All,
+                projections: Vec::new(),
+                filters: SearchFilters::default(),
+                limit: 10,
+                cursor: None,
+            })
+            .await
+            .is_err()
+    );
+
+    let restricted_writer = pcp_client(
+        Arc::clone(&store),
+        AccessSession::new(
+            principal("client:restricted-writer", AccessPrincipalType::Service),
+            "session:restricted-writer",
+            vec![
+                ScopeGrant {
+                    namespace: scope_a.clone(),
+                    permissions: vec![AccessPermission::ReadDetail],
+                },
+                ScopeGrant {
+                    namespace: scope_b.clone(),
+                    permissions: vec![AccessPermission::Write],
+                },
+            ],
+        ),
+    );
+    let mut derived = write_request(
+        &owner_id,
+        &scope_b,
+        actor.clone(),
+        "Derived from Scope A.",
+        "access:derived-denied",
+    );
+    derived.provenance = vec![ProvenanceEvent {
+        operation: "derive".to_owned(),
+        actor: actor.clone(),
+        timestamp: "2026-08-03T00:00:00Z".to_owned(),
+        input_revision_ids: vec![page_a.revision_id.clone()],
+        tool_or_model: Some("access-test".to_owned()),
+    }];
+    assert!(restricted_writer.write_page(derived).await.is_err());
+
+    let cross_scope_writer = pcp_client(
+        Arc::clone(&store),
+        AccessSession::new(
+            principal("client:cross-scope-writer", AccessPrincipalType::Service),
+            "session:cross-scope-writer",
+            vec![
+                ScopeGrant {
+                    namespace: scope_a.clone(),
+                    permissions: vec![AccessPermission::ReadDetail],
+                },
+                ScopeGrant {
+                    namespace: scope_b.clone(),
+                    permissions: vec![
+                        AccessPermission::Write,
+                        AccessPermission::DeriveAcrossScopes,
+                    ],
+                },
+            ],
+        ),
+    );
+    let mut derived = write_request(
+        &owner_id,
+        &scope_b,
+        actor.clone(),
+        "Explicitly derived from Scope A.",
+        "access:derived-allowed",
+    );
+    derived.provenance = vec![ProvenanceEvent {
+        operation: "derive".to_owned(),
+        actor,
+        timestamp: "2026-08-03T00:00:00Z".to_owned(),
+        input_revision_ids: vec![page_a.revision_id],
+        tool_or_model: Some("access-test".to_owned()),
+    }];
+    let derived = cross_scope_writer
+        .write_page(derived)
+        .await
+        .expect("explicitly allow cross-Scope derivation");
+
+    let client_b = pcp_client(
+        Arc::clone(&store),
+        AccessSession::read_only(
+            principal("client:access-b", AccessPrincipalType::ModelClient),
+            "session:access-b",
+            vec![scope_b.clone()],
+        ),
+    );
+    let derived_page = client_b
+        .read_pages(ReadPagesRequest {
+            revision_ids: vec![derived.revision_id],
+            projections: vec![Projection::Payload, Projection::Provenance],
+            max_chars: 4_000,
+        })
+        .await
+        .expect("read explicitly declassified content");
+    assert_eq!(
+        derived_page[0]
+            .revision
+            .payload
+            .as_ref()
+            .map(|payload| payload.content.as_str()),
+        Some("Explicitly derived from Scope A.")
+    );
+    assert!(
+        derived_page[0]
+            .revision
+            .provenance
+            .iter()
+            .all(|event| event.input_revision_ids.is_empty())
+    );
+
+    let (events, _) = admin
+        .access_log(100, None)
+        .await
+        .expect("read access audit");
+    assert!(events.iter().any(|event| {
+        event.principal.principal_id == "client:access-a" && event.operation == "read_pages"
+    }));
+    assert!(events.iter().any(|event| {
+        event.principal.principal_id == "client:restricted-writer"
+            && event.decision == pcp_core::AccessDecision::Denied
+    }));
+    let scope_b_auditor = pcp_client(
+        Arc::clone(&store),
+        AccessSession::new(
+            principal("client:scope-b-auditor", AccessPrincipalType::Service),
+            "session:scope-b-auditor",
+            vec![ScopeGrant {
+                namespace: scope_b.clone(),
+                permissions: vec![AccessPermission::Audit],
+            }],
+        ),
+    );
+    let (events, _) = scope_b_auditor
+        .access_log(100, None)
+        .await
+        .expect("read Scope B audit");
+    let cross_scope_event = events
+        .iter()
+        .find(|event| event.principal.principal_id == "client:cross-scope-writer")
+        .expect("cross-Scope write audit event");
+    assert_eq!(cross_scope_event.scopes, vec![scope_b]);
+
+    let _ = std::fs::remove_dir_all(root);
+}
 
 #[tokio::test]
 async fn stores_searches_revises_and_links_pages() {
@@ -1160,6 +1467,19 @@ fn write_request(
         initial_relations: Vec::new(),
         idempotency_key: Some(idempotency_key.to_owned()),
     }
+}
+
+fn principal(principal_id: &str, principal_type: AccessPrincipalType) -> AccessPrincipal {
+    AccessPrincipal {
+        principal_id: principal_id.to_owned(),
+        principal_type,
+        display_name: None,
+    }
+}
+
+fn pcp_client(store: Arc<SqlitePcpStore>, access: AccessSession) -> PcpClient {
+    let store: Arc<dyn PcpStore> = store;
+    PcpClient::new(store, access)
 }
 
 #[tokio::test]

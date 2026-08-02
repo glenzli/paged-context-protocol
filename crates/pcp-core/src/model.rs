@@ -335,6 +335,8 @@ pub struct Capabilities {
     pub supports_revision_conflicts: bool,
     pub supports_durable_deletion: bool,
     pub supports_provenance_graph: bool,
+    pub supports_access_sessions: bool,
+    pub supports_access_audit: bool,
     pub relation_types: Vec<String>,
 }
 

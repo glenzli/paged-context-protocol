@@ -12,6 +12,7 @@ path = "src/main.rs"
 anyhow = "1.0"
 pcp-core = { path = "../pcp-core" }
 pcp-sqlite = { path = "../pcp-sqlite" }
+pcp-store = { path = "../pcp-store" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }

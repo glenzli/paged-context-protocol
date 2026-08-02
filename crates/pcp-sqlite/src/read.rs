@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use pcp_core::{Projection, ReadPage, ReadPagesRequest, Relation, Scope};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::{
     row::{REVISION_COLUMNS, relation_from_row, revision_from_row},
@@ -185,6 +185,15 @@ impl SqlitePcpStore {
                 if !allowed_scopes.contains(&revision.namespace) {
                     anyhow::bail!("PCP revision is not available");
                 }
+                if include_provenance {
+                    for event in &mut revision.provenance {
+                        retain_authorized_revision_ids(
+                            &connection,
+                            &mut event.input_revision_ids,
+                            &allowed_scopes,
+                        )?;
+                    }
+                }
                 let mut summary = if include_summary {
                     current_summary(&connection, &revision_id)?
                 } else {
@@ -200,6 +209,29 @@ impl SqlitePcpStore {
                 } else {
                     Vec::new()
                 };
+                if let Some(summary) = summary.as_mut() {
+                    for event in &mut summary.provenance {
+                        retain_authorized_revision_ids(
+                            &connection,
+                            &mut event.input_revision_ids,
+                            &allowed_scopes,
+                        )?;
+                    }
+                }
+                if let Some(validity) = validity.as_mut() {
+                    retain_authorized_revision_ids(
+                        &connection,
+                        &mut validity.basis_revision_ids,
+                        &allowed_scopes,
+                    )?;
+                }
+                for assessment in &mut validity_history {
+                    retain_authorized_revision_ids(
+                        &connection,
+                        &mut assessment.basis_revision_ids,
+                        &allowed_scopes,
+                    )?;
+                }
                 if let Some(validity) = validity.as_mut() {
                     bound_validity(validity, &mut remaining_chars);
                 }
@@ -400,6 +432,32 @@ fn read_relations(
         }
     }
     Ok(relations)
+}
+
+fn retain_authorized_revision_ids(
+    connection: &rusqlite::Connection,
+    revision_ids: &mut Vec<String>,
+    allowed_scopes: &HashSet<String>,
+) -> Result<()> {
+    let mut retained = Vec::with_capacity(revision_ids.len());
+    for revision_id in revision_ids.drain(..) {
+        let namespace = connection
+            .query_row(
+                "SELECT namespace FROM pcp_revisions WHERE revision_id = ?1",
+                [&revision_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .context("resolve PCP provenance Scope")?;
+        if namespace
+            .as_ref()
+            .is_some_and(|scope| allowed_scopes.contains(scope))
+        {
+            retained.push(revision_id);
+        }
+    }
+    *revision_ids = retained;
+    Ok(())
 }
 
 fn parse_cursor(cursor: Option<&str>) -> Result<usize> {

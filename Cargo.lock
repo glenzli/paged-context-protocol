@@ -382,6 +382,7 @@ dependencies = [
  "anyhow",
  "pcp-core",
  "pcp-sqlite",
+ "pcp-store",
  "serde",
  "serde_json",
  "tokio",

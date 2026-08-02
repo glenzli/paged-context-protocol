@@ -68,6 +68,8 @@ impl SqlitePcpStore {
             supports_revision_conflicts: true,
             supports_durable_deletion: false,
             supports_provenance_graph: true,
+            supports_access_sessions: true,
+            supports_access_audit: true,
             relation_types: vec![
                 "contains",
                 "aggregates",

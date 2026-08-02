@@ -1,10 +1,12 @@
-use std::{env, path::PathBuf};
+use std::{env, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
 use pcp_core::{
-    Projection, ReadPage, ReadPagesRequest, SearchFilters, SearchMode, SearchPagesRequest,
+    AccessPrincipal, AccessPrincipalType, AccessSession, Projection, ReadPage, ReadPagesRequest,
+    SearchFilters, SearchMode, SearchPagesRequest,
 };
 use pcp_sqlite::SqlitePcpStore;
+use pcp_store::{PcpClient, PcpStore};
 use serde_json::json;
 
 #[tokio::main]
@@ -19,15 +21,28 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let store = SqlitePcpStore::open(path.clone())
-        .await
-        .with_context(|| format!("open PCP Store {}", path.display()))?;
+    let store = Arc::new(
+        SqlitePcpStore::open(path.clone())
+            .await
+            .with_context(|| format!("open PCP Store {}", path.display()))?,
+    );
     let scopes = store.local_scope_names().await?;
+    let access = AccessSession::read_only(
+        AccessPrincipal {
+            principal_id: "cli:pcp".to_owned(),
+            principal_type: AccessPrincipalType::Cli,
+            display_name: Some("PCP CLI".to_owned()),
+        },
+        format!("pcp-cli:{}", std::process::id()),
+        scopes.clone(),
+    );
+    let store: Arc<dyn PcpStore> = store;
+    let client = PcpClient::new(store, access);
     match command.as_str() {
-        "describe" => print_json(&store.capabilities())?,
+        "describe" => print_json(&client.capabilities())?,
         "scopes" => {
             let query = arguments.next();
-            let (items, next_cursor) = store.list_scopes(scopes, query, 100, None).await?;
+            let (items, next_cursor) = client.list_scopes(Vec::new(), query, 100, None).await?;
             print_json(&json!({"scopes": items, "nextCursor": next_cursor}))?;
         }
         "search" => {
@@ -37,7 +52,7 @@ async fn main() -> Result<()> {
                 .map(|value| parse_mode(&value))
                 .transpose()?
                 .unwrap_or(SearchMode::Auto);
-            let result = store
+            let result = client
                 .search_pages(SearchPagesRequest {
                     query,
                     scopes,
@@ -55,44 +70,41 @@ async fn main() -> Result<()> {
             let revision_id = arguments
                 .next()
                 .context("pcp read requires a revision id")?;
-            let pages = store
-                .read_pages(
-                    ReadPagesRequest {
-                        revision_ids: vec![revision_id],
-                        projections: vec![
-                            Projection::Manifest,
-                            Projection::Summary,
-                            Projection::Validity,
-                            Projection::Payload,
-                            Projection::Sources,
-                            Projection::Provenance,
-                            Projection::Facets,
-                            Projection::Relations,
-                            Projection::History,
-                        ],
-                        max_chars: 64_000,
-                    },
-                    scopes,
-                )
+            let pages = client
+                .read_pages(ReadPagesRequest {
+                    revision_ids: vec![revision_id],
+                    projections: vec![
+                        Projection::Manifest,
+                        Projection::Summary,
+                        Projection::Validity,
+                        Projection::Payload,
+                        Projection::Sources,
+                        Projection::Provenance,
+                        Projection::Facets,
+                        Projection::Relations,
+                        Projection::History,
+                    ],
+                    max_chars: 64_000,
+                })
                 .await?;
             print_json(&json!({"pages": pages}))?;
         }
         "export" => {
-            let pages = export_pages(&store, scopes).await?;
+            let pages = export_pages(&client, scopes).await?;
             print_json(&json!({
-                "protocolVersion": store.capabilities().protocol_version,
-                "ownerId": store.owner_id(),
+                "protocolVersion": client.capabilities().protocol_version,
+                "ownerId": client.owner_id(),
                 "pages": pages
             }))?;
         }
         "doctor" => {
-            let integrity = store.integrity_check().await?;
-            let page_count = store.page_count(scopes.clone()).await?;
-            let (scope_details, _) = store.list_scopes(scopes, None, 100, None).await?;
+            let integrity = client.integrity_check().await?;
+            let page_count = client.page_count(Vec::new()).await?;
+            let (scope_details, _) = client.list_scopes(Vec::new(), None, 100, None).await?;
             print_json(&json!({
                 "database": path,
                 "integrity": integrity,
-                "ownerId": store.owner_id(),
+                "ownerId": client.owner_id(),
                 "scopeCount": scope_details.len(),
                 "pageCount": page_count,
                 "status": if integrity == "ok" { "ready" } else { "degraded" }
@@ -103,7 +115,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn export_pages(store: &SqlitePcpStore, scopes: Vec<String>) -> Result<Vec<ReadPage>> {
+async fn export_pages(store: &PcpClient, scopes: Vec<String>) -> Result<Vec<ReadPage>> {
     let mut cursor = None;
     let mut revision_ids = Vec::new();
     loop {
@@ -129,24 +141,21 @@ async fn export_pages(store: &SqlitePcpStore, scopes: Vec<String>) -> Result<Vec
     for chunk in revision_ids.chunks(20) {
         pages.extend(
             store
-                .read_pages(
-                    ReadPagesRequest {
-                        revision_ids: chunk.to_vec(),
-                        projections: vec![
-                            Projection::Manifest,
-                            Projection::Summary,
-                            Projection::Validity,
-                            Projection::Payload,
-                            Projection::Sources,
-                            Projection::Provenance,
-                            Projection::Facets,
-                            Projection::Relations,
-                            Projection::History,
-                        ],
-                        max_chars: 64_000,
-                    },
-                    scopes.clone(),
-                )
+                .read_pages(ReadPagesRequest {
+                    revision_ids: chunk.to_vec(),
+                    projections: vec![
+                        Projection::Manifest,
+                        Projection::Summary,
+                        Projection::Validity,
+                        Projection::Payload,
+                        Projection::Sources,
+                        Projection::Provenance,
+                        Projection::Facets,
+                        Projection::Relations,
+                        Projection::History,
+                    ],
+                    max_chars: 64_000,
+                })
                 .await?,
         );
     }

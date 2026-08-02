@@ -167,6 +167,51 @@ enums:
 - `linked`: the current Scope plus explicitly linked Scopes;
 - `global`: a user-authorized global range.
 
+### 3.4 Client Identity and Access Sessions
+
+PCP MUST distinguish the content `Actor` from the `AccessPrincipal` that is
+accessing the Store:
+
+- `Actor` identifies who produced, revised, or summarized content and is part
+  of Provenance;
+- `AccessPrincipal` identifies the Host, model client, CLI, or service using
+  the Store;
+- `AccessSession` is established by a trusted access surface and binds a
+  Principal, session ID, and exact Scope Grants;
+- `ScopeGrant` declares the operations available to that Principal in one
+  Scope, such as Search, Summary read, Detail read, Write, Revise, Summarize,
+  Link, Assess, or Scope management.
+
+A model MUST NOT declare or expand its AccessSession through ordinary tool
+arguments. An MCP stdio implementation may treat one server configuration as
+one Principal. A remote transport MUST map authenticated credentials to an
+AccessSession outside model-controlled arguments.
+
+The Store MUST treat Grants as a hard upper bound and authorize before
+relevance ranking, graph traversal, or Projection materialization. A Relation
+does not grant access to its other endpoint. Relation projections and graph
+search MUST NOT reveal an unauthorized Revision.
+
+Deriving, summarizing, or assessing content from one Scope into another can
+declassify information. An implementation MUST deny it by default unless the
+AccessSession has an explicit cross-Scope derivation permission on the target
+Scope. An ordinary cross-Scope Relation is not content derivation and does not
+grant that permission.
+
+Grants cannot revoke information that has already entered the same model
+context. Strong information-flow isolation requires the Host not to combine
+read access to a sensitive source Scope with write access to another target
+Scope in one AccessSession. It SHOULD use separate access surfaces, model
+contexts, or equivalent trusted information-flow controls. The
+`derive_across_scopes` permission governs standard PCP derivation operations;
+it does not turn a model that already has both read and write authority into a
+safe declassifier.
+
+A compatible implementation SHOULD record metadata-only access events,
+including Principal, Session, operation, Scope, time, and outcome, without
+recording query text or Page content. The audit log remains protected by Scope
+and Audit permissions.
+
 ## IV. Pages and Revisions
 
 ### 4.1 Page

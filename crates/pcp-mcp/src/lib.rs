@@ -1,11 +1,10 @@
-use std::{collections::HashSet, sync::Arc};
-
 use pcp_core::{
-    AssessPageValidityRequest, Capabilities, CreateScopeRequest, LinkPagesRequest, ReadPage,
-    ReadPagesRequest, Relation, RevisePageRequest, Scope, SearchPagesRequest, SearchResult,
-    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    AccessAuditEvent, AccessSession, AssessPageValidityRequest, Capabilities, CreateScopeRequest,
+    LinkPagesRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest, Scope,
+    SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
+    WriteSummaryResult, WriteValidityResult,
 };
-use pcp_store::PcpStore;
+use pcp_store::PcpClient;
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::wrapper::{Json, Parameters},
@@ -15,12 +14,11 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Serialize;
 
-const SERVER_INSTRUCTIONS: &str = "PCP is a durable Page/Revision context store. Search or browse the Summary index first, then read exact Revisions only when useful. Preserve Scope, provenance, and source Revision IDs on writes. Summaries route to Detail and never replace it. PCP does not decide user profile, conversation policy, or what deserves attention; those remain Host decisions.";
+const SERVER_INSTRUCTIONS: &str = "PCP is a durable Page/Revision context store. Call pcp_whoami before planning cross-Scope work. Search or browse the Summary index first, then read exact Revisions only when useful. Preserve Scope, provenance, and source Revision IDs on writes. Summaries route to Detail and never replace it. PCP does not decide user profile, conversation policy, or what deserves attention; those remain Host decisions.";
 
 #[derive(Clone)]
 pub struct PcpMcpServer {
-    store: Arc<dyn PcpStore>,
-    restricted_scopes: Option<Arc<HashSet<String>>>,
+    client: PcpClient,
 }
 
 #[derive(Debug, JsonSchema, Serialize)]
@@ -29,6 +27,12 @@ pub struct DescribeResult {
     owner_id: String,
     integrity: String,
     capabilities: Capabilities,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhoAmIResult {
+    access: AccessSession,
 }
 
 #[derive(Debug, JsonSchema, serde::Deserialize)]
@@ -90,70 +94,25 @@ pub struct OperationResult {
     completed: bool,
 }
 
+#[derive(Debug, JsonSchema, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessLogParams {
+    #[serde(default = "default_limit")]
+    limit: u32,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessLogResult {
+    events: Vec<AccessAuditEvent>,
+    next_cursor: Option<String>,
+}
+
 impl PcpMcpServer {
-    pub fn new(store: Arc<dyn PcpStore>, restricted_scopes: Option<Vec<String>>) -> Self {
-        Self {
-            store,
-            restricted_scopes: restricted_scopes
-                .map(|scopes| Arc::new(scopes.into_iter().collect())),
-        }
-    }
-
-    async fn allowed_scopes(&self, requested: &[String]) -> Result<Vec<String>, McpError> {
-        let local = self
-            .store
-            .local_scope_names()
-            .await
-            .map_err(|error| operation_error("list authorized PCP Scopes", error))?
-            .into_iter()
-            .collect::<HashSet<_>>();
-        let available = match self.restricted_scopes.as_ref() {
-            Some(restricted) => local
-                .intersection(restricted)
-                .cloned()
-                .collect::<HashSet<_>>(),
-            None => local,
-        };
-        if requested.is_empty() {
-            let mut scopes = available.into_iter().collect::<Vec<_>>();
-            scopes.sort();
-            return Ok(scopes);
-        }
-        let mut resolved = Vec::with_capacity(requested.len());
-        for scope in requested {
-            if !available.contains(scope) {
-                return Err(McpError::invalid_params(
-                    format!("PCP Scope is not authorized or does not exist: {scope}"),
-                    None,
-                ));
-            }
-            if !resolved.contains(scope) {
-                resolved.push(scope.clone());
-            }
-        }
-        Ok(resolved)
-    }
-
-    fn authorize_owner(&self, owner_id: &str) -> Result<(), McpError> {
-        if owner_id != self.store.owner_id() {
-            return Err(McpError::invalid_params(
-                "ownerId does not match this PCP Store".to_owned(),
-                None,
-            ));
-        }
-        Ok(())
-    }
-
-    fn authorize_new_scope(&self, namespace: &str) -> Result<(), McpError> {
-        if let Some(restricted) = self.restricted_scopes.as_ref()
-            && !restricted.contains(namespace)
-        {
-            return Err(McpError::invalid_params(
-                format!("PCP Scope is outside the configured allow list: {namespace}"),
-                None,
-            ));
-        }
-        Ok(())
+    pub fn new(client: PcpClient) -> Self {
+        Self { client }
     }
 }
 
@@ -171,14 +130,30 @@ impl PcpMcpServer {
     )]
     pub async fn pcp_describe(&self) -> Result<Json<DescribeResult>, McpError> {
         let integrity = self
-            .store
+            .client
             .integrity_check()
             .await
             .map_err(|error| operation_error("check PCP Store integrity", error))?;
         Ok(Json(DescribeResult {
-            owner_id: self.store.owner_id().to_owned(),
+            owner_id: self.client.owner_id().to_owned(),
             integrity,
-            capabilities: self.store.capabilities(),
+            capabilities: self.client.capabilities(),
+        }))
+    }
+
+    #[tool(
+        name = "pcp_whoami",
+        description = "Inspect the server-injected client principal, session, exact Scope grants, and operation permissions. Tool arguments cannot change this identity.",
+        annotations(
+            title = "Inspect PCP Access Session",
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    pub async fn pcp_whoami(&self) -> Result<Json<WhoAmIResult>, McpError> {
+        Ok(Json(WhoAmIResult {
+            access: self.client.access().clone(),
         }))
     }
 
@@ -196,10 +171,9 @@ impl PcpMcpServer {
         &self,
         Parameters(params): Parameters<ListScopesParams>,
     ) -> Result<Json<ListScopesResult>, McpError> {
-        let allowed = self.allowed_scopes(&[]).await?;
         let (scopes, next_cursor) = self
-            .store
-            .list_scopes(allowed, params.query, params.limit, params.cursor)
+            .client
+            .list_scopes(Vec::new(), params.query, params.limit, params.cursor)
             .await
             .map_err(|error| operation_error("list PCP Scopes", error))?;
         Ok(Json(ListScopesResult {
@@ -222,9 +196,7 @@ impl PcpMcpServer {
         &self,
         Parameters(request): Parameters<CreateScopeRequest>,
     ) -> Result<Json<OperationResult>, McpError> {
-        self.authorize_owner(&request.owner_id)?;
-        self.authorize_new_scope(&request.namespace)?;
-        self.store
+        self.client
             .create_scope(request)
             .await
             .map_err(|error| operation_error("create PCP Scope", error))?;
@@ -246,10 +218,9 @@ impl PcpMcpServer {
     )]
     pub async fn pcp_search_pages(
         &self,
-        Parameters(mut request): Parameters<SearchPagesRequest>,
+        Parameters(request): Parameters<SearchPagesRequest>,
     ) -> Result<Json<SearchResult>, McpError> {
-        request.scopes = self.allowed_scopes(&request.scopes).await?;
-        self.store
+        self.client
             .search_pages(request)
             .await
             .map(Json)
@@ -270,10 +241,9 @@ impl PcpMcpServer {
         &self,
         Parameters(params): Parameters<BrowseIndexParams>,
     ) -> Result<Json<SearchResult>, McpError> {
-        let scopes = self.allowed_scopes(&params.scopes).await?;
-        self.store
+        self.client
             .browse_index(
-                scopes,
+                params.scopes,
                 params.excluded_page_kinds,
                 params.limit,
                 params.cursor,
@@ -298,10 +268,9 @@ impl PcpMcpServer {
         &self,
         Parameters(request): Parameters<ReadPagesRequest>,
     ) -> Result<Json<ReadPagesResult>, McpError> {
-        let allowed = self.allowed_scopes(&[]).await?;
         let pages = self
-            .store
-            .read_pages(request, allowed)
+            .client
+            .read_pages(request)
             .await
             .map_err(|error| operation_error("read PCP Pages", error))?;
         Ok(Json(ReadPagesResult { pages }))
@@ -321,10 +290,9 @@ impl PcpMcpServer {
         &self,
         Parameters(params): Parameters<CurrentRevisionParams>,
     ) -> Result<Json<CurrentRevisionResult>, McpError> {
-        let allowed = self.allowed_scopes(&[]).await?;
         let revision_id = self
-            .store
-            .current_revision_id(params.page_id.clone(), allowed)
+            .client
+            .current_revision_id(params.page_id.clone())
             .await
             .map_err(|error| operation_error("resolve current PCP Revision", error))?;
         Ok(Json(CurrentRevisionResult {
@@ -347,12 +315,8 @@ impl PcpMcpServer {
         &self,
         Parameters(request): Parameters<WritePageRequest>,
     ) -> Result<Json<WriteResult>, McpError> {
-        self.authorize_owner(&request.owner_id)?;
-        let allowed = self
-            .allowed_scopes(std::slice::from_ref(&request.namespace))
-            .await?;
-        self.store
-            .write_page(request, allowed)
+        self.client
+            .write_page(request)
             .await
             .map(Json)
             .map_err(|error| operation_error("write PCP Page", error))
@@ -372,9 +336,8 @@ impl PcpMcpServer {
         &self,
         Parameters(request): Parameters<RevisePageRequest>,
     ) -> Result<Json<WriteResult>, McpError> {
-        let allowed = self.allowed_scopes(&[]).await?;
-        self.store
-            .revise_page(request, allowed)
+        self.client
+            .revise_page(request)
             .await
             .map(Json)
             .map_err(|error| operation_error("revise PCP Page", error))
@@ -394,9 +357,8 @@ impl PcpMcpServer {
         &self,
         Parameters(request): Parameters<WriteSummaryRequest>,
     ) -> Result<Json<WriteSummaryResult>, McpError> {
-        let allowed = self.allowed_scopes(&[]).await?;
-        self.store
-            .write_summary(request, allowed)
+        self.client
+            .write_summary(request)
             .await
             .map(Json)
             .map_err(|error| operation_error("write PCP Summary", error))
@@ -416,9 +378,8 @@ impl PcpMcpServer {
         &self,
         Parameters(request): Parameters<LinkPagesRequest>,
     ) -> Result<Json<Relation>, McpError> {
-        let allowed = self.allowed_scopes(&[]).await?;
-        self.store
-            .link_pages(request, allowed)
+        self.client
+            .link_pages(request)
             .await
             .map(Json)
             .map_err(|error| operation_error("link PCP Pages", error))
@@ -438,12 +399,36 @@ impl PcpMcpServer {
         &self,
         Parameters(request): Parameters<AssessPageValidityRequest>,
     ) -> Result<Json<WriteValidityResult>, McpError> {
-        let allowed = self.allowed_scopes(&[]).await?;
-        self.store
-            .assess_page_validity(request, allowed)
+        self.client
+            .assess_page_validity(request)
             .await
             .map(Json)
             .map_err(|error| operation_error("assess PCP Page validity", error))
+    }
+
+    #[tool(
+        name = "pcp_access_log",
+        description = "Read recent metadata-only PCP access events visible to this client. Requires audit permission and never includes query or Page content.",
+        annotations(
+            title = "Read PCP Access Log",
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    pub async fn pcp_access_log(
+        &self,
+        Parameters(params): Parameters<AccessLogParams>,
+    ) -> Result<Json<AccessLogResult>, McpError> {
+        let (events, next_cursor) = self
+            .client
+            .access_log(params.limit, params.cursor)
+            .await
+            .map_err(|error| operation_error("read PCP access log", error))?;
+        Ok(Json(AccessLogResult {
+            events,
+            next_cursor,
+        }))
     }
 }
 
@@ -473,13 +458,15 @@ mod tests {
     use std::{sync::Arc, time::SystemTime};
 
     use pcp_core::{
-        Actor, ActorType, CreateScopeRequest, LifecycleStatus, PagePayload, Projection,
-        SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch, WritePageRequest,
+        AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType, CreateScopeRequest,
+        LifecycleStatus, PagePayload, Projection, SearchFilters, SearchMode, SearchPagesRequest,
+        SearchTermMatch, WritePageRequest,
     };
     use pcp_sqlite::SqlitePcpStore;
+    use pcp_store::{PcpClient, PcpStore};
     use rmcp::{ServiceExt, handler::server::wrapper::Parameters, model::CallToolRequestParams};
 
-    use super::PcpMcpServer;
+    use super::{AccessLogParams, PcpMcpServer};
 
     #[tokio::test]
     async fn tools_write_search_and_enforce_scope_access() {
@@ -496,7 +483,7 @@ mod tests {
         );
         let owner_id = store.owner_id().to_owned();
         let namespace = "project:mcp-test".to_owned();
-        let server = PcpMcpServer::new(store, Some(vec![namespace.clone()]));
+        let server = PcpMcpServer::new(full_client(store, vec![namespace.clone()]));
 
         server
             .pcp_create_scope(Parameters(CreateScopeRequest {
@@ -569,6 +556,19 @@ mod tests {
             .0;
         assert_eq!(found.hits.len(), 1);
         assert_eq!(found.hits[0].revision_id, written.revision_id);
+        let who = server.pcp_whoami().await.expect("inspect access session").0;
+        assert_eq!(who.access.principal.principal_id, "client:pcp-mcp-test");
+        let audit = server
+            .pcp_access_log(Parameters(AccessLogParams {
+                limit: 20,
+                cursor: None,
+            }))
+            .await
+            .expect("read access log")
+            .0;
+        assert!(audit.events.iter().any(|event| {
+            event.operation == "write_page" && event.principal.principal_id == "client:pcp-mcp-test"
+        }));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -586,7 +586,8 @@ mod tests {
                 .await
                 .expect("open store"),
         );
-        let server = PcpMcpServer::new(store, None);
+        let server =
+            PcpMcpServer::new(full_client(store, vec!["project:protocol-test".to_owned()]));
         let (server_io, client_io) = tokio::io::duplex(128 * 1024);
         let server_task = tokio::spawn(async move {
             server
@@ -600,6 +601,8 @@ mod tests {
         let client = ().serve(client_io).await.expect("initialize client");
         let tools = client.list_all_tools().await.expect("list tools");
         assert!(tools.iter().any(|tool| tool.name == "pcp_search_pages"));
+        assert!(tools.iter().any(|tool| tool.name == "pcp_whoami"));
+        assert!(tools.iter().any(|tool| tool.name == "pcp_access_log"));
         assert!(tools.iter().any(|tool| {
             tool.name == "pcp_write_page"
                 && tool
@@ -613,8 +616,27 @@ mod tests {
             .await
             .expect("call describe");
         assert!(described.structured_content.is_some());
+        let who = client
+            .call_tool(CallToolRequestParams::new("pcp_whoami"))
+            .await
+            .expect("call whoami");
+        assert!(who.structured_content.is_some());
         drop(client);
         server_task.await.expect("join server");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn full_client(store: Arc<SqlitePcpStore>, scopes: Vec<String>) -> PcpClient {
+        let access = AccessSession::full_control(
+            AccessPrincipal {
+                principal_id: "client:pcp-mcp-test".to_owned(),
+                principal_type: AccessPrincipalType::ModelClient,
+                display_name: Some("PCP MCP test".to_owned()),
+            },
+            "session:pcp-mcp-test",
+            scopes,
+        );
+        let store: Arc<dyn PcpStore> = store;
+        PcpClient::new(store, access)
     }
 }
