@@ -145,6 +145,7 @@ Host 行为变成协议要求：
 - `pcp-store`：与具体数据库无关、携带 AccessSession 的异步 Store 契约。
 - `pcp-client`：面向 Host 的传输无关能力接口，以及当前的 embedded 适配器。
 - `pcp-sqlite`：本地持久化、修订、检索、Summary、有效性与 DAG 关系。
+- `pcp-runtime`：可选的本地 Unix socket runtime 与 remote client。
 - `pcp-cli`：面向本地 Store 的检查、搜索、读取与导出工具。
 - `pcp-mcp`：基于官方 Rust MCP SDK 的本地 stdio 工具服务器。
 
@@ -159,6 +160,7 @@ behavior normative:
   adapter.
 - `pcp-sqlite`: local persistence, revisioning, retrieval, Summaries, validity,
   and DAG Relations.
+- `pcp-runtime`: the optional local Unix socket runtime and remote client.
 - `pcp-cli`: inspection, search, read, and export commands for a local Store.
 - `pcp-mcp`: a local stdio tool server built on the official Rust MCP SDK.
 
@@ -174,20 +176,47 @@ remains Model Client or Host policy.
 ### Deployment shapes
 
 PCP is a composable capability framework, not one mandatory client or daemon.
-`PcpApi` is the consumer boundary. `EmbeddedPcpClient` currently binds an
-AccessSession directly to a `PcpStore`; CLI and MCP use that same API rather
-than defining separate storage behavior:
+`PcpApi` is the consumer boundary. `EmbeddedPcpClient` binds an AccessSession
+directly to a `PcpStore`; `RemotePcpClient` reaches the same complete API over a
+local Unix socket. CLI and MCP can use either shape without defining separate
+storage behavior:
 
 ```text
 Host --------> PcpApi --> EmbeddedPcpClient --> PcpStore
+                    `----> RemotePcpClient ----> pcp-runtime --> PcpStore
 Codex -------> MCP -----> PcpApi
 Operator ----> CLI -----> PcpApi
 ```
 
-A remote runtime can implement `PcpApi` without changing Host policy. That
-runtime is an optional deployment shape for shared storage, centralized access
-control, and independent lifecycle; it is not required for a single local Host
-and is not part of the protocol's normative behavior.
+The runtime is optional. It gives one Store an independent lifecycle and keeps
+the AccessSession on the server side; RPC requests never carry a caller-chosen
+Principal. A single socket is one fixed trust identity. Run separate endpoints
+for symbiont-d, Codex, or another client instead of sharing a privileged Host
+socket. Socket mode is `0600`; this is a local user boundary, not protection
+against a hostile process already running as the same OS user.
+
+Start an identity-bound endpoint:
+
+```bash
+cargo build --release -p pcp-runtime -p pcp-cli -p pcp-mcp
+PCP_STORE_PATH=/absolute/path/to/context.sqlite3 \
+PCP_RUNTIME_SOCKET=/absolute/path/to/pcp-codex.sock \
+PCP_CLIENT_ID=codex:project-example \
+PCP_CLIENT_TYPE=model_client \
+PCP_ACCESS_MODE=read \
+PCP_ALLOWED_SCOPES=project:example,conversation:example-main \
+  target/release/pcp-runtime
+```
+
+The CLI uses that endpoint when `PCP_RUNTIME_SOCKET` is set. Supplying
+`PCP_CLIENT_ID` additionally verifies that the endpoint exposes the expected
+Principal:
+
+```bash
+PCP_RUNTIME_SOCKET=/absolute/path/to/pcp-codex.sock \
+PCP_CLIENT_ID=codex:project-example \
+  target/release/pcp describe
+```
 
 ### Codex / MCP
 
@@ -201,6 +230,17 @@ codex mcp add pcp \
   --env PCP_CLIENT_ID=codex:project-example \
   --env PCP_ACCESS_MODE=read \
   --env PCP_ALLOWED_SCOPES=project:example,conversation:example-main \
+  -- /absolute/path/to/paged-context-protocol/target/release/pcp-mcp
+```
+
+Alternatively, point MCP at an already running identity-bound runtime. In this
+mode the runtime owns Store and access configuration; MCP verifies its
+Principal before exposing tools:
+
+```bash
+codex mcp add pcp \
+  --env PCP_RUNTIME_SOCKET=/absolute/path/to/pcp-codex.sock \
+  --env PCP_CLIENT_ID=codex:project-example \
   -- /absolute/path/to/paged-context-protocol/target/release/pcp-mcp
 ```
 

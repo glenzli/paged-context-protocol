@@ -6,6 +6,7 @@ use pcp_core::{
     AccessPrincipal, AccessPrincipalType, AccessSession, Projection, ReadPage, ReadPagesRequest,
     SearchFilters, SearchMode, SearchPagesRequest,
 };
+use pcp_runtime::RemotePcpClient;
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 use serde_json::json;
@@ -22,25 +23,53 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let store = Arc::new(
-        SqlitePcpStore::open(path.clone())
-            .await
-            .with_context(|| format!("open PCP Store {}", path.display()))?,
-    );
-    let scopes = store.local_scope_names().await?;
-    let access = AccessSession::read_only(
-        AccessPrincipal {
-            principal_id: "cli:pcp".to_owned(),
-            principal_type: AccessPrincipalType::Cli,
-            display_name: Some("PCP CLI".to_owned()),
-        },
-        format!("pcp-cli:{}", std::process::id()),
-        scopes.clone(),
-    );
-    let store: Arc<dyn PcpStore> = store;
-    let client = EmbeddedPcpClient::shared(store, access);
+    let (client, source): (Arc<dyn PcpApi>, String) =
+        if let Some(socket_path) = env::var_os("PCP_RUNTIME_SOCKET") {
+            let socket_path = PathBuf::from(socket_path);
+            let remote = match env::var("PCP_CLIENT_ID") {
+                Ok(expected_principal) => {
+                    RemotePcpClient::connect_expected(&socket_path, &expected_principal).await?
+                }
+                Err(_) => RemotePcpClient::connect(&socket_path).await?,
+            };
+            (
+                Arc::new(remote),
+                format!("runtime:{}", socket_path.display()),
+            )
+        } else {
+            let store = Arc::new(
+                SqlitePcpStore::open(path.clone())
+                    .await
+                    .with_context(|| format!("open PCP Store {}", path.display()))?,
+            );
+            let scopes = store.local_scope_names().await?;
+            let access = AccessSession::read_only(
+                AccessPrincipal {
+                    principal_id: "cli:pcp".to_owned(),
+                    principal_type: AccessPrincipalType::Cli,
+                    display_name: Some("PCP CLI".to_owned()),
+                },
+                format!("pcp-cli:{}", std::process::id()),
+                scopes,
+            );
+            let store: Arc<dyn PcpStore> = store;
+            (
+                EmbeddedPcpClient::shared(store, access),
+                format!("sqlite:{}", path.display()),
+            )
+        };
+    let (available_scopes, _) = client.list_scopes(Vec::new(), None, 10_000, None).await?;
+    let scopes = available_scopes
+        .into_iter()
+        .map(|scope| scope.namespace)
+        .collect::<Vec<_>>();
     match command.as_str() {
-        "describe" => print_json(&client.capabilities())?,
+        "describe" => print_json(&json!({
+            "ownerId": client.owner_id(),
+            "capabilities": client.capabilities(),
+            "access": client.access(),
+            "source": source
+        }))?,
         "scopes" => {
             let query = arguments.next();
             let (items, next_cursor) = client.list_scopes(Vec::new(), query, 100, None).await?;
@@ -103,7 +132,7 @@ async fn main() -> Result<()> {
             let page_count = client.page_count(Vec::new()).await?;
             let (scope_details, _) = client.list_scopes(Vec::new(), None, 100, None).await?;
             print_json(&json!({
-                "database": path,
+                "source": source,
                 "integrity": integrity,
                 "ownerId": client.owner_id(),
                 "scopeCount": scope_details.len(),
@@ -181,6 +210,6 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
 
 fn print_help() {
     println!(
-        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <revision-id>\n  export\n  doctor\n\nSet PCP_STORE_PATH to select the SQLite database."
+        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <revision-id>\n  export\n  doctor\n\nSet PCP_RUNTIME_SOCKET to use a running local runtime, or PCP_STORE_PATH for embedded SQLite."
     );
 }

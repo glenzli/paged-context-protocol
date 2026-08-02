@@ -6,6 +6,7 @@ members = [
     "crates/pcp-sqlite",
     "crates/pcp-cli",
     "crates/pcp-mcp",
+    "crates/pcp-runtime",
 ]
 resolver = "3"
 

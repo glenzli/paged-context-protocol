@@ -8,6 +8,7 @@ license.workspace = true
 anyhow = "1.0"
 pcp-client = { path = "../pcp-client" }
 pcp-core = { path = "../pcp-core" }
+pcp-runtime = { path = "../pcp-runtime" }
 pcp-sqlite = { path = "../pcp-sqlite" }
 pcp-store = { path = "../pcp-store" }
 rmcp = { version = "3.1.0", default-features = false, features = [

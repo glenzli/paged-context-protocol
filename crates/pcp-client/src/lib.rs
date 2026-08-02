@@ -1,15 +1,84 @@
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
-    AccessAuditEvent, AccessSession, AssessPageValidityRequest, Capabilities, CreateScopeRequest,
-    LinkPagesRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest, Scope,
-    SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
-    WriteSummaryResult, WriteValidityResult,
+    AccessAuditEvent, AccessPermission, AccessPrincipal, AccessSession, AssessPageValidityRequest,
+    Capabilities, CreateScopeRequest, LinkPagesRequest, ReadPage, ReadPagesRequest, Relation,
+    RevisePageRequest, Scope, ScopeGrant, SearchPagesRequest, SearchResult, WritePageRequest,
+    WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::PcpStore;
 pub use pcp_store::{DurablePageInventoryItem, TombstoneCascadeResult};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccessMode {
+    Read,
+    Write,
+    Admin,
+}
+
+impl AccessMode {
+    pub fn session(
+        self,
+        principal: AccessPrincipal,
+        session_id: impl Into<String>,
+        scopes: Vec<String>,
+        allow_cross_scope_derivation: bool,
+    ) -> AccessSession {
+        let grants = scopes
+            .into_iter()
+            .map(|namespace| ScopeGrant {
+                namespace,
+                permissions: self.permissions(allow_cross_scope_derivation),
+            })
+            .collect();
+        AccessSession::new(principal, session_id, grants)
+    }
+
+    fn permissions(self, allow_cross_scope_derivation: bool) -> Vec<AccessPermission> {
+        let mut permissions = vec![
+            AccessPermission::ListScopes,
+            AccessPermission::Search,
+            AccessPermission::ReadSummary,
+            AccessPermission::ReadDetail,
+        ];
+        if matches!(self, Self::Write | Self::Admin) {
+            permissions.extend([
+                AccessPermission::Write,
+                AccessPermission::Revise,
+                AccessPermission::Summarize,
+                AccessPermission::Link,
+                AccessPermission::Assess,
+            ]);
+        }
+        if self == Self::Admin {
+            permissions.extend([
+                AccessPermission::ManageScope,
+                AccessPermission::Retract,
+                AccessPermission::Audit,
+            ]);
+        }
+        if allow_cross_scope_derivation {
+            permissions.push(AccessPermission::DeriveAcrossScopes);
+        }
+        permissions
+    }
+}
+
+impl FromStr for AccessMode {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "read" => Ok(Self::Read),
+            "write" => Ok(Self::Write),
+            "admin" => Ok(Self::Admin),
+            other => anyhow::bail!("unsupported PCP access mode: {other}"),
+        }
+    }
+}
 
 /// Transport-independent capabilities exposed to a PCP consumer.
 ///

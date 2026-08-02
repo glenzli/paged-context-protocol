@@ -6,10 +6,10 @@ use pcp_core::{
     SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
     WriteSummaryResult, WriteValidityResult,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DurablePageInventoryItem {
     pub page_id: String,
@@ -26,7 +26,7 @@ pub struct DurablePageInventoryItem {
     pub relation_types: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TombstoneCascadeResult {
     pub retracted_revision_ids: Vec<String>,
     pub restored_page_ids: Vec<String>,
