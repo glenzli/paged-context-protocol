@@ -1,0 +1,176 @@
+use std::{env, path::PathBuf};
+
+use anyhow::{Context, Result};
+use pcp_core::{
+    Projection, ReadPage, ReadPagesRequest, SearchFilters, SearchMode, SearchPagesRequest,
+};
+use pcp_sqlite::SqlitePcpStore;
+use serde_json::json;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let mut arguments = env::args().skip(1);
+    let command = arguments.next().unwrap_or_else(|| "help".to_owned());
+    let path = env::var_os("PCP_STORE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("data/context.sqlite3"));
+    if command == "help" || command == "--help" || command == "-h" {
+        print_help();
+        return Ok(());
+    }
+
+    let store = SqlitePcpStore::open(path.clone())
+        .await
+        .with_context(|| format!("open PCP Store {}", path.display()))?;
+    let scopes = store.local_scope_names().await?;
+    match command.as_str() {
+        "describe" => print_json(&store.capabilities())?,
+        "scopes" => {
+            let query = arguments.next();
+            let (items, next_cursor) = store.list_scopes(scopes, query, 100, None).await?;
+            print_json(&json!({"scopes": items, "nextCursor": next_cursor}))?;
+        }
+        "search" => {
+            let query = arguments.next().context("pcp search requires a query")?;
+            let mode = arguments
+                .next()
+                .map(|value| parse_mode(&value))
+                .transpose()?
+                .unwrap_or(SearchMode::Auto);
+            let result = store
+                .search_pages(SearchPagesRequest {
+                    query,
+                    scopes,
+                    mode,
+                    term_match: pcp_core::SearchTermMatch::All,
+                    projections: pcp_core::default_search_projections(),
+                    filters: SearchFilters::default(),
+                    limit: 20,
+                    cursor: None,
+                })
+                .await?;
+            print_json(&result)?;
+        }
+        "read" => {
+            let revision_id = arguments
+                .next()
+                .context("pcp read requires a revision id")?;
+            let pages = store
+                .read_pages(
+                    ReadPagesRequest {
+                        revision_ids: vec![revision_id],
+                        projections: vec![
+                            Projection::Manifest,
+                            Projection::Summary,
+                            Projection::Validity,
+                            Projection::Payload,
+                            Projection::Sources,
+                            Projection::Provenance,
+                            Projection::Facets,
+                            Projection::Relations,
+                            Projection::History,
+                        ],
+                        max_chars: 64_000,
+                    },
+                    scopes,
+                )
+                .await?;
+            print_json(&json!({"pages": pages}))?;
+        }
+        "export" => {
+            let pages = export_pages(&store, scopes).await?;
+            print_json(&json!({
+                "protocolVersion": store.capabilities().protocol_version,
+                "ownerId": store.owner_id(),
+                "pages": pages
+            }))?;
+        }
+        "doctor" => {
+            let integrity = store.integrity_check().await?;
+            let page_count = store.page_count(scopes.clone()).await?;
+            let (scope_details, _) = store.list_scopes(scopes, None, 100, None).await?;
+            print_json(&json!({
+                "database": path,
+                "integrity": integrity,
+                "ownerId": store.owner_id(),
+                "scopeCount": scope_details.len(),
+                "pageCount": page_count,
+                "status": if integrity == "ok" { "ready" } else { "degraded" }
+            }))?;
+        }
+        other => anyhow::bail!("unknown pcp command: {other}"),
+    }
+    Ok(())
+}
+
+async fn export_pages(store: &SqlitePcpStore, scopes: Vec<String>) -> Result<Vec<ReadPage>> {
+    let mut cursor = None;
+    let mut revision_ids = Vec::new();
+    loop {
+        let result = store
+            .search_pages(SearchPagesRequest {
+                query: String::new(),
+                scopes: scopes.clone(),
+                mode: SearchMode::Temporal,
+                term_match: pcp_core::SearchTermMatch::All,
+                projections: vec![Projection::Payload, Projection::Facets],
+                filters: SearchFilters::default(),
+                limit: 50,
+                cursor: cursor.clone(),
+            })
+            .await?;
+        revision_ids.extend(result.hits.into_iter().map(|hit| hit.revision_id));
+        cursor = result.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    let mut pages = Vec::new();
+    for chunk in revision_ids.chunks(20) {
+        pages.extend(
+            store
+                .read_pages(
+                    ReadPagesRequest {
+                        revision_ids: chunk.to_vec(),
+                        projections: vec![
+                            Projection::Manifest,
+                            Projection::Summary,
+                            Projection::Validity,
+                            Projection::Payload,
+                            Projection::Sources,
+                            Projection::Provenance,
+                            Projection::Facets,
+                            Projection::Relations,
+                            Projection::History,
+                        ],
+                        max_chars: 64_000,
+                    },
+                    scopes.clone(),
+                )
+                .await?,
+        );
+    }
+    Ok(pages)
+}
+
+fn parse_mode(value: &str) -> Result<SearchMode> {
+    match value {
+        "auto" => Ok(SearchMode::Auto),
+        "exact" => Ok(SearchMode::Exact),
+        "text" => Ok(SearchMode::Text),
+        "graph" => Ok(SearchMode::Graph),
+        "temporal" => Ok(SearchMode::Temporal),
+        other => anyhow::bail!("unknown search mode: {other}"),
+    }
+}
+
+fn print_json(value: &impl serde::Serialize) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+fn print_help() {
+    println!(
+        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <revision-id>\n  export\n  doctor\n\nSet PCP_STORE_PATH to select the SQLite database."
+    );
+}
