@@ -2,14 +2,15 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use pcp_core::{
-    Actor, ActorType, AssessPageValidityRequest, PageValidity, ValidityStanding,
-    WriteValidityResult,
+    Actor, ActorType, AssessPageValidityRequest, PagePayload, PageValidity, ProvenanceEvent,
+    ValidityStanding, WriteValidityResult,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde_json::json;
 
 use crate::{
     store::SqlitePcpStore,
-    write::{now, random_id},
+    write::{insert_relation, insert_revision, now, random_id},
 };
 
 const MAX_RATIONALE_CHARS: usize = 2_000;
@@ -47,22 +48,109 @@ impl SqlitePcpStore {
             let current = current_assessment_id(&transaction, &request.target_revision_id)?;
             match (&current, &request.expected_assessment_id) {
                 (None, None) => {}
+                (Some(_), None) => {}
                 (Some(current), Some(expected)) if current == expected => {}
                 (None, Some(expected)) => {
                     anyhow::bail!(
                         "validity conflict: expected {expected}, but the Revision has no assessment"
                     );
                 }
-                (Some(current), expected) => {
+                (Some(current), Some(expected)) => {
                     anyhow::bail!(
-                        "validity conflict: expected {}, current assessment is {current}",
-                        expected.as_deref().unwrap_or("none")
+                        "validity conflict: expected {expected}, current assessment Page is {current}",
                     );
                 }
             }
 
             let assessment_id = random_id(&transaction, "valid_")?;
+            let physical_page_id = random_id(&transaction, "pg_")?;
             let assessed_at = now();
+            let (owner_id, namespace, visibility): (String, String, String) = transaction
+                .query_row(
+                    "SELECT owner_id, namespace, visibility FROM pcp_revisions WHERE revision_id = ?1",
+                    [&request.target_revision_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .context("read PCP assessment target metadata")?;
+            transaction
+                .execute(
+                    "INSERT INTO pcp_pages (page_id, current_revision_id, created_at) VALUES (?1, NULL, ?2)",
+                    params![physical_page_id, assessed_at],
+                )
+                .context("create immutable PCP assessment Page")?;
+            let mut input_page_ids = request.basis_revision_ids.clone();
+            input_page_ids.push(request.target_revision_id.clone());
+            input_page_ids.sort();
+            input_page_ids.dedup();
+            let provenance = vec![ProvenanceEvent {
+                operation: "assess".to_owned(),
+                actor: request.created_by.clone(),
+                timestamp: assessed_at.clone(),
+                input_revision_ids: input_page_ids,
+                tool_or_model: request.tool_or_model.clone(),
+            }];
+            let payload = PagePayload {
+                media_type: "text/markdown".to_owned(),
+                content: request.rationale.trim().to_owned(),
+            };
+            let facets = json!({
+                "kind": "validity_assessment",
+                "standing": request.standing.as_str(),
+                "scope": request.scope.clone(),
+                "targetPageId": request.target_revision_id.clone(),
+            });
+            insert_revision(
+                &transaction,
+                &physical_page_id,
+                &assessment_id,
+                &owner_id,
+                &namespace,
+                &visibility,
+                "active",
+                &assessed_at,
+                Some(&assessed_at),
+                None,
+                None,
+                &request.created_by,
+                Some(&payload),
+                &[],
+                Some(&facets),
+                &provenance,
+            )?;
+            insert_relation(
+                &transaction,
+                &assessment_id,
+                "assesses",
+                &request.target_revision_id,
+                &request.created_by,
+                &assessed_at,
+            )?;
+            for basis_page_id in &request.basis_revision_ids {
+                insert_relation(
+                    &transaction,
+                    &assessment_id,
+                    "derived_from",
+                    basis_page_id,
+                    &request.created_by,
+                    &assessed_at,
+                )?;
+            }
+            if let Some(previous_assessment_page_id) = current.as_ref() {
+                insert_relation(
+                    &transaction,
+                    &assessment_id,
+                    "supersedes",
+                    previous_assessment_page_id,
+                    &request.created_by,
+                    &assessed_at,
+                )?;
+            }
+            transaction
+                .execute(
+                    "UPDATE pcp_pages SET current_revision_id = ?2 WHERE page_id = ?1",
+                    params![physical_page_id, assessment_id],
+                )
+                .context("publish immutable PCP assessment Page")?;
             let basis_revision_ids_json = serde_json::to_string(&request.basis_revision_ids)
                 .context("encode PCP validity basis")?;
             transaction

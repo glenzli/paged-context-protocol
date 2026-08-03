@@ -45,35 +45,29 @@ impl SqlitePcpStore {
             let current_revision_id = current.as_ref().map(|(revision_id, _)| revision_id);
             match (current_revision_id, &request.expected_summary_revision_id) {
                 (None, None) => {}
+                (Some(_), None) => {}
                 (Some(current), Some(expected)) if current == expected => {}
                 (None, Some(expected)) => {
                     anyhow::bail!(
                         "summary conflict: expected {expected}, but the Revision has no Summary"
                     );
                 }
-                (Some(current), expected) => {
+                (Some(current), Some(expected)) => {
                     anyhow::bail!(
-                        "summary conflict: expected {}, current Summary Revision is {current}",
-                        expected.as_deref().unwrap_or("none")
+                        "summary conflict: expected {expected}, current Summary Page is {current}",
                     );
                 }
             }
 
             let timestamp = now();
             let summary_revision_id = random_id(&transaction, "rev_")?;
-            let summary_page_id = match current.as_ref() {
-                Some((_, page_id)) => page_id.clone(),
-                None => {
-                    let page_id = random_id(&transaction, "pg_")?;
-                    transaction
-                        .execute(
-                            "INSERT INTO pcp_pages (page_id, current_revision_id, created_at) VALUES (?1, NULL, ?2)",
-                            params![page_id, timestamp],
-                        )
-                        .context("create PCP Summary Page")?;
-                    page_id
-                }
-            };
+            let summary_page_id = random_id(&transaction, "pg_")?;
+            transaction
+                .execute(
+                    "INSERT INTO pcp_pages (page_id, current_revision_id, created_at) VALUES (?1, NULL, ?2)",
+                    params![summary_page_id, timestamp],
+                )
+                .context("create immutable PCP Summary Page")?;
             let provenance = complete_provenance(
                 request.provenance,
                 &request.target_revision_id,
@@ -126,6 +120,16 @@ impl SqlitePcpStore {
                 &request.created_by,
                 &timestamp,
             )?;
+            if let Some(previous_summary_page_id) = current_revision_id {
+                insert_relation(
+                    &transaction,
+                    &summary_revision_id,
+                    "supersedes",
+                    previous_summary_page_id,
+                    &request.created_by,
+                    &timestamp,
+                )?;
+            }
 
             transaction
                 .execute(
@@ -167,7 +171,7 @@ impl SqlitePcpStore {
                     "UPDATE pcp_pages SET current_revision_id = ?2 WHERE page_id = ?1",
                     params![summary_page_id, summary_revision_id],
                 )
-                .context("publish PCP Summary Page Revision")?;
+                .context("publish immutable PCP Summary Page")?;
             transaction
                 .execute(
                     "

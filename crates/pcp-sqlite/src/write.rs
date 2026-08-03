@@ -21,22 +21,20 @@ impl SqlitePcpStore {
                 .execute(
                     "
                     INSERT INTO pcp_scopes (
-                        namespace, owner_id, scope_type, display_name, description,
+                        namespace, owner_id, display_name, description,
                         parent_namespace, visibility, created_at, updated_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
                     ON CONFLICT(namespace) DO UPDATE SET
                         display_name = excluded.display_name,
                         description = excluded.description,
                         parent_namespace = excluded.parent_namespace,
                         updated_at = excluded.updated_at
                     WHERE pcp_scopes.owner_id = excluded.owner_id
-                      AND pcp_scopes.scope_type = excluded.scope_type
                       AND pcp_scopes.visibility = excluded.visibility
                     ",
                     params![
                         request.namespace,
                         request.owner_id,
-                        request.scope_type,
                         request.display_name,
                         request.description,
                         request.parent_namespace,
@@ -124,6 +122,16 @@ impl SqlitePcpStore {
                     params![page_id, revision_id],
                 )
                 .context("publish PCP page revision")?;
+            transaction
+                .execute(
+                    "
+                    INSERT INTO pcp_refs (
+                        ref_id, namespace, head_page_id, created_at, updated_at
+                    ) VALUES (?1, ?2, ?3, ?4, ?4)
+                    ",
+                    params![page_id, request.namespace, revision_id, timestamp],
+                )
+                .context("create PCP Page Ref")?;
 
             for relation in request.initial_relations {
                 insert_relation(
@@ -185,10 +193,10 @@ impl SqlitePcpStore {
             ) = transaction
                 .query_row(
                     "
-                    SELECT r.owner_id, r.namespace, r.visibility, p.current_revision_id
-                    FROM pcp_pages p
-                    JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
-                    WHERE p.page_id = ?1
+                    SELECT r.owner_id, r.namespace, r.visibility, ref.head_page_id
+                    FROM pcp_refs ref
+                    JOIN pcp_revisions r ON r.revision_id = ref.head_page_id
+                    WHERE ref.ref_id = ?1
                     ",
                     [&request.page_id],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -233,6 +241,14 @@ impl SqlitePcpStore {
                 request.facets.as_ref(),
                 &provenance,
             )?;
+            insert_relation(
+                &transaction,
+                &revision_id,
+                "supersedes",
+                &request.expected_revision_id,
+                &request.created_by,
+                &timestamp,
+            )?;
             for relation in request.initial_relations {
                 insert_relation(
                     &transaction,
@@ -252,7 +268,25 @@ impl SqlitePcpStore {
                     ",
                     params![request.page_id, revision_id, request.expected_revision_id],
                 )
-                .context("publish revised PCP page")?;
+                .context("publish immutable successor through legacy PCP Ref")?;
+            let updated = transaction
+                .execute(
+                    "
+                    UPDATE pcp_refs
+                    SET head_page_id = ?2, updated_at = ?3
+                    WHERE ref_id = ?1 AND head_page_id = ?4
+                    ",
+                    params![
+                        request.page_id,
+                        revision_id,
+                        timestamp,
+                        request.expected_revision_id
+                    ],
+                )
+                .context("advance PCP Ref")?;
+            if updated != 1 {
+                anyhow::bail!("PCP Ref changed while publishing its immutable successor");
+            }
             record_idempotency(
                 &transaction,
                 &request.created_by.actor_id,
@@ -337,8 +371,8 @@ fn validate_scope(request: &CreateScopeRequest) -> Result<()> {
     if request.namespace.trim().is_empty() || request.namespace.len() > 200 {
         anyhow::bail!("scope namespace must contain 1-200 characters");
     }
-    if request.owner_id.trim().is_empty() || request.scope_type.trim().is_empty() {
-        anyhow::bail!("scope owner and type cannot be empty");
+    if request.owner_id.trim().is_empty() {
+        anyhow::bail!("scope owner cannot be empty");
     }
     if request.display_name.trim().is_empty() || request.visibility.trim().is_empty() {
         anyhow::bail!("scope display name and visibility cannot be empty");

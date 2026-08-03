@@ -59,6 +59,14 @@ impl RemotePcpClient {
         Ok(client)
     }
 
+    pub fn server_pid(&self) -> u32 {
+        self.descriptor.server_pid
+    }
+
+    pub fn server_started_at_unix_ms(&self) -> u64 {
+        self.descriptor.server_started_at_unix_ms
+    }
+
     async fn request(&self, operation: RpcOperation) -> Result<RpcValue> {
         let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         request_at(&self.socket_path, id, operation).await

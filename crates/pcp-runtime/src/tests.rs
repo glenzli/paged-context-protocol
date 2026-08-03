@@ -120,7 +120,6 @@ async fn broker_isolates_multiple_principals_on_one_store() {
             .create_scope(CreateScopeRequest {
                 owner_id: owner_id.clone(),
                 namespace: namespace.to_owned(),
-                scope_type: "project".to_owned(),
                 display_name: label.to_owned(),
                 description: None,
                 parent_namespace: None,
@@ -205,7 +204,6 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
         .create_scope(CreateScopeRequest {
             owner_id: owner_id.clone(),
             namespace: namespace.clone(),
-            scope_type: "project".to_owned(),
             display_name: "Runtime test".to_owned(),
             description: None,
             parent_namespace: None,
@@ -218,7 +216,6 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
             .create_scope(CreateScopeRequest {
                 owner_id: owner_id.clone(),
                 namespace: "project:not-authorized".to_owned(),
-                scope_type: "project".to_owned(),
                 display_name: "Denied".to_owned(),
                 description: None,
                 parent_namespace: None,
@@ -280,13 +277,15 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
 }
 
 async fn connect_when_ready(socket_path: &std::path::Path) -> RemotePcpClient {
+    let mut last_error = None;
     for _ in 0..100 {
-        if let Ok(client) = RemotePcpClient::connect(socket_path).await {
-            return client;
+        match RemotePcpClient::connect(socket_path).await {
+            Ok(client) => return client,
+            Err(error) => last_error = Some(error),
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    panic!("PCP runtime did not become ready");
+    panic!("PCP runtime did not become ready: {last_error:?}");
 }
 
 fn test_page(

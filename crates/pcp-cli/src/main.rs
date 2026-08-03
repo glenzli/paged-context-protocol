@@ -97,12 +97,10 @@ async fn main() -> Result<()> {
             print_json(&result)?;
         }
         "read" => {
-            let revision_id = arguments
-                .next()
-                .context("pcp read requires a revision id")?;
+            let page_id = arguments.next().context("pcp read requires a Page ID")?;
             let pages = client
                 .read_pages(ReadPagesRequest {
-                    revision_ids: vec![revision_id],
+                    revision_ids: vec![page_id],
                     projections: vec![
                         Projection::Manifest,
                         Projection::Summary,
@@ -210,6 +208,6 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
 
 fn print_help() {
     println!(
-        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <revision-id>\n  export\n  doctor\n\nSet PCP_RUNTIME_SOCKET to use a running local runtime, or PCP_STORE_PATH for embedded SQLite."
+        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <page-id>\n  export\n  doctor\n\nSet PCP_RUNTIME_SOCKET to use a running local runtime, or PCP_STORE_PATH for embedded SQLite."
     );
 }

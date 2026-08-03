@@ -9,7 +9,7 @@ use serde_json::json;
 use crate::{
     row::{REVISION_COLUMNS, revision_from_row},
     store::SqlitePcpStore,
-    write::{insert_revision, now, random_id},
+    write::{insert_relation, insert_revision, now, random_id},
 };
 
 const MAX_CASCADE_REVISIONS: usize = 1_000;
@@ -135,6 +135,14 @@ impl SqlitePcpStore {
                         tombstone_revision_ids.push(next_revision_id.clone());
                     }
                 }
+                insert_relation(
+                    &transaction,
+                    &next_revision_id,
+                    "supersedes",
+                    &current_revision_id,
+                    &actor,
+                    &timestamp,
+                )?;
                 transaction
                     .execute(
                         "
@@ -145,6 +153,16 @@ impl SqlitePcpStore {
                         params![page_id, next_revision_id, current_revision_id],
                     )
                     .context("publish PCP retraction revision")?;
+                transaction
+                    .execute(
+                        "
+                        UPDATE pcp_refs
+                        SET head_page_id = ?2, updated_at = ?4
+                        WHERE ref_id = ?1 AND head_page_id = ?3
+                        ",
+                        params![page_id, next_revision_id, current_revision_id, timestamp],
+                    )
+                    .context("advance PCP Ref after retraction")?;
             }
 
             transaction

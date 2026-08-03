@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PCP Console</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="title-block">
+      <strong>PCP Console</strong>
+      <span id="connection" class="connection">Connecting</span>
+    </div>
+    <div class="headline" aria-live="polite">
+      <span><b id="headline-pages">-</b> pages</span>
+      <span><b id="headline-content">-</b> content</span>
+      <button id="refresh" type="button">Refresh</button>
+    </div>
+  </header>
+
+  <nav class="tabs" aria-label="Console views">
+    <button class="tab active" type="button" data-view="overview">Overview</button>
+    <button class="tab" type="button" data-view="pages">Pages</button>
+    <button class="tab" type="button" data-view="quality">Quality</button>
+    <button class="tab" type="button" data-view="access">Access</button>
+  </nav>
+
+  <main>
+    <section id="view-overview" class="view active">
+      <div id="metrics" class="metrics"></div>
+      <div class="section-heading">
+        <h2>Scopes</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Scope</th><th>Pages</th><th>Updated</th><th></th></tr></thead>
+          <tbody id="scope-rows"></tbody>
+        </table>
+      </div>
+      <div class="section-heading">
+        <h2>Endpoint</h2>
+      </div>
+      <dl id="endpoint-details" class="details-grid"></dl>
+    </section>
+
+    <section id="view-pages" class="view">
+      <div class="view-heading">
+        <div><h2>Pages</h2><span id="pages-status" class="muted" aria-live="polite">Not loaded</span></div>
+      </div>
+      <form id="page-search" class="toolbar">
+        <input id="query" name="q" type="search" placeholder="Search pages" autocomplete="off">
+        <select id="scope-filter" name="scope" aria-label="Scope"><option value="">All scopes</option></select>
+        <select id="search-mode" name="mode" aria-label="Search method">
+          <option value="auto">Auto</option>
+          <option value="text">Text</option>
+          <option value="exact">Exact</option>
+        </select>
+        <button type="submit">Search</button>
+      </form>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Page</th><th>Scope</th><th>Preview from</th><th>Observed</th></tr></thead>
+          <tbody id="page-rows"></tbody>
+        </table>
+      </div>
+      <div class="list-footer">
+        <span id="pages-loaded" class="muted"></span>
+        <button id="pages-more" type="button" hidden>Load more</button>
+      </div>
+    </section>
+
+    <section id="view-quality" class="view">
+      <div class="view-heading">
+        <div><h2>Data quality</h2><span id="quality-status" class="muted" aria-live="polite">Not loaded</span></div>
+      </div>
+      <div id="quality-metrics" class="metrics"></div>
+      <div class="section-heading"><h2>Needs attention</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Page</th><th>Scope</th><th>Size</th><th>Issue</th></tr></thead>
+          <tbody id="quality-rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="view-access" class="view">
+      <div class="view-heading">
+        <div><h2>Access</h2><span id="access-status" class="muted" aria-live="polite">Not loaded</span></div>
+      </div>
+      <div id="access-summary" class="aggregate-grid"></div>
+      <div class="section-heading"><h2>Recent events</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Time</th><th>Principal</th><th>Operation</th><th>Scopes</th><th>Decision</th></tr></thead>
+          <tbody id="access-rows"></tbody>
+        </table>
+      </div>
+      <div class="list-footer">
+        <span id="access-loaded" class="muted"></span>
+        <button id="access-more" type="button" hidden>Load more</button>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="page-dialog">
+    <header class="dialog-header">
+      <div class="dialog-identity">
+        <button id="dialog-back" class="icon-button" type="button" aria-label="Back" title="Back" hidden>←</button>
+        <div><strong id="dialog-title">Page</strong><div id="dialog-subtitle" class="muted"></div></div>
+      </div>
+      <button id="dialog-close" type="button">Close</button>
+    </header>
+    <nav class="detail-tabs" aria-label="Page views">
+      <button class="detail-tab active" type="button" data-detail-view="summary">Summary</button>
+      <button class="detail-tab" type="button" data-detail-view="graph">Graph</button>
+      <button class="detail-tab" type="button" data-detail-view="history">Lineage</button>
+      <button class="detail-tab" type="button" data-detail-view="raw">Detail</button>
+    </nav>
+    <div id="detail-summary" class="page-detail detail-view active"></div>
+    <div id="detail-graph" class="page-detail detail-view"></div>
+    <div id="detail-history" class="page-detail detail-view"></div>
+    <div id="detail-raw" class="page-detail detail-view"></div>
+  </dialog>
+
+  <div id="error" class="error" hidden></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

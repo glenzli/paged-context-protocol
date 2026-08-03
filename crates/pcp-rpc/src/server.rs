@@ -1,7 +1,8 @@
 use std::{
     os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, LazyLock},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -13,6 +14,15 @@ use crate::wire::{
     PcpDescriptor, RpcOperation, RpcOutcome, RpcRequest, RpcResponse, RpcValue, read_frame,
     write_frame,
 };
+
+static SERVER_STARTED_AT_UNIX_MS: LazyLock<u64> = LazyLock::new(|| {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+});
 
 #[derive(Clone)]
 pub struct RuntimeEndpoint {
@@ -107,6 +117,8 @@ async fn dispatch(client: &dyn PcpApi, operation: RpcOperation) -> Result<RpcVal
             owner_id: client.owner_id().to_owned(),
             capabilities: client.capabilities(),
             access: client.access().clone(),
+            server_pid: std::process::id(),
+            server_started_at_unix_ms: *SERVER_STARTED_AT_UNIX_MS,
         }),
         RpcOperation::IntegrityCheck => RpcValue::Integrity(client.integrity_check().await?),
         RpcOperation::CreateScope(request) => {

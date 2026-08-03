@@ -12,7 +12,9 @@ use serde_json::Value;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DurablePageInventoryItem {
+    #[serde(rename = "refId")]
     pub page_id: String,
+    #[serde(rename = "pageId")]
     pub revision_id: String,
     pub namespace: String,
     pub kind: Option<String>,
@@ -21,6 +23,7 @@ pub struct DurablePageInventoryItem {
     pub content_chars: u64,
     pub snippet: String,
     pub facets: Option<Value>,
+    #[serde(rename = "summaryPageId")]
     pub summary_revision_id: Option<String>,
     pub summary: Option<String>,
     pub relation_types: Vec<String>,

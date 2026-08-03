@@ -110,7 +110,7 @@ fn browse_index_once(
         "SELECT {REVISION_COLUMNS},
                 substr(COALESCE(summary.content, r.payload_content, ''), 1, 700),
                 CASE WHEN summary.summary_revision_id IS NULL THEN 'payload' ELSE 'summary' END,
-                summary.summary_revision_id IS NOT NULL
+                summary.summary_revision_id
          FROM pcp_pages p
          JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
          LEFT JOIN pcp_summary_heads summary_head
@@ -120,7 +120,14 @@ fn browse_index_once(
          WHERE r.namespace IN ("
     );
     push_placeholders(&mut sql, scopes.len());
-    sql.push_str(") AND r.lifecycle_status = 'active'");
+    sql.push_str(
+        ") AND r.lifecycle_status = 'active'
+           AND NOT EXISTS (
+               SELECT 1 FROM pcp_relations newer
+               WHERE newer.relation_type = 'supersedes'
+                 AND newer.to_revision_id = r.revision_id
+           )",
+    );
     if !excluded_page_kinds.is_empty() {
         sql.push_str(" AND COALESCE(json_extract(r.facets_json, '$.kind'), '') NOT IN (");
         push_placeholders(&mut sql, excluded_page_kinds.len());
@@ -159,7 +166,7 @@ fn browse_index_once(
         let revision = revision_from_row(row, false, true, false, false)?;
         let snippet: String = row.get(17)?;
         let matched_projection: String = row.get(18)?;
-        let has_summary: bool = row.get(19)?;
+        let summary_revision_id: Option<String> = row.get(19)?;
         let entry_chars = snippet.chars().count().saturating_add(240);
         if !hits.is_empty() && used_chars.saturating_add(entry_chars) > max_chars {
             has_more = true;
@@ -168,18 +175,6 @@ fn browse_index_once(
         used_chars = used_chars.saturating_add(entry_chars);
         let validity =
             current_validity(connection, &revision.revision_id)?.map(compact_validity_hint);
-        let mut available_projections = vec![
-            Projection::Manifest,
-            Projection::Payload,
-            Projection::Relations,
-            Projection::Facets,
-        ];
-        if has_summary {
-            available_projections.insert(1, Projection::Summary);
-        }
-        if validity.is_some() {
-            available_projections.insert(usize::from(has_summary) + 1, Projection::Validity);
-        }
         hits.push(SearchHit {
             page_id: revision.page_id,
             revision_id: revision.revision_id,
@@ -190,9 +185,9 @@ fn browse_index_once(
             snippet,
             matched_by: "index_browse".to_owned(),
             matched_projection,
+            summary_revision_id,
             facets: compact_search_facets(revision.facets),
             validity,
-            available_projections,
         });
     }
     Ok(SearchResult {
@@ -280,8 +275,8 @@ fn search_revision_surface(
     let mut sql = format!(
         "SELECT {REVISION_COLUMNS},
                 substr(COALESCE({content_column}, ''), 1, 600),
-                EXISTS (
-                    SELECT 1 FROM pcp_summary_heads summary_head
+                (
+                    SELECT summary_head.current_summary_revision_id FROM pcp_summary_heads summary_head
                     WHERE summary_head.target_revision_id = r.revision_id
                 )
          FROM pcp_pages p
@@ -295,6 +290,7 @@ fn search_revision_surface(
     sql.push(')');
     values.extend(request.scopes.iter().cloned().map(SqlValue::Text));
 
+    append_effective_page_filter(&mut sql);
     append_lifecycle_filter(&mut sql, &mut values, request);
     append_time_filters(&mut sql, &mut values, request);
     append_relation_filter(&mut sql, &mut values, request);
@@ -370,7 +366,7 @@ fn search_summaries(
     let mut sql = format!(
         "SELECT {REVISION_COLUMNS},
                 substr(summary.content, 1, 600),
-                1
+                summary.summary_revision_id
          FROM pcp_pages p
          JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
          JOIN pcp_summary_heads summary_head
@@ -389,6 +385,7 @@ fn search_summaries(
     push_placeholders(&mut sql, request.scopes.len());
     sql.push(')');
     values.extend(request.scopes.iter().cloned().map(SqlValue::Text));
+    append_effective_page_filter(&mut sql);
     append_lifecycle_filter(&mut sql, &mut values, request);
     append_time_filters(&mut sql, &mut values, request);
     append_relation_filter(&mut sql, &mut values, request);
@@ -489,8 +486,8 @@ fn search_graph(
          )
          SELECT {REVISION_COLUMNS},
                 substr(COALESCE(r.payload_content, r.facets_json, ''), 1, 600),
-                EXISTS (
-                    SELECT 1 FROM pcp_summary_heads summary_head
+                (
+                    SELECT summary_head.current_summary_revision_id FROM pcp_summary_heads summary_head
                     WHERE summary_head.target_revision_id = r.revision_id
                 )
          FROM neighbors
@@ -554,25 +551,9 @@ fn collect_hits(
     while let Some(row) = rows.next().context("read PCP search row")? {
         let revision = revision_from_row(row, false, true, false, false)?;
         let snippet: String = row.get(17)?;
-        let has_summary: bool = row.get(18)?;
+        let summary_revision_id: Option<String> = row.get(18)?;
         let validity =
             current_validity(connection, &revision.revision_id)?.map(compact_validity_hint);
-        let mut available_projections = vec![
-            Projection::Manifest,
-            Projection::Payload,
-            Projection::Sources,
-            Projection::Provenance,
-            Projection::Relations,
-            Projection::Facets,
-            Projection::History,
-        ];
-        if has_summary {
-            available_projections.insert(1, Projection::Summary);
-        }
-        if validity.is_some() {
-            let index = usize::from(has_summary) + 1;
-            available_projections.insert(index, Projection::Validity);
-        }
         hits.push(SearchHit {
             page_id: revision.page_id,
             revision_id: revision.revision_id,
@@ -583,9 +564,9 @@ fn collect_hits(
             snippet,
             matched_by: matched_by.to_owned(),
             matched_projection: matched_projection.to_owned(),
+            summary_revision_id,
             facets: compact_search_facets(revision.facets),
             validity,
-            available_projections,
         });
     }
     let has_more = hits.len() > limit;
@@ -667,6 +648,16 @@ fn append_lifecycle_filter(
         statuses
             .into_iter()
             .map(|status| SqlValue::Text(status.as_str().to_owned())),
+    );
+}
+
+fn append_effective_page_filter(sql: &mut String) {
+    sql.push_str(
+        " AND NOT EXISTS (
+            SELECT 1 FROM pcp_relations newer
+            WHERE newer.relation_type = 'supersedes'
+              AND newer.to_revision_id = r.revision_id
+        )",
     );
 }
 

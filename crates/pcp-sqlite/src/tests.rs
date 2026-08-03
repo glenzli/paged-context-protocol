@@ -46,7 +46,6 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
             .create_scope(CreateScopeRequest {
                 owner_id: owner_id.clone(),
                 namespace: namespace.clone(),
-                scope_type: "project".to_owned(),
                 display_name: namespace.clone(),
                 description: None,
                 parent_namespace: None,
@@ -335,7 +334,6 @@ async fn stores_searches_revises_and_links_pages() {
         .create_scope(CreateScopeRequest {
             owner_id: owner_id.clone(),
             namespace: namespace.clone(),
-            scope_type: "conversation".to_owned(),
             display_name: "Test conversation".to_owned(),
             description: None,
             parent_namespace: None,
@@ -558,12 +556,18 @@ async fn stores_searches_revises_and_links_pages() {
         .expect("read revised page");
     assert_eq!(read.len(), 1);
     assert_eq!(read[0].history.len(), 2);
-    assert_eq!(read[0].relations.len(), 1);
+    assert_eq!(read[0].relations.len(), 2);
+    assert!(
+        read[0]
+            .relations
+            .iter()
+            .any(|relation| relation.relation_type == "supersedes")
+    );
     assert!(read[0].revision.source_refs.is_empty());
     assert!(read[0].revision.provenance.is_empty());
     let lean_json = serde_json::to_value(&read[0]).expect("serialize lean projection");
-    assert!(lean_json["revision"].get("sourceRefs").is_none());
-    assert!(lean_json["revision"].get("provenance").is_none());
+    assert!(lean_json["page"].get("sourceRefs").is_none());
+    assert!(lean_json["page"].get("provenance").is_none());
 
     let traced = store
         .read_pages(
@@ -622,7 +626,6 @@ async fn backfills_the_provenance_graph_index() {
         .create_scope(CreateScopeRequest {
             owner_id: owner_id.clone(),
             namespace: namespace.clone(),
-            scope_type: "conversation".to_owned(),
             display_name: "Backfill conversation".to_owned(),
             description: None,
             parent_namespace: None,
@@ -719,7 +722,6 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
         .create_scope(CreateScopeRequest {
             owner_id: owner_id.clone(),
             namespace: namespace.clone(),
-            scope_type: "conversation".to_owned(),
             display_name: "Summary conversation".to_owned(),
             description: None,
             parent_namespace: None,
@@ -824,10 +826,9 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
     assert_eq!(search.hits.len(), 1);
     assert_eq!(search.hits[0].revision_id, page.revision_id);
     assert_eq!(search.hits[0].matched_projection, "summary");
-    assert!(
-        search.hits[0]
-            .available_projections
-            .contains(&Projection::Summary)
+    assert_eq!(
+        search.hits[0].summary_revision_id.as_deref(),
+        Some(summary.summary_revision_id.as_str())
     );
     let browsed = store
         .search_pages(SearchPagesRequest {
@@ -955,7 +956,7 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
         .await
         .expect("revise summary");
     assert_ne!(revised.summary_revision_id, summary.summary_revision_id);
-    assert_eq!(revised.summary_page_id, summary.summary_page_id);
+    assert_ne!(revised.summary_page_id, summary.summary_page_id);
     assert!(
         store
             .next_summary_candidate(
@@ -1009,7 +1010,6 @@ async fn rejects_cycles_in_the_derivation_subgraph() {
         .create_scope(CreateScopeRequest {
             owner_id: owner_id.clone(),
             namespace: namespace.clone(),
-            scope_type: "project".to_owned(),
             display_name: "DAG project".to_owned(),
             description: None,
             parent_namespace: None,
@@ -1097,7 +1097,6 @@ async fn retracts_derived_pages_and_restores_preexisting_pages() {
         .create_scope(CreateScopeRequest {
             owner_id: owner_id.clone(),
             namespace: namespace.clone(),
-            scope_type: "conversation".to_owned(),
             display_name: "Retraction test".to_owned(),
             description: None,
             parent_namespace: None,
@@ -1281,7 +1280,6 @@ async fn validity_is_revisioned_and_routes_before_detail() {
         .create_scope(CreateScopeRequest {
             owner_id: owner_id.clone(),
             namespace: namespace.clone(),
-            scope_type: "conversation".to_owned(),
             display_name: "Validity conversation".to_owned(),
             description: None,
             parent_namespace: None,
@@ -1366,8 +1364,6 @@ async fn validity_is_revisioned_and_routes_before_detail() {
             .map(|value| value.basis_revision_count),
         Some(1)
     );
-    assert!(hit.available_projections.contains(&Projection::Validity));
-
     let routed = store
         .read_pages(
             ReadPagesRequest {
@@ -1501,7 +1497,6 @@ async fn durable_inventory_uses_current_heads_and_excludes_runtime_pages() {
         .create_scope(CreateScopeRequest {
             owner_id: owner_id.clone(),
             namespace: namespace.clone(),
-            scope_type: "project".to_owned(),
             display_name: "Inventory project".to_owned(),
             description: None,
             parent_namespace: None,

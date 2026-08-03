@@ -17,6 +17,10 @@ pub(crate) struct PcpDescriptor {
     pub owner_id: String,
     pub capabilities: Capabilities,
     pub access: AccessSession,
+    #[serde(default)]
+    pub server_pid: u32,
+    #[serde(default)]
+    pub server_started_at_unix_ms: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

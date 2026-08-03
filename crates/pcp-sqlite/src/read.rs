@@ -58,7 +58,7 @@ impl SqlitePcpStore {
             let mut statement = connection
                 .prepare(
                     "
-                    SELECT s.owner_id, s.namespace, s.scope_type, s.display_name,
+                    SELECT s.owner_id, s.namespace, s.display_name,
                            s.description, s.parent_namespace, s.visibility,
                            s.created_at, s.updated_at, COUNT(p.page_id)
                     FROM pcp_scopes s
@@ -74,14 +74,13 @@ impl SqlitePcpStore {
                     Ok(Scope {
                         owner_id: row.get(0)?,
                         namespace: row.get(1)?,
-                        scope_type: row.get(2)?,
-                        display_name: row.get(3)?,
-                        description: row.get(4)?,
-                        parent_namespace: row.get(5)?,
-                        visibility: row.get(6)?,
-                        created_at: row.get(7)?,
-                        updated_at: row.get(8)?,
-                        page_count: row.get::<_, i64>(9)? as u64,
+                        display_name: row.get(2)?,
+                        description: row.get(3)?,
+                        parent_namespace: row.get(4)?,
+                        visibility: row.get(5)?,
+                        created_at: row.get(6)?,
+                        updated_at: row.get(7)?,
+                        page_count: row.get::<_, i64>(8)? as u64,
                     })
                 })
                 .context("query PCP scopes")?
@@ -273,19 +272,36 @@ impl SqlitePcpStore {
                     let mut history_statement = connection
                         .prepare(
                             "
-                            SELECT revision_id
-                            FROM pcp_revisions
-                            WHERE page_id = ?1
-                            ORDER BY created_at DESC
+                            WITH RECURSIVE lineage(page_id) AS (
+                                SELECT ?1
+                                UNION
+                                SELECT CASE
+                                    WHEN relation.from_revision_id = lineage.page_id
+                                    THEN relation.to_revision_id
+                                    ELSE relation.from_revision_id
+                                END
+                                FROM lineage
+                                JOIN pcp_relations relation
+                                  ON relation.relation_type = 'supersedes'
+                                 AND (
+                                     relation.from_revision_id = lineage.page_id
+                                     OR relation.to_revision_id = lineage.page_id
+                                 )
+                            )
+                            SELECT revision.revision_id
+                            FROM lineage
+                            JOIN pcp_revisions revision
+                              ON revision.revision_id = lineage.page_id
+                            ORDER BY revision.created_at DESC, revision.revision_id DESC
                             LIMIT 100
                             ",
                         )
-                        .context("prepare PCP revision history")?;
+                        .context("prepare PCP Page lineage")?;
                     history_statement
-                        .query_map([&revision.page_id], |row| row.get(0))
-                        .context("query PCP revision history")?
+                        .query_map([&revision.revision_id], |row| row.get(0))
+                        .context("query PCP Page lineage")?
                         .collect::<rusqlite::Result<Vec<String>>>()
-                        .context("collect PCP revision history")?
+                        .context("collect PCP Page lineage")?
                 } else {
                     Vec::new()
                 };
@@ -313,10 +329,10 @@ impl SqlitePcpStore {
             let (revision_id, namespace): (String, String) = connection
                 .query_row(
                     "
-                    SELECT p.current_revision_id, r.namespace
-                    FROM pcp_pages p
-                    JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
-                    WHERE p.page_id = ?1
+                    SELECT ref.head_page_id, r.namespace
+                    FROM pcp_refs ref
+                    JOIN pcp_revisions r ON r.revision_id = ref.head_page_id
+                    WHERE ref.ref_id = ?1
                     ",
                     [&page_id],
                     |row| Ok((row.get(0)?, row.get(1)?)),
@@ -339,6 +355,11 @@ impl SqlitePcpStore {
                     SELECT r.namespace
                     FROM pcp_pages p
                     JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM pcp_relations newer
+                        WHERE newer.relation_type = 'supersedes'
+                          AND newer.to_revision_id = r.revision_id
+                    )
                     ",
                 )
                 .context("prepare PCP page count")?;
@@ -360,8 +381,7 @@ impl SqlitePcpStore {
                 .prepare(
                     "
                     SELECT r.namespace, length(COALESCE(r.payload_content, ''))
-                    FROM pcp_pages p
-                    JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
+                    FROM pcp_revisions r
                     ",
                 )
                 .context("prepare PCP content size")?;

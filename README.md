@@ -1,4 +1,4 @@
-# Paged-Context-Protocol (PCP) - v0.4.0-draft
+# Paged-Context-Protocol (PCP) - v0.6.0-draft
 
 ![Paged-Context-Protocol banner](assets/banner.png)
 
@@ -19,8 +19,8 @@ Context 之间保持统一身份、可追溯组织和按需物化。
 完整 Storage 太大，无法直接进入注意力；传统 Memory 往往只保留粗糙压缩，又容易丢失来源、
 版本和适用范围。
 
-**Paged-Context-Protocol (PCP)** 定义一个由用户拥有的统一逻辑 Page 空间。原始事件、文件、
-历史讨论、模型总结和跨项目关系可以共享稳定身份，并以不同 Projection 按需进入模型注意力。
+**Paged-Context-Protocol (PCP)** 定义一个由用户拥有的不可变 Page 图。原始事件、文件、
+历史讨论、模型总结和跨项目关系都以 Page 存在，并按需进入模型注意力。
 这里的 Context 是跨时间存在的信息连续体；模型当前窗口只是其中一个临时 working set。
 
 PCP 不是特定的 context manager、Memory 数据库或 Storage 格式。它定义三者之间可互操作、
@@ -28,9 +28,9 @@ PCP 不是特定的 context manager、Memory 数据库或 Storage 格式。它�
 
 ```text
 Source / Event
-  -> Page / Revision             (Storage)
-  -> Summary / Derived DAG       (Memory)
-  -> Search / Read Projection    (Attention boundary)
+  -> immutable Page              (Storage)
+  -> Relation / optional Ref     (Memory organization)
+  -> Search / Read               (Attention boundary)
   -> Active working context
 ```
 
@@ -39,27 +39,26 @@ Source / Event
 ### 核心原则
 
 - **用户拥有信息连续性**：历史不会绑定在单一模型、服务商、会话或项目目录中。
-- **稳定逻辑身份**：Page 与 Revision 拥有稳定 ID，进入或离开模型窗口不改变其身份。
+- **不可变内容身份**：Page 创建后不原地修改；变化由新 Page 与 `supersedes` 表达。
 - **原始历史可恢复**：在授权范围内保留可搜索来源；摘要和模型整理是可重建的派生层。
-- **稀疏模型记忆**：值得索引的 Page 可以拥有独立、可版本化的 Summary Projection，模型再
-  按需读取 Detail。
-- **可回溯整理图**：总结与聚合形成无环派生子图，并能逐层返回精确来源 Revision。
-- **显式注意力物化**：已返回候选、Summary 与 Detail 必须以明确的 Page、Revision 和
-  Projection 身份进入模型可见上下文。
+- **稀疏模型记忆**：只有值得索引的内容才创建 Summary Page，模型再按需读取目标 Page。
+- **可回溯整理图**：总结、聚合、判断与后继关系都能逐层返回精确来源 Page。
+- **显式关系断言**：时间相邻和内容相似不会自动成为 Relation；领域关系由 Host、用户或模型判断。
+- **显式注意力物化**：已返回候选与读取内容必须以明确 Page 身份进入模型可见上下文。
 - **显式作用域**：统一地址空间不等于全局注入，跨项目召回必须由 Scope、权限或关系允许。
 - **模型拥有策略**：搜索计划、排序、压缩和具体准入时机仍由模型或 Host 决定。
 
 ### PCP 不规定什么
 
-PCP 不再规定四处理器、Intent Focus、固定四级变焦、XML Linear Flow、Chain-of-Thought 或
-`Consult/Explore/Shelve/Purge` 状态机。它定义 Page、Scope、Revision、Provenance、
-Relation、Summary Projection、Detail 读取、attention materialization 和基础 I/O 语义，
+PCP 不规定四处理器、Intent Focus、固定四级变焦、XML Linear Flow、Chain-of-Thought 或
+`Consult/Explore/Shelve/Purge` 状态机。它定义 Page、Scope、Provenance、Relation、可选 Ref、
+Summary Page、attention materialization 和基础 I/O 语义，
 但不规定模型必须采用哪条召回路径，也不替模型决定某项内容何时最值得进入注意力。
 
 ### 当前状态
 
-`v0.4.0-draft` 是一次不向后兼容的协议重构，目前正由实际工程中的原型持续反哺。Core 与
-接口边界仍可能随实践调整；跨模型行为和百万级高密度上下文仍需系统评测。
+`v0.6.0-draft` 将旧 Page/Revision 双层模型收敛为不可变 Page，并把 Summary 与有效性判断
+统一为派生 Page。参考实现包含从旧数据结构幂等升级的迁移。
 
 旧 `v0.3.0-alpha` 作为一次重要的设计阶段被完整保留，并附有淘汰原因和迁移说明：
 [deprecated/v0.3.0-alpha](deprecated/v0.3.0-alpha/README.md)。
@@ -74,7 +73,7 @@ their visibility usually still ends at the current session and project. Complete
 Storage is too large to place directly into attention, while conventional Memory
 often preserves only coarse compression and loses source, revision, or scope.
 
-**Paged-Context-Protocol (PCP)** defines a user-owned unified logical Page space.
+**Paged-Context-Protocol (PCP)** defines a user-owned graph of immutable Pages.
 Raw events, files, past discussions, model summaries, and cross-project
 Relations can share stable identities and enter model attention through
 different Projections on demand. Context here is an information continuum across
@@ -85,9 +84,9 @@ defines an interoperable and traceable paging boundary among them:
 
 ```text
 Source / Event
-  -> Page / Revision             (Storage)
-  -> Summary / Derived DAG       (Memory)
-  -> Search / Read Projection    (Attention boundary)
+  -> immutable Page              (Storage)
+  -> Relation / optional Ref     (Memory organization)
+  -> Search / Read               (Attention boundary)
   -> Active working context
 ```
 
@@ -98,17 +97,19 @@ separate Memory service or profile.
 
 - **The user owns information continuity**: history is not bound to one model,
   provider, session, or project directory.
-- **Stable logical identity**: Pages and Revisions keep stable IDs across model
-  windows and storage locations.
+- **Immutable content identity**: Pages are never edited in place; a new Page
+  and `supersedes` express change.
 - **Recoverable raw history**: authorized sources remain searchable; summaries
   and model organization are rebuildable derived layers.
-- **Sparse model memory**: Pages worth indexing may have independently
-  versioned Summary Projections from which a model can read Detail on demand.
-- **Traceable organization graph**: summarization and aggregation form an
-  acyclic derivation subgraph that leads back to exact source Revisions.
-- **Explicit attention materialization**: returned candidates, Summaries, and
-  Detail enter model-visible context with explicit Page, Revision, and
-  Projection identities.
+- **Sparse model memory**: only content worth indexing receives a Summary Page;
+  models then read exact target Pages on demand.
+- **Traceable organization graph**: summaries, aggregates, assessments, and
+  successor chains lead back to exact source Pages.
+- **Explicit Relation assertions**: temporal adjacency and similarity do not
+  become graph edges automatically; domain Relations require Host, user, or
+  model judgment.
+- **Explicit attention materialization**: returned candidates and reads enter
+  model-visible context with explicit Page identities.
 - **Explicit scope**: a unified address space is not global injection;
   cross-project recall requires Scope, permission, or explicit Relations.
 - **The model owns strategy**: search planning, ranking, compaction, and exact
@@ -118,17 +119,16 @@ separate Memory service or profile.
 
 PCP no longer mandates four processors, Intent Focus, fixed zoom levels, an XML
 Linear Flow, Chain-of-Thought, or a `Consult/Explore/Shelve/Purge` state machine.
-It defines Page, Scope, Revision, Provenance, Relation, Summary Projections,
+It defines Page, Scope, Provenance, Relation, optional Refs, Summary Pages,
 Detail reads, attention materialization, and basic I/O semantics without
 prescribing a recall path or deciding when a specific item is most worthy of
 model attention.
 
 ### Current Status
 
-`v0.4.0-draft` is a backward-incompatible redesign continuously informed by an
-implementation prototype in a real project. Core and interface boundaries may
-still change with practice; cross-model behavior and millions-of-token,
-high-density context require systematic evaluation.
+`v0.6.0-draft` collapses the old Page/Revision model into immutable Pages and
+represents Summaries and validity assessments as derived Pages. The reference
+implementation includes an idempotent migration from the earlier layout.
 
 The complete `v0.3.0-alpha` generation is preserved as a significant design
 stage, together with its deprecation rationale and migration notes:
@@ -141,11 +141,12 @@ stage, together with its deprecation rationale and migration notes:
 仓库包含一个正在演进的 Rust 参考实现。它用于验证协议边界，不把某一种数据库、检索策略或
 Host 行为变成协议要求：
 
-- `pcp-core`：Page、Revision、Projection、Relation 与请求类型。
+- `pcp-core`：Page、Relation、Ref 语义与请求类型。
 - `pcp-store`：与具体数据库无关、携带 AccessSession 的异步 Store 契约。
 - `pcp-client`：面向 Host 的传输无关能力接口，以及当前的 embedded 适配器。
 - `pcp-rpc`：轻量 Unix socket wire、远端 client 与通用 server transport。
-- `pcp-sqlite`：本地持久化、修订、检索、Summary、有效性与 DAG 关系。
+- `pcp-console`：通过专用审计 Principal 运行的只读本地 Web Inspector。
+- `pcp-sqlite`：本地不可变 Page、检索、Summary、有效性、Ref 与 DAG 关系。
 - `pcp-runtime`：打开 Store、固定接入身份并管理多端点 broker 生命周期。
 - `pcp-cli`：面向本地 Store 的检查、搜索、读取与导出工具。
 - `pcp-mcp`：基于官方 Rust MCP SDK 的本地 stdio 工具服务器。
@@ -154,14 +155,16 @@ The repository includes an evolving Rust reference implementation. It exercises
 the protocol boundary without making one database, retrieval policy, or Host
 behavior normative:
 
-- `pcp-core`: Page, Revision, Projection, Relation, and request types.
+- `pcp-core`: Page, Relation, Ref semantics, and request types.
 - `pcp-store`: a database-independent async Store contract with AccessSession
   enforcement.
 - `pcp-client`: the transport-independent Host API and the current embedded
   adapter.
 - `pcp-rpc`: the lightweight Unix socket wire, remote client, and generic
   server transport.
-- `pcp-sqlite`: local persistence, revisioning, retrieval, Summaries, validity,
+- `pcp-console`: a read-only local Web Inspector using a dedicated audit
+  Principal.
+- `pcp-sqlite`: immutable local Pages, retrieval, Summaries, validity, Refs,
   and DAG Relations.
 - `pcp-runtime`: Store composition, fixed endpoint identities, and the
   multi-endpoint broker lifecycle.
@@ -229,6 +232,37 @@ PCP_ALLOWED_SCOPES=project:example,conversation:example-main \
   target/release/pcp-runtime
 ```
 
+### Read-only Console
+
+Give the Console a distinct endpoint with `access_mode = "audit"`. Audit mode
+can list, search, and read Pages and access events, but cannot write, revise,
+link, retract, or manage Scopes:
+
+```toml
+[[endpoints]]
+socket_path = "../run/pcp-operator.sock"
+client_id = "operator:local"
+client_type = "service"
+access_mode = "audit"
+allowed_scopes = ["user:{owner_id}", "project:example"]
+```
+
+Then run the independent local Console:
+
+```bash
+cargo build --release -p pcp-console
+PCP_RUNTIME_SOCKET=/absolute/path/to/pcp-operator.sock \
+PCP_CLIENT_ID=operator:local \
+PCP_CONSOLE_BIND=127.0.0.1:4318 \
+  target/release/pcp-console
+```
+
+The first version is intentionally read-only. Its default view summarizes the
+runtime and available Scopes. Page and access lists are cursor-paginated; a Page
+opens on its Summary or bounded preview, while full Detail and a navigable
+one-hop Relation graph are loaded only when requested. It also exposes the
+metadata-only access timeline.
+
 The CLI uses that endpoint when `PCP_RUNTIME_SOCKET` is set. Supplying
 `PCP_CLIENT_ID` additionally verifies that the endpoint exposes the expected
 Principal:
@@ -274,7 +308,8 @@ env = { PCP_STORE_PATH = "/absolute/path/to/context.sqlite3", PCP_CLIENT_ID = "c
 default_tools_approval_mode = "writes"
 ```
 
-`PCP_ACCESS_MODE` is `read`, `write`, or `admin`. Cross-Scope derivation remains
+`PCP_ACCESS_MODE` is `read`, `audit`, `write`, or `admin`. `audit` adds access
+log visibility to read-only data permissions. Cross-Scope derivation remains
 disabled even in admin mode; a trusted integration must separately set
 `PCP_ALLOW_CROSS_SCOPE_DERIVATION=1`. `pcp_whoami` shows the server-injected
 Principal and grants. `pcp_access_log` returns metadata-only events when the

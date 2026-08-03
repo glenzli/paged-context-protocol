@@ -7,7 +7,7 @@ pub use access::{
     AccessSession, ScopeGrant,
 };
 pub use model::{
-    Actor, ActorType, Capabilities, LifecycleStatus, PagePayload, PageRevision, PageSummary,
+    Actor, ActorType, Capabilities, LifecycleStatus, Page, PagePayload, PageRevision, PageSummary,
     PageValidity, PageValidityHint, Projection, ProvenanceEvent, ReadPage, Relation, Scope,
     SearchHit, SearchMode, SearchResult, SearchTermMatch, SourceRef, ValidityStanding, WriteResult,
     WriteSummaryResult, WriteValidityResult,

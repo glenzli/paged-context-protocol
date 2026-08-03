@@ -16,7 +16,6 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
             CREATE TABLE IF NOT EXISTS pcp_scopes (
                 namespace TEXT PRIMARY KEY,
                 owner_id TEXT NOT NULL,
-                scope_type TEXT NOT NULL,
                 display_name TEXT NOT NULL,
                 description TEXT,
                 parent_namespace TEXT,
@@ -59,6 +58,20 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 actor_type TEXT NOT NULL,
                 actor_id TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS pcp_relation_retractions (
+                relation_id TEXT PRIMARY KEY,
+                from_revision_id TEXT NOT NULL,
+                relation_type TEXT NOT NULL,
+                to_revision_id TEXT NOT NULL,
+                original_actor_type TEXT NOT NULL,
+                original_actor_id TEXT NOT NULL,
+                original_created_at TEXT NOT NULL,
+                retracted_actor_type TEXT NOT NULL,
+                retracted_actor_id TEXT NOT NULL,
+                retracted_at TEXT NOT NULL,
+                reason TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS pcp_provenance_inputs (
@@ -182,6 +195,8 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 ON pcp_relations(from_revision_id, relation_type);
             CREATE INDEX IF NOT EXISTS pcp_relations_to
                 ON pcp_relations(to_revision_id, relation_type);
+            CREATE INDEX IF NOT EXISTS pcp_relation_retractions_time
+                ON pcp_relation_retractions(retracted_at DESC, relation_id);
             CREATE INDEX IF NOT EXISTS pcp_provenance_inputs_input
                 ON pcp_provenance_inputs(input_revision_id, derived_revision_id);
             CREATE INDEX IF NOT EXISTS pcp_summaries_target
@@ -213,6 +228,21 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 WHERE key = 'provenance_input_index_version'
               ) = '0';
 
+            INSERT OR IGNORE INTO pcp_provenance_inputs (
+                derived_revision_id, input_revision_id, created_at
+            )
+            SELECT revision.revision_id, CAST(input.value AS TEXT), revision.created_at
+            FROM pcp_revisions revision
+            CROSS JOIN json_each(revision.provenance_json) event
+            CROSS JOIN json_each(event.value, '$.inputPageIds') input
+            JOIN pcp_revisions source
+              ON source.revision_id = CAST(input.value AS TEXT)
+            WHERE input.type = 'text'
+              AND (
+                SELECT value FROM pcp_metadata
+                WHERE key = 'provenance_input_index_version'
+              ) = '0';
+
             UPDATE pcp_metadata
             SET value = '1'
             WHERE key = 'provenance_input_index_version' AND value = '0';
@@ -220,7 +250,9 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
         )
         .context("initialize PCP schema")?;
 
+    drop_legacy_scope_type(connection)?;
     crate::summary_migration::migrate(connection)?;
+    crate::immutable_page_migration::migrate(connection)?;
 
     connection
         .execute(
@@ -231,6 +263,26 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
             [],
         )
         .context("initialize PCP owner identity")?;
+    Ok(())
+}
+
+fn drop_legacy_scope_type(connection: &Connection) -> Result<()> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(pcp_scopes)")
+        .context("inspect PCP Scope schema")?;
+    let has_legacy_column = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .context("query PCP Scope schema")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect PCP Scope schema")?
+        .into_iter()
+        .any(|column| column == "scope_type");
+    drop(statement);
+    if has_legacy_column {
+        connection
+            .execute("ALTER TABLE pcp_scopes DROP COLUMN scope_type", [])
+            .context("remove redundant PCP Scope type")?;
+    }
     Ok(())
 }
 
@@ -311,6 +363,15 @@ mod tests {
 
         initialize(&mut connection).expect("migrate legacy Summary");
         initialize(&mut connection).expect("repeat migration idempotently");
+
+        let scope_columns = connection
+            .prepare("PRAGMA table_info(pcp_scopes)")
+            .expect("inspect migrated Scope schema")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query migrated Scope schema")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect migrated Scope schema");
+        assert!(!scope_columns.iter().any(|column| column == "scope_type"));
 
         let summary_page_id: String = connection
             .query_row(

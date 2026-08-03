@@ -15,6 +15,7 @@ pub use pcp_store::{DurablePageInventoryItem, TombstoneCascadeResult};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AccessMode {
     Read,
+    Audit,
     Write,
     Admin,
 }
@@ -53,12 +54,11 @@ impl AccessMode {
                 AccessPermission::Assess,
             ]);
         }
+        if matches!(self, Self::Audit | Self::Admin) {
+            permissions.push(AccessPermission::Audit);
+        }
         if self == Self::Admin {
-            permissions.extend([
-                AccessPermission::ManageScope,
-                AccessPermission::Retract,
-                AccessPermission::Audit,
-            ]);
+            permissions.extend([AccessPermission::ManageScope, AccessPermission::Retract]);
         }
         if allow_cross_scope_derivation {
             permissions.push(AccessPermission::DeriveAcrossScopes);
@@ -73,6 +73,7 @@ impl FromStr for AccessMode {
     fn from_str(value: &str) -> Result<Self> {
         match value {
             "read" => Ok(Self::Read),
+            "audit" => Ok(Self::Audit),
             "write" => Ok(Self::Write),
             "admin" => Ok(Self::Admin),
             other => anyhow::bail!("unsupported PCP access mode: {other}"),
@@ -308,5 +309,31 @@ impl PcpApi for EmbeddedPcpClient {
         cursor: Option<String>,
     ) -> Result<(Vec<AccessAuditEvent>, Option<String>)> {
         self.store.access_log(&self.access, limit, cursor).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pcp_core::{AccessPermission, AccessPrincipal, AccessPrincipalType};
+
+    use super::AccessMode;
+
+    #[test]
+    fn audit_mode_can_inspect_without_mutating() {
+        let session = AccessMode::Audit.session(
+            AccessPrincipal {
+                principal_id: "operator:test".to_owned(),
+                principal_type: AccessPrincipalType::Service,
+                display_name: None,
+            },
+            "session:test",
+            vec!["project:test".to_owned()],
+            false,
+        );
+
+        assert!(session.allows("project:test", AccessPermission::ReadDetail));
+        assert!(session.allows("project:test", AccessPermission::Audit));
+        assert!(!session.allows("project:test", AccessPermission::Write));
+        assert!(!session.allows("project:test", AccessPermission::Retract));
     }
 }

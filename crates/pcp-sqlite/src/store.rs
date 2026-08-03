@@ -42,7 +42,7 @@ impl SqlitePcpStore {
 
     pub fn capabilities(&self) -> Capabilities {
         Capabilities {
-            protocol_version: "0.5.0-draft".to_owned(),
+            protocol_version: "0.6.0-draft".to_owned(),
             search_modes: vec![
                 SearchMode::Auto,
                 SearchMode::Exact,
@@ -65,6 +65,8 @@ impl SqlitePcpStore {
             max_read_pages: MAX_READ_PAGES,
             max_read_chars: MAX_READ_CHARS,
             supports_event_ingest: true,
+            supports_immutable_pages: true,
+            supports_refs: true,
             supports_revision_conflicts: true,
             supports_durable_deletion: false,
             supports_provenance_graph: true,
@@ -75,7 +77,6 @@ impl SqlitePcpStore {
                 "aggregates",
                 "derived_from",
                 "summarizes",
-                "follows",
                 "responds_to",
                 "continues",
                 "has_attachment",
@@ -86,6 +87,7 @@ impl SqlitePcpStore {
                 "uses",
                 "supports",
                 "contradicts",
+                "assesses",
                 "supersedes",
                 "qualifies",
                 "reaffirms",
