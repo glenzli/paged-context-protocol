@@ -63,7 +63,7 @@ impl SqlitePcpStore {
             let mut tombstone_revision_ids = Vec::new();
 
             for page_id in page_ids {
-                let current = current_revision(&transaction, &page_id)?;
+                let (current, current_kind) = current_revision(&transaction, &page_id)?;
                 if current.lifecycle_status == LifecycleStatus::Tombstoned {
                     continue;
                 }
@@ -75,8 +75,16 @@ impl SqlitePcpStore {
 
                 let fallback = latest_unaffected_revision(&transaction, &page_id, &affected)?;
                 let next_revision_id = random_id(&transaction, "rev_")?;
-                match fallback {
+                let (next_kind, next_lifecycle_status) = match fallback {
                     Some(fallback) => {
+                        let next_kind = fallback
+                            .facets
+                            .as_ref()
+                            .and_then(|facets| facets.get("kind"))
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| current_kind.clone());
+                        let next_lifecycle_status = fallback.lifecycle_status.clone();
                         insert_revision(
                             &transaction,
                             &page_id,
@@ -102,6 +110,7 @@ impl SqlitePcpStore {
                             }],
                         )?;
                         restored_page_ids.push(page_id.clone());
+                        (next_kind, next_lifecycle_status)
                     }
                     None => {
                         insert_revision(
@@ -133,18 +142,30 @@ impl SqlitePcpStore {
                             }],
                         )?;
                         tombstone_revision_ids.push(next_revision_id.clone());
+                        ("tombstone".to_owned(), LifecycleStatus::Tombstoned)
                     }
-                }
-                transaction
+                };
+                let published = transaction
                     .execute(
                         "
                         UPDATE pcp_pages
-                        SET current_revision_id = ?2
+                        SET current_revision_id = ?2,
+                            kind = ?4,
+                            lifecycle_status = ?5,
+                            updated_at = ?6
                         WHERE page_id = ?1 AND current_revision_id = ?3
                         ",
-                        params![page_id, next_revision_id, current_revision_id],
+                        params![
+                            page_id,
+                            next_revision_id,
+                            current_revision_id,
+                            next_kind,
+                            next_lifecycle_status.as_str(),
+                            timestamp
+                        ],
                     )
                     .context("publish PCP retraction revision")?;
+                anyhow::ensure!(published == 1, "PCP Page changed during retraction");
             }
 
             transaction
@@ -207,16 +228,19 @@ fn affected_page_ids(
 fn current_revision(
     transaction: &rusqlite::Transaction<'_>,
     page_id: &str,
-) -> Result<PageRevision> {
+) -> Result<(PageRevision, String)> {
     let sql = format!(
-        "SELECT {REVISION_COLUMNS}
+        "SELECT {REVISION_COLUMNS}, page.kind
          FROM pcp_pages page
          JOIN pcp_revisions r ON r.revision_id = page.current_revision_id
          WHERE page.page_id = ?1"
     );
     transaction
         .query_row(&sql, [page_id], |row| {
-            revision_from_row(row, true, true, true, true).map_err(to_sql_error)
+            Ok((
+                revision_from_row(row, true, true, true, true).map_err(to_sql_error)?,
+                row.get(18)?,
+            ))
         })
         .context("read current PCP Revision for retraction")
 }

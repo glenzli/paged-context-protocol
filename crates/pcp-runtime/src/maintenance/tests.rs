@@ -9,9 +9,9 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use pcp_client::{EmbeddedPcpClient, PcpApi};
 use pcp_core::{
-    AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType, CreateScopeRequest,
-    LifecycleStatus, PageMutability, PagePayload, PlanRevisionRetentionRequest, Projection,
-    ReadPagesRequest, RetentionPolicy, RetentionProtectionReason, RevisePageRequest,
+    AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
+    CreateScopeRequest, LifecycleStatus, PageMutability, PagePayload, PlanRevisionRetentionRequest,
+    Projection, ReadPagesRequest, RetentionPolicy, RetentionProtectionReason, RevisePageRequest,
     WritePageRequest,
 };
 use pcp_sqlite::SqlitePcpStore;
@@ -204,9 +204,12 @@ async fn semantic_retention_job_leases_only_worker_selected_revisions() {
     config.summary.enabled = false;
     config.compaction.enabled = false;
     config.retention.enabled = true;
-    config.retention.apply = true;
+    config.retention.write_leases = true;
     config.retention.minimum_age_days = 0;
     config.retention.keep_recent_revisions_per_page = 0;
+    let access = config.access_session(&fixture.owner_id);
+    assert!(access.allows(&fixture.namespace, AccessPermission::Audit));
+    assert!(access.allows(&fixture.namespace, AccessPermission::Write));
     let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
 
     let report = maintainer
@@ -239,6 +242,29 @@ async fn semantic_retention_job_leases_only_worker_selected_revisions() {
     assert!(plan.protection_reasons.iter().any(|count| {
         count.reason == RetentionProtectionReason::ExplicitLease && count.revisions == 1
     }));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn observe_mode_retention_can_plan_without_receiving_write_access() {
+    let fixture = Fixture::open("retention-observe-access").await;
+    let mut config = fixture.config();
+    config.mode = MaintenanceMode::Observe;
+    config.retention.enabled = true;
+
+    let access = config.access_session(&fixture.owner_id);
+    let client = EmbeddedPcpClient::shared(Arc::clone(&fixture.store), access.clone());
+
+    assert!(access.allows(&fixture.namespace, AccessPermission::Audit));
+    assert!(!access.allows(&fixture.namespace, AccessPermission::Write));
+    let plan = client
+        .plan_revision_retention(PlanRevisionRetentionRequest {
+            scopes: vec![fixture.namespace.clone()],
+            policy: RetentionPolicy::default(),
+        })
+        .await
+        .expect("observe-mode retention can plan");
+    assert_eq!(plan.scanned_pages, 0);
     fixture.close().await;
 }
 
@@ -452,6 +478,7 @@ struct Fixture {
     root: PathBuf,
     owner_id: String,
     namespace: String,
+    store: Arc<dyn PcpStore>,
     client: Arc<dyn PcpApi>,
 }
 
@@ -472,7 +499,7 @@ impl Fixture {
         let namespace = format!("project:maintenance-{label}");
         let store: Arc<dyn PcpStore> = store;
         let client = EmbeddedPcpClient::shared(
-            store,
+            Arc::clone(&store),
             AccessSession::full_control(
                 AccessPrincipal {
                     principal_id: "service:maintenance-test".to_owned(),
@@ -498,6 +525,7 @@ impl Fixture {
             root,
             owner_id,
             namespace,
+            store,
             client,
         }
     }
@@ -569,6 +597,19 @@ fn command_worker_is_constructible_from_validated_runtime_configuration() {
         actor_type: "model".to_owned(),
     };
     let _ = CommandSemanticWorker::new(&worker);
+}
+
+#[test]
+fn legacy_retention_apply_config_maps_to_semantic_lease_writes() {
+    let config: RetentionMaintenanceConfig = toml::from_str(
+        r#"
+        enabled = true
+        apply = true
+        "#,
+    )
+    .expect("parse legacy retention config");
+
+    assert!(config.write_leases);
 }
 
 #[tokio::test]

@@ -4,11 +4,12 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessDecision, AccessPermission, AccessSession, AssessPageValidityRequest,
-    Capabilities, ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest,
-    OperationTelemetry, PlanRevisionRetentionRequest, Projection, ProvenanceEvent,
-    PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
-    RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult,
-    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    Capabilities, CollectRevisionRetentionRequest, ConsolidatePagesRequest, CreateScopeRequest,
+    LinkPagesRequest, OperationTelemetry, PlanRevisionRetentionRequest, Projection,
+    ProvenanceEvent, PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation,
+    RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan,
+    Scope, SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
+    WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::{DurablePageInventoryItem, HealthSnapshot, PcpStore, TombstoneCascadeResult};
 use serde::Serialize;
@@ -385,6 +386,49 @@ impl PcpStore for SqlitePcpStore {
             self,
             access,
             "plan_revision_retention",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
+    }
+
+    async fn collect_revision_retention(
+        &self,
+        access: &AccessSession,
+        mut request: CollectRevisionRetentionRequest,
+    ) -> Result<RevisionCollectionResult> {
+        let observation =
+            OperationObservation::start().with_input_count(request.revision_ids.len());
+        let requested_scopes = request.scopes.clone();
+        let scopes = match authorize_scopes(access, &[AccessPermission::Collect], &requested_scopes)
+        {
+            Ok(scopes) => scopes,
+            Err(error) => {
+                return complete(
+                    self,
+                    access,
+                    "collect_revision_retention",
+                    requested_scopes,
+                    Err(error),
+                    true,
+                    observation,
+                )
+                .await;
+            }
+        };
+        request.scopes = scopes.clone();
+        let result = SqlitePcpStore::collect_revision_retention(
+            self,
+            access.principal.principal_id.clone(),
+            request,
+        )
+        .await;
+        complete(
+            self,
+            access,
+            "collect_revision_retention",
             scopes,
             result,
             false,

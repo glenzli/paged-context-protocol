@@ -186,6 +186,18 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 UNIQUE (holder_principal_id, idempotency_key)
             );
 
+            CREATE TABLE IF NOT EXISTS pcp_revision_collections (
+                revision_id TEXT PRIMARY KEY,
+                page_id TEXT NOT NULL,
+                namespace TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                original_created_at TEXT NOT NULL,
+                previous_revision_id TEXT,
+                collected_at TEXT NOT NULL,
+                estimated_bytes INTEGER NOT NULL,
+                collector_principal_id TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS pcp_access_log (
                 event_id TEXT PRIMARY KEY,
                 occurred_at TEXT NOT NULL,
@@ -236,6 +248,8 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 ON pcp_revision_retention_leases(revision_id, expires_at DESC);
             CREATE INDEX IF NOT EXISTS pcp_retention_leases_namespace
                 ON pcp_revision_retention_leases(namespace, expires_at DESC);
+            CREATE INDEX IF NOT EXISTS pcp_revision_collections_page
+                ON pcp_revision_collections(page_id, collected_at DESC);
             CREATE INDEX IF NOT EXISTS pcp_validity_standing
                 ON pcp_validity_assessments(standing, assessed_at DESC);
             CREATE INDEX IF NOT EXISTS pcp_access_log_time
@@ -287,6 +301,7 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
     crate::summary_migration::migrate(connection)?;
     crate::immutable_page_migration::migrate(connection)?;
     crate::page_revision_migration::migrate(connection)?;
+    synchronize_page_manifests(connection)?;
 
     connection
         .execute(
@@ -297,6 +312,30 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
             [],
         )
         .context("initialize PCP owner identity")?;
+    Ok(())
+}
+
+fn synchronize_page_manifests(connection: &Connection) -> Result<()> {
+    connection
+        .execute_batch(
+            "
+            UPDATE pcp_pages
+            SET lifecycle_status = 'tombstoned',
+                updated_at = (
+                    SELECT revision.created_at
+                    FROM pcp_revisions revision
+                    WHERE revision.revision_id = pcp_pages.current_revision_id
+                ),
+                kind = 'tombstone'
+            WHERE current_revision_id IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM pcp_revisions revision
+                  WHERE revision.revision_id = pcp_pages.current_revision_id
+                    AND revision.lifecycle_status = 'tombstoned'
+              );
+            ",
+        )
+        .context("repair tombstoned PCP Page manifests from current Revisions")?;
     Ok(())
 }
 

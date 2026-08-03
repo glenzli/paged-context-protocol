@@ -541,7 +541,7 @@ impl RuntimeMaintainer {
                     &offered,
                     self.config.retention.max_revisions_per_cycle,
                 )?;
-                if self.config.applies_retention_changes() {
+                if self.config.writes_retention_leases() {
                     let expires_at = (Utc::now()
                         + ChronoDuration::days(i64::from(self.config.retention.lease_days)))
                     .to_rfc3339_opts(SecondsFormat::Millis, true);

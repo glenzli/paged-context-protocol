@@ -4,10 +4,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessSession, AssessPageValidityRequest, Capabilities,
-    ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest, PlanRevisionRetentionRequest,
-    PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
-    RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult,
-    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    CollectRevisionRetentionRequest, ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest,
+    PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest,
+    Relation, RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease,
+    RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult, WritePageRequest, WriteResult,
+    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -93,6 +94,11 @@ pub trait PcpStore: Send + Sync {
         access: &AccessSession,
         request: PlanRevisionRetentionRequest,
     ) -> Result<RevisionRetentionPlan>;
+    async fn collect_revision_retention(
+        &self,
+        access: &AccessSession,
+        request: CollectRevisionRetentionRequest,
+    ) -> Result<RevisionCollectionResult>;
     async fn put_revision_retention_lease(
         &self,
         access: &AccessSession,

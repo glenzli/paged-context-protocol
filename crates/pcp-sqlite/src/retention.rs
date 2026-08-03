@@ -51,7 +51,7 @@ impl SqlitePcpStore {
     }
 }
 
-fn plan_retention(
+pub(crate) fn plan_retention(
     connection: &Connection,
     request: PlanRevisionRetentionRequest,
 ) -> Result<RevisionRetentionPlan> {
@@ -108,10 +108,13 @@ fn plan_retention(
     }
 
     protect_relation_basis(connection, &record_indexes, &mut protections)?;
+    protect_relation_endpoints(connection, &record_indexes, &mut protections)?;
     protect_projection_heads(connection, &record_indexes, &mut protections)?;
+    protect_summary_records(connection, &record_indexes, &mut protections)?;
+    protect_validity_records(connection, &record_indexes, &mut protections)?;
     let active_retention_leases =
         protect_retention_leases(connection, &record_indexes, &mut protections, &generated_at)?;
-    let expired_idempotency_records =
+    let past_window_idempotency_records =
         protect_live_idempotency(connection, &record_indexes, &mut protections, cutoff)?;
     close_over_provenance(connection, &record_indexes, &mut protections)?;
 
@@ -191,7 +194,7 @@ fn plan_retention(
         candidate_revisions,
         candidate_pages,
         candidate_estimated_bytes,
-        expired_idempotency_records,
+        past_window_idempotency_records,
         active_retention_leases,
         protection_reasons: reason_counts
             .into_iter()
@@ -308,6 +311,97 @@ fn protect_relation_basis(
     Ok(())
 }
 
+fn protect_relation_endpoints(
+    connection: &Connection,
+    records: &HashMap<String, usize>,
+    protections: &mut BTreeMap<String, BTreeSet<RetentionProtectionReason>>,
+) -> Result<()> {
+    protect_query_columns(
+        connection,
+        "SELECT from_revision_id, to_revision_id FROM pcp_relations",
+        records,
+        protections,
+        RetentionProtectionReason::RelationEndpoint,
+    )
+}
+
+fn protect_summary_records(
+    connection: &Connection,
+    records: &HashMap<String, usize>,
+    protections: &mut BTreeMap<String, BTreeSet<RetentionProtectionReason>>,
+) -> Result<()> {
+    protect_query_columns(
+        connection,
+        "SELECT summary_revision_id, target_revision_id FROM pcp_summaries",
+        records,
+        protections,
+        RetentionProtectionReason::SummaryRecord,
+    )
+}
+
+fn protect_validity_records(
+    connection: &Connection,
+    records: &HashMap<String, usize>,
+    protections: &mut BTreeMap<String, BTreeSet<RetentionProtectionReason>>,
+) -> Result<()> {
+    protect_query_columns(
+        connection,
+        "SELECT assessment_id, target_revision_id FROM pcp_validity_assessments",
+        records,
+        protections,
+        RetentionProtectionReason::ValidityRecord,
+    )?;
+    let mut statement = connection
+        .prepare("SELECT basis_revision_ids_json FROM pcp_validity_assessments")
+        .context("prepare PCP validity basis retention scan")?;
+    let encoded = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .context("query PCP validity basis retention scan")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect PCP validity basis retention scan")?;
+    for value in encoded {
+        for revision_id in serde_json::from_str::<Vec<String>>(&value)
+            .context("decode PCP validity basis during retention planning")?
+        {
+            if records.contains_key(&revision_id) {
+                protect(
+                    protections,
+                    &revision_id,
+                    RetentionProtectionReason::ValidityRecord,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn protect_query_columns(
+    connection: &Connection,
+    sql: &str,
+    records: &HashMap<String, usize>,
+    protections: &mut BTreeMap<String, BTreeSet<RetentionProtectionReason>>,
+    reason: RetentionProtectionReason,
+) -> Result<()> {
+    let mut statement = connection
+        .prepare(sql)
+        .context("prepare PCP exact Revision retention scan")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .context("query PCP exact Revision retention scan")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect PCP exact Revision retention scan")?;
+    for (first, second) in rows {
+        for revision_id in [first, second] {
+            if records.contains_key(&revision_id) {
+                protect(protections, &revision_id, reason);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn protect_projection_heads(
     connection: &Connection,
     records: &HashMap<String, usize>,
@@ -373,6 +467,13 @@ fn protect_live_idempotency(
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collect PCP idempotency retention scan")?;
         for (created_at, first_revision_id, second_revision_id) in rows {
+            let relevant = [first_revision_id.as_ref(), second_revision_id.as_ref()]
+                .into_iter()
+                .flatten()
+                .any(|revision_id| records.contains_key(revision_id));
+            if !relevant {
+                continue;
+            }
             let live = DateTime::parse_from_rfc3339(&created_at)
                 .map(|value| value.with_timezone(&Utc) > cutoff)
                 .unwrap_or(true);

@@ -12,10 +12,11 @@ use async_trait::async_trait;
 use pcp_client::{DurablePageInventoryItem, HealthSnapshot, PcpApi, TombstoneCascadeResult};
 use pcp_core::{
     AccessAuditEvent, AccessSession, AssessPageValidityRequest, Capabilities,
-    ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest, PlanRevisionRetentionRequest,
-    PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
-    RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult,
-    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    CollectRevisionRetentionRequest, ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest,
+    PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest,
+    Relation, RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease,
+    RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult, WritePageRequest, WriteResult,
+    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use tokio::net::UnixStream;
 
@@ -230,6 +231,19 @@ impl PcpApi for RemotePcpClient {
         {
             RpcValue::RevisionRetentionPlan(value) => Ok(value),
             _ => Err(unexpected("plan_revision_retention")),
+        }
+    }
+
+    async fn collect_revision_retention(
+        &self,
+        request: CollectRevisionRetentionRequest,
+    ) -> Result<RevisionCollectionResult> {
+        match self
+            .request(RpcOperation::CollectRevisionRetention(request))
+            .await?
+        {
+            RpcValue::RevisionCollectionResult(value) => Ok(value),
+            _ => Err(unexpected("collect_revision_retention")),
         }
     }
 

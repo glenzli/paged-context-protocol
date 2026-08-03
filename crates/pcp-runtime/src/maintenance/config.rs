@@ -5,7 +5,9 @@ use std::{
 
 use anyhow::Result;
 use pcp_client::AccessMode;
-use pcp_core::{AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType};
+use pcp_core::{
+    AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -101,7 +103,8 @@ pub struct CompactionMaintenanceConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct RetentionMaintenanceConfig {
     pub enabled: bool,
-    pub apply: bool,
+    #[serde(alias = "apply")]
+    pub write_leases: bool,
     pub minimum_age_days: u32,
     pub keep_recent_revisions_per_page: u32,
     pub candidate_window: usize,
@@ -116,7 +119,7 @@ impl Default for RetentionMaintenanceConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            apply: false,
+            write_leases: false,
             minimum_age_days: 30,
             keep_recent_revisions_per_page: 2,
             candidate_window: 32,
@@ -251,13 +254,13 @@ impl MaintenanceConfig {
             .map(|scope| scope.replace("{owner_id}", owner_id))
             .collect();
         let access_mode = if self.mode == MaintenanceMode::Apply
-            || (self.retention.enabled && self.retention.apply)
+            || (self.retention.enabled && self.retention.write_leases)
         {
             AccessMode::Write
         } else {
             AccessMode::Read
         };
-        access_mode.session(
+        let mut session = access_mode.session(
             AccessPrincipal {
                 principal_id: self.principal_id.clone(),
                 principal_type: AccessPrincipalType::Service,
@@ -266,15 +269,21 @@ impl MaintenanceConfig {
             format!("pcp-maintenance:{}:{started}", std::process::id()),
             scopes,
             false,
-        )
+        );
+        if self.retention.enabled {
+            for grant in &mut session.grants {
+                grant.permissions.push(AccessPermission::Audit);
+            }
+        }
+        session
     }
 
     pub fn applies_changes(&self) -> bool {
         self.mode == MaintenanceMode::Apply
     }
 
-    pub fn applies_retention_changes(&self) -> bool {
-        self.retention.enabled && self.retention.apply
+    pub fn writes_retention_leases(&self) -> bool {
+        self.retention.enabled && self.retention.write_leases
     }
 
     pub fn worker_actor(&self) -> Actor {

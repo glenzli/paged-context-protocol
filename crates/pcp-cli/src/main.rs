@@ -1,10 +1,12 @@
-use std::{env, path::PathBuf, sync::Arc};
+use std::{env, io::Read, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
 use pcp_client::{AccessMode, EmbeddedPcpClient, PcpApi};
 use pcp_core::{
-    AccessPrincipal, AccessPrincipalType, AccessSession, PlanRevisionRetentionRequest, Projection,
-    ReadPage, ReadPagesRequest, RetentionPolicy, SearchFilters, SearchMode, SearchPagesRequest,
+    AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
+    CollectRevisionRetentionRequest, ConsolidatePagesRequest, ConsolidationInput, LifecycleStatus,
+    PagePayload, PlanRevisionRetentionRequest, Projection, ReadPage, ReadPagesRequest,
+    RetentionPolicy, RevisePageRequest, SearchFilters, SearchMode, SearchPagesRequest,
 };
 use pcp_rpc::RemotePcpClient;
 use pcp_sqlite::SqlitePcpStore;
@@ -49,10 +51,12 @@ async fn main() -> Result<()> {
                 display_name: Some("PCP CLI".to_owned()),
             };
             let session_id = format!("pcp-cli:{}", std::process::id());
-            let access = if command == "retention-plan" {
-                AccessMode::Audit.session(principal, session_id, scopes, false)
-            } else {
-                AccessSession::read_only(principal, session_id, scopes)
+            let access = match command.as_str() {
+                "retention-plan" => AccessMode::Audit.session(principal, session_id, scopes, false),
+                "retention-collect" | "consolidate" | "revise" => {
+                    AccessMode::Admin.session(principal, session_id, scopes, false)
+                }
+                _ => AccessSession::read_only(principal, session_id, scopes),
             };
             let store: Arc<dyn PcpStore> = store;
             (
@@ -169,6 +173,214 @@ async fn main() -> Result<()> {
                 .await?;
             print_json(&plan)?;
         }
+        "retention-collect" => {
+            anyhow::ensure!(
+                arguments.next().as_deref() == Some("--confirm"),
+                "pcp retention-collect requires --confirm before policy arguments"
+            );
+            let minimum_age_days = parse_optional_u32(
+                arguments.next(),
+                "minimum age days",
+                RetentionPolicy::default().minimum_age_days,
+            )?;
+            let keep_recent_revisions_per_page = parse_optional_u32(
+                arguments.next(),
+                "recent revisions per Page",
+                RetentionPolicy::default().keep_recent_revisions_per_page,
+            )?;
+            let sample_limit = parse_optional_u32(
+                arguments.next(),
+                "sample limit",
+                RetentionPolicy::default().sample_limit,
+            )?
+            .clamp(1, 500);
+            let policy = RetentionPolicy {
+                minimum_age_days,
+                keep_recent_revisions_per_page,
+                sample_limit,
+            };
+            let plan = client
+                .plan_revision_retention(PlanRevisionRetentionRequest {
+                    scopes: scopes.clone(),
+                    policy: policy.clone(),
+                })
+                .await?;
+            anyhow::ensure!(
+                !plan.candidates_truncated,
+                "retention plan has more than {sample_limit} candidates; collect in smaller explicit batches"
+            );
+            anyhow::ensure!(
+                !plan.candidates.is_empty(),
+                "retention plan has no eligible Revision candidates"
+            );
+            let result = client
+                .collect_revision_retention(CollectRevisionRetentionRequest {
+                    scopes,
+                    policy,
+                    revision_ids: plan
+                        .candidates
+                        .into_iter()
+                        .map(|candidate| candidate.revision_id)
+                        .collect(),
+                })
+                .await?;
+            print_json(&result)?;
+        }
+        "consolidate" => {
+            anyhow::ensure!(
+                arguments.next().as_deref() == Some("--confirm"),
+                "pcp consolidate requires --confirm"
+            );
+            let canonical_page_id = arguments
+                .next()
+                .context("pcp consolidate requires a canonical Page ID")?;
+            let replaced_page_ids = arguments.collect::<Vec<_>>();
+            anyhow::ensure!(
+                !replaced_page_ids.is_empty(),
+                "pcp consolidate requires at least one absorbed Page ID"
+            );
+            let mut page_ids = vec![canonical_page_id.clone()];
+            page_ids.extend(replaced_page_ids.iter().cloned());
+            let pages = client
+                .read_pages(ReadPagesRequest {
+                    page_ids,
+                    revision_ids: Vec::new(),
+                    projections: vec![
+                        Projection::Manifest,
+                        Projection::Payload,
+                        Projection::Sources,
+                        Projection::Facets,
+                    ],
+                    max_chars: 256_000,
+                })
+                .await?;
+            anyhow::ensure!(
+                pages.len() == replaced_page_ids.len() + 1,
+                "one or more consolidation Pages could not be read"
+            );
+            let canonical = pages
+                .iter()
+                .find(|page| page.page.page_id == canonical_page_id)
+                .context("canonical Page could not be read")?;
+            let mut content = String::new();
+            std::io::stdin()
+                .read_to_string(&mut content)
+                .context("read consolidated Page content from stdin")?;
+            anyhow::ensure!(
+                !content.trim().is_empty(),
+                "pcp consolidate requires the canonical Markdown payload on stdin"
+            );
+            let replaced_pages = replaced_page_ids
+                .iter()
+                .map(|page_id| {
+                    let page = pages
+                        .iter()
+                        .find(|page| page.page.page_id == *page_id)
+                        .with_context(|| format!("absorbed Page {page_id} could not be read"))?;
+                    Ok(ConsolidationInput {
+                        page_id: page.page.page_id.clone(),
+                        expected_revision_id: page.revision.revision_id.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let idempotency_suffix = replaced_pages
+                .iter()
+                .map(|page| page.expected_revision_id.as_str())
+                .collect::<Vec<_>>()
+                .join(":");
+            let result = client
+                .consolidate_pages(ConsolidatePagesRequest {
+                    canonical_page_id: canonical.page.page_id.clone(),
+                    expected_canonical_revision_id: canonical.revision.revision_id.clone(),
+                    replaced_pages,
+                    created_by: Actor {
+                        actor_type: ActorType::Tool,
+                        actor_id: "cli:pcp".to_owned(),
+                    },
+                    lifecycle_status: LifecycleStatus::Active,
+                    observed_at: None,
+                    valid_from: canonical.revision.valid_from.clone(),
+                    valid_to: canonical.revision.valid_to.clone(),
+                    payload: Some(PagePayload {
+                        media_type: canonical
+                            .revision
+                            .payload
+                            .as_ref()
+                            .map(|payload| payload.media_type.clone())
+                            .unwrap_or_else(|| "text/markdown".to_owned()),
+                        content,
+                    }),
+                    source_refs: canonical.revision.source_refs.clone(),
+                    facets: canonical.revision.facets.clone(),
+                    provenance: Vec::new(),
+                    idempotency_key: Some(format!(
+                        "cli:consolidate:{}:{idempotency_suffix}",
+                        canonical.revision.revision_id
+                    )),
+                })
+                .await?;
+            print_json(&result)?;
+        }
+        "revise" => {
+            anyhow::ensure!(
+                arguments.next().as_deref() == Some("--confirm"),
+                "pcp revise requires --confirm"
+            );
+            let page_id = arguments.next().context("pcp revise requires a Page ID")?;
+            let page = client
+                .read_pages(ReadPagesRequest {
+                    page_ids: vec![page_id],
+                    revision_ids: Vec::new(),
+                    projections: vec![
+                        Projection::Manifest,
+                        Projection::Payload,
+                        Projection::Sources,
+                        Projection::Facets,
+                    ],
+                    max_chars: 256_000,
+                })
+                .await?
+                .into_iter()
+                .next()
+                .context("revision target Page could not be read")?;
+            let mut content = String::new();
+            std::io::stdin()
+                .read_to_string(&mut content)
+                .context("read revised Page content from stdin")?;
+            anyhow::ensure!(
+                !content.trim().is_empty(),
+                "pcp revise requires the new Markdown payload on stdin"
+            );
+            let result = client
+                .revise_page(RevisePageRequest {
+                    page_id: page.page.page_id,
+                    expected_revision_id: page.revision.revision_id.clone(),
+                    created_by: Actor {
+                        actor_type: ActorType::Tool,
+                        actor_id: "cli:pcp".to_owned(),
+                    },
+                    lifecycle_status: LifecycleStatus::Active,
+                    observed_at: None,
+                    valid_from: page.revision.valid_from,
+                    valid_to: page.revision.valid_to,
+                    payload: Some(PagePayload {
+                        media_type: page
+                            .revision
+                            .payload
+                            .as_ref()
+                            .map(|payload| payload.media_type.clone())
+                            .unwrap_or_else(|| "text/markdown".to_owned()),
+                        content,
+                    }),
+                    source_refs: page.revision.source_refs,
+                    facets: page.revision.facets,
+                    provenance: Vec::new(),
+                    initial_relations: Vec::new(),
+                    idempotency_key: Some(format!("cli:revise:{}", page.revision.revision_id)),
+                })
+                .await?;
+            print_json(&result)?;
+        }
         other => anyhow::bail!("unknown pcp command: {other}"),
     }
     Ok(())
@@ -251,6 +463,6 @@ fn parse_optional_u32(value: Option<String>, name: &str, default: u32) -> Result
 
 fn print_help() {
     println!(
-        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <page-id>\n  export\n  doctor\n  retention-plan [minimum-age-days] [keep-recent-per-page] [sample-limit]\n\nSet PCP_RUNTIME_SOCKET to use a running local runtime, or PCP_STORE_PATH for embedded SQLite."
+        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <page-id>\n  export\n  doctor\n  retention-plan [minimum-age-days] [keep-recent-per-page] [sample-limit]\n  retention-collect --confirm [minimum-age-days] [keep-recent-per-page] [sample-limit]\n  consolidate --confirm <canonical-page-id> <absorbed-page-id>... < canonical.md\n  revise --confirm <page-id> < revised.md\n\nSet PCP_RUNTIME_SOCKET to use a running local runtime, or PCP_STORE_PATH for embedded SQLite."
     );
 }

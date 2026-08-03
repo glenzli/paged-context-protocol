@@ -19,7 +19,8 @@ pub use request::{
     SearchPagesRequest, WritePageRequest, WriteSummaryRequest, default_search_projections,
 };
 pub use retention::{
-    PlanRevisionRetentionRequest, ProtectedRevisionSample, PutRevisionRetentionLeaseRequest,
-    RetentionPolicy, RetentionProtectionReason, RetentionReasonCount, RevisionRetentionCandidate,
+    CollectRevisionRetentionRequest, PlanRevisionRetentionRequest, ProtectedRevisionSample,
+    PutRevisionRetentionLeaseRequest, RetentionPolicy, RetentionProtectionReason,
+    RetentionReasonCount, RevisionCollectionResult, RevisionRetentionCandidate,
     RevisionRetentionLease, RevisionRetentionPlan,
 };

@@ -7,6 +7,7 @@ mod inventory;
 mod page_revision_migration;
 mod read;
 mod retention;
+mod retention_collection;
 mod retention_lease;
 mod retract;
 mod row;

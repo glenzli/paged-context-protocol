@@ -55,7 +55,9 @@ impl SqlitePcpStore {
                 return Ok(existing);
             }
 
-            let (owner_id, namespace, visibility, current_revision_id): (
+            let (owner_id, namespace, visibility, kind, mutability, current_revision_id): (
+                String,
+                String,
                 String,
                 String,
                 String,
@@ -63,14 +65,24 @@ impl SqlitePcpStore {
             ) = transaction
                 .query_row(
                     "
-                    SELECT owner_id, namespace, visibility, current_revision_id
+                    SELECT owner_id, namespace, visibility, kind, mutability,
+                           current_revision_id
                     FROM pcp_pages
-                    WHERE page_id = ?1
+                    WHERE page_id = ?1 AND lifecycle_status = 'active'
                     ",
                     [&request.canonical_page_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
                 )
-                .context("find canonical PCP Page")?;
+                .context("find active canonical PCP Page")?;
             anyhow::ensure!(
                 current_revision_id == request.expected_canonical_revision_id,
                 "canonical Page changed before consolidation"
@@ -83,20 +95,32 @@ impl SqlitePcpStore {
             let mut replaced_pages = Vec::with_capacity(request.replaced_pages.len());
             for input in &request.replaced_pages {
                 ensure_revision_access(&transaction, &input.expected_revision_id, &allowed_scopes)?;
-                let (target_owner, target_namespace, target_visibility, target_head): (
-                    String,
-                    String,
-                    String,
-                    String,
-                ) = transaction
+                let (
+                    target_owner,
+                    target_namespace,
+                    target_visibility,
+                    target_kind,
+                    target_mutability,
+                    target_head,
+                ): (String, String, String, String, String, String) = transaction
                     .query_row(
                         "
-                        SELECT owner_id, namespace, visibility, current_revision_id
+                        SELECT owner_id, namespace, visibility, kind, mutability,
+                               current_revision_id
                         FROM pcp_pages
                         WHERE page_id = ?1 AND lifecycle_status = 'active'
                         ",
                         [&input.page_id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                                row.get(5)?,
+                            ))
+                        },
                     )
                     .with_context(|| {
                         format!("find active consolidation input {}", input.page_id)
@@ -106,6 +130,10 @@ impl SqlitePcpStore {
                         && target_namespace == namespace
                         && target_visibility == visibility,
                     "PCP consolidation inputs must share owner, Scope, and visibility"
+                );
+                anyhow::ensure!(
+                    target_kind == kind && target_mutability == mutability,
+                    "PCP consolidation inputs must share kind and mutability"
                 );
                 anyhow::ensure!(
                     target_head == input.expected_revision_id,
@@ -188,13 +216,17 @@ impl SqlitePcpStore {
                 .execute(
                     "
                     UPDATE pcp_pages
-                    SET current_revision_id = ?2
+                    SET current_revision_id = ?2,
+                        lifecycle_status = ?4,
+                        updated_at = ?5
                     WHERE page_id = ?1 AND current_revision_id = ?3
                     ",
                     params![
                         request.canonical_page_id,
                         revision_id,
-                        request.expected_canonical_revision_id
+                        request.expected_canonical_revision_id,
+                        request.lifecycle_status.as_str(),
+                        timestamp
                     ],
                 )
                 .context("publish consolidated PCP Page")?;

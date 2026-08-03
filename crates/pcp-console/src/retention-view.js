@@ -30,8 +30,11 @@ export function createRetentionView({ request, showError, formatNumber, formatTi
       sealed_evidence: "Sealed evidence",
       recent_revision_window: "Recent Revision window",
       minimum_age_window: "Minimum age window",
+      relation_endpoint: "Relation endpoint",
       relation_basis: "Relation basis",
       projection_head: "Projection head",
+      summary_record: "Summary record",
+      validity_record: "Validity record",
       idempotency_window: "Idempotency window",
       provenance_dependency: "Provenance dependency",
       explicit_lease: "Explicit retention lease",
@@ -143,8 +146,8 @@ export function createRetentionView({ request, showError, formatNumber, formatTi
       "div",
       `health-signal tone-${collectionAvailable ? "warning" : "info"}`,
       collectionAvailable
-        ? `Collection available · ${formatNumber(plan.candidatePages)} candidate Pages · ${formatNumber(plan.activeRetentionLeases)} active leases · ${formatNumber(plan.expiredIdempotencyRecords)} expired idempotency records`
-        : `Dry run only · collection unavailable · ${formatNumber(plan.activeRetentionLeases)} active leases · cutoff ${formatTime(plan.cutoffAt)}`,
+        ? `Physical collection available · ${formatNumber(plan.candidatePages)} candidate Pages · ${formatNumber(plan.activeRetentionLeases)} active semantic leases`
+        : `Collection planning only · physical removal unavailable · ${formatNumber(plan.activeRetentionLeases)} active semantic leases · cutoff ${formatTime(plan.cutoffAt)}`,
     );
     byId("retention-mode").replaceChildren(signal);
     renderLeases(leases);

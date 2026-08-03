@@ -2,10 +2,11 @@ use anyhow::{Context, Result};
 use pcp_client::{DurablePageInventoryItem, HealthSnapshot, TombstoneCascadeResult};
 use pcp_core::{
     AccessAuditEvent, AccessSession, Actor, AssessPageValidityRequest, Capabilities,
-    ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest, PlanRevisionRetentionRequest,
-    PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
-    RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult,
-    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    CollectRevisionRetentionRequest, ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest,
+    PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest,
+    Relation, RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease,
+    RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult, WritePageRequest, WriteResult,
+    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -62,6 +63,7 @@ pub(crate) enum RpcOperation {
         requested_scopes: Vec<String>,
     },
     PlanRevisionRetention(PlanRevisionRetentionRequest),
+    CollectRevisionRetention(CollectRevisionRetentionRequest),
     PutRevisionRetentionLease(PutRevisionRetentionLeaseRequest),
     ActiveRevisionRetentionLeases {
         requested_scopes: Vec<String>,
@@ -129,6 +131,7 @@ pub(crate) enum RpcValue {
     PageCount(u64),
     ContentCharCount(u64),
     RevisionRetentionPlan(RevisionRetentionPlan),
+    RevisionCollectionResult(RevisionCollectionResult),
     RevisionRetentionLease(RevisionRetentionLease),
     RevisionRetentionLeases(Vec<RevisionRetentionLease>),
     WriteResult(WriteResult),

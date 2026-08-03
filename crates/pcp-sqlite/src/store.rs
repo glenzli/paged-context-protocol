@@ -70,7 +70,7 @@ impl SqlitePcpStore {
             supports_aliases: false,
             supports_revision_retention_planning: true,
             supports_revision_retention_leases: true,
-            supports_revision_retention: false,
+            supports_revision_retention: true,
             supports_revision_conflicts: true,
             supports_consolidation: true,
             supports_durable_deletion: false,

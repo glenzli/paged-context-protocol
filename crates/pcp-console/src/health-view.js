@@ -21,6 +21,14 @@ export function createHealthView({ request, showError, formatNumber }) {
     return total ? `${Math.round((part / total) * 100)}%` : "-";
   }
 
+  function decimalRatio(part, total) {
+    return total ? (part / total).toFixed(1) : "-";
+  }
+
+  function hourlyRate(value, hours) {
+    return hours ? (value / hours).toFixed(value / hours < 10 ? 1 : 0) : "-";
+  }
+
   function duration(value) {
     if (value === null || value === undefined) return "Collecting";
     if (value < 1000) return `${formatNumber(value)} ms`;
@@ -56,6 +64,12 @@ export function createHealthView({ request, showError, formatNumber }) {
       const zeroRate = data.recall.zeroResultSearches / data.recall.searches;
       if (zeroRate >= 0.35) signals.push(["warning", `${percentage(data.recall.zeroResultSearches, data.recall.searches)} of searches returned no Page.`]);
       else signals.push(["positive", `${percentage(data.recall.searches - data.recall.zeroResultSearches, data.recall.searches)} of searches returned at least one Page.`]);
+      const recallCalls = data.recall.searches + data.recall.summaryReads + data.recall.detailReads;
+      const callsPerHour = recallCalls / data.windowHours;
+      const readsPerSearch = (data.recall.summaryReads + data.recall.detailReads) / data.recall.searches;
+      if (callsPerHour >= 120 && readsPerSearch >= 2) {
+        signals.push(["warning", `Recall is issuing ${hourlyRate(recallCalls, data.windowHours)} search/read calls per hour at ${readsPerSearch.toFixed(1)} read calls per search. Check the Access view if the client should be idle.`]);
+      }
     }
     if (data.storage.longPages) {
       const coverage = data.storage.summarizedLongPages / data.storage.longPages;
@@ -158,10 +172,10 @@ export function createHealthView({ request, showError, formatNumber }) {
     );
     byId("health-flows").replaceChildren(
       panel("Recall", [
-        ["Searches", formatNumber(data.recall.searches)],
+        ["Searches", `${formatNumber(data.recall.searches)} · ${hourlyRate(data.recall.searches, data.windowHours)}/h`],
         ["Zero-result", percentage(data.recall.zeroResultSearches, data.recall.searches), data.recall.zeroResultSearches ? "warning" : "positive"],
-        ["Pages returned", formatNumber(data.recall.returnedPages)],
-        ["Summary / detail reads", `${formatNumber(data.recall.summaryReads)} / ${formatNumber(data.recall.detailReads)}`],
+        ["Pages returned", `${formatNumber(data.recall.returnedPages)} · ${decimalRatio(data.recall.returnedPages, data.recall.searches)}/search`],
+        ["Summary / detail reads", `${formatNumber(data.recall.summaryReads)} / ${formatNumber(data.recall.detailReads)} · ${decimalRatio(data.recall.summaryReads + data.recall.detailReads, data.recall.searches)}/search`],
       ]),
       panel("Consolidation", [
         ["Runs", formatNumber(data.consolidation.runs)],

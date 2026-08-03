@@ -33,7 +33,7 @@ One cycle is bounded by `max_jobs_per_cycle`:
 4. Runtime validates the selected IDs and reads their exact Detail.
 5. The worker returns `consolidate`, `keep_separate`, or `defer`.
 6. Runtime obtains a bounded dry-run retention plan and may ask the worker whether any actual old candidate Revision is a semantic milestone.
-7. In apply mode only, `write_summary` or `consolidate` crosses into the PCP commit API. Retention leases additionally require `maintenance.retention.apply = true` and always expire.
+7. In apply mode only, `write_summary` or `consolidate` crosses into the PCP commit API. Retention leases additionally require `maintenance.retention.write_leases = true` and always expire. Lease selection and physical collection remain separate operations; the current maintainer does not collect Revision payloads automatically.
 
 Runtime keeps cooldown decisions in `state_path`. This operational state is not
 written as user memory. Successful Page writes remain fully traceable through

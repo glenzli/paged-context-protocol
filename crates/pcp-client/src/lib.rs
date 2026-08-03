@@ -5,11 +5,12 @@ use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessPermission, AccessPrincipal, AccessSession, AssessPageValidityRequest,
-    Capabilities, ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest,
-    PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest,
-    Relation, RevisePageRequest, RevisionRetentionLease, RevisionRetentionPlan, Scope, ScopeGrant,
-    SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
-    WriteSummaryResult, WriteValidityResult,
+    Capabilities, CollectRevisionRetentionRequest, ConsolidatePagesRequest, CreateScopeRequest,
+    LinkPagesRequest, PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage,
+    ReadPagesRequest, Relation, RevisePageRequest, RevisionCollectionResult,
+    RevisionRetentionLease, RevisionRetentionPlan, Scope, ScopeGrant, SearchPagesRequest,
+    SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult,
+    WriteValidityResult,
 };
 use pcp_store::PcpStore;
 pub use pcp_store::{DurablePageInventoryItem, HealthSnapshot, TombstoneCascadeResult};
@@ -60,7 +61,11 @@ impl AccessMode {
             permissions.push(AccessPermission::Audit);
         }
         if self == Self::Admin {
-            permissions.extend([AccessPermission::ManageScope, AccessPermission::Retract]);
+            permissions.extend([
+                AccessPermission::ManageScope,
+                AccessPermission::Retract,
+                AccessPermission::Collect,
+            ]);
         }
         if allow_cross_scope_derivation {
             permissions.push(AccessPermission::DeriveAcrossScopes);
@@ -119,6 +124,10 @@ pub trait PcpApi: Send + Sync {
         &self,
         request: PlanRevisionRetentionRequest,
     ) -> Result<RevisionRetentionPlan>;
+    async fn collect_revision_retention(
+        &self,
+        request: CollectRevisionRetentionRequest,
+    ) -> Result<RevisionCollectionResult>;
     async fn put_revision_retention_lease(
         &self,
         request: PutRevisionRetentionLeaseRequest,
@@ -267,6 +276,15 @@ impl PcpApi for EmbeddedPcpClient {
     ) -> Result<RevisionRetentionPlan> {
         self.store
             .plan_revision_retention(&self.access, request)
+            .await
+    }
+
+    async fn collect_revision_retention(
+        &self,
+        request: CollectRevisionRetentionRequest,
+    ) -> Result<RevisionCollectionResult> {
+        self.store
+            .collect_revision_retention(&self.access, request)
             .await
     }
 

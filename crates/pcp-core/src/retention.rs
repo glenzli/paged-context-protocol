@@ -55,6 +55,16 @@ pub struct PutRevisionRetentionLeaseRequest {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CollectRevisionRetentionRequest {
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub policy: RetentionPolicy,
+    pub revision_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RevisionRetentionLease {
     pub lease_id: String,
     pub page_id: String,
@@ -76,8 +86,11 @@ pub enum RetentionProtectionReason {
     SealedEvidence,
     RecentRevisionWindow,
     MinimumAgeWindow,
+    RelationEndpoint,
     RelationBasis,
     ProjectionHead,
+    SummaryRecord,
+    ValidityRecord,
     IdempotencyWindow,
     ProvenanceDependency,
     ExplicitLease,
@@ -129,11 +142,23 @@ pub struct RevisionRetentionPlan {
     pub candidate_revisions: u64,
     pub candidate_pages: u64,
     pub candidate_estimated_bytes: u64,
-    pub expired_idempotency_records: u64,
+    pub past_window_idempotency_records: u64,
     pub active_retention_leases: u64,
     pub protection_reasons: Vec<RetentionReasonCount>,
     pub candidates: Vec<RevisionRetentionCandidate>,
     pub protected_samples: Vec<ProtectedRevisionSample>,
     pub candidates_truncated: bool,
     pub protected_samples_truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevisionCollectionResult {
+    pub collected_at: String,
+    pub collected_revisions: u64,
+    pub collected_pages: u64,
+    pub reclaimed_estimated_bytes: u64,
+    pub past_window_idempotency_records_removed: u64,
+    pub expired_retention_leases_removed: u64,
+    pub revision_ids: Vec<String>,
 }

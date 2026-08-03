@@ -167,6 +167,9 @@ async fn dispatch(client: &dyn PcpApi, operation: RpcOperation) -> Result<RpcVal
         RpcOperation::PlanRevisionRetention(request) => {
             RpcValue::RevisionRetentionPlan(client.plan_revision_retention(request).await?)
         }
+        RpcOperation::CollectRevisionRetention(request) => {
+            RpcValue::RevisionCollectionResult(client.collect_revision_retention(request).await?)
+        }
         RpcOperation::PutRevisionRetentionLease(request) => {
             RpcValue::RevisionRetentionLease(client.put_revision_retention_lease(request).await?)
         }

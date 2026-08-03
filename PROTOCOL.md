@@ -134,6 +134,14 @@ Consolidation 用于多个 Page 实际表达同一持久对象时的有损收敛
 5. canonical Page 以 `supersedes` 指向被吸收的其他 Page；
 6. 被吸收 Page 退出默认召回，但仍可精确审计。
 
+canonical Page 与被吸收 Page 必须具有相同的 `kind` 和 `mutability`。原始证据、维护型理解、
+Summary 与 Topic 即使文本高度相似，也不能跨语义角色 consolidation；它们应通过 provenance、
+`summarizes` 或其他 Page Relation 保持联系。
+
+Host 若为 Page 声明了稳定领域身份（例如一个 episode/topic 的稳定键），身份冲突必须视为
+consolidation 的硬拒绝，而不能被标题、文本相似度或共同召回覆盖。该身份的具体字段由 Host 定义，
+不进入 PCP 通用协议。
+
 相似度、共同召回和时间邻接只能发现候选。是否合并以及如何有损生成内容必须由 Host、用户或
 模型判断，Store 只验证权限、并发、图不变量和事务原子性。
 
@@ -151,6 +159,7 @@ Core 能力面至少应提供：
 - `assess_validity(target_page_id, target_revision_id, standing, evidence_revision_ids)`
 - `relate_pages(from_page_id, relation_type, to_page_id, basis_revision_ids?)`
 - `plan_revision_retention(scopes, policy)`
+- `collect_revision_retention(scopes, policy, confirmed_revision_ids)`
 - `put_revision_retention_lease(revision_id, reason, expires_at, idempotency_key)`
 - `list_active_revision_retention_leases(scopes, limit)`
 
@@ -178,7 +187,8 @@ Page/Revision 的协议字段。最小安全规则：
 
 - 当前头永远保留；
 - sealed Page 的唯一证据 Revision 默认保留；
-- 受保护根可达的 provenance、Relation basis、显式快照或租约引用的 Revision 保留；
+- 受保护根可达的 provenance、Relation 的精确端点与 basis、Summary/Validity 精确记录、显式快照
+  或租约引用的 Revision 保留；
 - 未被引用的普通中间 Revision 可按策略压缩或删除；
 - 删除前必须重新计算保护根，并留下聚合级审计记录；
 - 被回收 Revision 的 ID 不得静默复用。
@@ -191,10 +201,11 @@ Page/Revision 的协议字段。最小安全规则：
 和 Page 数量、按原因聚合的保护根、候选内容估算字节数，以及有界的候选与受保护样本。估算字节
 只用于比较候选规模，不承诺数据库文件会立即释放相同空间。
 
-规划器从当前头、sealed 证据、最近版本窗口、最小年龄窗口、Relation basis、当前投影、未过期
-幂等记录和显式租约等根出发，再沿受保护 Revision 的跨 Page provenance 传递保护。候选 Revision
-自身的 provenance 不应反向保活整个待回收子图；同一 Page 的普通 `previousRevisionId` 也不是 GC
-根。跨 Scope 依赖必须保守保护授权范围内的输入，但不能泄露未授权对象。
+规划器从当前头、sealed 证据、最近版本窗口、最小年龄窗口、Relation 的精确端点与 basis、
+Summary/Validity 精确记录、当前投影、未过期幂等记录和显式租约等根出发，再沿受保护 Revision
+的跨 Page provenance 传递保护。候选 Revision 自身的 provenance 不应反向保活整个待回收子图；
+同一 Page 的普通 `previousRevisionId` 也不是 GC 根。跨 Scope 依赖必须保守保护授权范围内的输入，
+但不能泄露未授权对象。
 
 显式保留应使用有期限、可幂等续期的 Revision lease，而不是把保留状态写进 Page 内容。lease
 必须绑定精确 Revision、授权 Scope、持有 Principal、理由和到期时间；过期 lease 不再构成保护根。
@@ -202,8 +213,12 @@ Runtime 可以把真实回收候选的有界路由内容交给 Host 的语义 wo
 理由，不选择全局 GC 参数，也不能绕过 Store 的权限与保护闭包。永久保留、提前撤销和实际回收属于
 显式运维动作，不应由一次普通模型判断静默触发。
 
-dry-run 不产生删除。未来执行计划时必须在同一事务内重新计算保护根，并原子清理候选 Revision、
-只属于候选的兼容投影或来源边，以及已经超过窗口的幂等记录。实现应分别声明
+dry-run 不产生删除。执行计划时必须要求具有独立 collection 权限的调用方提交精确候选 ID，
+在同一事务内重新计算保护根；任何 ID 已不再是候选时，整批操作必须拒绝。成功回收应原子清理
+候选 Revision、只属于候选的兼容索引或来源边，以及与这些候选精确关联且已经超过窗口的幂等记录，
+并保存不含正文的 collection ledger，使旧 Revision ID 可被识别为“已回收”而不是“从未存在”。
+仍可能被 Host 重放的 Page 写入、当前头和其他存活操作，其幂等记录不能仅因时间经过而全局删除。
+实现应分别声明
 `supportsRevisionRetentionPlanning` 与 `supportsRevisionRetention`；支持规划不表示已经支持执行。
 
 保留策略按 Host、Page kind、存储预算和价值配置，不应要求模型为每次写入选择 GC 参数。
