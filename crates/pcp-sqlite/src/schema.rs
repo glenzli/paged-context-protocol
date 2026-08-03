@@ -168,7 +168,8 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 operation TEXT NOT NULL,
                 scopes_json TEXT NOT NULL,
                 decision TEXT NOT NULL,
-                detail TEXT
+                detail TEXT,
+                telemetry_json TEXT
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS pcp_revision_fts USING fts5(
@@ -250,6 +251,7 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
         )
         .context("initialize PCP schema")?;
 
+    ensure_access_telemetry_column(connection)?;
     drop_legacy_scope_type(connection)?;
     crate::summary_migration::migrate(connection)?;
     crate::immutable_page_migration::migrate(connection)?;
@@ -263,6 +265,25 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
             [],
         )
         .context("initialize PCP owner identity")?;
+    Ok(())
+}
+
+fn ensure_access_telemetry_column(connection: &Connection) -> Result<()> {
+    let columns = connection
+        .prepare("PRAGMA table_info(pcp_access_log)")
+        .context("inspect PCP access log schema")?
+        .query_map([], |row| row.get::<_, String>(1))
+        .context("query PCP access log schema")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect PCP access log schema")?;
+    if !columns.iter().any(|column| column == "telemetry_json") {
+        connection
+            .execute(
+                "ALTER TABLE pcp_access_log ADD COLUMN telemetry_json TEXT",
+                [],
+            )
+            .context("add PCP access telemetry column")?;
+    }
     Ok(())
 }
 
@@ -301,6 +322,39 @@ mod tests {
     use rusqlite::Connection;
 
     use super::initialize;
+
+    #[test]
+    fn adds_optional_telemetry_to_existing_access_logs() {
+        let mut connection = Connection::open_in_memory().expect("open legacy database");
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE pcp_access_log (
+                    event_id TEXT PRIMARY KEY,
+                    occurred_at TEXT NOT NULL,
+                    principal_json TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    scopes_json TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    detail TEXT
+                );
+                ",
+            )
+            .expect("seed legacy access log");
+
+        initialize(&mut connection).expect("upgrade access log telemetry");
+        initialize(&mut connection).expect("repeat telemetry upgrade");
+
+        let columns = connection
+            .prepare("PRAGMA table_info(pcp_access_log)")
+            .expect("inspect access log")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query access log")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect access log columns");
+        assert!(columns.iter().any(|column| column == "telemetry_json"));
+    }
 
     #[test]
     fn migrates_legacy_summary_sidecars_into_the_page_dag() {

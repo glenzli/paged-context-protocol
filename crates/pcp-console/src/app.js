@@ -1,5 +1,6 @@
 import { createPageInspector } from "/page-inspector.js";
 import { createQualityView } from "/quality-view.js";
+import { createHealthView } from "/health-view.js";
 
 const PAGE_LIMIT = 20;
 const ACCESS_LIMIT = 50;
@@ -67,6 +68,7 @@ const qualityView = createQualityView({
   formatNumber,
   openPage: (pageId) => pageInspector.open(pageId),
 });
+const healthView = createHealthView({ request: api, showError, formatNumber });
 
 function metric(label, value, tone = "") {
   const node = element("div", `metric${tone ? ` tone-${tone}` : ""}`);
@@ -328,7 +330,9 @@ async function activateView(name, { reload = false } = {}) {
   document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === name));
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === `view-${name}`));
   if (name === "pages" && (reload || !state.pages.loaded)) await loadPages();
-  if (name === "quality") await qualityView.load({ reload });
+  if (name === "health") {
+    await Promise.all([healthView.load({ reload }), qualityView.load({ reload })]);
+  }
   if (name === "access" && (reload || !state.access.loaded)) await loadAccess();
 }
 
@@ -344,7 +348,12 @@ async function refresh() {
   try {
     await loadOverview();
     if (state.activeView === "pages") await loadPages();
-    if (state.activeView === "quality") await qualityView.load({ reload: true });
+    if (state.activeView === "health") {
+      await Promise.all([
+        healthView.load({ reload: true }),
+        qualityView.load({ reload: true }),
+      ]);
+    }
     if (state.activeView === "access") await loadAccess();
   } catch (error) { showError(error); }
 }
@@ -366,5 +375,6 @@ byId("scope-filter").addEventListener("change", () => {
 });
 byId("pages-more").addEventListener("click", () => loadPages({ append: true }).catch(showError));
 byId("access-more").addEventListener("click", () => loadAccess({ append: true }).catch(showError));
+byId("health-window").addEventListener("change", () => healthView.load({ reload: true }).catch(showError));
 
 refresh();

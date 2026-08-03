@@ -24,3 +24,41 @@ allowed_scopes = [
   "project:example",
   "conversation:example-main",
 ]
+
+# Semantic maintenance is deliberately opt-in. Uncomment and point `program`
+# at a local adapter that accepts one JSON request on stdin and emits one JSON
+# decision on stdout. It may call Codex, another model, or a Host-owned service.
+#
+# [maintenance]
+# enabled = true
+# mode = "observe" # default; use "apply" only after reviewing worker behavior
+# state_path = "../data/maintenance-state.json"
+# allowed_scopes = ["user:{owner_id}", "project:symbiont-d"]
+# interval_seconds = 1800
+# initial_delay_seconds = 300
+# max_jobs_per_cycle = 2
+# principal_id = "service:pcp-maintainer"
+# principal_name = "PCP runtime maintainer"
+#
+# [maintenance.worker]
+# program = "/absolute/path/to/semantic-worker"
+# args = []
+# timeout_seconds = 120
+# actor_id = "model:maintenance-worker"
+# actor_type = "model"
+#
+# [maintenance.summary]
+# enabled = true
+# minimum_chars = 4000
+# max_input_chars = 32000
+# retry_after_seconds = 86400
+# excluded_page_kinds = ["pcp_summary", "validity_assessment", "conversation_event"]
+#
+# [maintenance.compaction]
+# enabled = true
+# candidate_window = 32
+# routing_chars_per_page = 480
+# max_pages_per_candidate = 8
+# max_input_chars = 64000
+# retry_after_seconds = 86400
+# excluded_page_kinds = ["pcp_summary", "validity_assessment", "conversation_event"]

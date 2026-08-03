@@ -234,4 +234,24 @@ pub struct AccessAuditEvent {
     pub decision: AccessDecision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<OperationTelemetry>,
+}
+
+/// Privacy-preserving operational measurements attached to an access event.
+///
+/// Query text and Page content are deliberately excluded. Counts and projection
+/// names are sufficient for runtime health analysis without duplicating memory.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationTelemetry {
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projections: Vec<String>,
 }

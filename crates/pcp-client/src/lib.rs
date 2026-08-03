@@ -11,7 +11,7 @@ use pcp_core::{
     WriteValidityResult,
 };
 use pcp_store::PcpStore;
-pub use pcp_store::{DurablePageInventoryItem, TombstoneCascadeResult};
+pub use pcp_store::{DurablePageInventoryItem, HealthSnapshot, TombstoneCascadeResult};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AccessMode {
@@ -148,6 +148,11 @@ pub trait PcpApi: Send + Sync {
         limit: u32,
         cursor: Option<String>,
     ) -> Result<(Vec<AccessAuditEvent>, Option<String>)>;
+    async fn health_snapshot(
+        &self,
+        requested_scopes: Vec<String>,
+        window_hours: u32,
+    ) -> Result<HealthSnapshot>;
 }
 
 #[derive(Clone)]
@@ -315,6 +320,16 @@ impl PcpApi for EmbeddedPcpClient {
         cursor: Option<String>,
     ) -> Result<(Vec<AccessAuditEvent>, Option<String>)> {
         self.store.access_log(&self.access, limit, cursor).await
+    }
+
+    async fn health_snapshot(
+        &self,
+        requested_scopes: Vec<String>,
+        window_hours: u32,
+    ) -> Result<HealthSnapshot> {
+        self.store
+            .health_snapshot(&self.access, requested_scopes, window_hours)
+            .await
     }
 }
 

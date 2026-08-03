@@ -23,7 +23,7 @@
   <nav class="tabs" aria-label="Console views">
     <button class="tab active" type="button" data-view="overview">Overview</button>
     <button class="tab" type="button" data-view="pages">Pages</button>
-    <button class="tab" type="button" data-view="quality">Quality</button>
+    <button class="tab" type="button" data-view="health">Health</button>
     <button class="tab" type="button" data-view="access">Access</button>
   </nav>
 
@@ -71,12 +71,49 @@
       </div>
     </section>
 
-    <section id="view-quality" class="view">
+    <section id="view-health" class="view">
       <div class="view-heading">
-        <div><h2>Data quality</h2><span id="quality-status" class="muted" aria-live="polite">Not loaded</span></div>
+        <div><h2>Memory health</h2><span id="health-status" class="muted" aria-live="polite">Not loaded</span></div>
+        <label class="window-control">Window
+          <select id="health-window" aria-label="Health analysis window">
+            <option value="24">24 hours</option>
+            <option value="168">7 days</option>
+            <option value="720">30 days</option>
+            <option value="2160">90 days</option>
+          </select>
+        </label>
+      </div>
+      <div id="health-metrics" class="metrics"></div>
+      <div id="health-signals" class="health-signals"></div>
+
+      <div class="section-heading"><h2>Recall and consolidation</h2></div>
+      <div id="health-flows" class="aggregate-grid"></div>
+
+      <div class="section-heading"><h2>Activity trend</h2></div>
+      <div id="health-timeline" class="timeline-panel"></div>
+
+      <div class="section-heading"><h2>Operations</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Operation</th><th>Calls</th><th>Failures</th><th>Output</th><th>p50</th><th>p95</th></tr></thead>
+          <tbody id="health-operation-rows"></tbody>
+        </table>
+      </div>
+
+      <div class="section-heading"><h2>Scopes</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Scope</th><th>Current</th><th>Immutable</th><th>Calls</th><th>Searches</th><th>Writes</th></tr></thead>
+          <tbody id="health-scope-rows"></tbody>
+        </table>
+      </div>
+
+      <div class="section-heading">
+        <h2>Recent data quality sample</h2>
+        <span id="quality-status" class="muted" aria-live="polite">Not loaded</span>
       </div>
       <div id="quality-metrics" class="metrics"></div>
-      <div class="section-heading"><h2>Needs attention</h2></div>
+      <div class="section-heading"><h2>Sample findings</h2></div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Page</th><th>Scope</th><th>Size</th><th>Issue</th></tr></thead>

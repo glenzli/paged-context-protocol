@@ -76,6 +76,12 @@ struct GraphQuery {
     limit: Option<usize>,
 }
 
+#[derive(Default, Deserialize)]
+struct HealthQuery {
+    scope: Option<String>,
+    hours: Option<u32>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let socket_path = env::var_os("PCP_RUNTIME_SOCKET")
@@ -111,6 +117,7 @@ fn router(state: AppState) -> Router {
         .route("/page-content.css", get(page_content_css))
         .route("/page-graph.js", get(page_graph_js))
         .route("/quality-view.js", get(quality_view_js))
+        .route("/health-view.js", get(health_view_js))
         .route("/styles.css", get(styles_css))
         .route("/api/health", get(health))
         .route("/api/overview", get(overview))
@@ -120,6 +127,7 @@ fn router(state: AppState) -> Router {
         .route("/api/pages/{page_id}/graph", get(page_graph))
         .route("/api/pages/{page_id}/lineage", get(page_lineage))
         .route("/api/quality", get(quality))
+        .route("/api/metrics", get(health_metrics))
         .route("/api/access", get(access_log))
         .with_state(state)
 }
@@ -189,6 +197,13 @@ async fn quality_view_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         include_str!("quality-view.js"),
+    )
+}
+
+async fn health_view_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("health-view.js"),
     )
 }
 
@@ -364,6 +379,20 @@ async fn page_lineage(
 async fn quality(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let items = state.client.durable_page_inventory(Vec::new()).await?;
     Ok(Json(json!({"items": items})))
+}
+
+async fn health_metrics(
+    State(state): State<AppState>,
+    Query(query): Query<HealthQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let snapshot = state
+        .client
+        .health_snapshot(
+            selected_scopes(state.client.as_ref(), query.scope.as_deref()),
+            query.hours.unwrap_or(24).clamp(1, 24 * 90),
+        )
+        .await?;
+    Ok(Json(json!(snapshot)))
 }
 
 async fn access_log(

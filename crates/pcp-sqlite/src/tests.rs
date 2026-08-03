@@ -318,6 +318,190 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
 }
 
 #[tokio::test]
+async fn aggregates_privacy_preserving_runtime_health() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-health-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("pcp.sqlite3"))
+            .await
+            .expect("open health store"),
+    );
+    let owner_id = store.owner_id().to_owned();
+    let namespace = "project:health".to_owned();
+    let admin = pcp_client(
+        Arc::clone(&store),
+        AccessSession::full_control(
+            principal("host:health", AccessPrincipalType::Host),
+            "session:health",
+            vec![namespace.clone()],
+        ),
+    );
+    admin
+        .create_scope(CreateScopeRequest {
+            owner_id: owner_id.clone(),
+            namespace: namespace.clone(),
+            display_name: "Health project".to_owned(),
+            description: None,
+            parent_namespace: None,
+            visibility: "private".to_owned(),
+        })
+        .await
+        .expect("create health Scope");
+    let actor = Actor {
+        actor_type: ActorType::Model,
+        actor_id: "model:health".to_owned(),
+    };
+    let first = admin
+        .write_page(write_request(
+            &owner_id,
+            &namespace,
+            actor.clone(),
+            "Alpha signal remains current.",
+            "health:first",
+        ))
+        .await
+        .expect("write first health Page");
+    let second = admin
+        .write_page(write_request(
+            &owner_id,
+            &namespace,
+            actor.clone(),
+            "Alpha signal is repeated with more words.",
+            "health:second",
+        ))
+        .await
+        .expect("write second health Page");
+    let hit = admin
+        .search_pages(SearchPagesRequest {
+            query: "Alpha signal".to_owned(),
+            scopes: vec![namespace.clone()],
+            mode: SearchMode::Text,
+            term_match: SearchTermMatch::All,
+            projections: vec![Projection::Manifest, Projection::Payload],
+            filters: SearchFilters::default(),
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .expect("search health hit");
+    assert_eq!(hit.hits.len(), 2);
+    let miss = admin
+        .search_pages(SearchPagesRequest {
+            query: "never-present-token".to_owned(),
+            scopes: vec![namespace.clone()],
+            mode: SearchMode::Text,
+            term_match: SearchTermMatch::All,
+            projections: vec![Projection::Manifest, Projection::Payload],
+            filters: SearchFilters::default(),
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .expect("search health miss");
+    assert!(miss.hits.is_empty());
+    admin
+        .read_pages(ReadPagesRequest {
+            revision_ids: vec![first.revision_id.clone()],
+            projections: vec![Projection::Manifest, Projection::Summary],
+            max_chars: 2_000,
+        })
+        .await
+        .expect("read Summary route");
+    admin
+        .read_pages(ReadPagesRequest {
+            revision_ids: vec![second.revision_id.clone()],
+            projections: vec![Projection::Payload],
+            max_chars: 2_000,
+        })
+        .await
+        .expect("read detail route");
+    admin
+        .consolidate_pages(ConsolidatePagesRequest {
+            canonical_revision_id: first.revision_id.clone(),
+            replaced_revision_ids: vec![first.revision_id, second.revision_id],
+            created_by: actor,
+            lifecycle_status: LifecycleStatus::Active,
+            observed_at: None,
+            valid_from: None,
+            valid_to: None,
+            payload: Some(PagePayload {
+                media_type: "text/markdown".to_owned(),
+                content: "Alpha signal remains current with its useful detail.".to_owned(),
+            }),
+            source_refs: Vec::new(),
+            facets: None,
+            provenance: Vec::new(),
+            idempotency_key: Some("health:consolidate".to_owned()),
+        })
+        .await
+        .expect("consolidate health Pages");
+    let legacy_scope = namespace.clone();
+    store
+        .run("seed legacy health event", move |connection| {
+            connection.execute(
+                "
+                INSERT INTO pcp_access_log (
+                    event_id, occurred_at, principal_json, session_id,
+                    operation, scopes_json, decision, detail, telemetry_json
+                ) VALUES (
+                    'acc_legacy_health', ?1,
+                    '{\"principalId\":\"host:legacy\",\"principalType\":\"host\"}',
+                    'session:legacy', 'search_pages', ?2, 'allowed', NULL, NULL
+                )
+                ",
+                rusqlite::params![
+                    chrono::Utc::now().to_rfc3339(),
+                    serde_json::to_string(&vec![legacy_scope])?,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("seed legacy access event without telemetry");
+
+    let health = admin
+        .health_snapshot(vec![namespace.clone()], 24)
+        .await
+        .expect("read PCP health snapshot");
+    assert_eq!(health.storage.current_pages, 1);
+    assert_eq!(health.storage.immutable_pages, 3);
+    assert_eq!(health.storage.refs, 2);
+    assert_eq!(health.storage.redirected_refs, 1);
+    assert_eq!(health.recall.searches, 2);
+    assert_eq!(health.recall.zero_result_searches, 1);
+    assert_eq!(health.recall.returned_pages, 2);
+    assert_eq!(health.recall.summary_reads, 1);
+    assert_eq!(health.recall.detail_reads, 1);
+    assert_eq!(health.consolidation.runs, 1);
+    assert_eq!(health.consolidation.input_pages, 2);
+    assert_eq!(health.consolidation.net_page_reduction, 1);
+    assert_eq!(health.graph.relations, 2);
+    assert!(health.activity.calls >= 7);
+    assert_eq!(health.activity.measured_calls + 1, health.activity.calls);
+
+    let (events, _) = admin
+        .access_log(100, None)
+        .await
+        .expect("read telemetry audit");
+    let search_event = events
+        .iter()
+        .find(|event| event.operation == "search_pages" && event.telemetry.is_some())
+        .expect("search telemetry event");
+    let telemetry = search_event.telemetry.as_ref().expect("search telemetry");
+    assert_eq!(telemetry.input_count, Some(1));
+    assert_eq!(telemetry.output_count, Some(0));
+    assert_eq!(telemetry.projections, vec!["manifest", "payload"]);
+    assert!(search_event.detail.is_none());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn stores_searches_revises_and_links_pages() {
     let root = std::env::temp_dir().join(format!(
         "pcp-sqlite-{}",

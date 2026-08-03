@@ -33,6 +33,25 @@ client_type = "host"
 access_mode = "admin"
 allowed_scopes = ["user:{owner_id}", "project:symbiont-d"]
 allow_cross_scope_derivation = true
+
+[maintenance]
+enabled = true
+mode = "apply"
+state_path = "data/maintenance.json"
+allowed_scopes = ["user:{owner_id}", "project:symbiont-d"]
+interval_seconds = 300
+initial_delay_seconds = 45
+max_jobs_per_cycle = 2
+
+[maintenance.worker]
+program = "bin/semantic-worker"
+actor_id = "model:maintenance-test"
+
+[maintenance.summary]
+minimum_chars = 6000
+
+[maintenance.compaction]
+max_pages_per_candidate = 6
 "#,
     )
     .expect("write runtime config");
@@ -43,6 +62,15 @@ allow_cross_scope_derivation = true
         config.endpoints[0].socket_path,
         root.join("run/symbiont.sock")
     );
+    let maintenance = config.maintenance.as_ref().expect("maintenance config");
+    assert_eq!(maintenance.mode, crate::MaintenanceMode::Apply);
+    assert_eq!(maintenance.initial_delay_seconds, 45);
+    assert_eq!(maintenance.state_path, root.join("data/maintenance.json"));
+    assert_eq!(maintenance.worker.program, root.join("bin/semantic-worker"));
+    let maintenance_access = maintenance.access_session("owner-test");
+    assert!(maintenance_access.allows("user:owner-test", AccessPermission::Write));
+    assert!(!maintenance_access.allows("user:owner-test", AccessPermission::ManageScope));
+    assert!(!maintenance_access.allows("user:owner-test", AccessPermission::Audit));
     let access = config.endpoints[0]
         .access_session("owner-test", 0)
         .expect("build endpoint access session");
@@ -52,6 +80,49 @@ allow_cross_scope_derivation = true
     let mut invalid = config;
     invalid.endpoints.push(invalid.endpoints[0].clone());
     assert!(invalid.validate().is_err());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn maintenance_defaults_to_read_only_observation() {
+    let nonce = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("pcp-runtime-observe-{nonce}"));
+    std::fs::create_dir_all(&root).expect("create observe config directory");
+    let path = root.join("runtime.toml");
+    std::fs::write(
+        &path,
+        r#"
+store_path = "data/context.sqlite3"
+
+[[endpoints]]
+socket_path = "data/pcp.sock"
+client_id = "host:test"
+client_type = "host"
+client_name = "test"
+access_mode = "read"
+allowed_scopes = ["user:{owner_id}"]
+
+[maintenance]
+enabled = true
+state_path = "data/maintenance.json"
+allowed_scopes = ["user:{owner_id}"]
+
+[maintenance.worker]
+program = "/bin/false"
+actor_id = "model:maintenance-test"
+"#,
+    )
+    .expect("write observing maintenance config");
+    let config = RuntimeConfig::load(&path).expect("parse observing maintenance config");
+    let maintenance = config.maintenance.expect("maintenance config");
+    assert_eq!(maintenance.mode, crate::MaintenanceMode::Observe);
+    let access = maintenance.access_session("owner-test");
+    assert!(access.allows("user:owner-test", AccessPermission::ReadDetail));
+    assert!(access.allows("user:owner-test", AccessPermission::Search));
+    assert!(!access.allows("user:owner-test", AccessPermission::Write));
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -312,6 +383,14 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
             .expect("resolve redirected Ref"),
         consolidated.revision_id
     );
+    let health = remote
+        .health_snapshot(Vec::new(), 24)
+        .await
+        .expect("read health through remote client");
+    assert_eq!(health.storage.current_pages, 1);
+    assert_eq!(health.consolidation.runs, 1);
+    assert_eq!(health.consolidation.input_pages, 2);
+    assert!(health.recall.searches >= 1);
     let (audit, _) = remote.access_log(50, None).await.expect("read access log");
     assert!(audit.iter().all(|event| {
         event.principal.principal_id == "host:runtime-test"

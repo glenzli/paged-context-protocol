@@ -9,11 +9,14 @@ use pcp_client::AccessMode;
 use pcp_core::{AccessPrincipal, AccessPrincipalType, AccessSession};
 use serde::Deserialize;
 
+use crate::MaintenanceConfig;
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
     pub store_path: PathBuf,
     pub endpoints: Vec<RuntimeEndpointConfig>,
+    pub maintenance: Option<MaintenanceConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -83,6 +86,9 @@ impl RuntimeConfig {
                 endpoint.client_id
             );
         }
+        if let Some(maintenance) = &self.maintenance {
+            maintenance.validate()?;
+        }
         Ok(())
     }
 
@@ -94,6 +100,9 @@ impl RuntimeConfig {
             if endpoint.socket_path.is_relative() {
                 endpoint.socket_path = base.join(&endpoint.socket_path);
             }
+        }
+        if let Some(maintenance) = &mut self.maintenance {
+            maintenance.resolve_paths(base);
         }
     }
 }

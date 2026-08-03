@@ -152,7 +152,8 @@ Host 行为变成协议要求：
 - `pcp-rpc`：轻量 Unix socket wire、远端 client 与通用 server transport。
 - `pcp-console`：通过专用审计 Principal 运行的只读本地 Web Inspector。
 - `pcp-sqlite`：本地不可变 Page、检索、Summary、有效性、Ref 与 DAG 关系。
-- `pcp-runtime`：打开 Store、固定接入身份并管理多端点 broker 生命周期。
+- `pcp-runtime`：打开 Store、固定接入身份并管理多端点 broker 生命周期；可选维护器以独立
+  Principal 调度 Summary 与 consolidation，但不内置语义模型。
 - `pcp-cli`：面向本地 Store 的检查、搜索、读取与导出工具。
 - `pcp-mcp`：基于官方 Rust MCP SDK 的本地 stdio 工具服务器。
 
@@ -171,8 +172,9 @@ behavior normative:
   Principal.
 - `pcp-sqlite`: immutable local Pages, retrieval, Summaries, validity, Refs,
   and DAG Relations.
-- `pcp-runtime`: Store composition, fixed endpoint identities, and the
-  multi-endpoint broker lifecycle.
+- `pcp-runtime`: Store composition, fixed endpoint identities, the
+  multi-endpoint broker lifecycle, and an optional semantic-worker maintenance
+  coordinator that does not embed model policy.
 - `pcp-cli`: inspection, search, read, and export commands for a local Store.
 - `pcp-mcp`: a local stdio tool server built on the official Rust MCP SDK.
 
@@ -207,6 +209,15 @@ Principal. A single socket is one fixed trust identity. One broker process can
 share one Store across several separately configured sockets for symbiont-d,
 Codex, or other clients. Socket mode is `0600`; this is a local user boundary,
 not protection against a hostile process already running as the same OS user.
+
+The broker can also run an explicitly enabled maintenance coordinator. It gives
+a bounded inventory or exact Detail to a configured local semantic worker, then
+accepts only `write_summary`, `consolidate`, `keep_separate`, or `defer` decisions.
+The worker cannot mutate the Store directly: Runtime fills mechanical metadata,
+and the Store revalidates authorization, current heads, lineage, and atomicity.
+The coordinator defaults to a read-only observation mode; apply mode is an
+explicit deployment choice. Scheduling and cooldown state remain outside the Page graph. See
+[`crates/pcp-runtime/README.md`](crates/pcp-runtime/README.md).
 
 For multiple clients, start the broker from a TOML file. Relative Store and
 socket paths resolve from the config location, and `{owner_id}` inside a Scope
@@ -266,7 +277,11 @@ The first version is intentionally read-only. Its default view summarizes the
 runtime and available Scopes. Page and access lists are cursor-paginated; a Page
 opens on its Summary or bounded preview, while full Detail and a navigable
 one-hop Relation graph are loaded only when requested. It also exposes the
-metadata-only access timeline. Markdown Page content is rendered for reading,
+metadata-only access timeline. The Health view aggregates current-memory shape,
+recall behavior, consolidation, call latency, failures, per-Scope activity, and
+time-window trends without producing a single opaque score. Operation telemetry
+stores counts, projection names, duration, and response size; query text and Page
+content are deliberately excluded. Markdown Page content is rendered for reading,
 including KaTeX-compatible inline and display math; non-Markdown payloads and
 the metadata views remain escaped plain text.
 

@@ -1,13 +1,17 @@
+use std::time::Instant;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessDecision, AccessPermission, AccessSession, AssessPageValidityRequest,
-    Capabilities, ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest, Projection,
-    ProvenanceEvent, ReadPage, ReadPagesRequest, Relation, RevisePageRequest, Scope,
-    SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
-    WriteSummaryResult, WriteValidityResult,
+    Capabilities, ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest,
+    OperationTelemetry, Projection, ProvenanceEvent, ReadPage, ReadPagesRequest, Relation,
+    RevisePageRequest, Scope, SearchPagesRequest, SearchResult, WritePageRequest, WriteResult,
+    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
-use pcp_store::{DurablePageInventoryItem, PcpStore, TombstoneCascadeResult};
+use pcp_store::{DurablePageInventoryItem, HealthSnapshot, PcpStore, TombstoneCascadeResult};
+use serde::Serialize;
+use serde_json::Value;
 
 use crate::{
     SqlitePcpStore,
@@ -37,6 +41,7 @@ impl PcpStore for SqlitePcpStore {
         access: &AccessSession,
         request: CreateScopeRequest,
     ) -> Result<()> {
+        let observation = OperationObservation::start();
         let mut scopes = vec![request.namespace.clone()];
         let authorization = (request.owner_id == self.owner_id())
             .then_some(())
@@ -52,10 +57,28 @@ impl PcpStore for SqlitePcpStore {
                 Ok(())
             });
         if let Err(error) = authorization {
-            return complete(self, access, "create_scope", scopes, Err(error), true).await;
+            return complete(
+                self,
+                access,
+                "create_scope",
+                scopes,
+                Err(error),
+                true,
+                observation,
+            )
+            .await;
         }
         let result = SqlitePcpStore::create_scope(self, request).await;
-        complete(self, access, "create_scope", scopes, result, false).await
+        complete(
+            self,
+            access,
+            "create_scope",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
     }
 
     async fn list_scopes(
@@ -66,6 +89,7 @@ impl PcpStore for SqlitePcpStore {
         limit: u32,
         cursor: Option<String>,
     ) -> Result<(Vec<Scope>, Option<String>)> {
+        let observation = OperationObservation::start();
         let scopes =
             match authorize_scopes(access, &[AccessPermission::ListScopes], &requested_scopes) {
                 Ok(scopes) => scopes,
@@ -77,12 +101,22 @@ impl PcpStore for SqlitePcpStore {
                         requested_scopes,
                         Err(error),
                         true,
+                        observation,
                     )
                     .await;
                 }
             };
         let result = SqlitePcpStore::list_scopes(self, scopes.clone(), query, limit, cursor).await;
-        complete(self, access, "list_scopes", scopes, result, false).await
+        complete(
+            self,
+            access,
+            "list_scopes",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
     }
 
     async fn search_pages(
@@ -93,17 +127,38 @@ impl PcpStore for SqlitePcpStore {
         if request.projections.is_empty() {
             request.projections = pcp_core::default_search_projections();
         }
+        let observation = OperationObservation::start()
+            .with_input_count(1)
+            .with_projections(&request.projections);
         let permissions = search_permissions(&request.projections);
         let requested = request.scopes.clone();
         let scopes = match authorize_scopes(access, &permissions, &requested) {
             Ok(scopes) => scopes,
             Err(error) => {
-                return complete(self, access, "search_pages", requested, Err(error), true).await;
+                return complete(
+                    self,
+                    access,
+                    "search_pages",
+                    requested,
+                    Err(error),
+                    true,
+                    observation,
+                )
+                .await;
             }
         };
         request.scopes = scopes.clone();
         let result = SqlitePcpStore::search_pages(self, request).await;
-        complete(self, access, "search_pages", scopes, result, false).await
+        complete(
+            self,
+            access,
+            "search_pages",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
     }
 
     async fn browse_index(
@@ -115,6 +170,7 @@ impl PcpStore for SqlitePcpStore {
         cursor: Option<String>,
         max_chars: u32,
     ) -> Result<SearchResult> {
+        let observation = OperationObservation::start();
         let scopes = match authorize_scopes(
             access,
             &[
@@ -133,6 +189,7 @@ impl PcpStore for SqlitePcpStore {
                     requested_scopes,
                     Err(error),
                     true,
+                    observation,
                 )
                 .await;
             }
@@ -146,7 +203,16 @@ impl PcpStore for SqlitePcpStore {
             max_chars,
         )
         .await;
-        complete(self, access, "browse_index", scopes, result, false).await
+        complete(
+            self,
+            access,
+            "browse_index",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
     }
 
     async fn read_pages(
@@ -154,6 +220,9 @@ impl PcpStore for SqlitePcpStore {
         access: &AccessSession,
         request: ReadPagesRequest,
     ) -> Result<Vec<ReadPage>> {
+        let observation = OperationObservation::start()
+            .with_input_count(request.revision_ids.len())
+            .with_projections(&request.projections);
         let permission = if request.projections.iter().any(is_detail_projection) {
             AccessPermission::ReadDetail
         } else {
@@ -162,14 +231,33 @@ impl PcpStore for SqlitePcpStore {
         let scopes = match authorize_scopes(access, &[permission], &[]) {
             Ok(scopes) => scopes,
             Err(error) => {
-                return complete(self, access, "read_pages", Vec::new(), Err(error), true).await;
+                return complete(
+                    self,
+                    access,
+                    "read_pages",
+                    Vec::new(),
+                    Err(error),
+                    true,
+                    observation,
+                )
+                .await;
             }
         };
         let result = SqlitePcpStore::read_pages(self, request, scopes.clone()).await;
-        complete(self, access, "read_pages", scopes, result, false).await
+        complete(
+            self,
+            access,
+            "read_pages",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
     }
 
     async fn current_revision_id(&self, access: &AccessSession, page_id: String) -> Result<String> {
+        let observation = OperationObservation::start().with_input_count(1);
         let scopes = match authorize_scopes(access, &[AccessPermission::ReadSummary], &[]) {
             Ok(scopes) => scopes,
             Err(error) => {
@@ -180,12 +268,22 @@ impl PcpStore for SqlitePcpStore {
                     Vec::new(),
                     Err(error),
                     true,
+                    observation,
                 )
                 .await;
             }
         };
         let result = SqlitePcpStore::current_revision_id(self, page_id, scopes.clone()).await;
-        complete(self, access, "current_revision", scopes, result, false).await
+        complete(
+            self,
+            access,
+            "current_revision",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
     }
 
     async fn page_count(
@@ -193,15 +291,34 @@ impl PcpStore for SqlitePcpStore {
         access: &AccessSession,
         requested_scopes: Vec<String>,
     ) -> Result<u64> {
+        let observation = OperationObservation::start();
         let scopes = match authorize_scopes(access, &[AccessPermission::Search], &requested_scopes)
         {
             Ok(scopes) => scopes,
             Err(error) => {
-                return complete(self, access, "page_count", Vec::new(), Err(error), true).await;
+                return complete(
+                    self,
+                    access,
+                    "page_count",
+                    Vec::new(),
+                    Err(error),
+                    true,
+                    observation,
+                )
+                .await;
             }
         };
         let result = SqlitePcpStore::page_count(self, scopes.clone()).await;
-        complete(self, access, "page_count", scopes, result, false).await
+        complete(
+            self,
+            access,
+            "page_count",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
     }
 
     async fn content_char_count(
@@ -209,6 +326,7 @@ impl PcpStore for SqlitePcpStore {
         access: &AccessSession,
         requested_scopes: Vec<String>,
     ) -> Result<usize> {
+        let observation = OperationObservation::start();
         let scopes =
             match authorize_scopes(access, &[AccessPermission::ReadDetail], &requested_scopes) {
                 Ok(scopes) => scopes,
@@ -220,12 +338,22 @@ impl PcpStore for SqlitePcpStore {
                         Vec::new(),
                         Err(error),
                         true,
+                        observation,
                     )
                     .await;
                 }
             };
         let result = SqlitePcpStore::content_char_count(self, scopes.clone()).await;
-        complete(self, access, "content_char_count", scopes, result, false).await
+        complete(
+            self,
+            access,
+            "content_char_count",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
     }
 
     async fn write_page(
@@ -233,6 +361,14 @@ impl PcpStore for SqlitePcpStore {
         access: &AccessSession,
         request: WritePageRequest,
     ) -> Result<WriteResult> {
+        let observation = OperationObservation::start().with_input_count(
+            request.initial_relations.len()
+                + request
+                    .provenance
+                    .iter()
+                    .map(|event| event.input_revision_ids.len())
+                    .sum::<usize>(),
+        );
         let target_scope = request.namespace.clone();
         let mut audit_scopes = vec![target_scope.clone()];
         let authorization = async {
@@ -263,10 +399,28 @@ impl PcpStore for SqlitePcpStore {
         }
         .await;
         if let Err(error) = authorization {
-            return complete(self, access, "write_page", audit_scopes, Err(error), true).await;
+            return complete(
+                self,
+                access,
+                "write_page",
+                audit_scopes,
+                Err(error),
+                true,
+                observation,
+            )
+            .await;
         }
         let result = SqlitePcpStore::write_page(self, request, audit_scopes.clone()).await;
-        complete(self, access, "write_page", audit_scopes, result, false).await
+        complete(
+            self,
+            access,
+            "write_page",
+            audit_scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
     }
 
     async fn revise_page(
@@ -274,10 +428,27 @@ impl PcpStore for SqlitePcpStore {
         access: &AccessSession,
         request: RevisePageRequest,
     ) -> Result<WriteResult> {
+        let observation = OperationObservation::start().with_input_count(
+            1 + request.initial_relations.len()
+                + request
+                    .provenance
+                    .iter()
+                    .map(|event| event.input_revision_ids.len())
+                    .sum::<usize>(),
+        );
         let target_scope = match self.page_namespace(request.page_id.clone()).await {
             Ok(scope) => scope,
             Err(error) => {
-                return complete(self, access, "revise_page", Vec::new(), Err(error), false).await;
+                return complete(
+                    self,
+                    access,
+                    "revise_page",
+                    Vec::new(),
+                    Err(error),
+                    false,
+                    observation,
+                )
+                .await;
             }
         };
         let mut audit_scopes = vec![target_scope.clone()];
@@ -306,10 +477,28 @@ impl PcpStore for SqlitePcpStore {
         }
         .await;
         if let Err(error) = authorization {
-            return complete(self, access, "revise_page", audit_scopes, Err(error), true).await;
+            return complete(
+                self,
+                access,
+                "revise_page",
+                audit_scopes,
+                Err(error),
+                true,
+                observation,
+            )
+            .await;
         }
         let result = SqlitePcpStore::revise_page(self, request, audit_scopes.clone()).await;
-        complete(self, access, "revise_page", audit_scopes, result, false).await
+        complete(
+            self,
+            access,
+            "revise_page",
+            audit_scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
     }
 
     async fn consolidate_pages(
@@ -317,6 +506,8 @@ impl PcpStore for SqlitePcpStore {
         access: &AccessSession,
         request: ConsolidatePagesRequest,
     ) -> Result<WriteResult> {
+        let observation =
+            OperationObservation::start().with_input_count(request.replaced_revision_ids.len());
         let mut target_ids = request.replaced_revision_ids.clone();
         target_ids.push(request.canonical_revision_id.clone());
         target_ids.sort();
@@ -331,6 +522,7 @@ impl PcpStore for SqlitePcpStore {
                     Vec::new(),
                     Err(error),
                     false,
+                    observation,
                 )
                 .await;
             }
@@ -351,10 +543,28 @@ impl PcpStore for SqlitePcpStore {
         }
         .await;
         if let Err(error) = authorization {
-            return complete(self, access, "consolidate_pages", scopes, Err(error), true).await;
+            return complete(
+                self,
+                access,
+                "consolidate_pages",
+                scopes,
+                Err(error),
+                true,
+                observation,
+            )
+            .await;
         }
         let result = SqlitePcpStore::consolidate_pages(self, request, scopes.clone()).await;
-        complete(self, access, "consolidate_pages", scopes, result, false).await
+        complete(
+            self,
+            access,
+            "consolidate_pages",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
     }
 
     async fn link_pages(
@@ -362,6 +572,7 @@ impl PcpStore for SqlitePcpStore {
         access: &AccessSession,
         request: LinkPagesRequest,
     ) -> Result<Relation> {
+        let observation = OperationObservation::start().with_input_count(2);
         let scopes = match self
             .revision_namespaces(vec![
                 request.from_revision_id.clone(),
@@ -371,16 +582,43 @@ impl PcpStore for SqlitePcpStore {
         {
             Ok(scopes) => scopes,
             Err(error) => {
-                return complete(self, access, "link_pages", Vec::new(), Err(error), false).await;
+                return complete(
+                    self,
+                    access,
+                    "link_pages",
+                    Vec::new(),
+                    Err(error),
+                    false,
+                    observation,
+                )
+                .await;
             }
         };
         for scope in &scopes {
             if let Err(error) = authorize_exact(access, scope, AccessPermission::Link) {
-                return complete(self, access, "link_pages", scopes, Err(error), true).await;
+                return complete(
+                    self,
+                    access,
+                    "link_pages",
+                    scopes,
+                    Err(error),
+                    true,
+                    observation,
+                )
+                .await;
             }
         }
         let result = SqlitePcpStore::link_pages(self, request, scopes.clone()).await;
-        complete(self, access, "link_pages", scopes, result, false).await
+        complete(
+            self,
+            access,
+            "link_pages",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
     }
 
     async fn write_summary(
@@ -388,6 +626,13 @@ impl PcpStore for SqlitePcpStore {
         access: &AccessSession,
         request: WriteSummaryRequest,
     ) -> Result<WriteSummaryResult> {
+        let observation = OperationObservation::start().with_input_count(
+            1 + request
+                .provenance
+                .iter()
+                .map(|event| event.input_revision_ids.len())
+                .sum::<usize>(),
+        );
         let target_scope = match self
             .revision_namespaces(vec![request.target_revision_id.clone()])
             .await
@@ -399,8 +644,16 @@ impl PcpStore for SqlitePcpStore {
             }) {
             Ok(scope) => scope,
             Err(error) => {
-                return complete(self, access, "write_summary", Vec::new(), Err(error), false)
-                    .await;
+                return complete(
+                    self,
+                    access,
+                    "write_summary",
+                    Vec::new(),
+                    Err(error),
+                    false,
+                    observation,
+                )
+                .await;
             }
         };
         let mut scopes = vec![target_scope.clone()];
@@ -413,10 +666,28 @@ impl PcpStore for SqlitePcpStore {
         }
         .await;
         if let Err(error) = authorization {
-            return complete(self, access, "write_summary", scopes, Err(error), true).await;
+            return complete(
+                self,
+                access,
+                "write_summary",
+                scopes,
+                Err(error),
+                true,
+                observation,
+            )
+            .await;
         }
         let result = SqlitePcpStore::write_summary(self, request, scopes.clone()).await;
-        complete(self, access, "write_summary", scopes, result, false).await
+        complete(
+            self,
+            access,
+            "write_summary",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
     }
 
     async fn next_summary_candidate(
@@ -425,6 +696,7 @@ impl PcpStore for SqlitePcpStore {
         minimum_chars: usize,
         excluded_page_kinds: Vec<String>,
     ) -> Result<Option<String>> {
+        let observation = OperationObservation::start();
         let scopes = match authorize_scopes(
             access,
             &[AccessPermission::Search, AccessPermission::ReadDetail],
@@ -439,6 +711,7 @@ impl PcpStore for SqlitePcpStore {
                     Vec::new(),
                     Err(error),
                     true,
+                    observation,
                 )
                 .await;
             }
@@ -457,6 +730,7 @@ impl PcpStore for SqlitePcpStore {
             scopes,
             result,
             false,
+            observation,
         )
         .await
     }
@@ -468,6 +742,7 @@ impl PcpStore for SqlitePcpStore {
         outcome: String,
         tool_or_model: Option<String>,
     ) -> Result<()> {
+        let observation = OperationObservation::start().with_input_count(1);
         let scopes = match self
             .revision_namespaces(vec![target_revision_id.clone()])
             .await
@@ -481,6 +756,7 @@ impl PcpStore for SqlitePcpStore {
                     Vec::new(),
                     Err(error),
                     false,
+                    observation,
                 )
                 .await;
             }
@@ -495,6 +771,7 @@ impl PcpStore for SqlitePcpStore {
                 scopes,
                 Err(error),
                 true,
+                observation,
             )
             .await;
         }
@@ -506,7 +783,16 @@ impl PcpStore for SqlitePcpStore {
             scopes.clone(),
         )
         .await;
-        complete(self, access, "mark_summary_assessed", scopes, result, false).await
+        complete(
+            self,
+            access,
+            "mark_summary_assessed",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
     }
 
     async fn assess_page_validity(
@@ -514,6 +800,8 @@ impl PcpStore for SqlitePcpStore {
         access: &AccessSession,
         request: AssessPageValidityRequest,
     ) -> Result<WriteValidityResult> {
+        let observation =
+            OperationObservation::start().with_input_count(1 + request.basis_revision_ids.len());
         let target_scope = match self
             .revision_namespaces(vec![request.target_revision_id.clone()])
             .await
@@ -532,6 +820,7 @@ impl PcpStore for SqlitePcpStore {
                     Vec::new(),
                     Err(error),
                     false,
+                    observation,
                 )
                 .await;
             }
@@ -551,10 +840,28 @@ impl PcpStore for SqlitePcpStore {
         }
         .await;
         if let Err(error) = authorization {
-            return complete(self, access, "assess_validity", scopes, Err(error), true).await;
+            return complete(
+                self,
+                access,
+                "assess_validity",
+                scopes,
+                Err(error),
+                true,
+                observation,
+            )
+            .await;
         }
         let result = SqlitePcpStore::assess_page_validity(self, request, scopes.clone()).await;
-        complete(self, access, "assess_validity", scopes, result, false).await
+        complete(
+            self,
+            access,
+            "assess_validity",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
     }
 
     async fn tombstone_derivation_cascade(
@@ -563,10 +870,20 @@ impl PcpStore for SqlitePcpStore {
         root_revision_id: String,
         actor: pcp_core::Actor,
     ) -> Result<TombstoneCascadeResult> {
+        let observation = OperationObservation::start().with_input_count(1);
         let scopes = match authorize_scopes(access, &[AccessPermission::Retract], &[]) {
             Ok(scopes) => scopes,
             Err(error) => {
-                return complete(self, access, "retract", Vec::new(), Err(error), true).await;
+                return complete(
+                    self,
+                    access,
+                    "retract",
+                    Vec::new(),
+                    Err(error),
+                    true,
+                    observation,
+                )
+                .await;
             }
         };
         let result = SqlitePcpStore::tombstone_derivation_cascade(
@@ -576,7 +893,7 @@ impl PcpStore for SqlitePcpStore {
             scopes.clone(),
         )
         .await;
-        complete(self, access, "retract", scopes, result, false).await
+        complete(self, access, "retract", scopes, result, false, observation).await
     }
 
     async fn durable_page_inventory(
@@ -584,6 +901,7 @@ impl PcpStore for SqlitePcpStore {
         access: &AccessSession,
         excluded_page_kinds: Vec<String>,
     ) -> Result<Vec<DurablePageInventoryItem>> {
+        let observation = OperationObservation::start();
         let scopes = match authorize_scopes(access, &[AccessPermission::ReadDetail], &[]) {
             Ok(scopes) => scopes,
             Err(error) => {
@@ -594,13 +912,23 @@ impl PcpStore for SqlitePcpStore {
                     Vec::new(),
                     Err(error),
                     true,
+                    observation,
                 )
                 .await;
             }
         };
         let result =
             SqlitePcpStore::durable_page_inventory(self, scopes.clone(), excluded_page_kinds).await;
-        complete(self, access, "durable_inventory", scopes, result, false).await
+        complete(
+            self,
+            access,
+            "durable_inventory",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
     }
 
     async fn access_log(
@@ -611,6 +939,41 @@ impl PcpStore for SqlitePcpStore {
     ) -> Result<(Vec<AccessAuditEvent>, Option<String>)> {
         let scopes = authorize_scopes(access, &[AccessPermission::Audit], &[])?;
         SqlitePcpStore::read_access_log(self, scopes, limit, cursor).await
+    }
+
+    async fn health_snapshot(
+        &self,
+        access: &AccessSession,
+        requested_scopes: Vec<String>,
+        window_hours: u32,
+    ) -> Result<HealthSnapshot> {
+        let observation = OperationObservation::start();
+        let scopes = match authorize_scopes(access, &[AccessPermission::Audit], &requested_scopes) {
+            Ok(scopes) => scopes,
+            Err(error) => {
+                return complete(
+                    self,
+                    access,
+                    "health_snapshot",
+                    requested_scopes,
+                    Err(error),
+                    true,
+                    observation,
+                )
+                .await;
+            }
+        };
+        let result = SqlitePcpStore::health_snapshot(self, scopes.clone(), window_hours).await;
+        complete(
+            self,
+            access,
+            "health_snapshot",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
     }
 }
 
@@ -685,7 +1048,11 @@ async fn complete<T>(
     scopes: Vec<String>,
     result: Result<T>,
     denied: bool,
-) -> Result<T> {
+    observation: OperationObservation,
+) -> Result<T>
+where
+    T: Serialize,
+{
     let decision = if result.is_ok() {
         AccessDecision::Allowed
     } else if denied {
@@ -698,12 +1065,90 @@ async fn complete<T>(
         AccessDecision::Failed => Some("operation failed"),
         AccessDecision::Allowed => None,
     };
+    let telemetry = observation.finish(result.as_ref().ok());
     let audit = store
-        .record_access(access, operation, &scopes, decision, detail)
+        .record_access(
+            access,
+            operation,
+            &scopes,
+            decision,
+            detail,
+            Some(&telemetry),
+        )
         .await;
     match (result, audit) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+struct OperationObservation {
+    started: Instant,
+    input_count: Option<u64>,
+    projections: Vec<String>,
+}
+
+impl OperationObservation {
+    fn start() -> Self {
+        Self {
+            started: Instant::now(),
+            input_count: None,
+            projections: Vec::new(),
+        }
+    }
+
+    fn with_input_count(mut self, count: usize) -> Self {
+        self.input_count = u64::try_from(count).ok();
+        self
+    }
+
+    fn with_projections(mut self, projections: &[Projection]) -> Self {
+        self.projections = projections
+            .iter()
+            .map(|projection| projection.as_str().to_owned())
+            .collect();
+        self
+    }
+
+    fn finish<T: Serialize>(&self, result: Option<&T>) -> OperationTelemetry {
+        let output = result.and_then(|value| serde_json::to_value(value).ok());
+        OperationTelemetry {
+            duration_ms: self
+                .started
+                .elapsed()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX),
+            input_count: self.input_count,
+            output_count: output.as_ref().and_then(output_count),
+            output_bytes: result
+                .and_then(|value| serde_json::to_vec(value).ok())
+                .and_then(|bytes| u64::try_from(bytes.len()).ok()),
+            projections: self.projections.clone(),
+        }
+    }
+}
+
+fn output_count(value: &Value) -> Option<u64> {
+    match value {
+        Value::Array(values) => {
+            if values.len() == 2
+                && let Some(first) = values.first().and_then(Value::as_array)
+            {
+                return u64::try_from(first.len()).ok();
+            }
+            u64::try_from(values.len()).ok()
+        }
+        Value::Object(object) => {
+            for key in ["hits", "pages", "items", "events", "scopes"] {
+                if let Some(values) = object.get(key).and_then(Value::as_array) {
+                    return u64::try_from(values.len()).ok();
+                }
+            }
+            Some(1)
+        }
+        Value::Null => Some(0),
+        Value::Bool(_) | Value::Number(_) | Value::String(_) => Some(1),
     }
 }

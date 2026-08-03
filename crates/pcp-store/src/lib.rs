@@ -1,3 +1,5 @@
+mod health;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
@@ -8,6 +10,11 @@ use pcp_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+pub use health::{
+    ActivityHealth, ConsolidationHealth, GraphHealth, HealthSnapshot, HealthTimelineBucket,
+    NamedCount, OperationHealth, RecallHealth, ScopeHealth, StorageHealth,
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -143,4 +150,10 @@ pub trait PcpStore: Send + Sync {
         limit: u32,
         cursor: Option<String>,
     ) -> Result<(Vec<AccessAuditEvent>, Option<String>)>;
+    async fn health_snapshot(
+        &self,
+        access: &AccessSession,
+        requested_scopes: Vec<String>,
+        window_hours: u32,
+    ) -> Result<HealthSnapshot>;
 }

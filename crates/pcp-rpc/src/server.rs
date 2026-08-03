@@ -216,6 +216,14 @@ async fn dispatch(client: &dyn PcpApi, operation: RpcOperation) -> Result<RpcVal
                 next_cursor,
             }
         }
+        RpcOperation::HealthSnapshot {
+            requested_scopes,
+            window_hours,
+        } => RpcValue::HealthSnapshot(
+            client
+                .health_snapshot(requested_scopes, window_hours)
+                .await?,
+        ),
     };
     Ok(value)
 }

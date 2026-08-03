@@ -4,7 +4,7 @@ mod request;
 
 pub use access::{
     AccessAuditEvent, AccessDecision, AccessPermission, AccessPrincipal, AccessPrincipalType,
-    AccessSession, ScopeGrant,
+    AccessSession, OperationTelemetry, ScopeGrant,
 };
 pub use model::{
     Actor, ActorType, Capabilities, LifecycleStatus, Page, PagePayload, PageRevision, PageSummary,

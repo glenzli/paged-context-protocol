@@ -106,8 +106,11 @@ main { max-width: 1280px; margin: 0 auto; padding: 22px; }
 .metric.tone-danger { background: var(--danger-soft); }
 .metric.tone-danger .metric-value { color: var(--danger); }
 .section-heading { display: flex; align-items: center; margin-top: 26px; margin-bottom: 8px; }
+.section-heading > .muted { margin-left: 8px; }
 .view-heading { display: flex; align-items: center; justify-content: space-between; min-height: 34px; margin-bottom: 10px; }
 .view-heading h2 { display: inline; margin-right: 8px; }
+.window-control { display: flex; align-items: center; gap: 7px; color: var(--muted); }
+.window-control select { min-height: 30px; padding-top: 2px; padding-bottom: 2px; }
 h2 { margin: 0; font-size: 13px; }
 .table-wrap { border: 1px solid var(--line); border-radius: 6px; overflow: auto; background: var(--surface); }
 table { width: 100%; border-collapse: collapse; table-layout: fixed; }
@@ -130,6 +133,7 @@ input, select { min-height: 34px; border: 1px solid var(--strong-line); border-r
 input:focus, select:focus { border-color: var(--accent); }
 .list-footer { min-height: 46px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .aggregate-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+#health-flows { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .aggregate-panel { min-width: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); overflow: hidden; }
 .aggregate-panel h3 { margin: 0; padding: 9px 11px; border-bottom: 1px solid var(--line); background: var(--surface-subtle); color: var(--muted); font-size: 12px; }
 .aggregate-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 11px; border-bottom: 1px solid var(--line); }
@@ -138,6 +142,23 @@ input:focus, select:focus { border-color: var(--accent); }
 .aggregate-row.decision-allowed strong { color: var(--positive); }
 .aggregate-row.decision-denied strong { color: var(--danger); }
 .aggregate-row.decision-other strong { color: var(--warning); }
+.aggregate-row.health-positive strong { color: var(--positive); }
+.aggregate-row.health-warning strong { color: var(--warning); }
+.aggregate-row.health-danger strong { color: var(--danger); }
+.health-signals { display: grid; gap: 7px; margin-top: 12px; }
+.health-signal { padding: 9px 11px; border: 1px solid var(--line); border-left-width: 3px; border-radius: 5px; background: var(--surface); }
+.health-signal.tone-info { border-left-color: var(--accent); }
+.health-signal.tone-positive { border-left-color: var(--positive); }
+.health-signal.tone-warning { border-left-color: var(--warning); }
+.health-signal.tone-danger { border-left-color: var(--danger); }
+.health-danger { color: var(--danger); font-weight: 600; }
+.timeline-panel { min-height: 126px; padding: 13px 13px 8px; border: 1px solid var(--line); border-radius: 6px; overflow-x: auto; background: var(--surface); }
+.timeline-chart { min-width: max-content; height: 104px; display: flex; align-items: end; gap: 8px; }
+.timeline-bucket { width: 28px; display: grid; justify-items: center; gap: 5px; }
+.timeline-bars { position: relative; width: 18px; height: 76px; display: flex; align-items: end; justify-content: center; }
+.timeline-bar { position: absolute; bottom: 0; width: 13px; min-height: 0; border-radius: 2px 2px 0 0; background: var(--accent); opacity: .72; }
+.timeline-bar.failures { z-index: 1; width: 5px; background: var(--danger); opacity: .95; }
+.timeline-label { max-width: 42px; color: var(--muted); font-size: 10px; white-space: nowrap; }
 .empty, .loading { padding: 18px; color: var(--muted); text-align: center; }
 .details-grid { display: grid; grid-template-columns: 170px minmax(0, 1fr); margin: 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--surface); }
 .details-grid dt, .details-grid dd { margin: 0; padding: 9px 11px; border-bottom: 1px solid var(--line); }
@@ -252,9 +273,14 @@ pre { margin: 0; max-height: 420px; overflow: auto; padding: 11px; border: 1px s
   .metric { border-bottom: 1px solid var(--line); }
   .toolbar { grid-template-columns: 1fr; }
   .aggregate-grid { grid-template-columns: 1fr; }
+  #health-flows { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .details-grid { grid-template-columns: 120px minmax(0, 1fr); }
   .graph-lanes { grid-template-columns: 1fr; }
   .graph-query-controls, .topology-header { align-items: flex-start; flex-direction: column; }
   .topology-header { padding-bottom: 9px; }
   .topology-map { height: 390px; min-height: 280px; }
+}
+@media (max-width: 520px) {
+  #health-flows { grid-template-columns: 1fr; }
+  .view-heading { align-items: flex-start; gap: 8px; }
 }

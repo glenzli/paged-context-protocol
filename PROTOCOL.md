@@ -167,6 +167,28 @@ Consolidation 必须是原子的，并且：
 有损内容生成必须由 Host、用户或模型完成。实现可以提供可选后台维护器，但 PCP 不规定固定
 调度周期、相似度阈值或模型。
 
+### 2.2 Consolidation 提案与提交边界
+
+PCP Core 只接收已经完成语义判断的 consolidation 提交，不把候选发现、模型 Prompt、任务
+租约、重试或冷却状态定义成 Page 或 Core Relation。最终提交至少包含：
+
+- 两个或更多精确、仍为当前状态的输入 Page IDs；
+- 输入集合中的一个 canonical Page ID；
+- 可独立用于后续召回的新内容；
+- 产生判断的 Actor，以及 Host 可确定的 provenance 与幂等键。
+
+候选与提案是短暂的工作对象，不因“被发现”而自动获得持久语义。实现可以让后台维护器先
+提供有界 routing surface，由语义 worker 选择候选，再读取精确 Detail 并返回以下之一：
+
+```text
+consolidate | keep_separate | defer
+```
+
+只有 `consolidate` 会进入 Core 提交。Store 必须在同一事务中重新验证 Scope、当前 Ref head、
+输入 standing、canonical 身份、DAG 和幂等条件；worker 的判断不能绕过这些约束。
+`keep_separate` 与 `defer` 属于维护器策略状态，不应伪装成用户记忆 Page，除非 Host 明确决定
+该判断本身具有长期信息价值。
+
 ## 3. 有效性与变化
 
 Page 的内容永远不被后续事实改写。后续信息可以：
@@ -232,6 +254,30 @@ consolidation、当前有效 Page 投影、索引、权限执行、持久化、�
 
 PCP 不定义：用户画像策略、主动探索策略、注意力价值判断、固定 Prompt、模型路由、窗口压缩
 算法或后台 Agent 拓扑。这些属于 symbiont-d 等具体 Host。
+
+### 6.1 可选 Runtime Maintainer
+
+参考实现可以在 Store 与语义 worker 之间提供一个非规范性的维护器：
+
+```text
+Store inventory / Summary routes
+  -> Runtime selects a bounded maintenance job
+  -> Semantic worker selects and synthesizes
+  -> Runtime fills mechanical metadata
+  -> Store validates and commits atomically
+```
+
+该维护器负责自己的生命周期、定时、预算、超时、重试、冷却、worker 接入与运行记录；这些
+状态不属于 PCP Page 图。语义 worker 负责判断是否值得 Summary、哪些 Page 真正等价、是否存在
+冲突以及如何有损合成，但不直接推进 Ref 或写 Relation。Store 仍只负责授权、持久化与结构
+不变量。
+
+维护器必须显式启用，使用独立 Principal 和明确 Scope。没有配置语义 worker 时，参考 Runtime
+不得自行退化为相似度阈值合并器。候选发现可以使用相似度、共同召回或实现定义的 routing
+提示，但它们只能减少 worker 的阅读范围，不能成为提交依据。
+
+观察、审批和自动应用是 Runtime/Host 策略，不是协议状态。参考 Runtime 应默认以只读 Principal
+运行观察模式；只有显式切换到应用模式后，模型完成的提案才可以进入 Core 提交接口。
 
 ## 7. 兼容与迁移
 

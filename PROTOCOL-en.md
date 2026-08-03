@@ -194,6 +194,33 @@ semantic judgment and lossy synthesis. An implementation MAY provide an
 optional background maintainer, but PCP does not prescribe its schedule,
 similarity threshold, or model.
 
+### 2.2 Consolidation Proposal and Commit Boundary
+
+PCP Core accepts only a consolidation commit whose semantic judgment is
+complete. Candidate discovery, model prompts, job leases, retries, and cooldown
+state are not Pages or Core Relations. A final commit contains at least:
+
+- two or more exact input Page IDs that are still current;
+- one canonical Page ID from that input set;
+- new content that is independently useful for future recall;
+- the deciding Actor plus Host-determined provenance and idempotency identity.
+
+Candidates and proposals are transient work objects. Discovery alone gives them
+no durable semantics. An implementation may let a background maintainer expose
+a bounded routing surface, ask a semantic worker to select candidates, read
+exact Detail, and return one of:
+
+```text
+consolidate | keep_separate | defer
+```
+
+Only `consolidate` crosses the Core commit boundary. In one transaction the
+Store MUST revalidate Scope, current Ref heads, input standing, canonical
+identity, DAG constraints, and idempotency. Worker judgment cannot bypass those
+invariants. `keep_separate` and `defer` are maintainer policy state and SHOULD
+NOT masquerade as user-memory Pages unless the Host explicitly judges the
+decision itself to have durable informational value.
+
 ## 3. Validity and Change
 
 Later information never rewrites Page content. It may:
@@ -270,6 +297,37 @@ adjacency or similarity or decide which content should be lossily consolidated.
 PCP does not define user-profile policy, autonomous exploration, interruption
 value, fixed prompts, model routing, context-window compaction, or background
 agent topology. Those belong to concrete Hosts such as symbiont-d.
+
+### 6.1 Optional Runtime Maintainer
+
+A reference implementation may provide a non-normative maintainer between the
+Store and a semantic worker:
+
+```text
+Store inventory / Summary routes
+  -> Runtime selects a bounded maintenance job
+  -> Semantic worker selects and synthesizes
+  -> Runtime fills mechanical metadata
+  -> Store validates and commits atomically
+```
+
+The maintainer owns its lifecycle, schedule, budgets, timeout, retry, cooldown,
+worker integration, and operational records. That state does not belong in the
+PCP Page graph. The semantic worker decides whether a Summary is worthwhile,
+which Pages are genuinely equivalent, whether they conflict, and how to perform
+lossy synthesis, but it does not advance Refs or write Relations directly. The
+Store continues to own authorization, persistence, and structural invariants.
+
+Maintenance MUST be explicitly enabled under a separate Principal and explicit
+Scopes. Without a configured semantic worker, a reference Runtime MUST NOT
+silently degrade into a similarity-threshold merger. Similarity, co-recall, and
+implementation-defined routing hints may reduce what the worker reads; they
+remain candidate filters rather than commit evidence.
+
+Observation, approval, and automatic application are Runtime/Host policy, not
+protocol state. A reference Runtime SHOULD default to observation under a
+read-only Principal; model-completed proposals may enter Core commit APIs only
+after apply mode is selected explicitly.
 
 ## 7. Compatibility and Migration
 

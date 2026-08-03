@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use pcp_client::{DurablePageInventoryItem, PcpApi, TombstoneCascadeResult};
+use pcp_client::{DurablePageInventoryItem, HealthSnapshot, PcpApi, TombstoneCascadeResult};
 use pcp_core::{
     AccessAuditEvent, AccessSession, AssessPageValidityRequest, Capabilities,
     ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest, ReadPage, ReadPagesRequest,
@@ -352,6 +352,23 @@ impl PcpApi for RemotePcpClient {
                 next_cursor,
             } => Ok((events, next_cursor)),
             _ => Err(unexpected("access_log")),
+        }
+    }
+
+    async fn health_snapshot(
+        &self,
+        requested_scopes: Vec<String>,
+        window_hours: u32,
+    ) -> Result<HealthSnapshot> {
+        match self
+            .request(RpcOperation::HealthSnapshot {
+                requested_scopes,
+                window_hours,
+            })
+            .await?
+        {
+            RpcValue::HealthSnapshot(value) => Ok(value),
+            _ => Err(unexpected("health_snapshot")),
         }
     }
 }

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use pcp_client::{DurablePageInventoryItem, TombstoneCascadeResult};
+use pcp_client::{DurablePageInventoryItem, HealthSnapshot, TombstoneCascadeResult};
 use pcp_core::{
     AccessAuditEvent, AccessSession, Actor, AssessPageValidityRequest, Capabilities,
     ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest, ReadPage, ReadPagesRequest,
@@ -86,6 +86,10 @@ pub(crate) enum RpcOperation {
         limit: u32,
         cursor: Option<String>,
     },
+    HealthSnapshot {
+        requested_scopes: Vec<String>,
+        window_hours: u32,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -128,6 +132,7 @@ pub(crate) enum RpcValue {
         events: Vec<AccessAuditEvent>,
         next_cursor: Option<String>,
     },
+    HealthSnapshot(HealthSnapshot),
 }
 
 pub(crate) async fn write_frame<T>(writer: &mut (impl AsyncWrite + Unpin), value: &T) -> Result<()>

@@ -2,7 +2,9 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
-use pcp_core::{AccessAuditEvent, AccessDecision, AccessPermission, AccessSession};
+use pcp_core::{
+    AccessAuditEvent, AccessDecision, AccessPermission, AccessSession, OperationTelemetry,
+};
 use rusqlite::params;
 
 use crate::SqlitePcpStore;
@@ -101,6 +103,7 @@ impl SqlitePcpStore {
         scopes: &[String],
         decision: AccessDecision,
         detail: Option<&str>,
+        telemetry: Option<&OperationTelemetry>,
     ) -> Result<()> {
         let occurred_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
         let principal_json = serde_json::to_string(&access.principal)?;
@@ -109,15 +112,16 @@ impl SqlitePcpStore {
         let operation = operation.to_owned();
         let decision = decision.as_str().to_owned();
         let detail = detail.map(bound_detail);
+        let telemetry_json = telemetry.map(serde_json::to_string).transpose()?;
         self.run("access audit write", move |connection| {
             connection
                 .execute(
                     "
                     INSERT INTO pcp_access_log (
                         event_id, occurred_at, principal_json, session_id,
-                        operation, scopes_json, decision, detail
+                        operation, scopes_json, decision, detail, telemetry_json
                     ) VALUES (
-                        'acc_' || lower(hex(randomblob(16))), ?1, ?2, ?3, ?4, ?5, ?6, ?7
+                        'acc_' || lower(hex(randomblob(16))), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
                     )
                     ",
                     params![
@@ -128,6 +132,7 @@ impl SqlitePcpStore {
                         scopes_json,
                         decision,
                         detail,
+                        telemetry_json,
                     ],
                 )
                 .context("record PCP access event")?;
@@ -154,7 +159,7 @@ impl SqlitePcpStore {
                 .prepare(
                     "
                     SELECT event_id, occurred_at, principal_json, session_id,
-                           operation, scopes_json, decision, detail
+                           operation, scopes_json, decision, detail, telemetry_json
                     FROM pcp_access_log
                     ORDER BY occurred_at DESC, event_id DESC
                     ",
@@ -171,6 +176,7 @@ impl SqlitePcpStore {
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
                         row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
                     ))
                 })
                 .context("query PCP access log")?
@@ -188,6 +194,7 @@ impl SqlitePcpStore {
                         scopes_json,
                         decision,
                         detail,
+                        telemetry_json,
                     )| {
                         let mut scopes = serde_json::from_str::<Vec<String>>(&scopes_json).ok()?;
                         scopes.retain(|scope| allowed_scopes.contains(scope));
@@ -203,6 +210,9 @@ impl SqlitePcpStore {
                             scopes,
                             decision: AccessDecision::parse(&decision)?,
                             detail,
+                            telemetry: telemetry_json
+                                .as_deref()
+                                .and_then(|value| serde_json::from_str(value).ok()),
                         })
                     },
                 )

@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use pcp_client::{AccessMode, EmbeddedPcpClient};
 use pcp_core::{AccessPrincipal, AccessPrincipalType};
 use pcp_rpc::{RuntimeEndpoint, serve_unix, serve_unix_endpoints};
-use pcp_runtime::RuntimeConfig;
+use pcp_runtime::{CommandSemanticWorker, RuntimeConfig, RuntimeMaintainer};
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 
@@ -62,7 +62,23 @@ async fn run_broker(config_path: PathBuf) -> Result<()> {
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    serve_unix_endpoints(endpoints).await
+    let maintenance_task = if let Some(maintenance) =
+        config.maintenance.filter(|maintenance| maintenance.enabled)
+    {
+        let client =
+            EmbeddedPcpClient::shared(Arc::clone(&store), maintenance.access_session(&owner_id));
+        let worker = Arc::new(CommandSemanticWorker::new(&maintenance.worker));
+        let maintainer = RuntimeMaintainer::load(client, worker, maintenance).await?;
+        Some(tokio::spawn(maintainer.run_forever()))
+    } else {
+        None
+    };
+    let result = serve_unix_endpoints(endpoints).await;
+    if let Some(task) = maintenance_task {
+        task.abort();
+        let _ = task.await;
+    }
+    result
 }
 
 async fn run_single_endpoint() -> Result<()> {
