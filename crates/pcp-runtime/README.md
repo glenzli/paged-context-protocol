@@ -8,9 +8,9 @@ normative PCP data model.
 
 | Layer | Owns | Does not own |
 | --- | --- | --- |
-| PCP protocol and Store | Immutable Pages, Relations, Refs, authorization, exact reads, atomic Summary/consolidation commits | Timers, prompts, model routing, retry policy |
+| PCP protocol and Store | Stable Pages, immutable Revisions, Relations, authorization, exact reads, atomic Summary/consolidation commits | Timers, prompts, model routing, retry policy |
 | Runtime maintainer | Bounded jobs, Scope-specific Principal, budgets, timeout, cooldown, worker invocation, mechanical request fields | Semantic equivalence or generated content |
-| Semantic worker | Whether a Summary is useful, candidate selection, conflict detection, lossy synthesis | Direct Store writes, Ref advancement, Relation creation |
+| Semantic worker | Whether a Summary is useful, candidate selection, conflict detection, lossy synthesis, whether an old candidate Revision is a meaningful milestone | Direct Store writes, Page-head advancement, Relation creation, GC policy |
 
 The maintainer is disabled unless `[maintenance]` is present with
 `enabled = true`. It never falls back to automatic similarity-based merging.
@@ -32,7 +32,8 @@ One cycle is bounded by `max_jobs_per_cycle`:
 3. A bounded routing window may be sent as `select_consolidation`.
 4. Runtime validates the selected IDs and reads their exact Detail.
 5. The worker returns `consolidate`, `keep_separate`, or `defer`.
-6. In apply mode only, `write_summary` or `consolidate` crosses into the PCP commit API.
+6. Runtime obtains a bounded dry-run retention plan and may ask the worker whether any actual old candidate Revision is a semantic milestone.
+7. In apply mode only, `write_summary` or `consolidate` crosses into the PCP commit API. Retention leases additionally require `maintenance.retention.apply = true` and always expire.
 
 Runtime keeps cooldown decisions in `state_path`. This operational state is not
 written as user memory. Successful Page writes remain fully traceable through
@@ -59,8 +60,8 @@ Routing selection receives compact text rather than complete Page payloads:
   "operation": "select_consolidation",
   "pages": [
     {
-      "refId": "ref_...",
       "pageId": "pg_...",
+      "revisionId": "rev_...",
       "namespace": "project:example",
       "contentChars": 1800,
       "routingText": "bounded Summary or excerpt"
@@ -90,6 +91,6 @@ semantic output:
 ```
 
 Actor identity, Scope, lifecycle, facets, source references, provenance,
-idempotency, `supersedes` Relations, and Ref updates are filled or validated by
+idempotency, cross-Page `supersedes` Relations, and Page-head updates are filled or validated by
 Runtime and Store. `keep_separate` and `defer` remain non-Page operational
 decisions.

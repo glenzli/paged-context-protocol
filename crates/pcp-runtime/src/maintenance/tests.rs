@@ -10,15 +10,18 @@ use async_trait::async_trait;
 use pcp_client::{EmbeddedPcpClient, PcpApi};
 use pcp_core::{
     AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType, CreateScopeRequest,
-    LifecycleStatus, PagePayload, Projection, ReadPagesRequest, WritePageRequest,
+    LifecycleStatus, PageMutability, PagePayload, PlanRevisionRetentionRequest, Projection,
+    ReadPagesRequest, RetentionPolicy, RetentionProtectionReason, RevisePageRequest,
+    WritePageRequest,
 };
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 
 use super::{
     CommandSemanticWorker, CompactionMaintenanceConfig, MaintenanceConfig, MaintenanceMode,
-    MaintenanceWorkerRequest, MaintenanceWorkerResponse, RuntimeMaintainer,
-    SemanticMaintenanceWorker, SummaryMaintenanceConfig, WorkerCommandConfig,
+    MaintenanceWorkerRequest, MaintenanceWorkerResponse, RetentionMaintenanceConfig,
+    RetentionMilestone, RuntimeMaintainer, SemanticMaintenanceWorker, SummaryMaintenanceConfig,
+    WorkerCommandConfig,
 };
 
 struct FakeWorker {
@@ -89,6 +92,7 @@ async fn maintainer_writes_only_the_summary_selected_by_the_worker() {
     let read = fixture
         .client
         .read_pages(ReadPagesRequest {
+            page_ids: Vec::new(),
             revision_ids: vec![written.revision_id],
             projections: vec![Projection::Manifest, Projection::Summary],
             max_chars: 2_000,
@@ -143,6 +147,7 @@ async fn observe_mode_records_a_summary_proposal_without_mutating_the_page() {
     let read = fixture
         .client
         .read_pages(ReadPagesRequest {
+            page_ids: Vec::new(),
             revision_ids: vec![written.revision_id],
             projections: vec![Projection::Manifest, Projection::Summary],
             max_chars: 2_000,
@@ -150,6 +155,90 @@ async fn observe_mode_records_a_summary_proposal_without_mutating_the_page() {
         .await
         .expect("read observed Page");
     assert!(read[0].summary.is_none());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn semantic_retention_job_leases_only_worker_selected_revisions() {
+    let fixture = Fixture::open("retention").await;
+    let selected = fixture
+        .client
+        .write_page(fixture.page(
+            "A durable decision that should survive ordinary Revision pruning.",
+            "retention:1",
+        ))
+        .await
+        .expect("write retention candidate");
+    let current = fixture
+        .client
+        .revise_page(RevisePageRequest {
+            page_id: selected.page_id.clone(),
+            expected_revision_id: selected.revision_id.clone(),
+            created_by: Actor {
+                actor_type: ActorType::Model,
+                actor_id: "model:maintenance-test".to_owned(),
+            },
+            lifecycle_status: LifecycleStatus::Active,
+            observed_at: None,
+            valid_from: None,
+            valid_to: None,
+            payload: Some(PagePayload {
+                media_type: "text/markdown".to_owned(),
+                content: "The current state after that decision.".to_owned(),
+            }),
+            source_refs: Vec::new(),
+            facets: None,
+            provenance: Vec::new(),
+            initial_relations: Vec::new(),
+            idempotency_key: Some("retention:2".to_owned()),
+        })
+        .await
+        .expect("revise retention candidate Page");
+    let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Retain {
+        milestones: vec![RetentionMilestone {
+            revision_id: selected.revision_id.clone(),
+            reason: "Records a durable decision boundary".to_owned(),
+        }],
+    }]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.compaction.enabled = false;
+    config.retention.enabled = true;
+    config.retention.apply = true;
+    config.retention.minimum_age_days = 0;
+    config.retention.keep_recent_revisions_per_page = 0;
+    let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+
+    let report = maintainer
+        .run_once()
+        .await
+        .expect("run semantic retention maintenance");
+
+    assert_eq!(report.retention_leases_written, 1);
+    let leases = fixture
+        .client
+        .active_revision_retention_leases(vec![fixture.namespace.clone()], 10)
+        .await
+        .expect("read active retention leases");
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0].revision_id, selected.revision_id);
+    assert_ne!(leases[0].revision_id, current.revision_id);
+    let plan = fixture
+        .client
+        .plan_revision_retention(PlanRevisionRetentionRequest {
+            scopes: vec![fixture.namespace.clone()],
+            policy: RetentionPolicy {
+                minimum_age_days: 0,
+                keep_recent_revisions_per_page: 0,
+                sample_limit: 20,
+            },
+        })
+        .await
+        .expect("plan retention with semantic lease");
+    assert_eq!(plan.active_retention_leases, 1);
+    assert!(plan.protection_reasons.iter().any(|count| {
+        count.reason == RetentionProtectionReason::ExplicitLease && count.revisions == 1
+    }));
     fixture.close().await;
 }
 
@@ -174,11 +263,11 @@ async fn maintainer_requires_selection_and_synthesis_before_atomic_consolidation
         .expect("write second consolidation Page");
     let worker = Arc::new(FakeWorker::new(vec![
         MaintenanceWorkerResponse::Candidate {
-            page_ids: vec![first.revision_id.clone(), second.revision_id.clone()],
+            page_ids: vec![first.page_id.clone(), second.page_id.clone()],
             rationale: Some("Both Pages describe one durable runtime state.".to_owned()),
         },
         MaintenanceWorkerResponse::Consolidate {
-            canonical_page_id: first.revision_id.clone(),
+            canonical_page_id: first.page_id.clone(),
             content: "The runtime preserves one durable, auditable state across restarts."
                 .to_owned(),
         },
@@ -200,14 +289,15 @@ async fn maintainer_requires_selection_and_synthesis_before_atomic_consolidation
         .client
         .current_revision_id(first.page_id)
         .await
-        .expect("read canonical Ref");
+        .expect("read canonical Page head");
     let second_head = fixture
         .client
         .current_revision_id(second.page_id)
         .await
-        .expect("read redirected Ref");
-    assert_eq!(first_head, second_head);
+        .expect("read absorbed Page head");
+    assert_ne!(first_head, second_head);
     assert_ne!(first_head, first.revision_id);
+    assert_eq!(second_head, second.revision_id);
     fixture.close().await;
 }
 
@@ -229,11 +319,11 @@ async fn observe_mode_records_a_consolidation_proposal_without_replacing_heads()
         .expect("write second observed Page");
     let worker = Arc::new(FakeWorker::new(vec![
         MaintenanceWorkerResponse::Candidate {
-            page_ids: vec![first.revision_id.clone(), second.revision_id.clone()],
+            page_ids: vec![first.page_id.clone(), second.page_id.clone()],
             rationale: Some("Both Pages describe one state.".to_owned()),
         },
         MaintenanceWorkerResponse::Consolidate {
-            canonical_page_id: first.revision_id.clone(),
+            canonical_page_id: first.page_id.clone(),
             content: "A proposed replacement that must not be committed.".to_owned(),
         },
     ]));
@@ -283,7 +373,7 @@ async fn maintainer_keeps_pages_current_when_the_worker_rejects_a_merge() {
         .expect("write second separate Page");
     let worker = Arc::new(FakeWorker::new(vec![
         MaintenanceWorkerResponse::Candidate {
-            page_ids: vec![first.revision_id.clone(), second.revision_id.clone()],
+            page_ids: vec![first.page_id.clone(), second.page_id.clone()],
             rationale: None,
         },
         MaintenanceWorkerResponse::KeepSeparate {
@@ -418,6 +508,8 @@ impl Fixture {
             namespace: self.namespace.clone(),
             visibility: "private".to_owned(),
             lifecycle_status: LifecycleStatus::Active,
+            kind: "document".to_owned(),
+            mutability: PageMutability::Revisioned,
             created_by: Actor {
                 actor_type: ActorType::Model,
                 actor_id: "model:maintenance-test".to_owned(),
@@ -457,6 +549,7 @@ impl Fixture {
             },
             summary: SummaryMaintenanceConfig::default(),
             compaction: CompactionMaintenanceConfig::default(),
+            retention: RetentionMaintenanceConfig::default(),
         }
     }
 

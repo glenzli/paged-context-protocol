@@ -24,7 +24,7 @@ impl SqlitePcpStore {
             let mut sql = format!(
                 "
                 SELECT r.page_id, r.revision_id, r.namespace,
-                       json_extract(r.facets_json, '$.kind'),
+                       page.kind,
                        r.created_at, r.observed_at,
                        length(COALESCE(r.payload_content, '')),
                        substr(COALESCE(r.payload_content, ''), 1, ?),
@@ -35,15 +35,15 @@ impl SqlitePcpStore {
                            FROM (
                                SELECT DISTINCT relation.relation_type
                                FROM pcp_relations relation
-                               WHERE relation.from_revision_id = r.revision_id
-                                  OR relation.to_revision_id = r.revision_id
+                               WHERE relation.from_page_id = page.page_id
+                                  OR relation.to_page_id = page.page_id
                                ORDER BY relation.relation_type
                            )
                        ), '[]')
                 FROM pcp_pages page
                 JOIN pcp_revisions r ON r.revision_id = page.current_revision_id
-                LEFT JOIN pcp_summary_heads summary_head
-                  ON summary_head.target_revision_id = r.revision_id
+                LEFT JOIN pcp_page_summary_heads summary_head
+                  ON summary_head.target_page_id = page.page_id
                 LEFT JOIN pcp_summaries summary
                   ON summary.summary_revision_id = summary_head.current_summary_revision_id
                 WHERE r.namespace IN ({placeholders})
@@ -57,9 +57,7 @@ impl SqlitePcpStore {
                     .map(|_| "?")
                     .collect::<Vec<_>>()
                     .join(",");
-                sql.push_str(&format!(
-                    " AND COALESCE(json_extract(r.facets_json, '$.kind'), '') NOT IN ({placeholders})"
-                ));
+                sql.push_str(&format!(" AND page.kind NOT IN ({placeholders})"));
                 values.extend(excluded_page_kinds.into_iter().map(SqlValue::Text));
             }
             sql.push_str(

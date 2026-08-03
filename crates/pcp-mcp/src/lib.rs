@@ -4,10 +4,11 @@ use chrono::{SecondsFormat, Utc};
 use pcp_client::PcpApi;
 use pcp_core::{
     AccessAuditEvent, AccessPermission, AccessSession, Actor, ActorType, AssessPageValidityRequest,
-    Capabilities, ConsolidatePagesRequest, CreateScopeRequest, InitialRelation, LifecycleStatus,
-    LinkPagesRequest, PagePayload, Projection, ProvenanceEvent, ReadPage, ReadPagesRequest,
-    Relation, RevisePageRequest, Scope, SearchFilters, SearchMode, SearchPagesRequest,
-    SearchResult, SearchTermMatch, ValidityStanding, WritePageRequest, WriteSummaryRequest,
+    Capabilities, ConsolidatePagesRequest, ConsolidationInput, CreateScopeRequest, InitialRelation,
+    LifecycleStatus, LinkPagesRequest, PageMutability, PagePayload, Projection, ProvenanceEvent,
+    ReadPage, ReadPagesRequest, Relation, RevisePageRequest, Scope, SearchFilters, SearchMode,
+    SearchPagesRequest, SearchResult, SearchTermMatch, ValidityStanding, WritePageRequest,
+    WriteSummaryRequest,
 };
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -18,7 +19,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Serialize;
 
-const SERVER_INSTRUCTIONS: &str = "PCP is a durable graph of immutable Pages. Call pcp_whoami before cross-Scope work. Search or browse compact routing text, then read only useful exact Pages. On writes, provide content and exact source Page IDs; the host records actor, time, provenance, and structural Relations. A later correction or Summary is a new Page, never an in-place edit. PCP does not decide user profile, conversation policy, or what deserves attention; those remain Host decisions.";
+const SERVER_INSTRUCTIONS: &str = "PCP is a durable graph of stable Pages with immutable Revisions. Call pcp_whoami before cross-Scope work. Search or browse current Page heads, then read only useful Pages or exact Revisions. Use pageId for stable identity and Relations; use revisionId for exact evidence and provenance. PCP does not decide user profile, conversation policy, or what deserves attention; those remain Host decisions.";
 
 #[derive(Clone)]
 pub struct PcpMcpServer {
@@ -89,7 +90,10 @@ pub struct SearchPagesParams {
 #[derive(Debug, JsonSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadPagesParams {
+    #[serde(default)]
     page_ids: Vec<String>,
+    #[serde(default)]
+    revision_ids: Vec<String>,
     #[serde(default)]
     view: Option<String>,
     #[serde(default = "default_max_chars")]
@@ -101,43 +105,51 @@ pub struct ReadPagesParams {
 pub struct WritePageParams {
     #[serde(default)]
     scope: Option<String>,
+    #[serde(default = "default_page_kind")]
+    kind: String,
+    #[serde(default)]
+    mutability: PageMutability,
     content: String,
     #[serde(default)]
-    based_on_page_ids: Vec<String>,
+    based_on_revision_ids: Vec<String>,
 }
 
 #[derive(Debug, JsonSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WriteSummaryParams {
     target_page_id: String,
+    target_revision_id: String,
     content: String,
     #[serde(default)]
-    based_on_page_ids: Vec<String>,
+    based_on_revision_ids: Vec<String>,
 }
 
 #[derive(Debug, JsonSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssessPageParams {
     target_page_id: String,
+    target_revision_id: String,
     standing: ValidityStanding,
     rationale: String,
-    evidence_page_ids: Vec<String>,
+    evidence_revision_ids: Vec<String>,
 }
 
 #[derive(Debug, JsonSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SupersedePageParams {
+pub struct RevisePageParams {
     target_page_id: String,
+    expected_revision_id: String,
     content: String,
     #[serde(default)]
-    based_on_page_ids: Vec<String>,
+    based_on_revision_ids: Vec<String>,
 }
 
 #[derive(Debug, JsonSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConsolidatePagesParams {
     canonical_page_id: String,
-    replaced_page_ids: Vec<String>,
+    expected_canonical_revision_id: String,
+    replaced_pages: Vec<ConsolidationInput>,
     content: String,
 }
 
@@ -147,6 +159,8 @@ pub struct RelatePagesParams {
     from_page_id: String,
     relation_type: String,
     to_page_id: String,
+    #[serde(default)]
+    basis_revision_ids: Vec<String>,
 }
 
 #[derive(Debug, JsonSchema, Serialize)]
@@ -166,6 +180,7 @@ pub struct OperationResult {
 #[serde(rename_all = "camelCase")]
 pub struct PageWriteResult {
     page_id: String,
+    revision_id: String,
     created: bool,
 }
 
@@ -173,7 +188,9 @@ pub struct PageWriteResult {
 #[serde(rename_all = "camelCase")]
 pub struct SummaryWriteResult {
     target_page_id: String,
+    target_revision_id: String,
     summary_page_id: String,
+    summary_revision_id: String,
     created: bool,
 }
 
@@ -181,7 +198,9 @@ pub struct SummaryWriteResult {
 #[serde(rename_all = "camelCase")]
 pub struct AssessmentWriteResult {
     target_page_id: String,
+    target_revision_id: String,
     assessment_page_id: String,
+    assessment_revision_id: String,
     created: bool,
 }
 
@@ -204,6 +223,47 @@ pub struct AccessLogResult {
 impl PcpMcpServer {
     pub fn new(client: Arc<dyn PcpApi>) -> Self {
         Self { client }
+    }
+
+    async fn read_current_pages(&self, page_ids: Vec<String>) -> Result<Vec<ReadPage>, McpError> {
+        if page_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.client
+            .read_pages(ReadPagesRequest {
+                page_ids,
+                revision_ids: Vec::new(),
+                projections: vec![
+                    Projection::Manifest,
+                    Projection::Sources,
+                    Projection::Facets,
+                ],
+                max_chars: 32_000,
+            })
+            .await
+            .map_err(|error| operation_error("resolve PCP Pages", error))
+    }
+
+    async fn read_exact_revisions(
+        &self,
+        revision_ids: Vec<String>,
+    ) -> Result<Vec<ReadPage>, McpError> {
+        if revision_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.client
+            .read_pages(ReadPagesRequest {
+                page_ids: Vec::new(),
+                revision_ids,
+                projections: vec![
+                    Projection::Manifest,
+                    Projection::Sources,
+                    Projection::Facets,
+                ],
+                max_chars: 32_000,
+            })
+            .await
+            .map_err(|error| operation_error("resolve PCP Revisions", error))
     }
 }
 
@@ -299,7 +359,7 @@ impl PcpMcpServer {
 
     #[tool(
         name = "pcp_search_pages",
-        description = "Find immutable Page candidates. Use auto normally, exact for a literal anchor, graph for one Page ID, and recent for time-ordered browsing. Read only selected Pages.",
+        description = "Find current Page heads. Each hit has a stable pageId and exact revisionId. Use auto normally, exact for a literal anchor, graph for one stable Page ID, and recent for time-ordered browsing.",
         annotations(
             title = "Search PCP Pages",
             read_only_hint = true,
@@ -357,7 +417,7 @@ impl PcpMcpServer {
 
     #[tool(
         name = "pcp_read_pages",
-        description = "Read exact immutable Pages. content returns the Page itself, context adds interpretation and nearby Relations, and full adds source/provenance diagnostics.",
+        description = "Read current heads by stable pageId and exact snapshots by revisionId. content returns content, context adds interpretation and Page Relations, and full adds source/provenance diagnostics.",
         annotations(
             title = "Read PCP Pages",
             read_only_hint = true,
@@ -370,7 +430,8 @@ impl PcpMcpServer {
         Parameters(params): Parameters<ReadPagesParams>,
     ) -> Result<Json<ReadPagesResult>, McpError> {
         let request = ReadPagesRequest {
-            revision_ids: params.page_ids,
+            page_ids: params.page_ids,
+            revision_ids: params.revision_ids,
             projections: read_view(params.view.as_deref().unwrap_or("content"))?,
             max_chars: params.max_chars,
         };
@@ -384,7 +445,7 @@ impl PcpMcpServer {
 
     #[tool(
         name = "pcp_write_page",
-        description = "Write one immutable durable Page. Supply its content, optional Scope, and exact Pages it is based on; the host records actor, time, provenance, and derived_from links.",
+        description = "Create one durable Page with an immutable first Revision. Choose sealed for raw evidence and revisioned for maintained understanding; exact source Revisions become provenance and stable derived_from links.",
         annotations(
             title = "Write PCP Page",
             read_only_hint = false,
@@ -398,11 +459,20 @@ impl PcpMcpServer {
     ) -> Result<Json<PageWriteResult>, McpError> {
         let namespace = writable_scope(self.client.as_ref(), params.scope.as_deref())?;
         let actor = session_actor(self.client.as_ref());
+        let source_pages = self
+            .read_exact_revisions(params.based_on_revision_ids)
+            .await?;
+        let source_revisions = source_pages
+            .iter()
+            .map(|page| page.revision.revision_id.clone())
+            .collect::<Vec<_>>();
         let request = WritePageRequest {
             owner_id: self.client.owner_id().to_owned(),
             namespace,
             visibility: "private".to_owned(),
             lifecycle_status: LifecycleStatus::Active,
+            kind: params.kind,
+            mutability: params.mutability,
             created_by: actor.clone(),
             observed_at: None,
             valid_from: None,
@@ -413,11 +483,11 @@ impl PcpMcpServer {
             }),
             source_refs: Vec::new(),
             facets: None,
-            provenance: (!params.based_on_page_ids.is_empty())
-                .then(|| provenance("derive", &actor, params.based_on_page_ids.clone()))
+            provenance: (!source_revisions.is_empty())
+                .then(|| provenance("derive", &actor, source_revisions))
                 .into_iter()
                 .collect(),
-            initial_relations: derived_relations(params.based_on_page_ids),
+            initial_relations: derived_relations(&source_pages),
             idempotency_key: None,
         };
         let written = self
@@ -426,45 +496,59 @@ impl PcpMcpServer {
             .await
             .map_err(|error| operation_error("write PCP Page", error))?;
         Ok(Json(PageWriteResult {
-            page_id: written.revision_id,
+            page_id: written.page_id,
+            revision_id: written.revision_id,
             created: written.created,
         }))
     }
 
     #[tool(
-        name = "pcp_supersede_page",
-        description = "Write an immutable successor to a current Page. The target remains recoverable and the host advances its Ref when one exists.",
+        name = "pcp_revise_page",
+        description = "Publish a new immutable Revision of one revisioned Page. pageId stays stable and expectedRevisionId prevents overwriting a newer head.",
         annotations(
-            title = "Supersede PCP Page",
+            title = "Revise PCP Page",
             read_only_hint = false,
             destructive_hint = false,
             open_world_hint = false
         )
     )]
-    pub async fn pcp_supersede_page(
+    pub async fn pcp_revise_page(
         &self,
-        Parameters(params): Parameters<SupersedePageParams>,
+        Parameters(params): Parameters<RevisePageParams>,
     ) -> Result<Json<PageWriteResult>, McpError> {
         let target = self
             .client
             .read_pages(ReadPagesRequest {
-                revision_ids: vec![params.target_page_id.clone()],
+                page_ids: vec![params.target_page_id.clone()],
+                revision_ids: Vec::new(),
                 projections: vec![Projection::Manifest, Projection::Facets],
                 max_chars: 256,
             })
             .await
-            .map_err(|error| operation_error("read PCP supersede target", error))?
+            .map_err(|error| operation_error("read PCP revision target", error))?
             .into_iter()
             .next()
-            .ok_or_else(|| operation_error("read PCP supersede target", "Page not found"))?;
+            .ok_or_else(|| operation_error("read PCP revision target", "Page not found"))?;
+        if target.revision.revision_id != params.expected_revision_id {
+            return Err(operation_error(
+                "revise PCP Page",
+                "expectedRevisionId is not the current Page head",
+            ));
+        }
         let actor = session_actor(self.client.as_ref());
-        let mut inputs = params.based_on_page_ids.clone();
-        inputs.push(params.target_page_id.clone());
+        let source_pages = self
+            .read_exact_revisions(params.based_on_revision_ids)
+            .await?;
+        let mut inputs = source_pages
+            .iter()
+            .map(|page| page.revision.revision_id.clone())
+            .collect::<Vec<_>>();
+        inputs.push(target.revision.revision_id.clone());
         inputs.sort();
         inputs.dedup();
         let request = RevisePageRequest {
-            page_id: target.revision.page_id,
-            expected_revision_id: params.target_page_id,
+            page_id: target.page.page_id,
+            expected_revision_id: params.expected_revision_id,
             created_by: actor.clone(),
             lifecycle_status: LifecycleStatus::Active,
             observed_at: None,
@@ -476,24 +560,25 @@ impl PcpMcpServer {
             }),
             source_refs: Vec::new(),
             facets: target.revision.facets,
-            provenance: vec![provenance("supersede", &actor, inputs)],
-            initial_relations: derived_relations(params.based_on_page_ids),
+            provenance: vec![provenance("revise", &actor, inputs)],
+            initial_relations: Vec::new(),
             idempotency_key: None,
         };
         let written = self
             .client
             .revise_page(request)
             .await
-            .map_err(|error| operation_error("supersede PCP Page", error))?;
+            .map_err(|error| operation_error("revise PCP Page", error))?;
         Ok(Json(PageWriteResult {
-            page_id: written.revision_id,
+            page_id: written.page_id,
+            revision_id: written.revision_id,
             created: written.created,
         }))
     }
 
     #[tool(
         name = "pcp_consolidate_pages",
-        description = "Replace two or more current Pages that express one durable subject with one model-written Page. Preserve one selected Page as the canonical Ref; all inputs remain traceable but leave default recall.",
+        description = "Revise one canonical Page to absorb one or more redundant current Pages. Each Page is paired with its exact expected head; absorbed Pages remain traceable but leave default recall.",
         annotations(
             title = "Consolidate PCP Pages",
             read_only_hint = false,
@@ -506,31 +591,30 @@ impl PcpMcpServer {
         Parameters(params): Parameters<ConsolidatePagesParams>,
     ) -> Result<Json<PageWriteResult>, McpError> {
         let canonical = self
-            .client
-            .read_pages(ReadPagesRequest {
-                revision_ids: vec![params.canonical_page_id.clone()],
-                projections: vec![
-                    Projection::Manifest,
-                    Projection::Sources,
-                    Projection::Facets,
-                ],
-                max_chars: 8_000,
-            })
-            .await
-            .map_err(|error| operation_error("read canonical PCP Page", error))?
+            .read_current_pages(vec![params.canonical_page_id.clone()])
+            .await?
             .into_iter()
             .next()
             .ok_or_else(|| operation_error("read canonical PCP Page", "Page not found"))?;
+        if canonical.revision.revision_id != params.expected_canonical_revision_id {
+            return Err(operation_error(
+                "consolidate PCP Pages",
+                "expectedCanonicalRevisionId is not the current Page head",
+            ));
+        }
         let actor = session_actor(self.client.as_ref());
-        let mut replaced_page_ids = params.replaced_page_ids;
-        replaced_page_ids.push(params.canonical_page_id.clone());
-        replaced_page_ids.sort();
-        replaced_page_ids.dedup();
+        let mut input_revisions = params
+            .replaced_pages
+            .iter()
+            .map(|page| page.expected_revision_id.clone())
+            .collect::<Vec<_>>();
+        input_revisions.push(params.expected_canonical_revision_id.clone());
         let written = self
             .client
             .consolidate_pages(ConsolidatePagesRequest {
-                canonical_revision_id: params.canonical_page_id,
-                replaced_revision_ids: replaced_page_ids.clone(),
+                canonical_page_id: canonical.page.page_id.clone(),
+                expected_canonical_revision_id: params.expected_canonical_revision_id,
+                replaced_pages: params.replaced_pages,
                 created_by: actor.clone(),
                 lifecycle_status: LifecycleStatus::Active,
                 observed_at: None,
@@ -540,22 +624,23 @@ impl PcpMcpServer {
                     media_type: "text/markdown".to_owned(),
                     content: params.content,
                 }),
-                source_refs: canonical.revision.source_refs,
-                facets: canonical.revision.facets,
-                provenance: vec![provenance("consolidate", &actor, replaced_page_ids)],
+                source_refs: canonical.revision.source_refs.clone(),
+                facets: canonical.revision.facets.clone(),
+                provenance: vec![provenance("consolidate", &actor, input_revisions)],
                 idempotency_key: None,
             })
             .await
             .map_err(|error| operation_error("consolidate PCP Pages", error))?;
         Ok(Json(PageWriteResult {
-            page_id: written.revision_id,
+            page_id: written.page_id,
+            revision_id: written.revision_id,
             created: written.created,
         }))
     }
 
     #[tool(
         name = "pcp_write_summary",
-        description = "Write an immutable routing Summary Page for one exact target Page. A later better Summary becomes another Page linked to the prior one.",
+        description = "Create or revise the stable routing Summary Page for one exact target Revision.",
         annotations(
             title = "Write PCP Summary",
             read_only_hint = false,
@@ -568,12 +653,38 @@ impl PcpMcpServer {
         Parameters(params): Parameters<WriteSummaryParams>,
     ) -> Result<Json<SummaryWriteResult>, McpError> {
         let actor = session_actor(self.client.as_ref());
-        let mut inputs = params.based_on_page_ids;
-        inputs.push(params.target_page_id.clone());
+        let target = self
+            .client
+            .read_pages(ReadPagesRequest {
+                page_ids: Vec::new(),
+                revision_ids: vec![params.target_revision_id.clone()],
+                projections: vec![Projection::Manifest],
+                max_chars: 256,
+            })
+            .await
+            .map_err(|error| operation_error("read PCP Summary target", error))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| operation_error("read PCP Summary target", "Revision not found"))?;
+        if target.page.page_id != params.target_page_id {
+            return Err(operation_error(
+                "write PCP Summary",
+                "targetPageId and targetRevisionId do not match",
+            ));
+        }
+        let resolved = self
+            .read_exact_revisions(params.based_on_revision_ids)
+            .await?;
+        let mut inputs = resolved
+            .iter()
+            .map(|page| page.revision.revision_id.clone())
+            .collect::<Vec<_>>();
+        inputs.push(params.target_revision_id.clone());
         inputs.sort();
         inputs.dedup();
         let request = WriteSummaryRequest {
-            target_revision_id: params.target_page_id,
+            target_page_id: params.target_page_id,
+            target_revision_id: params.target_revision_id,
             expected_summary_revision_id: None,
             content: params.content,
             created_by: actor.clone(),
@@ -587,15 +698,17 @@ impl PcpMcpServer {
             .await
             .map_err(|error| operation_error("write PCP Summary", error))?;
         Ok(Json(SummaryWriteResult {
-            target_page_id: written.target_revision_id,
-            summary_page_id: written.summary_revision_id,
+            target_page_id: written.target_page_id,
+            target_revision_id: written.target_revision_id,
+            summary_page_id: written.summary_page_id,
+            summary_revision_id: written.summary_revision_id,
             created: written.created,
         }))
     }
 
     #[tool(
         name = "pcp_relate_pages",
-        description = "Add one meaningful directed Relation between immutable Pages. Structural Relations are created automatically by dedicated write tools.",
+        description = "Add one meaningful directed Relation between stable Pages, with optional exact basis Revisions.",
         annotations(
             title = "Relate PCP Pages",
             read_only_hint = false,
@@ -608,9 +721,10 @@ impl PcpMcpServer {
         Parameters(params): Parameters<RelatePagesParams>,
     ) -> Result<Json<Relation>, McpError> {
         let request = LinkPagesRequest {
-            from_revision_id: params.from_page_id,
+            from_page_id: params.from_page_id,
             relation_type: params.relation_type,
-            to_revision_id: params.to_page_id,
+            to_page_id: params.to_page_id,
+            basis_revision_ids: params.basis_revision_ids,
             created_by: session_actor(self.client.as_ref()),
             idempotency_key: None,
         };
@@ -623,7 +737,7 @@ impl PcpMcpServer {
 
     #[tool(
         name = "pcp_assess_validity",
-        description = "Write an immutable assessment Page when later evidence materially changes how another Page should be used. The host links the assessment, evidence, and prior assessment.",
+        description = "Create or revise the validity assessment for one exact target Revision using exact evidence Revisions.",
         annotations(
             title = "Assess PCP Validity",
             read_only_hint = false,
@@ -636,13 +750,28 @@ impl PcpMcpServer {
         Parameters(params): Parameters<AssessPageParams>,
     ) -> Result<Json<AssessmentWriteResult>, McpError> {
         let actor = session_actor(self.client.as_ref());
+        let target = self
+            .read_exact_revisions(vec![params.target_revision_id.clone()])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| operation_error("read PCP validity target", "Revision not found"))?;
+        if target.page.page_id != params.target_page_id {
+            return Err(operation_error(
+                "assess PCP validity",
+                "targetPageId and targetRevisionId do not match",
+            ));
+        }
+        self.read_exact_revisions(params.evidence_revision_ids.clone())
+            .await?;
         let request = AssessPageValidityRequest {
-            target_revision_id: params.target_page_id,
-            expected_assessment_id: None,
+            target_page_id: params.target_page_id,
+            target_revision_id: params.target_revision_id,
+            expected_assessment_revision_id: None,
             standing: params.standing,
             rationale: params.rationale,
             scope: None,
-            basis_revision_ids: params.evidence_page_ids,
+            basis_revision_ids: params.evidence_revision_ids,
             created_by: actor.clone(),
             tool_or_model: Some(actor.actor_id.clone()),
             idempotency_key: None,
@@ -653,8 +782,10 @@ impl PcpMcpServer {
             .await
             .map_err(|error| operation_error("assess PCP Page validity", error))?;
         Ok(Json(AssessmentWriteResult {
-            target_page_id: written.target_revision_id,
-            assessment_page_id: written.assessment_id,
+            target_page_id: written.target_page_id,
+            target_revision_id: written.target_revision_id,
+            assessment_page_id: written.assessment_page_id,
+            assessment_revision_id: written.assessment_revision_id,
             created: written.created,
         }))
     }
@@ -700,6 +831,10 @@ fn default_limit() -> u32 {
 
 fn default_max_chars() -> u32 {
     8_000
+}
+
+fn default_page_kind() -> String {
+    "document".to_owned()
 }
 
 fn parse_search_strategy(value: &str) -> Result<SearchMode, McpError> {
@@ -792,12 +927,13 @@ fn session_actor(client: &dyn PcpApi) -> Actor {
     }
 }
 
-fn derived_relations(page_ids: Vec<String>) -> Vec<InitialRelation> {
-    page_ids
-        .into_iter()
-        .map(|to_revision_id| InitialRelation {
+fn derived_relations(pages: &[ReadPage]) -> Vec<InitialRelation> {
+    pages
+        .iter()
+        .map(|page| InitialRelation {
             relation_type: "derived_from".to_owned(),
-            to_revision_id,
+            to_page_id: page.page.page_id.clone(),
+            basis_revision_ids: vec![page.revision.revision_id.clone()],
         })
         .collect()
 }
@@ -873,8 +1009,10 @@ mod tests {
         let written = server
             .pcp_write_page(Parameters(WritePageParams {
                 scope: Some(namespace.clone()),
+                kind: "document".to_owned(),
+                mutability: pcp_core::PageMutability::Sealed,
                 content: "A durable context engine preserves exact Page identity.".to_owned(),
-                based_on_page_ids: Vec::new(),
+                based_on_revision_ids: Vec::new(),
             }))
             .await
             .expect("write page")
@@ -892,7 +1030,7 @@ mod tests {
             .expect("search page")
             .0;
         assert_eq!(found.hits.len(), 1);
-        assert_eq!(found.hits[0].revision_id, written.page_id);
+        assert_eq!(found.hits[0].page_id, written.page_id);
         let who = server.pcp_whoami().await.expect("inspect access session").0;
         assert_eq!(who.access.principal.principal_id, "client:pcp-mcp-test");
         let audit = server

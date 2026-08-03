@@ -96,6 +96,29 @@ impl SqlitePcpStore {
         .await
     }
 
+    pub(crate) async fn page_namespaces(&self, page_ids: Vec<String>) -> Result<Vec<String>> {
+        if page_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.run("Page Scope lookup", move |connection| {
+            let mut scopes = Vec::new();
+            for page_id in page_ids {
+                let namespace = connection
+                    .query_row(
+                        "SELECT namespace FROM pcp_pages WHERE page_id = ?1",
+                        [&page_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .with_context(|| format!("find PCP Page {page_id}"))?;
+                if !scopes.contains(&namespace) {
+                    scopes.push(namespace);
+                }
+            }
+            Ok(scopes)
+        })
+        .await
+    }
+
     pub(crate) async fn record_access(
         &self,
         access: &AccessSession,

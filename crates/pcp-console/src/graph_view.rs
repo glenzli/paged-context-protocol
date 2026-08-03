@@ -87,7 +87,8 @@ pub async fn load_page_graph(
     } else {
         client
             .read_pages(ReadPagesRequest {
-                revision_ids: neighbor_ids,
+                page_ids: neighbor_ids,
+                revision_ids: Vec::new(),
                 projections: vec![
                     Projection::Manifest,
                     Projection::Summary,
@@ -135,7 +136,7 @@ async fn load_topology(
     depth: usize,
     node_limit: usize,
 ) -> Result<GraphTopology> {
-    let root_id = root.revision.revision_id.clone();
+    let root_id = root.page.page_id.clone();
     let mut nodes = vec![GraphNode {
         page_id: root_id.clone(),
         depth: 0,
@@ -150,7 +151,7 @@ async fn load_topology(
         let mut candidate_ids = Vec::new();
         let mut candidate_relations = Vec::new();
         for page in &current_pages {
-            let current_id = &page.revision.revision_id;
+            let current_id = &page.page.page_id;
             if page.relations.len() >= 200 {
                 truncated = true;
             }
@@ -184,7 +185,7 @@ async fn load_topology(
             if is_superseded(&page) {
                 continue;
             }
-            let page_id = page.revision.revision_id.clone();
+            let page_id = page.page.page_id.clone();
             if seen_nodes.insert(page_id.clone()) {
                 nodes.push(GraphNode {
                     page_id,
@@ -195,13 +196,13 @@ async fn load_topology(
         }
 
         for relation in candidate_relations {
-            if seen_nodes.contains(&relation.from_revision_id)
-                && seen_nodes.contains(&relation.to_revision_id)
+            if seen_nodes.contains(&relation.from_page_id)
+                && seen_nodes.contains(&relation.to_page_id)
             {
                 let edge_key = (
-                    relation.from_revision_id.clone(),
+                    relation.from_page_id.clone(),
                     relation.relation_type.clone(),
-                    relation.to_revision_id.clone(),
+                    relation.to_page_id.clone(),
                 );
                 if seen_edges.insert(edge_key.clone()) {
                     edges.push(GraphEdge {
@@ -240,7 +241,8 @@ async fn read_relation_pages(
     for batch in page_ids.chunks(batch_size) {
         let loaded = client
             .read_pages(ReadPagesRequest {
-                revision_ids: batch.to_vec(),
+                page_ids: batch.to_vec(),
+                revision_ids: Vec::new(),
                 projections: vec![Projection::Manifest, Projection::Relations],
                 max_chars: 8_000,
             })
@@ -258,7 +260,8 @@ async fn read_one_page(
 ) -> Result<ReadPage> {
     client
         .read_pages(ReadPagesRequest {
-            revision_ids: vec![page_id],
+            page_ids: vec![page_id],
+            revision_ids: Vec::new(),
             projections,
             max_chars,
         })
@@ -268,10 +271,10 @@ async fn read_one_page(
 }
 
 fn relation_neighbor<'a>(relation: &'a Relation, page_id: &str) -> Option<&'a str> {
-    if relation.from_revision_id == page_id {
-        Some(&relation.to_revision_id)
-    } else if relation.to_revision_id == page_id {
-        Some(&relation.from_revision_id)
+    if relation.from_page_id == page_id {
+        Some(&relation.to_page_id)
+    } else if relation.to_page_id == page_id {
+        Some(&relation.from_page_id)
     } else {
         None
     }
@@ -282,10 +285,7 @@ fn is_default_graph_relation(relation: &Relation) -> bool {
 }
 
 fn is_superseded(page: &ReadPage) -> bool {
-    page.relations.iter().any(|relation| {
-        relation.relation_type == "supersedes"
-            && relation.to_revision_id == page.revision.revision_id
-    })
+    page.page.lifecycle_status == pcp_core::LifecycleStatus::Superseded
 }
 
 fn graph_neighbor_ids(relations: &[Relation], root_page_id: &str, limit: usize) -> Vec<String> {
@@ -308,9 +308,10 @@ mod tests {
     fn relation(from: &str, relation_type: &str, to: &str) -> Relation {
         Relation {
             relation_id: format!("{from}:{relation_type}:{to}"),
-            from_revision_id: from.to_owned(),
+            from_page_id: from.to_owned(),
             relation_type: relation_type.to_owned(),
-            to_revision_id: to.to_owned(),
+            to_page_id: to.to_owned(),
+            basis_revision_ids: Vec::new(),
             created_by: Actor {
                 actor_type: ActorType::System,
                 actor_id: "system:test".to_owned(),

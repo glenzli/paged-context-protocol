@@ -27,7 +27,14 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
             CREATE TABLE IF NOT EXISTS pcp_pages (
                 page_id TEXT PRIMARY KEY,
                 current_revision_id TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                owner_id TEXT,
+                namespace TEXT,
+                visibility TEXT,
+                kind TEXT,
+                mutability TEXT,
+                lifecycle_status TEXT,
+                updated_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS pcp_revisions (
@@ -47,7 +54,8 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 payload_content TEXT,
                 source_refs_json TEXT NOT NULL,
                 facets_json TEXT,
-                provenance_json TEXT NOT NULL
+                provenance_json TEXT NOT NULL,
+                previous_revision_id TEXT
             );
 
             CREATE TABLE IF NOT EXISTS pcp_relations (
@@ -57,7 +65,10 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 to_revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
                 actor_type TEXT NOT NULL,
                 actor_id TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                from_page_id TEXT,
+                to_page_id TEXT,
+                basis_revision_ids_json TEXT
             );
 
             CREATE TABLE IF NOT EXISTS pcp_relation_retractions (
@@ -91,7 +102,8 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 actor_id TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 tool_or_model TEXT,
-                provenance_json TEXT NOT NULL
+                provenance_json TEXT NOT NULL,
+                target_page_id TEXT
             );
 
             CREATE TABLE IF NOT EXISTS pcp_summary_heads (
@@ -160,6 +172,20 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 PRIMARY KEY (actor_id, operation, idempotency_key)
             );
 
+            CREATE TABLE IF NOT EXISTS pcp_revision_retention_leases (
+                lease_id TEXT PRIMARY KEY,
+                page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
+                revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+                namespace TEXT NOT NULL,
+                holder_principal_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                UNIQUE (holder_principal_id, idempotency_key)
+            );
+
             CREATE TABLE IF NOT EXISTS pcp_access_log (
                 event_id TEXT PRIMARY KEY,
                 occurred_at TEXT NOT NULL,
@@ -206,6 +232,10 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 ON pcp_summary_assessments(policy_version, assessed_at DESC);
             CREATE INDEX IF NOT EXISTS pcp_validity_target
                 ON pcp_validity_assessments(target_revision_id, assessed_at DESC);
+            CREATE INDEX IF NOT EXISTS pcp_retention_leases_revision
+                ON pcp_revision_retention_leases(revision_id, expires_at DESC);
+            CREATE INDEX IF NOT EXISTS pcp_retention_leases_namespace
+                ON pcp_revision_retention_leases(namespace, expires_at DESC);
             CREATE INDEX IF NOT EXISTS pcp_validity_standing
                 ON pcp_validity_assessments(standing, assessed_at DESC);
             CREATE INDEX IF NOT EXISTS pcp_access_log_time
@@ -253,8 +283,10 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
 
     ensure_access_telemetry_column(connection)?;
     drop_legacy_scope_type(connection)?;
+    ensure_revision_parent_column(connection)?;
     crate::summary_migration::migrate(connection)?;
     crate::immutable_page_migration::migrate(connection)?;
+    crate::page_revision_migration::migrate(connection)?;
 
     connection
         .execute(
@@ -265,6 +297,28 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
             [],
         )
         .context("initialize PCP owner identity")?;
+    Ok(())
+}
+
+fn ensure_revision_parent_column(connection: &Connection) -> Result<()> {
+    let columns = connection
+        .prepare("PRAGMA table_info(pcp_revisions)")
+        .context("inspect PCP Revision schema")?
+        .query_map([], |row| row.get::<_, String>(1))
+        .context("query PCP Revision schema")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect PCP Revision schema")?;
+    if !columns
+        .iter()
+        .any(|column| column == "previous_revision_id")
+    {
+        connection
+            .execute(
+                "ALTER TABLE pcp_revisions ADD COLUMN previous_revision_id TEXT",
+                [],
+            )
+            .context("add PCP Revision parent")?;
+    }
     Ok(())
 }
 

@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use pcp_core::{
-    Actor, ActorType, LifecycleStatus, PagePayload, PageRevision, ProvenanceEvent, Relation,
-    SourceRef,
+    Actor, ActorType, LifecycleStatus, Page, PageMutability, PagePayload, PageRevision,
+    ProvenanceEvent, Relation, SourceRef,
 };
-use rusqlite::Row;
+use rusqlite::{Connection, Row};
 
 pub(crate) fn revision_from_row(
     row: &Row<'_>,
@@ -23,6 +23,7 @@ pub(crate) fn revision_from_row(
     Ok(PageRevision {
         page_id: row.get(0)?,
         revision_id: row.get(1)?,
+        previous_revision_id: row.get(17)?,
         owner_id: row.get(2)?,
         namespace: row.get(3)?,
         visibility: row.get(4)?,
@@ -73,9 +74,11 @@ pub(crate) fn relation_from_row(row: &Row<'_>) -> Result<Relation> {
     let actor_type_text: String = row.get(4)?;
     Ok(Relation {
         relation_id: row.get(0)?,
-        from_revision_id: row.get(1)?,
+        from_page_id: row.get(1)?,
         relation_type: row.get(2)?,
-        to_revision_id: row.get(3)?,
+        to_page_id: row.get(3)?,
+        basis_revision_ids: serde_json::from_str(&row.get::<_, String>(7)?)
+            .context("decode PCP relation basis")?,
         created_by: Actor {
             actor_type: ActorType::parse(&actor_type_text)
                 .with_context(|| format!("unknown actor type {actor_type_text}"))?,
@@ -85,9 +88,39 @@ pub(crate) fn relation_from_row(row: &Row<'_>) -> Result<Relation> {
     })
 }
 
+pub(crate) fn page_manifest(connection: &Connection, page_id: &str) -> Result<Page> {
+    connection
+        .query_row(
+            "SELECT page_id, current_revision_id, owner_id, namespace, visibility,
+                    kind, mutability, lifecycle_status, created_at, updated_at
+             FROM pcp_pages WHERE page_id = ?1",
+            [page_id],
+            |row| {
+                let mutability: String = row.get(6)?;
+                let lifecycle: String = row.get(7)?;
+                Ok(Page {
+                    page_id: row.get(0)?,
+                    head_revision_id: row.get(1)?,
+                    owner_id: row.get(2)?,
+                    namespace: row.get(3)?,
+                    visibility: row.get(4)?,
+                    kind: row.get(5)?,
+                    mutability: PageMutability::parse(&mutability)
+                        .unwrap_or(PageMutability::Sealed),
+                    lifecycle_status: LifecycleStatus::parse(&lifecycle)
+                        .unwrap_or(LifecycleStatus::Active),
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            },
+        )
+        .context("read PCP Page manifest")
+}
+
 pub(crate) const REVISION_COLUMNS: &str = "
     r.page_id, r.revision_id, r.owner_id, r.namespace, r.visibility,
     r.lifecycle_status, r.created_at, r.observed_at, r.valid_from, r.valid_to,
     r.actor_type, r.actor_id, r.payload_media_type, r.payload_content,
     r.source_refs_json, r.facets_json, r.provenance_json
+    , r.previous_revision_id
 ";

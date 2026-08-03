@@ -24,6 +24,7 @@
     <button class="tab active" type="button" data-view="overview">Overview</button>
     <button class="tab" type="button" data-view="pages">Pages</button>
     <button class="tab" type="button" data-view="health">Health</button>
+    <button class="tab" type="button" data-view="retention">Retention</button>
     <button class="tab" type="button" data-view="access">Access</button>
   </nav>
 
@@ -43,6 +44,10 @@
         <h2>Endpoint</h2>
       </div>
       <dl id="endpoint-details" class="details-grid"></dl>
+      <div class="section-heading">
+        <h2>Capabilities</h2>
+      </div>
+      <dl id="capability-details" class="details-grid"></dl>
     </section>
 
     <section id="view-pages" class="view">
@@ -103,7 +108,7 @@
       <div class="section-heading"><h2>Scopes</h2></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Scope</th><th>Current</th><th>Immutable</th><th>Calls</th><th>Searches</th><th>Writes</th></tr></thead>
+          <thead><tr><th>Scope</th><th>Current</th><th>Pages</th><th>Revisions</th><th>Calls</th><th>Searches</th><th>Writes</th></tr></thead>
           <tbody id="health-scope-rows"></tbody>
         </table>
       </div>
@@ -118,6 +123,61 @@
         <table>
           <thead><tr><th>Page</th><th>Scope</th><th>Size</th><th>Issue</th></tr></thead>
           <tbody id="quality-rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="view-retention" class="view">
+      <div class="view-heading">
+        <div><h2>Revision retention</h2><span id="retention-status" class="muted" aria-live="polite">Not loaded</span></div>
+      </div>
+      <form id="retention-controls" class="retention-controls">
+        <label>Scope
+          <select id="retention-scope" name="scope"><option value="">All scopes</option></select>
+        </label>
+        <label>Minimum age
+          <span class="input-unit"><input id="retention-minimum-age" name="minimumAgeDays" type="number" min="0" max="36500" step="1" value="30"><span>days</span></span>
+        </label>
+        <label>Recent per Page
+          <input id="retention-recent" name="keepRecentRevisionsPerPage" type="number" min="0" max="1000" step="1" value="2">
+        </label>
+        <label>Samples
+          <input id="retention-samples" name="sampleLimit" type="number" min="1" max="100" step="1" value="50">
+        </label>
+        <button id="retention-run" type="submit">Run plan</button>
+      </form>
+      <div id="retention-mode" class="health-signals"></div>
+      <div id="retention-metrics" class="metrics"></div>
+
+      <div class="section-heading"><h2>Semantic retention leases</h2><span id="retention-lease-status" class="muted"></span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Page</th><th>Scope</th><th>Holder</th><th>Reason</th><th>Expires</th></tr></thead>
+          <tbody id="retention-lease-rows"></tbody>
+        </table>
+      </div>
+
+      <div class="section-heading"><h2>Protection roots</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Reason</th><th>Revisions</th><th>Protected share</th></tr></thead>
+          <tbody id="retention-reason-rows"></tbody>
+        </table>
+      </div>
+
+      <div class="section-heading"><h2>Candidate sample</h2><span id="retention-candidate-status" class="muted"></span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Page</th><th>Scope</th><th>Kind</th><th>Created</th><th>Estimated size</th></tr></thead>
+          <tbody id="retention-candidate-rows"></tbody>
+        </table>
+      </div>
+
+      <div class="section-heading"><h2>Protected historical sample</h2><span id="retention-protected-status" class="muted"></span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Page</th><th>Scope</th><th>Kind</th><th>Reasons</th><th>Created</th></tr></thead>
+          <tbody id="retention-protected-rows"></tbody>
         </table>
       </div>
     </section>

@@ -164,6 +164,16 @@ input:focus, select:focus { border-color: var(--accent); }
 .details-grid dt, .details-grid dd { margin: 0; padding: 9px 11px; border-bottom: 1px solid var(--line); }
 .details-grid dt { color: var(--muted); background: var(--surface-subtle); }
 .details-grid dt:last-of-type, .details-grid dd:last-of-type { border-bottom: 0; }
+.capability-yes { color: var(--positive); font-weight: 600; }
+.capability-no { color: var(--muted); }
+.retention-controls { display: grid; grid-template-columns: minmax(180px, 1fr) repeat(3, minmax(120px, 170px)) auto; align-items: end; gap: 9px; margin-bottom: 12px; }
+.retention-controls label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+.retention-controls input, .retention-controls select { width: 100%; color: var(--text); }
+.retention-controls button { min-height: 34px; }
+.input-unit { position: relative; display: block; }
+.input-unit input { padding-right: 42px; }
+.input-unit > span { position: absolute; right: 9px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+.retention-reasons { color: var(--muted); line-height: 1.55; }
 dialog { width: min(960px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow: auto; padding: 0; border: 1px solid var(--strong-line); border-radius: 7px; background: var(--surface); color: var(--text); box-shadow: 0 18px 55px rgba(0, 0, 0, .22); }
 dialog::backdrop { background: rgba(0, 0, 0, .38); }
 .dialog-header { position: sticky; z-index: 2; top: 0; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 13px 15px; border-bottom: 1px solid var(--line); background: var(--surface); }
@@ -272,6 +282,8 @@ pre { margin: 0; max-height: 420px; overflow: auto; padding: 11px; border: 1px s
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric { border-bottom: 1px solid var(--line); }
   .toolbar { grid-template-columns: 1fr; }
+  .retention-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .retention-controls button { align-self: end; }
   .aggregate-grid { grid-template-columns: 1fr; }
   #health-flows { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .details-grid { grid-template-columns: 120px minmax(0, 1fr); }
@@ -283,4 +295,5 @@ pre { margin: 0; max-height: 420px; overflow: auto; padding: 11px; border: 1px s
 @media (max-width: 520px) {
   #health-flows { grid-template-columns: 1fr; }
   .view-heading { align-items: flex-start; gap: 8px; }
+  .retention-controls { grid-template-columns: 1fr; }
 }

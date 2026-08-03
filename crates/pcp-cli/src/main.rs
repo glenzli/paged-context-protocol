@@ -1,10 +1,10 @@
 use std::{env, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
-use pcp_client::{EmbeddedPcpClient, PcpApi};
+use pcp_client::{AccessMode, EmbeddedPcpClient, PcpApi};
 use pcp_core::{
-    AccessPrincipal, AccessPrincipalType, AccessSession, Projection, ReadPage, ReadPagesRequest,
-    SearchFilters, SearchMode, SearchPagesRequest,
+    AccessPrincipal, AccessPrincipalType, AccessSession, PlanRevisionRetentionRequest, Projection,
+    ReadPage, ReadPagesRequest, RetentionPolicy, SearchFilters, SearchMode, SearchPagesRequest,
 };
 use pcp_rpc::RemotePcpClient;
 use pcp_sqlite::SqlitePcpStore;
@@ -43,15 +43,17 @@ async fn main() -> Result<()> {
                     .with_context(|| format!("open PCP Store {}", path.display()))?,
             );
             let scopes = store.local_scope_names().await?;
-            let access = AccessSession::read_only(
-                AccessPrincipal {
-                    principal_id: "cli:pcp".to_owned(),
-                    principal_type: AccessPrincipalType::Cli,
-                    display_name: Some("PCP CLI".to_owned()),
-                },
-                format!("pcp-cli:{}", std::process::id()),
-                scopes,
-            );
+            let principal = AccessPrincipal {
+                principal_id: "cli:pcp".to_owned(),
+                principal_type: AccessPrincipalType::Cli,
+                display_name: Some("PCP CLI".to_owned()),
+            };
+            let session_id = format!("pcp-cli:{}", std::process::id());
+            let access = if command == "retention-plan" {
+                AccessMode::Audit.session(principal, session_id, scopes, false)
+            } else {
+                AccessSession::read_only(principal, session_id, scopes)
+            };
             let store: Arc<dyn PcpStore> = store;
             (
                 EmbeddedPcpClient::shared(store, access),
@@ -100,7 +102,8 @@ async fn main() -> Result<()> {
             let page_id = arguments.next().context("pcp read requires a Page ID")?;
             let pages = client
                 .read_pages(ReadPagesRequest {
-                    revision_ids: vec![page_id],
+                    page_ids: vec![page_id],
+                    revision_ids: Vec::new(),
                     projections: vec![
                         Projection::Manifest,
                         Projection::Summary,
@@ -138,6 +141,34 @@ async fn main() -> Result<()> {
                 "status": if integrity == "ok" { "ready" } else { "degraded" }
             }))?;
         }
+        "retention-plan" => {
+            let minimum_age_days = parse_optional_u32(
+                arguments.next(),
+                "minimum age days",
+                RetentionPolicy::default().minimum_age_days,
+            )?;
+            let keep_recent_revisions_per_page = parse_optional_u32(
+                arguments.next(),
+                "recent revisions per Page",
+                RetentionPolicy::default().keep_recent_revisions_per_page,
+            )?;
+            let sample_limit = parse_optional_u32(
+                arguments.next(),
+                "sample limit",
+                RetentionPolicy::default().sample_limit,
+            )?;
+            let plan = client
+                .plan_revision_retention(PlanRevisionRetentionRequest {
+                    scopes,
+                    policy: RetentionPolicy {
+                        minimum_age_days,
+                        keep_recent_revisions_per_page,
+                        sample_limit,
+                    },
+                })
+                .await?;
+            print_json(&plan)?;
+        }
         other => anyhow::bail!("unknown pcp command: {other}"),
     }
     Ok(())
@@ -170,6 +201,7 @@ async fn export_pages(store: &dyn PcpApi, scopes: Vec<String>) -> Result<Vec<Rea
         pages.extend(
             store
                 .read_pages(ReadPagesRequest {
+                    page_ids: Vec::new(),
                     revision_ids: chunk.to_vec(),
                     projections: vec![
                         Projection::Manifest,
@@ -206,8 +238,19 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
     Ok(())
 }
 
+fn parse_optional_u32(value: Option<String>, name: &str, default: u32) -> Result<u32> {
+    value
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .with_context(|| format!("invalid {name}: {value}"))
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(default))
+}
+
 fn print_help() {
     println!(
-        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <page-id>\n  export\n  doctor\n\nSet PCP_RUNTIME_SOCKET to use a running local runtime, or PCP_STORE_PATH for embedded SQLite."
+        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <page-id>\n  export\n  doctor\n  retention-plan [minimum-age-days] [keep-recent-per-page] [sample-limit]\n\nSet PCP_RUNTIME_SOCKET to use a running local runtime, or PCP_STORE_PATH for embedded SQLite."
     );
 }

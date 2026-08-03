@@ -45,8 +45,20 @@ impl SqlitePcpStore {
                 return Ok(existing);
             }
 
-            let current = current_assessment_id(&transaction, &request.target_revision_id)?;
-            match (&current, &request.expected_assessment_id) {
+            let resolved_target_page: String = transaction.query_row(
+                "SELECT page_id FROM pcp_revisions WHERE revision_id = ?1",
+                [&request.target_revision_id],
+                |row| row.get(0),
+            )?;
+            anyhow::ensure!(
+                resolved_target_page == request.target_page_id,
+                "target Revision does not belong to target Page"
+            );
+            let current = current_assessment(&transaction, &request.target_page_id)?;
+            let current_revision_id = current
+                .as_ref()
+                .map(|(revision_id, _)| revision_id.clone());
+            match (&current_revision_id, &request.expected_assessment_revision_id) {
                 (None, None) => {}
                 (Some(_), None) => {}
                 (Some(current), Some(expected)) if current == expected => {}
@@ -62,8 +74,11 @@ impl SqlitePcpStore {
                 }
             }
 
-            let assessment_id = random_id(&transaction, "valid_")?;
-            let physical_page_id = random_id(&transaction, "pg_")?;
+            let assessment_id = random_id(&transaction, "rev_")?;
+            let physical_page_id = current
+                .as_ref()
+                .map(|(_, page_id)| page_id.clone())
+                .unwrap_or(random_id(&transaction, "pg_")?);
             let assessed_at = now();
             let (owner_id, namespace, visibility): (String, String, String) = transaction
                 .query_row(
@@ -72,12 +87,18 @@ impl SqlitePcpStore {
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .context("read PCP assessment target metadata")?;
-            transaction
-                .execute(
-                    "INSERT INTO pcp_pages (page_id, current_revision_id, created_at) VALUES (?1, NULL, ?2)",
-                    params![physical_page_id, assessed_at],
+            if current.is_none() {
+                transaction
+                    .execute(
+                    "INSERT INTO pcp_pages (
+                        page_id, current_revision_id, created_at, owner_id, namespace,
+                        visibility, kind, mutability, lifecycle_status, updated_at
+                     ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, 'validity_assessment',
+                               'revisioned', 'active', ?2)",
+                    params![physical_page_id, assessed_at, owner_id, namespace, visibility],
                 )
-                .context("create immutable PCP assessment Page")?;
+                    .context("create PCP validity Page")?;
+            }
             let mut input_page_ids = request.basis_revision_ids.clone();
             input_page_ids.push(request.target_revision_id.clone());
             input_page_ids.sort();
@@ -97,7 +118,8 @@ impl SqlitePcpStore {
                 "kind": "validity_assessment",
                 "standing": request.standing.as_str(),
                 "scope": request.scope.clone(),
-                "targetPageId": request.target_revision_id.clone(),
+                "targetPageId": request.target_page_id.clone(),
+                "targetRevisionId": request.target_revision_id.clone(),
             });
             insert_revision(
                 &transaction,
@@ -117,40 +139,26 @@ impl SqlitePcpStore {
                 Some(&facets),
                 &provenance,
             )?;
-            insert_relation(
-                &transaction,
-                &assessment_id,
-                "assesses",
-                &request.target_revision_id,
-                &request.created_by,
-                &assessed_at,
-            )?;
-            for basis_page_id in &request.basis_revision_ids {
+            if current.is_none() {
                 insert_relation(
                     &transaction,
                     &assessment_id,
-                    "derived_from",
-                    basis_page_id,
+                    "assesses",
+                    &request.target_revision_id,
                     &request.created_by,
                     &assessed_at,
                 )?;
             }
-            if let Some(previous_assessment_page_id) = current.as_ref() {
-                insert_relation(
-                    &transaction,
-                    &assessment_id,
-                    "supersedes",
-                    previous_assessment_page_id,
-                    &request.created_by,
-                    &assessed_at,
-                )?;
-            }
-            transaction
+            let published = transaction
                 .execute(
-                    "UPDATE pcp_pages SET current_revision_id = ?2 WHERE page_id = ?1",
-                    params![physical_page_id, assessment_id],
+                    "UPDATE pcp_pages
+                     SET current_revision_id = ?2, updated_at = ?3
+                     WHERE page_id = ?1
+                       AND (current_revision_id = ?4 OR (current_revision_id IS NULL AND ?4 IS NULL))",
+                    params![physical_page_id, assessment_id, assessed_at, current_revision_id],
                 )
-                .context("publish immutable PCP assessment Page")?;
+                .context("publish PCP validity Revision")?;
+            anyhow::ensure!(published == 1, "validity Page changed during publication");
             let basis_revision_ids_json = serde_json::to_string(&request.basis_revision_ids)
                 .context("encode PCP validity basis")?;
             transaction
@@ -164,7 +172,7 @@ impl SqlitePcpStore {
                     ",
                     params![
                         assessment_id,
-                        current,
+                        current_revision_id,
                         request.target_revision_id,
                         request.standing.as_str(),
                         request.rationale.trim(),
@@ -181,12 +189,13 @@ impl SqlitePcpStore {
                 .execute(
                     "
                     INSERT INTO pcp_validity_heads (
-                        target_revision_id, current_assessment_id
-                    ) VALUES (?1, ?2)
-                    ON CONFLICT(target_revision_id) DO UPDATE SET
+                        target_page_id, target_revision_id, current_assessment_id
+                    ) VALUES (?1, ?2, ?3)
+                    ON CONFLICT(target_page_id) DO UPDATE SET
+                        target_revision_id = excluded.target_revision_id,
                         current_assessment_id = excluded.current_assessment_id
                     ",
-                    params![request.target_revision_id, assessment_id],
+                    params![request.target_page_id, request.target_revision_id, assessment_id],
                 )
                 .context("publish PCP validity assessment")?;
             if let Some(key) = request.idempotency_key.as_deref() {
@@ -212,8 +221,10 @@ impl SqlitePcpStore {
                 .commit()
                 .context("commit PCP validity assessment")?;
             Ok(WriteValidityResult {
+                target_page_id: request.target_page_id,
                 target_revision_id: request.target_revision_id,
-                assessment_id,
+                assessment_page_id: physical_page_id,
+                assessment_revision_id: assessment_id,
                 created: true,
             })
         })
@@ -232,11 +243,18 @@ pub(crate) fn current_validity(
                    assessment.target_revision_id, assessment.standing,
                    assessment.rationale, assessment.scope, assessment.assessed_at,
                    assessment.actor_type, assessment.actor_id,
-                   assessment.tool_or_model, assessment.basis_revision_ids_json
+                   assessment.tool_or_model, assessment.basis_revision_ids_json,
+                   assessment_revision.page_id, target_revision.page_id
             FROM pcp_validity_heads head
             JOIN pcp_validity_assessments assessment
               ON assessment.assessment_id = head.current_assessment_id
-            WHERE head.target_revision_id = ?1
+            JOIN pcp_revisions assessment_revision
+              ON assessment_revision.revision_id = assessment.assessment_id
+            JOIN pcp_revisions target_revision
+              ON target_revision.revision_id = assessment.target_revision_id
+            WHERE head.target_page_id = (
+                SELECT page_id FROM pcp_revisions WHERE revision_id = ?1
+            )
             ",
             [target_revision_id],
             validity_from_row,
@@ -255,7 +273,9 @@ pub(crate) fn validity_history(
             WITH RECURSIVE chain(assessment_id, depth) AS (
                 SELECT current_assessment_id, 0
                 FROM pcp_validity_heads
-                WHERE target_revision_id = ?1
+                WHERE target_page_id = (
+                    SELECT page_id FROM pcp_revisions WHERE revision_id = ?1
+                )
                 UNION ALL
                 SELECT assessment.previous_assessment_id, chain.depth + 1
                 FROM chain
@@ -267,10 +287,15 @@ pub(crate) fn validity_history(
                    assessment.target_revision_id, assessment.standing,
                    assessment.rationale, assessment.scope, assessment.assessed_at,
                    assessment.actor_type, assessment.actor_id,
-                   assessment.tool_or_model, assessment.basis_revision_ids_json
+                   assessment.tool_or_model, assessment.basis_revision_ids_json,
+                   assessment_revision.page_id, target_revision.page_id
             FROM chain
             JOIN pcp_validity_assessments assessment
               ON assessment.assessment_id = chain.assessment_id
+            JOIN pcp_revisions assessment_revision
+              ON assessment_revision.revision_id = assessment.assessment_id
+            JOIN pcp_revisions target_revision
+              ON target_revision.revision_id = assessment.target_revision_id
             WHERE chain.depth > 0
             ORDER BY chain.depth
             LIMIT 20
@@ -308,19 +333,21 @@ fn validate_assessment(request: &AssessPageValidityRequest) -> Result<()> {
     Ok(())
 }
 
-fn current_assessment_id(
+fn current_assessment(
     transaction: &Transaction<'_>,
-    target_revision_id: &str,
-) -> Result<Option<String>> {
+    target_page_id: &str,
+) -> Result<Option<(String, String)>> {
     transaction
         .query_row(
             "
-            SELECT current_assessment_id
-            FROM pcp_validity_heads
-            WHERE target_revision_id = ?1
+            SELECT head.current_assessment_id, revision.page_id
+            FROM pcp_validity_heads head
+            JOIN pcp_revisions revision
+              ON revision.revision_id = head.current_assessment_id
+            WHERE head.target_page_id = ?1
             ",
-            [target_revision_id],
-            |row| row.get(0),
+            [target_page_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .context("read current PCP validity assessment id")
@@ -337,15 +364,20 @@ fn lookup_idempotency(
     transaction
         .query_row(
             "
-            SELECT target_revision_id, result_assessment_id
-            FROM pcp_validity_idempotency
-            WHERE actor_id = ?1 AND idempotency_key = ?2
+            SELECT i.target_revision_id, i.result_assessment_id,
+                   target.page_id, assessment.page_id
+            FROM pcp_validity_idempotency i
+            JOIN pcp_revisions target ON target.revision_id = i.target_revision_id
+            JOIN pcp_revisions assessment ON assessment.revision_id = i.result_assessment_id
+            WHERE i.actor_id = ?1 AND i.idempotency_key = ?2
             ",
             params![actor_id, key],
             |row| {
                 Ok(WriteValidityResult {
+                    target_page_id: row.get(2)?,
                     target_revision_id: row.get(0)?,
-                    assessment_id: row.get(1)?,
+                    assessment_page_id: row.get(3)?,
+                    assessment_revision_id: row.get(1)?,
                     created: false,
                 })
             },
@@ -386,8 +418,10 @@ fn validity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PageValidity> 
         rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, Box::new(error))
     })?;
     Ok(PageValidity {
-        assessment_id: row.get(0)?,
-        previous_assessment_id: row.get(1)?,
+        assessment_page_id: row.get(11)?,
+        assessment_revision_id: row.get(0)?,
+        previous_assessment_revision_id: row.get(1)?,
+        target_page_id: row.get(12)?,
         target_revision_id: row.get(2)?,
         standing,
         rationale: row.get(4)?,

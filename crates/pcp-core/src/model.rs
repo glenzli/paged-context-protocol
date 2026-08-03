@@ -48,6 +48,31 @@ pub enum LifecycleStatus {
     Tombstoned,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageMutability {
+    #[default]
+    Sealed,
+    Revisioned,
+}
+
+impl PageMutability {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Sealed => "sealed",
+            Self::Revisioned => "revisioned",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "sealed" => Some(Self::Sealed),
+            "revisioned" => Some(Self::Revisioned),
+            _ => None,
+        }
+    }
+}
+
 impl LifecycleStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -199,19 +224,35 @@ pub struct ProvenanceEvent {
     pub operation: String,
     pub actor: Actor,
     pub timestamp: String,
-    #[serde(default, rename = "inputPageIds", alias = "inputRevisionIds")]
+    #[serde(default)]
     pub input_revision_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_or_model: Option<String>,
 }
 
+/// Stable semantic identity. Content is carried by immutable `PageRevision`s.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Page {
+    pub page_id: String,
+    pub head_revision_id: String,
+    pub owner_id: String,
+    pub namespace: String,
+    pub visibility: String,
+    pub kind: String,
+    pub mutability: PageMutability,
+    pub lifecycle_status: LifecycleStatus,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageRevision {
-    #[serde(rename = "refId")]
     pub page_id: String,
-    #[serde(rename = "pageId", alias = "revisionId")]
     pub revision_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_revision_id: Option<String>,
     pub owner_id: String,
     pub namespace: String,
     pub visibility: String,
@@ -234,11 +275,7 @@ pub struct PageRevision {
     pub provenance: Vec<ProvenanceEvent>,
 }
 
-/// Canonical public name for an immutable PCP content node.
-///
-/// `PageRevision` remains as an internal compatibility name while hosts migrate
-/// from the pre-0.6 mutable Page/Revision model.
-pub type Page = PageRevision;
+pub type Revision = PageRevision;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -260,11 +297,11 @@ pub struct Scope {
 #[serde(rename_all = "camelCase")]
 pub struct Relation {
     pub relation_id: String,
-    #[serde(rename = "fromPageId", alias = "fromRevisionId")]
-    pub from_revision_id: String,
+    pub from_page_id: String,
     pub relation_type: String,
-    #[serde(rename = "toPageId", alias = "toRevisionId")]
-    pub to_revision_id: String,
+    pub to_page_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub basis_revision_ids: Vec<String>,
     pub created_by: Actor,
     pub created_at: String,
 }
@@ -272,11 +309,9 @@ pub struct Relation {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageSummary {
-    #[serde(rename = "summaryRefId")]
     pub summary_page_id: String,
-    #[serde(rename = "summaryPageId", alias = "summaryRevisionId")]
     pub summary_revision_id: String,
-    #[serde(rename = "targetPageId", alias = "targetRevisionId")]
+    pub target_page_id: String,
     pub target_revision_id: String,
     pub content: String,
     pub created_by: Actor,
@@ -290,16 +325,11 @@ pub struct PageSummary {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageValidity {
-    #[serde(rename = "assessmentPageId", alias = "assessmentId")]
-    pub assessment_id: String,
-    #[serde(
-        default,
-        rename = "previousAssessmentPageId",
-        alias = "previousAssessmentId",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub previous_assessment_id: Option<String>,
-    #[serde(rename = "targetPageId", alias = "targetRevisionId")]
+    pub assessment_page_id: String,
+    pub assessment_revision_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_assessment_revision_id: Option<String>,
+    pub target_page_id: String,
     pub target_revision_id: String,
     pub standing: ValidityStanding,
     pub rationale: String,
@@ -309,15 +339,15 @@ pub struct PageValidity {
     pub created_by: Actor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_or_model: Option<String>,
-    #[serde(default, rename = "basisPageIds", alias = "basisRevisionIds")]
+    #[serde(default)]
     pub basis_revision_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageValidityHint {
-    #[serde(rename = "assessmentPageId", alias = "assessmentId")]
-    pub assessment_id: String,
+    pub assessment_page_id: String,
+    pub assessment_revision_id: String,
     pub standing: ValidityStanding,
     pub rationale: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -329,7 +359,7 @@ pub struct PageValidityHint {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadPage {
-    #[serde(rename = "page", alias = "revision")]
+    pub page: Page,
     pub revision: PageRevision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<PageSummary>,
@@ -354,8 +384,14 @@ pub struct Capabilities {
     pub max_read_pages: u32,
     pub max_read_chars: u32,
     pub supports_event_ingest: bool,
-    pub supports_immutable_pages: bool,
-    pub supports_refs: bool,
+    pub supports_sealed_pages: bool,
+    pub supports_revisioned_pages: bool,
+    pub supports_aliases: bool,
+    #[serde(default)]
+    pub supports_revision_retention_planning: bool,
+    #[serde(default)]
+    pub supports_revision_retention_leases: bool,
+    pub supports_revision_retention: bool,
     pub supports_revision_conflicts: bool,
     #[serde(default)]
     pub supports_consolidation: bool,
@@ -369,10 +405,10 @@ pub struct Capabilities {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchHit {
-    #[serde(rename = "refId")]
     pub page_id: String,
-    #[serde(rename = "pageId", alias = "revisionId")]
     pub revision_id: String,
+    pub kind: String,
+    pub mutability: PageMutability,
     pub namespace: String,
     pub lifecycle_status: LifecycleStatus,
     pub created_at: String,
@@ -381,12 +417,7 @@ pub struct SearchHit {
     pub snippet: String,
     pub matched_by: String,
     pub matched_projection: String,
-    #[serde(
-        default,
-        rename = "summaryPageId",
-        alias = "summaryRevisionId",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_revision_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facets: Option<Value>,
@@ -405,9 +436,7 @@ pub struct SearchResult {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WriteResult {
-    #[serde(rename = "refId")]
     pub page_id: String,
-    #[serde(rename = "pageId", alias = "revisionId")]
     pub revision_id: String,
     pub created: bool,
 }
@@ -415,11 +444,9 @@ pub struct WriteResult {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WriteSummaryResult {
-    #[serde(rename = "targetPageId", alias = "targetRevisionId")]
+    pub target_page_id: String,
     pub target_revision_id: String,
-    #[serde(rename = "summaryRefId")]
     pub summary_page_id: String,
-    #[serde(rename = "summaryPageId", alias = "summaryRevisionId")]
     pub summary_revision_id: String,
     pub created: bool,
 }
@@ -427,9 +454,9 @@ pub struct WriteSummaryResult {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WriteValidityResult {
-    #[serde(rename = "targetPageId", alias = "targetRevisionId")]
+    pub target_page_id: String,
     pub target_revision_id: String,
-    #[serde(rename = "assessmentPageId", alias = "assessmentId")]
-    pub assessment_id: String,
+    pub assessment_page_id: String,
+    pub assessment_revision_id: String,
     pub created: bool,
 }

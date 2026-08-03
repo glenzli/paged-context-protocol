@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    Actor, LifecycleStatus, PagePayload, Projection, ProvenanceEvent, SearchMode, SearchTermMatch,
-    SourceRef, ValidityStanding,
+    Actor, LifecycleStatus, PageMutability, PagePayload, Projection, ProvenanceEvent, SearchMode,
+    SearchTermMatch, SourceRef, ValidityStanding,
 };
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -25,8 +25,9 @@ pub struct CreateScopeRequest {
 pub struct InitialRelation {
     #[serde(alias = "relation_type")]
     pub relation_type: String,
-    #[serde(rename = "toPageId", alias = "toRevisionId", alias = "to_revision_id")]
-    pub to_revision_id: String,
+    pub to_page_id: String,
+    #[serde(default)]
+    pub basis_revision_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -36,6 +37,9 @@ pub struct WritePageRequest {
     pub namespace: String,
     pub visibility: String,
     pub lifecycle_status: LifecycleStatus,
+    pub kind: String,
+    #[serde(default)]
+    pub mutability: PageMutability,
     pub created_by: Actor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<String>,
@@ -60,9 +64,7 @@ pub struct WritePageRequest {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RevisePageRequest {
-    #[serde(rename = "refId", alias = "pageId")]
     pub page_id: String,
-    #[serde(rename = "expectedPageId", alias = "expectedRevisionId")]
     pub expected_revision_id: String,
     pub created_by: Actor,
     pub lifecycle_status: LifecycleStatus,
@@ -89,10 +91,9 @@ pub struct RevisePageRequest {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConsolidatePagesRequest {
-    #[serde(rename = "canonicalPageId", alias = "canonicalRevisionId")]
-    pub canonical_revision_id: String,
-    #[serde(rename = "replacedPageIds", alias = "replacedRevisionIds")]
-    pub replaced_revision_ids: Vec<String>,
+    pub canonical_page_id: String,
+    pub expected_canonical_revision_id: String,
+    pub replaced_pages: Vec<ConsolidationInput>,
     pub created_by: Actor,
     pub lifecycle_status: LifecycleStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -111,6 +112,13 @@ pub struct ConsolidatePagesRequest {
     pub provenance: Vec<ProvenanceEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsolidationInput {
+    pub page_id: String,
+    pub expected_revision_id: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema, Serialize)]
@@ -150,7 +158,9 @@ pub fn default_search_projections() -> Vec<Projection> {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadPagesRequest {
-    #[serde(rename = "pageIds", alias = "revisionIds")]
+    #[serde(default)]
+    pub page_ids: Vec<String>,
+    #[serde(default)]
     pub revision_ids: Vec<String>,
     pub projections: Vec<Projection>,
     pub max_chars: u32,
@@ -159,14 +169,9 @@ pub struct ReadPagesRequest {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WriteSummaryRequest {
-    #[serde(rename = "targetPageId", alias = "targetRevisionId")]
+    pub target_page_id: String,
     pub target_revision_id: String,
-    #[serde(
-        default,
-        rename = "expectedSummaryPageId",
-        alias = "expectedSummaryRevisionId",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_summary_revision_id: Option<String>,
     pub content: String,
     pub created_by: Actor,
@@ -181,20 +186,15 @@ pub struct WriteSummaryRequest {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssessPageValidityRequest {
-    #[serde(rename = "targetPageId", alias = "targetRevisionId")]
+    pub target_page_id: String,
     pub target_revision_id: String,
-    #[serde(
-        default,
-        rename = "expectedAssessmentPageId",
-        alias = "expectedAssessmentId",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub expected_assessment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_assessment_revision_id: Option<String>,
     pub standing: ValidityStanding,
     pub rationale: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
-    #[serde(default, rename = "basisPageIds", alias = "basisRevisionIds")]
+    #[serde(default)]
     pub basis_revision_ids: Vec<String>,
     pub created_by: Actor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -206,11 +206,11 @@ pub struct AssessPageValidityRequest {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkPagesRequest {
-    #[serde(rename = "fromPageId", alias = "fromRevisionId")]
-    pub from_revision_id: String,
+    pub from_page_id: String,
     pub relation_type: String,
-    #[serde(rename = "toPageId", alias = "toRevisionId")]
-    pub to_revision_id: String,
+    pub to_page_id: String,
+    #[serde(default)]
+    pub basis_revision_ids: Vec<String>,
     pub created_by: Actor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,

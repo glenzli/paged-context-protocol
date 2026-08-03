@@ -111,6 +111,13 @@ pub(crate) fn selection_window_key(page_ids: &[String]) -> String {
     format!("selection_window:{}", page_ids.join(","))
 }
 
+pub(crate) fn retention_window_key(revision_ids: &[String]) -> String {
+    let mut revision_ids = revision_ids.to_vec();
+    revision_ids.sort();
+    revision_ids.dedup();
+    format!("retention_window:{}", revision_ids.join(","))
+}
+
 fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)

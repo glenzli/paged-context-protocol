@@ -5,7 +5,7 @@ use pcp_core::{Projection, ReadPage, ReadPagesRequest, Relation, Scope};
 use rusqlite::{OptionalExtension, params};
 
 use crate::{
-    row::{REVISION_COLUMNS, relation_from_row, revision_from_row},
+    row::{REVISION_COLUMNS, page_manifest, relation_from_row, revision_from_row},
     store::{MAX_READ_CHARS, MAX_READ_PAGES, SqlitePcpStore},
     summary::current_summary,
     validity::{current_validity, validity_history},
@@ -116,10 +116,10 @@ impl SqlitePcpStore {
         request: ReadPagesRequest,
         allowed_scopes: Vec<String>,
     ) -> Result<Vec<ReadPage>> {
-        if request.revision_ids.is_empty() {
+        if request.page_ids.is_empty() && request.revision_ids.is_empty() {
             return Ok(Vec::new());
         }
-        if request.revision_ids.len() > MAX_READ_PAGES as usize {
+        if request.page_ids.len() + request.revision_ids.len() > MAX_READ_PAGES as usize {
             anyhow::bail!("read request exceeds the PCP page limit");
         }
         let allowed_scopes: HashSet<String> = allowed_scopes.into_iter().collect();
@@ -159,8 +159,21 @@ impl SqlitePcpStore {
 
         self.run("page read", move |connection| {
             let mut remaining_chars = max_chars;
-            let mut output = Vec::with_capacity(request.revision_ids.len());
-            for revision_id in request.revision_ids {
+            let mut requested_revision_ids = request.revision_ids;
+            for page_id in request.page_ids {
+                let head = connection
+                    .query_row(
+                        "SELECT current_revision_id FROM pcp_pages WHERE page_id = ?1",
+                        [&page_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .with_context(|| format!("resolve PCP Page {page_id}"))?;
+                requested_revision_ids.push(head);
+            }
+            let mut seen = HashSet::new();
+            requested_revision_ids.retain(|revision_id| seen.insert(revision_id.clone()));
+            let mut output = Vec::with_capacity(requested_revision_ids.len());
+            for revision_id in requested_revision_ids {
                 let sql = format!(
                     "SELECT {REVISION_COLUMNS} FROM pcp_revisions r WHERE r.revision_id = ?1"
                 );
@@ -184,6 +197,7 @@ impl SqlitePcpStore {
                 if !allowed_scopes.contains(&revision.namespace) {
                     anyhow::bail!("PCP revision is not available");
                 }
+                let page = page_manifest(&connection, &revision.page_id)?;
                 if include_provenance {
                     for event in &mut revision.provenance {
                         retain_authorized_revision_ids(
@@ -264,7 +278,7 @@ impl SqlitePcpStore {
                     }
                 }
                 let relations = if include_relations {
-                    read_relations(&connection, &revision_id, &allowed_scopes)?
+                    read_relations(&connection, &revision.page_id, &allowed_scopes)?
                 } else {
                     Vec::new()
                 };
@@ -272,33 +286,16 @@ impl SqlitePcpStore {
                     let mut history_statement = connection
                         .prepare(
                             "
-                            WITH RECURSIVE lineage(page_id) AS (
-                                SELECT ?1
-                                UNION
-                                SELECT CASE
-                                    WHEN relation.from_revision_id = lineage.page_id
-                                    THEN relation.to_revision_id
-                                    ELSE relation.from_revision_id
-                                END
-                                FROM lineage
-                                JOIN pcp_relations relation
-                                  ON relation.relation_type = 'supersedes'
-                                 AND (
-                                     relation.from_revision_id = lineage.page_id
-                                     OR relation.to_revision_id = lineage.page_id
-                                 )
-                            )
-                            SELECT revision.revision_id
-                            FROM lineage
-                            JOIN pcp_revisions revision
-                              ON revision.revision_id = lineage.page_id
-                            ORDER BY revision.created_at DESC, revision.revision_id DESC
+                            SELECT revision_id
+                            FROM pcp_revisions
+                            WHERE page_id = ?1
+                            ORDER BY created_at DESC, revision_id DESC
                             LIMIT 100
                             ",
                         )
                         .context("prepare PCP Page lineage")?;
                     history_statement
-                        .query_map([&revision.revision_id], |row| row.get(0))
+                        .query_map([&revision.page_id], |row| row.get(0))
                         .context("query PCP Page lineage")?
                         .collect::<rusqlite::Result<Vec<String>>>()
                         .context("collect PCP Page lineage")?
@@ -306,6 +303,7 @@ impl SqlitePcpStore {
                     Vec::new()
                 };
                 output.push(ReadPage {
+                    page,
                     revision,
                     summary,
                     validity,
@@ -329,10 +327,9 @@ impl SqlitePcpStore {
             let (revision_id, namespace): (String, String) = connection
                 .query_row(
                     "
-                    SELECT ref.head_page_id, r.namespace
-                    FROM pcp_refs ref
-                    JOIN pcp_revisions r ON r.revision_id = ref.head_page_id
-                    WHERE ref.ref_id = ?1
+                    SELECT p.current_revision_id, p.namespace
+                    FROM pcp_pages p
+                    WHERE p.page_id = ?1
                     ",
                     [&page_id],
                     |row| Ok((row.get(0)?, row.get(1)?)),
@@ -355,10 +352,11 @@ impl SqlitePcpStore {
                     SELECT r.namespace
                     FROM pcp_pages p
                     JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
-                    WHERE NOT EXISTS (
+                    WHERE r.lifecycle_status = 'active'
+                      AND NOT EXISTS (
                         SELECT 1 FROM pcp_relations newer
                         WHERE newer.relation_type = 'supersedes'
-                          AND newer.to_revision_id = r.revision_id
+                          AND newer.to_page_id = p.page_id
                     )
                     ",
                 )
@@ -421,31 +419,32 @@ fn take_budgeted(content: &str, remaining_chars: &mut usize) -> String {
 
 fn read_relations(
     connection: &rusqlite::Connection,
-    revision_id: &str,
+    page_id: &str,
     allowed_scopes: &HashSet<String>,
 ) -> Result<Vec<Relation>> {
     let mut statement = connection
         .prepare(
             "
-            SELECT rel.relation_id, rel.from_revision_id, rel.relation_type,
-                   rel.to_revision_id, rel.actor_type, rel.actor_id, rel.created_at,
+            SELECT rel.relation_id, rel.from_page_id, rel.relation_type,
+                   rel.to_page_id, rel.actor_type, rel.actor_id, rel.created_at,
+                   COALESCE(rel.basis_revision_ids_json, '[]'),
                    source.namespace, target.namespace
             FROM pcp_relations rel
-            JOIN pcp_revisions source ON source.revision_id = rel.from_revision_id
-            JOIN pcp_revisions target ON target.revision_id = rel.to_revision_id
-            WHERE rel.from_revision_id = ?1 OR rel.to_revision_id = ?1
+            JOIN pcp_pages source ON source.page_id = rel.from_page_id
+            JOIN pcp_pages target ON target.page_id = rel.to_page_id
+            WHERE rel.from_page_id = ?1 OR rel.to_page_id = ?1
             ORDER BY rel.created_at DESC
             LIMIT 200
             ",
         )
         .context("prepare PCP relations")?;
     let mut rows = statement
-        .query(params![revision_id])
+        .query(params![page_id])
         .context("query PCP relations")?;
     let mut relations = Vec::new();
     while let Some(row) = rows.next().context("read PCP relation row")? {
-        let source_namespace: String = row.get(7)?;
-        let target_namespace: String = row.get(8)?;
+        let source_namespace: String = row.get(8)?;
+        let target_namespace: String = row.get(9)?;
         if allowed_scopes.contains(&source_namespace) && allowed_scopes.contains(&target_namespace)
         {
             relations.push(relation_from_row(row)?);

@@ -137,7 +137,8 @@ export function createHealthView({ request, showError, formatNumber }) {
       row.append(
         element("td", "mono", scope.namespace),
         element("td", "", formatNumber(scope.currentPages)),
-        element("td", "", formatNumber(scope.immutablePages)),
+        element("td", "", formatNumber(scope.pages)),
+        element("td", "", formatNumber(scope.revisions)),
         element("td", "", formatNumber(scope.calls)),
         element("td", "", formatNumber(scope.searches)),
         element("td", "", formatNumber(scope.writes)),
@@ -166,13 +167,13 @@ export function createHealthView({ request, showError, formatNumber }) {
         ["Runs", formatNumber(data.consolidation.runs)],
         ["Input Pages", formatNumber(data.consolidation.inputPages)],
         ["Net contraction", formatNumber(data.consolidation.netPageReduction), data.consolidation.netPageReduction ? "positive" : ""],
-        ["Redirected Refs", formatNumber(data.storage.redirectedRefs)],
+        ["Historical Revisions", formatNumber(data.storage.historicalRevisions)],
       ]),
       panel("Shape", [
-        ["Immutable Pages", formatNumber(data.storage.immutablePages)],
+        ["Pages / Revisions", `${formatNumber(data.storage.pages)} / ${formatNumber(data.storage.revisions)}`],
+        ["Sealed / revisioned", `${formatNumber(data.storage.sealedPages)} / ${formatNumber(data.storage.revisionedPages)}`],
         ["Relations", formatNumber(data.graph.relations)],
-        ["Relations / immutable", data.graph.averageRelationsPerPage.toFixed(1)],
-        ["Isolated current", formatNumber(data.graph.isolatedCurrentPages)],
+        ["Relations / Page", data.graph.averageRelationsPerPage.toFixed(1)],
       ]),
       panel("Runtime", [
         ["Principals", formatNumber(data.activity.principals)],

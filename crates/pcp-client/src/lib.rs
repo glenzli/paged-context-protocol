@@ -5,10 +5,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessPermission, AccessPrincipal, AccessSession, AssessPageValidityRequest,
-    Capabilities, ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest, ReadPage,
-    ReadPagesRequest, Relation, RevisePageRequest, Scope, ScopeGrant, SearchPagesRequest,
-    SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult,
-    WriteValidityResult,
+    Capabilities, ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest,
+    PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest,
+    Relation, RevisePageRequest, RevisionRetentionLease, RevisionRetentionPlan, Scope, ScopeGrant,
+    SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
+    WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::PcpStore;
 pub use pcp_store::{DurablePageInventoryItem, HealthSnapshot, TombstoneCascadeResult};
@@ -114,6 +115,19 @@ pub trait PcpApi: Send + Sync {
     async fn current_revision_id(&self, page_id: String) -> Result<String>;
     async fn page_count(&self, requested_scopes: Vec<String>) -> Result<u64>;
     async fn content_char_count(&self, requested_scopes: Vec<String>) -> Result<usize>;
+    async fn plan_revision_retention(
+        &self,
+        request: PlanRevisionRetentionRequest,
+    ) -> Result<RevisionRetentionPlan>;
+    async fn put_revision_retention_lease(
+        &self,
+        request: PutRevisionRetentionLeaseRequest,
+    ) -> Result<RevisionRetentionLease>;
+    async fn active_revision_retention_leases(
+        &self,
+        requested_scopes: Vec<String>,
+        limit: u32,
+    ) -> Result<Vec<RevisionRetentionLease>>;
     async fn write_page(&self, request: WritePageRequest) -> Result<WriteResult>;
     async fn revise_page(&self, request: RevisePageRequest) -> Result<WriteResult>;
     async fn consolidate_pages(&self, request: ConsolidatePagesRequest) -> Result<WriteResult>;
@@ -244,6 +258,34 @@ impl PcpApi for EmbeddedPcpClient {
     async fn content_char_count(&self, requested_scopes: Vec<String>) -> Result<usize> {
         self.store
             .content_char_count(&self.access, requested_scopes)
+            .await
+    }
+
+    async fn plan_revision_retention(
+        &self,
+        request: PlanRevisionRetentionRequest,
+    ) -> Result<RevisionRetentionPlan> {
+        self.store
+            .plan_revision_retention(&self.access, request)
+            .await
+    }
+
+    async fn put_revision_retention_lease(
+        &self,
+        request: PutRevisionRetentionLeaseRequest,
+    ) -> Result<RevisionRetentionLease> {
+        self.store
+            .put_revision_retention_lease(&self.access, request)
+            .await
+    }
+
+    async fn active_revision_retention_leases(
+        &self,
+        requested_scopes: Vec<String>,
+        limit: u32,
+    ) -> Result<Vec<RevisionRetentionLease>> {
+        self.store
+            .active_revision_retention_leases(&self.access, requested_scopes, limit)
             .await
     }
 

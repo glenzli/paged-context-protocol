@@ -5,8 +5,9 @@ pub use config::{RuntimeConfig, RuntimeEndpointConfig};
 pub use maintenance::{
     CommandSemanticWorker, CompactionMaintenanceConfig, MaintenanceConfig, MaintenanceCycleReport,
     MaintenanceDetailPage, MaintenanceMode, MaintenanceRelation, MaintenanceRoutingPage,
-    MaintenanceWorkerRequest, MaintenanceWorkerResponse, RuntimeMaintainer,
-    SemanticMaintenanceWorker, SummaryMaintenanceConfig, WorkerCommandConfig,
+    MaintenanceWorkerRequest, MaintenanceWorkerResponse, RetentionMaintenanceConfig,
+    RetentionMilestone, RuntimeMaintainer, SemanticMaintenanceWorker, SummaryMaintenanceConfig,
+    WorkerCommandConfig,
 };
 
 #[cfg(test)]

@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
 use pcp_core::{
-    Actor, CreateScopeRequest, LinkPagesRequest, PagePayload, ProvenanceEvent, Relation,
-    RevisePageRequest, SourceRef, WritePageRequest, WriteResult,
+    Actor, CreateScopeRequest, LinkPagesRequest, PageMutability, PagePayload, ProvenanceEvent,
+    Relation, RevisePageRequest, SourceRef, WritePageRequest, WriteResult,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -74,7 +74,10 @@ impl SqlitePcpStore {
             }
 
             for relation in &request.initial_relations {
-                ensure_revision_access(&transaction, &relation.to_revision_id, &allowed_scopes)?;
+                ensure_page_access(&transaction, &relation.to_page_id, &allowed_scopes)?;
+                for revision_id in &relation.basis_revision_ids {
+                    ensure_revision_access(&transaction, revision_id, &allowed_scopes)?;
+                }
             }
 
             let timestamp = now();
@@ -92,10 +95,21 @@ impl SqlitePcpStore {
             transaction
                 .execute(
                     "
-                    INSERT INTO pcp_pages (page_id, current_revision_id, created_at)
-                    VALUES (?1, NULL, ?2)
+                    INSERT INTO pcp_pages (
+                        page_id, current_revision_id, created_at, owner_id, namespace,
+                        visibility, kind, mutability, lifecycle_status, updated_at
+                    ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?2)
                     ",
-                    params![page_id, timestamp],
+                    params![
+                        page_id,
+                        timestamp,
+                        request.owner_id,
+                        request.namespace,
+                        request.visibility,
+                        request.kind,
+                        request.mutability.as_str(),
+                        request.lifecycle_status.as_str(),
+                    ],
                 )
                 .context("create PCP page")?;
             insert_revision(
@@ -122,23 +136,13 @@ impl SqlitePcpStore {
                     params![page_id, revision_id],
                 )
                 .context("publish PCP page revision")?;
-            transaction
-                .execute(
-                    "
-                    INSERT INTO pcp_refs (
-                        ref_id, namespace, head_page_id, created_at, updated_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?4)
-                    ",
-                    params![page_id, request.namespace, revision_id, timestamp],
-                )
-                .context("create PCP Page Ref")?;
-
             for relation in request.initial_relations {
-                insert_relation(
+                insert_page_relation(
                     &transaction,
-                    &revision_id,
+                    &page_id,
                     &relation.relation_type,
-                    &relation.to_revision_id,
+                    &relation.to_page_id,
+                    &relation.basis_revision_ids,
                     &request.created_by,
                     &timestamp,
                 )?;
@@ -182,10 +186,14 @@ impl SqlitePcpStore {
             }
 
             for relation in &request.initial_relations {
-                ensure_revision_access(&transaction, &relation.to_revision_id, &allowed_scopes)?;
+                ensure_page_access(&transaction, &relation.to_page_id, &allowed_scopes)?;
+                for revision_id in &relation.basis_revision_ids {
+                    ensure_revision_access(&transaction, revision_id, &allowed_scopes)?;
+                }
             }
 
-            let (owner_id, namespace, visibility, current_revision_id): (
+            let (owner_id, namespace, visibility, mutability, current_revision_id): (
+                String,
                 String,
                 String,
                 String,
@@ -193,13 +201,20 @@ impl SqlitePcpStore {
             ) = transaction
                 .query_row(
                     "
-                    SELECT r.owner_id, r.namespace, r.visibility, ref.head_page_id
-                    FROM pcp_refs ref
-                    JOIN pcp_revisions r ON r.revision_id = ref.head_page_id
-                    WHERE ref.ref_id = ?1
+                    SELECT owner_id, namespace, visibility, mutability, current_revision_id
+                    FROM pcp_pages
+                    WHERE page_id = ?1
                     ",
                     [&request.page_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
                 )
                 .context("find current PCP page revision")?;
             if !allowed_scopes.contains(&namespace) {
@@ -212,6 +227,10 @@ impl SqlitePcpStore {
                     current_revision_id
                 );
             }
+            anyhow::ensure!(
+                PageMutability::parse(&mutability) == Some(PageMutability::Revisioned),
+                "sealed PCP Pages cannot be revised"
+            );
 
             let timestamp = now();
             let revision_id = random_id(&transaction, "rev_")?;
@@ -241,20 +260,13 @@ impl SqlitePcpStore {
                 request.facets.as_ref(),
                 &provenance,
             )?;
-            insert_relation(
-                &transaction,
-                &revision_id,
-                "supersedes",
-                &request.expected_revision_id,
-                &request.created_by,
-                &timestamp,
-            )?;
             for relation in request.initial_relations {
-                insert_relation(
+                insert_page_relation(
                     &transaction,
-                    &revision_id,
+                    &request.page_id,
                     &relation.relation_type,
-                    &relation.to_revision_id,
+                    &relation.to_page_id,
+                    &relation.basis_revision_ids,
                     &request.created_by,
                     &timestamp,
                 )?;
@@ -263,30 +275,20 @@ impl SqlitePcpStore {
                 .execute(
                     "
                     UPDATE pcp_pages
-                    SET current_revision_id = ?2
+                    SET current_revision_id = ?2,
+                        lifecycle_status = ?4,
+                        updated_at = ?5
                     WHERE page_id = ?1 AND current_revision_id = ?3
-                    ",
-                    params![request.page_id, revision_id, request.expected_revision_id],
-                )
-                .context("publish immutable successor through legacy PCP Ref")?;
-            let updated = transaction
-                .execute(
-                    "
-                    UPDATE pcp_refs
-                    SET head_page_id = ?2, updated_at = ?3
-                    WHERE ref_id = ?1 AND head_page_id = ?4
                     ",
                     params![
                         request.page_id,
                         revision_id,
+                        request.expected_revision_id,
+                        request.lifecycle_status.as_str(),
                         timestamp,
-                        request.expected_revision_id
                     ],
                 )
-                .context("advance PCP Ref")?;
-            if updated != 1 {
-                anyhow::bail!("PCP Ref changed while publishing its immutable successor");
-            }
+                .context("publish PCP Page revision")?;
             record_idempotency(
                 &transaction,
                 &request.created_by.actor_id,
@@ -320,8 +322,11 @@ impl SqlitePcpStore {
             let transaction = connection
                 .transaction()
                 .context("start PCP relation write")?;
-            ensure_revision_access(&transaction, &request.from_revision_id, &allowed_scopes)?;
-            ensure_revision_access(&transaction, &request.to_revision_id, &allowed_scopes)?;
+            ensure_page_access(&transaction, &request.from_page_id, &allowed_scopes)?;
+            ensure_page_access(&transaction, &request.to_page_id, &allowed_scopes)?;
+            for revision_id in &request.basis_revision_ids {
+                ensure_revision_access(&transaction, revision_id, &allowed_scopes)?;
+            }
 
             if let Some(key) = request.idempotency_key.as_deref()
                 && let Some(relation_id) = transaction
@@ -342,11 +347,12 @@ impl SqlitePcpStore {
             }
 
             let timestamp = now();
-            let relation = insert_relation(
+            let relation = insert_page_relation(
                 &transaction,
-                &request.from_revision_id,
+                &request.from_page_id,
                 &request.relation_type,
-                &request.to_revision_id,
+                &request.to_page_id,
+                &request.basis_revision_ids,
                 &request.created_by,
                 &timestamp,
             )?;
@@ -442,6 +448,24 @@ pub(crate) fn ensure_revision_access(
     Ok(())
 }
 
+pub(crate) fn ensure_page_access(
+    transaction: &Transaction<'_>,
+    page_id: &str,
+    allowed_scopes: &HashSet<String>,
+) -> Result<()> {
+    let namespace: String = transaction
+        .query_row(
+            "SELECT namespace FROM pcp_pages WHERE page_id = ?1",
+            [page_id],
+            |row| row.get(0),
+        )
+        .with_context(|| format!("find PCP Page {page_id}"))?;
+    if !allowed_scopes.contains(&namespace) {
+        anyhow::bail!("Page is outside the authorized PCP scopes");
+    }
+    Ok(())
+}
+
 pub(crate) fn ensure_provenance_access(
     transaction: &Transaction<'_>,
     provenance: &[ProvenanceEvent],
@@ -491,10 +515,11 @@ pub(crate) fn insert_revision(
                 revision_id, page_id, owner_id, namespace, visibility,
                 lifecycle_status, created_at, observed_at, valid_from, valid_to,
                 actor_type, actor_id, payload_media_type, payload_content,
-                source_refs_json, facets_json, provenance_json
+                source_refs_json, facets_json, provenance_json, previous_revision_id
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                ?13, ?14, ?15, ?16, ?17
+                ?13, ?14, ?15, ?16, ?17,
+                (SELECT current_revision_id FROM pcp_pages WHERE page_id = ?2)
             )
             ",
             params![
@@ -534,6 +559,9 @@ pub(crate) fn insert_revision(
             .context("index PCP provenance input")?;
     }
     transaction
+        .execute("DELETE FROM pcp_revision_fts WHERE page_id = ?1", [page_id])
+        .context("replace PCP Page head index")?;
+    transaction
         .execute(
             "
             INSERT INTO pcp_revision_fts (
@@ -560,23 +588,89 @@ pub(crate) fn insert_relation(
     actor: &Actor,
     created_at: &str,
 ) -> Result<Relation> {
+    insert_revision_relation_with_basis(
+        transaction,
+        from_revision_id,
+        relation_type,
+        to_revision_id,
+        &[from_revision_id.to_owned(), to_revision_id.to_owned()],
+        actor,
+        created_at,
+    )
+}
+
+pub(crate) fn insert_page_relation(
+    transaction: &Transaction<'_>,
+    from_page_id: &str,
+    relation_type: &str,
+    to_page_id: &str,
+    basis_revision_ids: &[String],
+    actor: &Actor,
+    created_at: &str,
+) -> Result<Relation> {
+    let from_revision_id: String = transaction.query_row(
+        "SELECT current_revision_id FROM pcp_pages WHERE page_id = ?1",
+        [from_page_id],
+        |row| row.get(0),
+    )?;
+    let to_revision_id: String = transaction.query_row(
+        "SELECT current_revision_id FROM pcp_pages WHERE page_id = ?1",
+        [to_page_id],
+        |row| row.get(0),
+    )?;
+    let mut basis = basis_revision_ids.to_vec();
+    basis.extend([from_revision_id.clone(), to_revision_id.clone()]);
+    basis.sort();
+    basis.dedup();
+    insert_revision_relation_with_basis(
+        transaction,
+        &from_revision_id,
+        relation_type,
+        &to_revision_id,
+        &basis,
+        actor,
+        created_at,
+    )
+}
+
+fn insert_revision_relation_with_basis(
+    transaction: &Transaction<'_>,
+    from_revision_id: &str,
+    relation_type: &str,
+    to_revision_id: &str,
+    basis_revision_ids: &[String],
+    actor: &Actor,
+    created_at: &str,
+) -> Result<Relation> {
     if relation_type.trim().is_empty() || relation_type.len() > 80 {
         anyhow::bail!("relation type must contain 1-80 characters");
     }
+    let from_page_id: String = transaction.query_row(
+        "SELECT page_id FROM pcp_revisions WHERE revision_id = ?1",
+        [from_revision_id],
+        |row| row.get(0),
+    )?;
+    let to_page_id: String = transaction.query_row(
+        "SELECT page_id FROM pcp_revisions WHERE revision_id = ?1",
+        [to_revision_id],
+        |row| row.get(0),
+    )?;
     ensure_acyclic_derivation_relation(
         transaction,
-        from_revision_id,
+        &from_page_id,
         relation_type.trim(),
-        to_revision_id,
+        &to_page_id,
     )?;
     let relation_id = random_id(transaction, "rel_")?;
+    let basis_json = serde_json::to_string(basis_revision_ids)?;
     transaction
         .execute(
             "
             INSERT INTO pcp_relations (
                 relation_id, from_revision_id, relation_type, to_revision_id,
-                actor_type, actor_id, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                actor_type, actor_id, created_at, from_page_id, to_page_id,
+                basis_revision_ids_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ",
             params![
                 relation_id,
@@ -586,14 +680,18 @@ pub(crate) fn insert_relation(
                 actor.actor_type.as_str(),
                 actor.actor_id,
                 created_at,
+                from_page_id,
+                to_page_id,
+                basis_json,
             ],
         )
         .context("insert PCP relation")?;
     Ok(Relation {
         relation_id,
-        from_revision_id: from_revision_id.to_owned(),
+        from_page_id,
         relation_type: relation_type.to_owned(),
-        to_revision_id: to_revision_id.to_owned(),
+        to_page_id,
+        basis_revision_ids: basis_revision_ids.to_vec(),
         created_by: actor.clone(),
         created_at: created_at.to_owned(),
     })
@@ -601,40 +699,44 @@ pub(crate) fn insert_relation(
 
 fn ensure_acyclic_derivation_relation(
     transaction: &Transaction<'_>,
-    from_revision_id: &str,
+    from_page_id: &str,
     relation_type: &str,
-    to_revision_id: &str,
+    to_page_id: &str,
 ) -> Result<()> {
     if !matches!(relation_type, "aggregates" | "derived_from" | "summarizes") {
         return Ok(());
     }
-    if from_revision_id == to_revision_id {
-        anyhow::bail!("derivation relations cannot point to the same Revision");
+    if from_page_id == to_page_id {
+        anyhow::bail!("derivation relations cannot point to the same Page");
     }
     let creates_cycle: bool = transaction
         .query_row(
             "
-            WITH RECURSIVE derivation_edges (from_revision_id, to_revision_id) AS (
-                SELECT from_revision_id, to_revision_id
+            WITH RECURSIVE derivation_edges (from_page_id, to_page_id) AS (
+                SELECT from_page_id, to_page_id
                 FROM pcp_relations
                 WHERE relation_type IN ('aggregates', 'derived_from', 'summarizes')
                 UNION
-                SELECT derived_revision_id, input_revision_id
-                FROM pcp_provenance_inputs
+                SELECT derived.page_id, input.page_id
+                FROM pcp_provenance_inputs provenance
+                JOIN pcp_revisions derived
+                  ON derived.revision_id = provenance.derived_revision_id
+                JOIN pcp_revisions input
+                  ON input.revision_id = provenance.input_revision_id
             ),
-            reachable (revision_id) AS (
+            reachable (page_id) AS (
                 SELECT ?2
                 UNION
-                SELECT edge.to_revision_id
+                SELECT edge.to_page_id
                 FROM reachable
                 JOIN derivation_edges edge
-                  ON edge.from_revision_id = reachable.revision_id
+                  ON edge.from_page_id = reachable.page_id
             )
             SELECT EXISTS (
-                SELECT 1 FROM reachable WHERE revision_id = ?1
+                SELECT 1 FROM reachable WHERE page_id = ?1
             )
             ",
-            params![from_revision_id, to_revision_id],
+            params![from_page_id, to_page_id],
             |row| row.get(0),
         )
         .context("validate PCP derivation DAG")?;
@@ -648,8 +750,9 @@ fn read_relation(transaction: &Transaction<'_>, relation_id: &str) -> Result<Rel
     transaction
         .query_row(
             "
-            SELECT relation_id, from_revision_id, relation_type, to_revision_id,
-                   actor_type, actor_id, created_at
+            SELECT relation_id, from_page_id, relation_type, to_page_id,
+                   actor_type, actor_id, created_at,
+                   COALESCE(basis_revision_ids_json, '[]')
             FROM pcp_relations
             WHERE relation_id = ?1
             ",
@@ -665,9 +768,11 @@ fn read_relation(transaction: &Transaction<'_>, relation_id: &str) -> Result<Rel
                 })?;
                 Ok(Relation {
                     relation_id: row.get(0)?,
-                    from_revision_id: row.get(1)?,
+                    from_page_id: row.get(1)?,
                     relation_type: row.get(2)?,
-                    to_revision_id: row.get(3)?,
+                    to_page_id: row.get(3)?,
+                    basis_revision_ids: serde_json::from_str(&row.get::<_, String>(7)?)
+                        .unwrap_or_default(),
                     created_by: Actor {
                         actor_type,
                         actor_id: row.get(5)?,

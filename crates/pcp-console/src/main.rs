@@ -10,8 +10,8 @@ use axum::{
 };
 use pcp_client::PcpApi;
 use pcp_core::{
-    Projection, ReadPage, ReadPagesRequest, SearchFilters, SearchMode, SearchPagesRequest,
-    SearchTermMatch,
+    PlanRevisionRetentionRequest, Projection, ReadPage, ReadPagesRequest, RetentionPolicy,
+    SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch,
 };
 use pcp_rpc::RemotePcpClient;
 use serde::Deserialize;
@@ -25,6 +25,7 @@ const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_PAGE_LIMIT: u32 = 20;
 const MAX_PAGE_LIMIT: u32 = 50;
 const MAX_HISTORY_REVISIONS: usize = 20;
+const MAX_RETENTION_SAMPLE_LIMIT: u32 = 100;
 
 mod graph_view;
 
@@ -82,6 +83,15 @@ struct HealthQuery {
     hours: Option<u32>,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RetentionQuery {
+    scope: Option<String>,
+    minimum_age_days: Option<u32>,
+    keep_recent_revisions_per_page: Option<u32>,
+    sample_limit: Option<u32>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let socket_path = env::var_os("PCP_RUNTIME_SOCKET")
@@ -118,6 +128,7 @@ fn router(state: AppState) -> Router {
         .route("/page-graph.js", get(page_graph_js))
         .route("/quality-view.js", get(quality_view_js))
         .route("/health-view.js", get(health_view_js))
+        .route("/retention-view.js", get(retention_view_js))
         .route("/styles.css", get(styles_css))
         .route("/api/health", get(health))
         .route("/api/overview", get(overview))
@@ -128,6 +139,7 @@ fn router(state: AppState) -> Router {
         .route("/api/pages/{page_id}/lineage", get(page_lineage))
         .route("/api/quality", get(quality))
         .route("/api/metrics", get(health_metrics))
+        .route("/api/retention", get(retention_plan))
         .route("/api/access", get(access_log))
         .with_state(state)
 }
@@ -204,6 +216,13 @@ async fn health_view_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         include_str!("health-view.js"),
+    )
+}
+
+async fn retention_view_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("retention-view.js"),
     )
 }
 
@@ -362,6 +381,7 @@ async fn page_lineage(
     let pages = state
         .client
         .read_pages(ReadPagesRequest {
+            page_ids: Vec::new(),
             revision_ids: root.history.into_iter().take(limit).collect(),
             projections: vec![
                 Projection::Manifest,
@@ -393,6 +413,25 @@ async fn health_metrics(
         )
         .await?;
     Ok(Json(json!(snapshot)))
+}
+
+async fn retention_plan(
+    State(state): State<AppState>,
+    Query(query): Query<RetentionQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let scopes = selected_scopes(state.client.as_ref(), query.scope.as_deref());
+    let (plan, leases) = tokio::try_join!(
+        state
+            .client
+            .plan_revision_retention(PlanRevisionRetentionRequest {
+                scopes: scopes.clone(),
+                policy: retention_policy(&query),
+            }),
+        state
+            .client
+            .active_revision_retention_leases(scopes, MAX_RETENTION_SAMPLE_LIMIT),
+    )?;
+    Ok(Json(json!({"plan": plan, "leases": leases})))
 }
 
 async fn access_log(
@@ -429,7 +468,15 @@ async fn read_one_page(
 ) -> Result<ReadPage, ApiError> {
     let mut pages = client
         .read_pages(ReadPagesRequest {
-            revision_ids: vec![page_id],
+            page_ids: (!page_id.starts_with("rev_"))
+                .then_some(page_id.clone())
+                .into_iter()
+                .collect(),
+            revision_ids: page_id
+                .starts_with("rev_")
+                .then_some(page_id)
+                .into_iter()
+                .collect(),
             projections,
             max_chars,
         })
@@ -448,6 +495,24 @@ fn parse_search_mode(value: Option<&str>) -> Result<SearchMode, ApiError> {
     }
 }
 
+fn retention_policy(query: &RetentionQuery) -> RetentionPolicy {
+    let defaults = RetentionPolicy::default();
+    RetentionPolicy {
+        minimum_age_days: query
+            .minimum_age_days
+            .unwrap_or(defaults.minimum_age_days)
+            .min(36_500),
+        keep_recent_revisions_per_page: query
+            .keep_recent_revisions_per_page
+            .unwrap_or(defaults.keep_recent_revisions_per_page)
+            .min(1_000),
+        sample_limit: query
+            .sample_limit
+            .unwrap_or(defaults.sample_limit)
+            .clamp(1, MAX_RETENTION_SAMPLE_LIMIT),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,5 +523,23 @@ mod tests {
         assert_eq!(parse_search_mode(Some("text")).unwrap(), SearchMode::Text);
         assert_eq!(parse_search_mode(Some("exact")).unwrap(), SearchMode::Exact);
         assert!(parse_search_mode(Some("graph")).is_err());
+    }
+
+    #[test]
+    fn console_retention_policy_defaults_and_bounds_samples() {
+        let defaults = retention_policy(&RetentionQuery::default());
+        assert_eq!(defaults.minimum_age_days, 30);
+        assert_eq!(defaults.keep_recent_revisions_per_page, 2);
+        assert_eq!(defaults.sample_limit, 100);
+
+        let bounded = retention_policy(&RetentionQuery {
+            minimum_age_days: Some(u32::MAX),
+            keep_recent_revisions_per_page: Some(u32::MAX),
+            sample_limit: Some(0),
+            ..RetentionQuery::default()
+        });
+        assert_eq!(bounded.minimum_age_days, 36_500);
+        assert_eq!(bounded.keep_recent_revisions_per_page, 1_000);
+        assert_eq!(bounded.sample_limit, 1);
     }
 }

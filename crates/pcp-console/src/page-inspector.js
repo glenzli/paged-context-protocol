@@ -59,7 +59,7 @@ export function createPageInspector({ request, showError, formatTime }) {
   }
 
   function pageLabel(page) {
-    const facetTitle = page.page.facets?.title;
+    const facetTitle = page.revision.facets?.title;
     if (facetTitle) return facetTitle;
     const firstLine = page.summary?.content?.split("\n").find((line) => line.trim());
     return firstLine?.replace(/^#+\s*/, "").slice(0, 120) || page.page.pageId;
@@ -78,16 +78,19 @@ export function createPageInspector({ request, showError, formatTime }) {
   }
 
   function renderSummary(page) {
-    const preview = page.summary?.content || page.page.payload?.content || "No summary projection";
+    const preview = page.summary?.content || page.revision.payload?.content || "No summary projection";
     const previewMediaType = page.summary
       ? "text/markdown"
-      : page.page.payload?.mediaType || "text/plain";
+      : page.revision.payload?.mediaType || "text/plain";
     const facts = element("dl", "details-grid compact-details");
     const rows = [
       ["Scope", page.page.namespace],
+      ["Kind", page.page.kind],
+      ["Mutability", page.page.mutability],
       ["Status", page.page.lifecycleStatus],
-      ["Observed", formatTime(page.page.observedAt || page.page.createdAt)],
-      ["Created by", actorLabel(page.page.createdBy)],
+      ["Revision", page.revision.revisionId],
+      ["Observed", formatTime(page.revision.observedAt || page.revision.createdAt)],
+      ["Created by", actorLabel(page.revision.createdBy)],
       ["Relations", page.relations.length],
       ["Lineage", page.lineage.length],
     ];
@@ -114,6 +117,7 @@ export function createPageInspector({ request, showError, formatTime }) {
       element("span", `graph-relation relation-${family}`, `${direction} · ${relationTypes.join(" / ")}`),
       element("strong", "", pageLabel(page)),
       element("span", "mono muted", page.page.pageId),
+      element("span", "mono muted", page.revision.revisionId),
       element("span", "mono muted", page.page.namespace),
     );
     const summaryPreview = truncate(page.summary?.content, 220);
@@ -234,40 +238,48 @@ export function createPageInspector({ request, showError, formatTime }) {
   function renderHistory(lineage) {
     const list = element("div", "history-list");
     lineage.pages.forEach((page, index) => {
-      const button = element("button", `history-entry${page.page.pageId === currentPageId ? " selected" : ""}`);
+      const selected = page.revision.revisionId === currentPageId
+        || (page.page.pageId === currentPageId && page.revision.revisionId === page.page.headRevisionId);
+      const button = element("button", `history-entry${selected ? " selected" : ""}`);
       button.type = "button";
       const heading = element("span", "history-heading");
       heading.append(
-        element("strong", "mono", page.page.pageId),
-        element("span", "muted", index === 0 ? "Current" : formatTime(page.page.createdAt)),
+        element("strong", "mono", page.revision.revisionId),
+        element("span", "muted", index === 0 ? "Current head" : formatTime(page.revision.createdAt)),
       );
       const standing = page.validity?.standing ? ` · ${page.validity.standing}` : "";
       button.append(
         heading,
-        element("span", "muted", `${page.page.lifecycleStatus}${standing}`),
-        element("span", "history-preview", truncate(page.summary?.content || page.page.payload?.content, 360) || "No content projection"),
+        element("span", "muted", `${page.page.lifecycleStatus} · ${page.page.mutability}${standing}`),
+        element("span", "history-preview", truncate(page.summary?.content || page.revision.payload?.content, 360) || "No content projection"),
       );
       button.addEventListener("click", () => {
-        if (page.page.pageId !== currentPageId) navigate(page.page.pageId);
+        if (page.revision.revisionId !== currentPageId) navigate(page.revision.revisionId);
       });
       list.append(button);
     });
     const status = lineage.total > lineage.pages.length
-      ? `${lineage.pages.length} of ${lineage.total} Pages in this lineage`
-      : `${lineage.pages.length} Pages in this lineage`;
+      ? `${lineage.pages.length} of ${lineage.total} Revisions`
+      : `${lineage.pages.length} Revisions`;
     historyPane.replaceChildren(element("div", "history-status muted", status), list);
   }
 
   function renderRaw(page) {
-    const payload = page.page.payload;
+    const payload = page.revision.payload;
     const manifest = {
-      lifecycleStatus: page.page.lifecycleStatus,
-      createdAt: page.page.createdAt,
-      observedAt: page.page.observedAt,
-      validFrom: page.page.validFrom,
-      validTo: page.page.validTo,
-      createdBy: page.page.createdBy,
-      facets: page.page.facets,
+      page: page.page,
+      revision: {
+        pageId: page.revision.pageId,
+        revisionId: page.revision.revisionId,
+        previousRevisionId: page.revision.previousRevisionId,
+        lifecycleStatus: page.revision.lifecycleStatus,
+        createdAt: page.revision.createdAt,
+        observedAt: page.revision.observedAt,
+        validFrom: page.revision.validFrom,
+        validTo: page.revision.validTo,
+        createdBy: page.revision.createdBy,
+        facets: page.revision.facets,
+      },
     };
     rawPane.replaceChildren(
       detailSection(
@@ -276,8 +288,8 @@ export function createPageInspector({ request, showError, formatTime }) {
       ),
       detailSection("Manifest", jsonBlock(manifest, "No manifest")),
       detailSection("Sources and provenance", jsonBlock({
-        sourceRefs: page.page.sourceRefs,
-        provenance: page.page.provenance,
+        sourceRefs: page.revision.sourceRefs,
+        provenance: page.revision.provenance,
       }, "No sources or provenance")),
     );
   }
@@ -355,9 +367,7 @@ export function createPageInspector({ request, showError, formatTime }) {
       }
       if (currentPageId !== pageId) return;
       title.textContent = page.page.pageId;
-      subtitle.textContent = page.page.refId
-        ? `${page.page.namespace} · Ref ${page.page.refId}`
-        : page.page.namespace;
+      subtitle.textContent = `${page.page.namespace} · ${page.page.kind} · ${page.page.mutability} · ${page.revision.revisionId}`;
       renderSummary(page);
       if (!dialog.open) dialog.showModal();
       dialog.scrollTop = 0;

@@ -27,6 +27,11 @@ pub enum MaintenanceWorkerRequest {
     ConsolidatePages {
         pages: Vec<MaintenanceDetailPage>,
     },
+    SelectRetentionMilestones {
+        pages: Vec<MaintenanceRoutingPage>,
+        max_revisions: usize,
+        lease_days: u32,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -44,6 +49,9 @@ pub enum MaintenanceWorkerResponse {
         canonical_page_id: String,
         content: String,
     },
+    Retain {
+        milestones: Vec<RetentionMilestone>,
+    },
     KeepSeparate {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
@@ -60,11 +68,16 @@ pub enum MaintenanceWorkerResponse {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RetentionMilestone {
+    pub revision_id: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MaintenanceRoutingPage {
-    #[serde(rename = "refId")]
-    pub ref_id: String,
-    #[serde(rename = "pageId")]
     pub page_id: String,
+    pub revision_id: String,
     pub namespace: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
@@ -82,10 +95,8 @@ pub struct MaintenanceRoutingPage {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaintenanceDetailPage {
-    #[serde(rename = "refId")]
-    pub ref_id: String,
-    #[serde(rename = "pageId")]
     pub page_id: String,
+    pub revision_id: String,
     pub namespace: String,
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,8 +133,8 @@ impl MaintenanceRoutingPage {
             .take(routing_chars)
             .collect();
         Self {
-            ref_id: item.page_id,
-            page_id: item.revision_id,
+            page_id: item.page_id,
+            revision_id: item.revision_id,
             namespace: item.namespace,
             kind: item.kind,
             created_at: item.created_at,
@@ -132,6 +143,45 @@ impl MaintenanceRoutingPage {
             routing_text,
             facets: item.facets,
             relation_types: item.relation_types,
+        }
+    }
+
+    pub(crate) fn from_detail(
+        item: MaintenanceDetailPage,
+        kind: String,
+        routing_chars: usize,
+    ) -> Self {
+        let routing_text = item
+            .summary
+            .as_deref()
+            .or(item.content.as_deref())
+            .unwrap_or_default()
+            .chars()
+            .take(routing_chars)
+            .collect();
+        let content_chars = item
+            .content
+            .as_deref()
+            .map(|content| content.chars().count() as u64)
+            .unwrap_or_default();
+        let mut relation_types = item
+            .relations
+            .iter()
+            .map(|relation| relation.relation_type.clone())
+            .collect::<Vec<_>>();
+        relation_types.sort();
+        relation_types.dedup();
+        Self {
+            page_id: item.page_id,
+            revision_id: item.revision_id,
+            namespace: item.namespace,
+            kind: Some(kind),
+            created_at: item.created_at,
+            observed_at: item.observed_at,
+            content_chars,
+            routing_text,
+            facets: item.facets,
+            relation_types,
         }
     }
 }
@@ -144,8 +194,8 @@ impl From<ReadPage> for MaintenanceDetailPage {
             .map(|payload| (Some(payload.media_type), Some(payload.content)))
             .unwrap_or_default();
         Self {
-            ref_id: revision.page_id,
-            page_id: revision.revision_id,
+            page_id: revision.page_id,
+            revision_id: revision.revision_id,
             namespace: revision.namespace,
             created_at: revision.created_at,
             observed_at: revision.observed_at,
@@ -159,8 +209,8 @@ impl From<ReadPage> for MaintenanceDetailPage {
                 .into_iter()
                 .map(|relation| MaintenanceRelation {
                     relation_type: relation.relation_type,
-                    from_page_id: relation.from_revision_id,
-                    to_page_id: relation.to_revision_id,
+                    from_page_id: relation.from_page_id,
+                    to_page_id: relation.to_page_id,
                 })
                 .collect(),
         }

@@ -9,7 +9,7 @@ use rusqlite::{Connection, params_from_iter, types::Value as SqlValue};
 use serde_json::{Map, Value};
 
 use crate::{
-    row::{REVISION_COLUMNS, revision_from_row},
+    row::{REVISION_COLUMNS, page_manifest, revision_from_row},
     store::{MAX_SEARCH_RESULTS, SqlitePcpStore},
     validity::current_validity,
 };
@@ -113,8 +113,8 @@ fn browse_index_once(
                 summary.summary_revision_id
          FROM pcp_pages p
          JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
-         LEFT JOIN pcp_summary_heads summary_head
-           ON summary_head.target_revision_id = r.revision_id
+         LEFT JOIN pcp_page_summary_heads summary_head
+           ON summary_head.target_page_id = p.page_id
          LEFT JOIN pcp_summaries summary
            ON summary.summary_revision_id = summary_head.current_summary_revision_id
          WHERE r.namespace IN ("
@@ -125,11 +125,11 @@ fn browse_index_once(
            AND NOT EXISTS (
                SELECT 1 FROM pcp_relations newer
                WHERE newer.relation_type = 'supersedes'
-                 AND newer.to_revision_id = r.revision_id
+                 AND newer.to_page_id = p.page_id
            )",
     );
     if !excluded_page_kinds.is_empty() {
-        sql.push_str(" AND COALESCE(json_extract(r.facets_json, '$.kind'), '') NOT IN (");
+        sql.push_str(" AND p.kind NOT IN (");
         push_placeholders(&mut sql, excluded_page_kinds.len());
         sql.push(')');
         values.extend(excluded_page_kinds.iter().cloned().map(SqlValue::Text));
@@ -164,9 +164,9 @@ fn browse_index_once(
             break;
         }
         let revision = revision_from_row(row, false, true, false, false)?;
-        let snippet: String = row.get(17)?;
-        let matched_projection: String = row.get(18)?;
-        let summary_revision_id: Option<String> = row.get(19)?;
+        let snippet: String = row.get(18)?;
+        let matched_projection: String = row.get(19)?;
+        let summary_revision_id: Option<String> = row.get(20)?;
         let entry_chars = snippet.chars().count().saturating_add(240);
         if !hits.is_empty() && used_chars.saturating_add(entry_chars) > max_chars {
             has_more = true;
@@ -175,9 +175,12 @@ fn browse_index_once(
         used_chars = used_chars.saturating_add(entry_chars);
         let validity =
             current_validity(connection, &revision.revision_id)?.map(compact_validity_hint);
+        let page = page_manifest(connection, &revision.page_id)?;
         hits.push(SearchHit {
             page_id: revision.page_id,
             revision_id: revision.revision_id,
+            kind: page.kind,
+            mutability: page.mutability,
             namespace: revision.namespace,
             lifecycle_status: revision.lifecycle_status,
             created_at: revision.created_at,
@@ -276,8 +279,9 @@ fn search_revision_surface(
         "SELECT {REVISION_COLUMNS},
                 substr(COALESCE({content_column}, ''), 1, 600),
                 (
-                    SELECT summary_head.current_summary_revision_id FROM pcp_summary_heads summary_head
-                    WHERE summary_head.target_revision_id = r.revision_id
+                    SELECT summary_head.current_summary_revision_id
+                    FROM pcp_page_summary_heads summary_head
+                    WHERE summary_head.target_page_id = p.page_id
                 )
          FROM pcp_pages p
          JOIN pcp_revisions r ON r.revision_id = p.current_revision_id"
@@ -369,8 +373,8 @@ fn search_summaries(
                 summary.summary_revision_id
          FROM pcp_pages p
          JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
-         JOIN pcp_summary_heads summary_head
-           ON summary_head.target_revision_id = r.revision_id
+         JOIN pcp_page_summary_heads summary_head
+           ON summary_head.target_page_id = p.page_id
          JOIN pcp_summaries summary
            ON summary.summary_revision_id = summary_head.current_summary_revision_id"
     );
@@ -441,31 +445,50 @@ fn search_graph(
     };
     ensure_graph_origin_access(connection, &origin_revision, &request.scopes)?;
 
-    let mut values = vec![
-        SqlValue::Text(origin_revision.clone()),
-        SqlValue::Text(origin_revision.clone()),
-        SqlValue::Text(origin_revision),
-    ];
+    let mut values = vec![SqlValue::Text(origin_revision)];
     let mut sql = String::from(
-        "WITH graph_edges (
-            from_revision_id, to_revision_id, edge_type, created_at
-         ) AS (
-            SELECT from_revision_id, to_revision_id, relation_type, created_at
-            FROM pcp_relations
-            UNION ALL
-            SELECT derived_revision_id, input_revision_id, 'derived_from', created_at
-            FROM pcp_provenance_inputs
+        "WITH origin AS (
+            SELECT revision.page_id,
+                   revision.revision_id AS requested_revision_id
+            FROM pcp_revisions revision
+            WHERE revision.revision_id = ?
          ),
-         neighbors AS (
+         graph_edges (revision_id, edge_type, created_at) AS (
             SELECT
                 CASE
-                    WHEN edge.from_revision_id = ? THEN edge.to_revision_id
-                    ELSE edge.from_revision_id
-                END AS revision_id,
+                    WHEN relation.from_page_id = origin.page_id
+                    THEN target.current_revision_id
+                    ELSE source.current_revision_id
+                END,
+                relation.relation_type,
+                relation.created_at
+            FROM pcp_relations relation
+            JOIN origin
+            JOIN pcp_pages source ON source.page_id = relation.from_page_id
+            JOIN pcp_pages target ON target.page_id = relation.to_page_id
+            WHERE (relation.from_page_id = origin.page_id
+                   OR relation.to_page_id = origin.page_id)
+              AND relation.from_page_id <> relation.to_page_id
+            UNION ALL
+            SELECT
+                CASE
+                    WHEN provenance.derived_revision_id = origin.requested_revision_id
+                    THEN provenance.input_revision_id
+                    ELSE provenance.derived_revision_id
+                END,
+                'derived_from',
+                provenance.created_at
+            FROM pcp_provenance_inputs provenance
+            JOIN origin
+            WHERE (provenance.derived_revision_id = origin.requested_revision_id
+                   OR provenance.input_revision_id = origin.requested_revision_id)
+              AND provenance.derived_revision_id <> provenance.input_revision_id
+         ),
+         neighbors AS (
+            SELECT edge.revision_id,
                 MAX(edge.created_at) AS edge_created_at
             FROM graph_edges edge
-            WHERE (edge.from_revision_id = ? OR edge.to_revision_id = ?)
-              AND edge.from_revision_id <> edge.to_revision_id",
+            WHERE 1 = 1",
     );
     if !request.filters.relation_types.is_empty() {
         sql.push_str(" AND edge.edge_type IN (");
@@ -487,17 +510,20 @@ fn search_graph(
          SELECT {REVISION_COLUMNS},
                 substr(COALESCE(r.payload_content, r.facets_json, ''), 1, 600),
                 (
-                    SELECT summary_head.current_summary_revision_id FROM pcp_summary_heads summary_head
-                    WHERE summary_head.target_revision_id = r.revision_id
+                    SELECT summary_head.current_summary_revision_id
+                    FROM pcp_page_summary_heads summary_head
+                    WHERE summary_head.target_page_id = r.page_id
                 )
          FROM neighbors
          JOIN pcp_revisions r ON r.revision_id = neighbors.revision_id
+         JOIN pcp_pages p ON p.page_id = r.page_id
          WHERE r.namespace IN ("
     ));
     push_placeholders(&mut sql, request.scopes.len());
     sql.push(')');
     values.extend(request.scopes.iter().cloned().map(SqlValue::Text));
     append_lifecycle_filter(&mut sql, &mut values, request);
+    append_effective_page_filter(&mut sql);
     append_time_filters(&mut sql, &mut values, request);
     sql.push_str(
         " ORDER BY neighbors.edge_created_at DESC, r.revision_id DESC
@@ -550,13 +576,16 @@ fn collect_hits(
     let mut hits = Vec::new();
     while let Some(row) = rows.next().context("read PCP search row")? {
         let revision = revision_from_row(row, false, true, false, false)?;
-        let snippet: String = row.get(17)?;
-        let summary_revision_id: Option<String> = row.get(18)?;
+        let snippet: String = row.get(18)?;
+        let summary_revision_id: Option<String> = row.get(19)?;
         let validity =
             current_validity(connection, &revision.revision_id)?.map(compact_validity_hint);
+        let page = page_manifest(connection, &revision.page_id)?;
         hits.push(SearchHit {
             page_id: revision.page_id,
             revision_id: revision.revision_id,
+            kind: page.kind,
+            mutability: page.mutability,
             namespace: revision.namespace,
             lifecycle_status: revision.lifecycle_status,
             created_at: revision.created_at,
@@ -579,7 +608,8 @@ fn collect_hits(
 
 fn compact_validity_hint(validity: PageValidity) -> PageValidityHint {
     PageValidityHint {
-        assessment_id: validity.assessment_id,
+        assessment_page_id: validity.assessment_page_id,
+        assessment_revision_id: validity.assessment_revision_id,
         standing: validity.standing,
         rationale: truncate_search_text(&validity.rationale, 360),
         scope: validity
@@ -656,7 +686,7 @@ fn append_effective_page_filter(sql: &mut String) {
         " AND NOT EXISTS (
             SELECT 1 FROM pcp_relations newer
             WHERE newer.relation_type = 'supersedes'
-              AND newer.to_revision_id = r.revision_id
+              AND newer.to_page_id = p.page_id
         )",
     );
 }
@@ -684,8 +714,8 @@ fn append_relation_filter(
         " AND EXISTS (
             SELECT 1 FROM pcp_relations relation_filter
             WHERE (
-                relation_filter.from_revision_id = r.revision_id
-                OR relation_filter.to_revision_id = r.revision_id
+                relation_filter.from_page_id = p.page_id
+                OR relation_filter.to_page_id = p.page_id
             ) AND relation_filter.relation_type IN (",
     );
     push_placeholders(sql, request.filters.relation_types.len());

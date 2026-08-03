@@ -164,6 +164,20 @@ async fn dispatch(client: &dyn PcpApi, operation: RpcOperation) -> Result<RpcVal
             u64::try_from(client.content_char_count(requested_scopes).await?)
                 .context("encode PCP content character count")?,
         ),
+        RpcOperation::PlanRevisionRetention(request) => {
+            RpcValue::RevisionRetentionPlan(client.plan_revision_retention(request).await?)
+        }
+        RpcOperation::PutRevisionRetentionLease(request) => {
+            RpcValue::RevisionRetentionLease(client.put_revision_retention_lease(request).await?)
+        }
+        RpcOperation::ActiveRevisionRetentionLeases {
+            requested_scopes,
+            limit,
+        } => RpcValue::RevisionRetentionLeases(
+            client
+                .active_revision_retention_leases(requested_scopes, limit)
+                .await?,
+        ),
         RpcOperation::WritePage(request) => {
             RpcValue::WriteResult(client.write_page(request).await?)
         }

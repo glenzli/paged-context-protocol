@@ -1,295 +1,225 @@
-# Paged-Context-Protocol (PCP) - v0.6.0-draft
+# Paged-Context-Protocol (PCP) - v0.7.0-draft
 
-> 状态：草案。v0.6 收回了早期 Page/Revision 双层对象与独立 Summary、Validity
-> 版本系统。Core 现在以不可变 Page、Page 间 Relation 和可选 Ref 为中心。
+> 状态：草案。v0.7 恢复稳定 Page 与不可变 Revision 的双层模型，并明确区分语义、版本与物理保留策略。
 
-Paged-Context-Protocol（PCP）是一套面向模型、由用户拥有的长期上下文协议。它让不同
-Host 和模型在明确 Scope 与权限下，发现、读取、写入并追溯同一组持久信息，而不规定模型
-必须采用哪一种召回、总结或推理流程。
+Paged-Context-Protocol（PCP）是一套面向模型、由用户拥有的长期上下文协议。它让不同 Host
+和模型在明确 Scope 与权限下发现、读取、写入并追溯同一组持久信息，但不规定固定的召回、
+总结、压缩或推理流程。
 
 PCP 的边界是：
 
-> **维护可寻址、不可变、可追溯的 Page 图；把何时召回、如何理解、是否写入和是否进入
-> 当前注意力留给模型与 Host。**
+> **维护稳定 Page、不可变 Revision、Page 关系与精确来源；把何时召回、如何理解、是否写入
+> 和是否进入当前注意力留给模型与 Host。**
 
 ## 1. Core 对象
 
 ### 1.1 Page
 
-Page 是 PCP 中唯一的持久内容对象。一个 Page：
-
-- 拥有全局稳定的 `page_id`；
-- 属于一个 `namespace`（Scope）；
-- 创建后内容不可原地修改；
-- 可以保存文本 payload、外部大对象引用或二者之一；
-- 可以通过 Relation 引用其他 Page；
-- 可以是原始事件，也可以是模型产生的总结、判断或聚合。
-
-最小 Page envelope：
+Page 是稳定的语义对象，不等于一次内容版本：
 
 ```json
 {
   "pageId": "pg_01...",
+  "headRevisionId": "rev_03...",
   "ownerId": "usr_01...",
   "namespace": "project:example",
-  "visibility": "private",
-  "lifecycleStatus": "active",
-  "createdAt": "2026-08-03T10:00:00+08:00",
-  "createdBy": {
-    "actorType": "user|model|tool|system",
-    "actorId": "..."
-  },
-  "payload": {
-    "mediaType": "text/markdown",
-    "content": "..."
-  },
+  "kind": "document",
+  "mutability": "sealed|revisioned",
+  "lifecycleStatus": "active|superseded|archived|tombstoned",
+  "createdAt": "...",
+  "updatedAt": "..."
+}
+```
+
+- `sealed`：原始消息、文件快照、工具结果等事实记录。产生后不得发布第二个 Revision。
+- `revisioned`：Summary、Topic、用户画像、项目状态等系统持续维护的理解。
+- `mutability` 是内容不变量，不是历史保留级别。
+- `lifecycleStatus` 描述 Page 是否参与默认召回，不表达其内容真假。
+- `kind` 是开放字符串，用于路由和 Host 策略；它不产生新的 Core 对象类型。
+
+### 1.2 Revision
+
+Revision 是 Page 的不可变内容快照：
+
+```json
+{
+  "revisionId": "rev_03...",
+  "pageId": "pg_01...",
+  "previousRevisionId": "rev_02...",
+  "createdAt": "...",
+  "createdBy": { "actorType": "model", "actorId": "..." },
+  "payload": { "mediaType": "text/markdown", "content": "..." },
   "sourceRefs": [],
+  "facets": {},
   "provenance": []
 }
 ```
 
-`payload` 与 `sourceRefs` 至少应有一个非空。大图片、音频和其他大型资源可以由对象存储
-保存，Page 只记录稳定引用、媒体类型、摘要性描述与来源。
+已经存在的 Revision 不得原地改写。`revisioned` Page 通过比较并交换
+`expectedRevisionId -> newRevisionId` 原子推进当前头。普通版本推进由
+`previousRevisionId` 表达，不得创建同一 Page 内的 `supersedes` Relation。
 
-`facets` 可以作为实现定义的可选索引提示，但不是 Core 身份，不得替代 payload、来源或
-Relation，也不应无条件进入模型上下文。
+Revision 不可变不等于永久保留。Store 可以按策略回收不再受保护的历史 Revision；Page
+当前头、sealed Page 的证据 Revision、仍受保护的 provenance 所依赖的 Revision，以及显式
+保留根不得被回收。默认 Search 和全文索引只覆盖 Page 当前头。
 
-### 1.2 Relation
+### 1.3 Relation
 
-Relation 是两个不可变 Page 之间的有向事实：
+Relation 是稳定 Page 之间可维护的语义断言：
 
 ```json
 {
-  "fromPageId": "pg_new",
-  "relationType": "supersedes",
-  "toPageId": "pg_old",
-  "createdAt": "...",
-  "createdBy": { "actorType": "model", "actorId": "..." }
+  "fromPageId": "pg_summary",
+  "relationType": "summarizes",
+  "toPageId": "pg_source",
+  "basisRevisionIds": ["rev_summary_3", "rev_source_7"]
 }
 ```
 
-Core 关系：
+`basisRevisionIds` 记录断言建立时观察的精确版本；导航跟随稳定 Page，审计回到精确 Revision。
+Core 约定关系包括：
 
-- `supersedes`：前者成为后者的新解释、状态或内容后继；后者仍可读取；
-- `summarizes`：前者是后者的路由摘要；
-- `derived_from`：前者直接使用了后者的信息；
-- `assesses`：前者判断后者当前应如何被使用。
+- `summarizes`：来源 Page 是目标 Page 的路由摘要；
+- `assesses`：来源 Page 判断目标 Page 当前应如何使用；
+- `supersedes`：一个 Page 在语义上替代另一个 Page；
+- `aggregates`：来源 Page 聚合多个独立 Page。
 
-Host 可以增加 `responds_to`、`supports`、`contradicts`、`aggregates` 等领域关系。派生关系
-`summarizes`、`derived_from` 和 `aggregates` 必须形成 DAG。`supersedes` 必须形成可追溯的
-有向后继链，不得产生环。
+`derived_from` 的精确信息应优先写入 Revision provenance；只有确有导航价值时才同时建立
+Page Relation。Relation 不能因为时间相邻、同属 Scope、共同命中或向量相似自动产生。
+会话顺序属于 Host event stream，不是 Page 图关系。
 
-Relation 必须来自明确断言，而不是 Store 根据两个 Page 的时间相邻、写入顺序、同属一个
-Scope、搜索命中或向量相似自动生成。特别是：
+同一三元组的 Relation 应被去重。错误 Relation 可以撤回；撤回不修改两端 Page。Relation
+不会授予另一端 Page 的读取权限。
 
-- `responds_to` 表示可证明的回复或生成因果，不等于“这是用户在上一条助手消息之后说的”；
-- `continues` 表示内容上的延续，需要 Host、用户或模型作出语义判断；
-- 单纯的会话顺序应由时间投影或 Host 的 event stream 维护，不应以 `follows` 污染 Page 图。
+### 1.4 Provenance
 
-Store 只应自动创建当前操作能够确定的结构性关系，例如 `supersedes`、`summarizes`、
-`assesses`，以及调用方明确提供输入 Page 时的 `derived_from`。领域语义关系由 Host、用户或
-模型产生。
+Provenance 属于 Revision，必须引用实际参与生成的精确 `revisionId`。模型或工具生成内容时应
+记录操作、Actor、时间、输入 Revision 和必要的工具/模型标识。Page Relation 用于导航，
+provenance 用于复现“当时依据了什么”，二者不可互相替代。
 
-Relation 是独立于 Page 内容的可维护断言。撤回错误、过期或机械生成的 Relation 不会修改
-两端 Page；实现应记录撤回 Actor、时间与原因。精确历史审计可以保留被撤回 Relation，但
-默认 Search 和图遍历不得继续使用它。
+### 1.5 Scope 与 Alias
 
-Relation 不会授予另一端 Page 的读取权限。
+每个 Page 必须属于一个 `namespace`。Search、Read、图遍历和写入均受 AccessSession 的
+Scope Grant 限制；语义相似不得扩大权限。
 
-### 1.3 Ref
+Alias 是可选的人类入口或兼容重定向：`alias -> pageId`。Alias 不是 Page 身份、证据或派生图
+节点。旧版 Ref 可以迁移为 Alias，但不得继续承担稳定 Page 的语义。
 
-Ref 是可选的、可变的定位名称：
+## 2. Summary、Validity 与 Consolidation
 
-```text
-ref_id -> head_page_id
-```
-
-Ref 用于“当前用户画像”“当前项目状态”这类需要稳定入口的对象。更新 Ref 不会改变旧 Page，
-而是创建新 Page、建立 `supersedes`，再原子地推进 Ref。
-
-Ref 不是内容对象、不是证据，也不参与派生 DAG。模型产生的引用与来源必须最终落到精确
-`page_id`，不能只记录一个未来会移动的 Ref。
-
-### 1.4 Scope
-
-每个 Page 必须属于一个 `namespace`。推荐形式：
-
-```text
-user:<user-id>
-project:<project-id>
-task:<task-id>
-conversation:<conversation-id>
-```
-
-统一地址空间不等于全局注入。Search、Read、图遍历和写入都必须受 AccessSession 的 Scope
-Grant 限制；语义相似不得静默扩大权限边界。
-
-## 2. Summary 与 Detail
-
-Summary 不是 Page 的字段版本，也不是第二套存储对象。它是普通的派生 Page，通过
-`summarizes` 指向目标 Page。
-
-只有内容足够长、密集或未来值得路由时，才应创建 Summary。短消息和低价值事件可以只参与
-精确、关键词或时间检索，不要求每个 Page 都有 Summary。
+Summary 是普通的 `revisioned` Page，通过 `summarizes` 指向目标 Page。并非每个 Page 都值得
+Summary；只有内容足够长、密集或未来值得路由时才创建。更好的 Summary 更新同一个 Summary
+Page，产生新 Revision，而不是制造新 Page。
 
 典型召回路径是：
 
 ```text
-Search/Browse compact routing text
-  -> model selects candidate Page IDs
-  -> Read exact Page content
-  -> optionally follow Relations or provenance
+Search/Browse current Summary and Page heads
+  -> model selects stable Page IDs
+  -> Read current or exact Revision
+  -> optionally follow Page Relations or exact provenance
 ```
 
-模型也可以直接精确搜索、全文搜索、图遍历或读取已知 Page。PCP 不规定固定的
-summary-detail 状态机。
+Validity assessment 同样是稳定的 `revisioned` Page；新的判断更新同一 Page，而不是累积新的
+assessment Page。Page 的 `lifecycleStatus` 只控制默认可见性；`live`、
+`qualified`、`disputed`、`retracted` 等认识必须由 assessment 内容、证据 Revision 与当前投影
+表达，不能混入版本链。
 
-更好的 Summary 必须创建新 Summary Page，并以 `supersedes` 指向旧 Summary。多 Page 的主题
-整理同样是普通聚合或 Summary Page，由关系连接来源。
+Consolidation 用于多个 Page 实际表达同一持久对象时的有损收敛：
 
-### 2.1 多 Page 合并
+1. 选择一个 `revisioned` canonical Page；
+2. 读取并锁定所有输入 Page 的精确当前 Revision；
+3. 为 canonical Page 发布一个新 Revision；
+4. provenance 记录全部输入 Revision；
+5. canonical Page 以 `supersedes` 指向被吸收的其他 Page；
+6. 被吸收 Page 退出默认召回，但仍可精确审计。
 
-长期运行的 Memory 层不能只增加 Summary 与 Relation。模型判断多个当前 Page 实际表达同一
-持久主题、事实或状态时，可以创建一个内容自洽的新 Page，并以该 Page `supersedes` 所有
-被替代 Page。这个操作称为 consolidation，而不是 Summary：新 Page 是后续召回可直接使用的
-内容，不只是通往旧 Detail 的索引。
+相似度、共同召回和时间邻接只能发现候选。是否合并以及如何有损生成内容必须由 Host、用户或
+模型判断，Store 只验证权限、并发、图不变量和事务原子性。
 
-Consolidation 必须是原子的，并且：
+## 3. 接口语义
 
-- 输入至少包含两个仍为当前状态的精确 Page IDs；
-- 明确选择一个 canonical Page 作为合并结果的身份；所有输入 Ref 原子地收敛到新 Page，调用方
-  获得 canonical Ref；
-- 新 Page 的 provenance 记录全部输入和 `consolidate` 操作；
-- 所有输入仍可精确读取和沿 lineage 追溯，但退出默认 Search、索引和当前关系图；
-- 输入不一致、相互矛盾或只是部分相关时不得强行合并，应保留、聚合或 assessment。
-
-相似度、时间邻接和共享 Scope 只能帮助发现候选，不能自行触发 consolidation。语义判断和
-有损内容生成必须由 Host、用户或模型完成。实现可以提供可选后台维护器，但 PCP 不规定固定
-调度周期、相似度阈值或模型。
-
-### 2.2 Consolidation 提案与提交边界
-
-PCP Core 只接收已经完成语义判断的 consolidation 提交，不把候选发现、模型 Prompt、任务
-租约、重试或冷却状态定义成 Page 或 Core Relation。最终提交至少包含：
-
-- 两个或更多精确、仍为当前状态的输入 Page IDs；
-- 输入集合中的一个 canonical Page ID；
-- 可独立用于后续召回的新内容；
-- 产生判断的 Actor，以及 Host 可确定的 provenance 与幂等键。
-
-候选与提案是短暂的工作对象，不因“被发现”而自动获得持久语义。实现可以让后台维护器先
-提供有界 routing surface，由语义 worker 选择候选，再读取精确 Detail 并返回以下之一：
-
-```text
-consolidate | keep_separate | defer
-```
-
-只有 `consolidate` 会进入 Core 提交。Store 必须在同一事务中重新验证 Scope、当前 Ref head、
-输入 standing、canonical 身份、DAG 和幂等条件；worker 的判断不能绕过这些约束。
-`keep_separate` 与 `defer` 属于维护器策略状态，不应伪装成用户记忆 Page，除非 Host 明确决定
-该判断本身具有长期信息价值。
-
-## 3. 有效性与变化
-
-Page 的内容永远不被后续事实改写。后续信息可以：
-
-- 以新 Page `supersedes` 旧 Page；
-- 创建 assessment Page，以 `assesses` 指向目标，并以 `derived_from` 指向证据；
-- 使用 `supports`、`contradicts` 或实现定义关系补充语义。
-
-当同一目标有多个 assessment 时，新 assessment 应 `supersedes` 旧 assessment。Store 可以
-投影当前 standing，例如 `live`、`qualified`、`disputed`、`superseded` 或 `retracted`，但
-这个投影必须能回到产生判断的 assessment Page 与证据 Page。
-
-读取默认可以返回“当前有效 Page”，但必须允许按精确 `page_id` 读取旧 Page 和完整 lineage。
-
-## 4. Provenance
-
-模型或工具生成的 Page 应记录：
-
-- 创建 Actor 与时间；
-- 直接输入的精确 Page IDs；
-- 产生内容的操作或工具/模型标识；
-- 必要的外部 source reference。
-
-Host 应自动填充可确定的身份、时间、Scope 与 provenance，避免要求模型重复生成机械元数据。
-模型只需提供内容、意图和它实际使用的 Page IDs。
-
-Summary、聚合与 assessment 不能伪装成原始证据。任何派生链都应能回到仍受权限与保留策略
-约束的来源。
-
-## 5. 模型接口
-
-符合 Core 的能力面应至少提供：
+Core 能力面至少应提供：
 
 - `search_pages(query, scopes, strategy?, limit?, cursor?)`
-- `read_pages(page_ids, view?, max_chars?)`
-- `write_page(content, scope?, based_on_page_ids?)`
-- `supersede_page(target_page_id, content, based_on_page_ids?)`
-- `consolidate_pages(canonical_page_id, replaced_page_ids, content)`
-- `write_summary(target_page_id, content, based_on_page_ids?)`
-- `assess_validity(target_page_id, standing, rationale, evidence_page_ids)`
-- `relate_pages(from_page_id, relation_type, to_page_id)`
+- `read_pages(page_ids, revision_ids?, view?, max_chars?)`
+- `write_page(kind, mutability, content, scope?, based_on_revision_ids?)`
+- `revise_page(page_id, expected_revision_id, content, based_on_revision_ids?)`
+- `consolidate_pages(canonical_page_id, expected_canonical_revision_id,
+  absorbed[{page_id, expected_revision_id}], content)`
+- `write_summary(target_page_id, target_revision_id, content)`
+- `assess_validity(target_page_id, target_revision_id, standing, evidence_revision_ids)`
+- `relate_pages(from_page_id, relation_type, to_page_id, basis_revision_ids?)`
+- `plan_revision_retention(scopes, policy)`
+- `put_revision_retention_lease(revision_id, reason, expires_at, idempotency_key)`
+- `list_active_revision_retention_leases(scopes, limit)`
 
-Host 可以提供 Scope 浏览、Ref 解析、审计和管理接口。对模型公开的默认工具应保持简短：
-结构性关系、Actor、时间、幂等键和常规 provenance 应由 Host 自动产生。
+默认模型工具应简短。Host 自动填充身份、时间、Scope、常规 provenance 和结构性关系。Search
+返回候选而不是真值，并必须有界、可分页、标明命中投影和当前 Revision。精确 Revision 读取
+用于审计，不应重新进入默认搜索结果。
 
-Search 返回的是候选，不是真值。实现可以使用全文索引、精确匹配、时间顺序、图遍历、向量
-检索或混合检索，但必须：
+## 4. 分层责任
 
-- 返回有界结果与游标；
-- 标明命中的 Page ID、Scope、投影和截断文本；
-- 不越过 AccessSession；
-- 允许模型随后读取精确 Page；
-- 默认避免把已被 `supersedes` 的 Page 当作当前候选，同时保留精确读取能力。
+协议定义：Page/Revision 身份、sealed/revisioned 不变量、Page Relation、精确 provenance、
+Scope 权限、CAS 发布与可追溯回收约束。
 
-## 6. Host 与 Store 职责
+Store/Runtime 负责：当前头索引、事务、权限执行、审计、Relation 撤回、历史保留、冷热迁移、
+GC 根、候选发现和维护任务生命周期。这些物理状态不进入模型上下文。
 
-Host 负责：认证、AccessSession、Scope 选择、预算、原始事件捕获、event stream 顺序、领域
-语义关系判断、工具编排，以及哪些内容进入当前模型上下文。
+Host 负责：原始事件捕获、会话顺序、Page kind、哪些对象可修订、Summary/Topic/画像策略、语义
+关系判断、模型路由、主动探索、注意力边界和当前上下文组装。
 
-Store 负责：不可变 Page、调用方断言的 Relation、结构性 Relation、Ref 的原子推进、原子
-consolidation、当前有效 Page 投影、索引、权限执行、持久化、审计和完整性检查。Store 不根据
-时间邻接或相似度发明领域语义关系，也不自行决定哪些内容应被有损合并。
+PCP 不定义固定 Prompt、向量算法、总结阈值、后台 Agent 拓扑或用户画像格式。
 
-PCP 不定义：用户画像策略、主动探索策略、注意力价值判断、固定 Prompt、模型路由、窗口压缩
-算法或后台 Agent 拓扑。这些属于 symbiont-d 等具体 Host。
+## 5. 保留与回收
 
-### 6.1 可选 Runtime Maintainer
+实现可以把 Revision 归为当前、受保护、可回收、冷存或缺页占位，但这是 Store 状态，不是
+Page/Revision 的协议字段。最小安全规则：
 
-参考实现可以在 Store 与语义 worker 之间提供一个非规范性的维护器：
+- 当前头永远保留；
+- sealed Page 的唯一证据 Revision 默认保留；
+- 受保护根可达的 provenance、Relation basis、显式快照或租约引用的 Revision 保留；
+- 未被引用的普通中间 Revision 可按策略压缩或删除；
+- 删除前必须重新计算保护根，并留下聚合级审计记录；
+- 被回收 Revision 的 ID 不得静默复用。
 
-```text
-Store inventory / Summary routes
-  -> Runtime selects a bounded maintenance job
-  -> Semantic worker selects and synthesizes
-  -> Runtime fills mechanical metadata
-  -> Store validates and commits atomically
-```
+精确读取已回收 Revision 时，Store 必须明确返回不可用，而不能静默退回 Page 当前头。
+`previousRevisionId` 表示发布顺序，不是永久保留边；回收后版本链可以存在物理缺口，读取端不得沿
+缺口猜测或替换版本。
 
-该维护器负责自己的生命周期、定时、预算、超时、重试、冷却、worker 接入与运行记录；这些
-状态不属于 PCP Page 图。语义 worker 负责判断是否值得 Summary、哪些 Page 真正等价、是否存在
-冲突以及如何有损合成，但不直接推进 Ref 或写 Relation。Store 仍只负责授权、持久化与结构
-不变量。
+执行回收前，Runtime 应先提供确定性的 dry-run 规划。规划至少返回扫描与保护数量、候选 Revision
+和 Page 数量、按原因聚合的保护根、候选内容估算字节数，以及有界的候选与受保护样本。估算字节
+只用于比较候选规模，不承诺数据库文件会立即释放相同空间。
 
-维护器必须显式启用，使用独立 Principal 和明确 Scope。没有配置语义 worker 时，参考 Runtime
-不得自行退化为相似度阈值合并器。候选发现可以使用相似度、共同召回或实现定义的 routing
-提示，但它们只能减少 worker 的阅读范围，不能成为提交依据。
+规划器从当前头、sealed 证据、最近版本窗口、最小年龄窗口、Relation basis、当前投影、未过期
+幂等记录和显式租约等根出发，再沿受保护 Revision 的跨 Page provenance 传递保护。候选 Revision
+自身的 provenance 不应反向保活整个待回收子图；同一 Page 的普通 `previousRevisionId` 也不是 GC
+根。跨 Scope 依赖必须保守保护授权范围内的输入，但不能泄露未授权对象。
 
-观察、审批和自动应用是 Runtime/Host 策略，不是协议状态。参考 Runtime 应默认以只读 Principal
-运行观察模式；只有显式切换到应用模式后，模型完成的提案才可以进入 Core 提交接口。
+显式保留应使用有期限、可幂等续期的 Revision lease，而不是把保留状态写进 Page 内容。lease
+必须绑定精确 Revision、授权 Scope、持有 Principal、理由和到期时间；过期 lease 不再构成保护根。
+Runtime 可以把真实回收候选的有界路由内容交给 Host 的语义 worker 判断，但模型只选择候选和说明
+理由，不选择全局 GC 参数，也不能绕过 Store 的权限与保护闭包。永久保留、提前撤销和实际回收属于
+显式运维动作，不应由一次普通模型判断静默触发。
 
-## 7. 兼容与迁移
+dry-run 不产生删除。未来执行计划时必须在同一事务内重新计算保护根，并原子清理候选 Revision、
+只属于候选的兼容投影或来源边，以及已经超过窗口的幂等记录。实现应分别声明
+`supportsRevisionRetentionPlanning` 与 `supportsRevisionRetention`；支持规划不表示已经支持执行。
 
-从 v0.4/v0.5 的 Page/Revision 实现迁移到 v0.6 时：
+保留策略按 Host、Page kind、存储预算和价值配置，不应要求模型为每次写入选择 GC 参数。
 
-1. 每个旧 `revision_id` 成为一个不可变 `page_id`；
-2. 旧 `page_id` 成为可选 Ref；
-3. 同一旧逻辑对象的相邻 Revision 回填为 `supersedes` 链；
-4. Summary sidecar 物化为 Summary Page，并建立 `summarizes` 与必要的 `supersedes`；
-5. Validity assessment 物化为 assessment Page，并建立 `assesses`、`derived_from` 与必要的
-   `supersedes`；
-6. 迁移必须幂等，并在升级前保留可恢复备份。
+## 6. v0.6 迁移
 
-参考实现可以在内部暂时保留旧表名与 Rust 类型名，但公开 JSON、模型工具与 Console 应使用
-v0.6 的 Page、Relation、Ref 语义。
+v0.6 参考实现虽然公开使用 `Ref ≈ Page`、`Page ≈ Revision`，数据库已保存稳定 `page_id` 和
+精确 `revision_id`。升级到 v0.7 时应：
+
+1. 恢复旧稳定 `page_id` 为 Page；旧 `revision_id` 为 Revision；
+2. 由 Page 当前头回填 owner、Scope、kind、mutability 与 lifecycle；
+3. 由同 Page 的时间序回填 `previousRevisionId`；
+4. 删除同 Page 内机械生成的 `supersedes`；
+5. 将 Relation 端点归一为稳定 Page，并保留精确 basis Revision；
+6. 把 Summary 与 Validity 更新分别收敛到稳定维护 Page；
+7. 重建只包含当前头的全文与 Summary 索引；
+8. 移除身份型旧 Ref；实现若确实提供 Alias API，再显式迁移非身份型 Ref。
+
+迁移必须事务化、幂等，并在升级前保留可恢复备份。

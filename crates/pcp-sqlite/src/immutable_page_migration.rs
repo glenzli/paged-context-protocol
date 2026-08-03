@@ -9,6 +9,18 @@ const MIGRATION_KEY: &str = "immutable_page_model_version";
 const MIGRATION_VERSION: &str = "1";
 
 pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
+    let existing_version = connection
+        .query_row(
+            "SELECT value FROM pcp_metadata WHERE key = ?1",
+            [MIGRATION_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .context("read immutable PCP Page migration version")?;
+    if existing_version.as_deref() == Some(MIGRATION_VERSION) {
+        return Ok(());
+    }
+
     connection
         .execute_batch(
             "
@@ -29,16 +41,7 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
         )
         .context("initialize immutable PCP Page support")?;
 
-    let version: String = connection
-        .query_row(
-            "SELECT value FROM pcp_metadata WHERE key = ?1",
-            [MIGRATION_KEY],
-            |row| row.get(0),
-        )
-        .context("read immutable PCP Page migration version")?;
-    if version == MIGRATION_VERSION {
-        return Ok(());
-    }
+    let version = existing_version.unwrap_or_else(|| "0".to_owned());
     if version != "0" {
         anyhow::bail!("unsupported immutable PCP Page migration version: {version}");
     }

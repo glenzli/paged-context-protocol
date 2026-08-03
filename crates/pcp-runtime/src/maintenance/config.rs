@@ -40,6 +40,8 @@ pub struct MaintenanceConfig {
     pub summary: SummaryMaintenanceConfig,
     #[serde(default)]
     pub compaction: CompactionMaintenanceConfig,
+    #[serde(default)]
+    pub retention: RetentionMaintenanceConfig,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -74,8 +76,10 @@ impl Default for SummaryMaintenanceConfig {
             retry_after_seconds: 86_400,
             excluded_page_kinds: vec![
                 "pcp_summary".to_owned(),
+                "summary_projection".to_owned(),
                 "validity_assessment".to_owned(),
                 "conversation_event".to_owned(),
+                "tombstone".to_owned(),
             ],
         }
     }
@@ -91,6 +95,44 @@ pub struct CompactionMaintenanceConfig {
     pub max_input_chars: u32,
     pub retry_after_seconds: u64,
     pub excluded_page_kinds: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RetentionMaintenanceConfig {
+    pub enabled: bool,
+    pub apply: bool,
+    pub minimum_age_days: u32,
+    pub keep_recent_revisions_per_page: u32,
+    pub candidate_window: usize,
+    pub routing_chars_per_page: usize,
+    pub max_revisions_per_cycle: usize,
+    pub lease_days: u32,
+    pub retry_after_seconds: u64,
+    pub excluded_page_kinds: Vec<String>,
+}
+
+impl Default for RetentionMaintenanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            apply: false,
+            minimum_age_days: 30,
+            keep_recent_revisions_per_page: 2,
+            candidate_window: 32,
+            routing_chars_per_page: 480,
+            max_revisions_per_cycle: 4,
+            lease_days: 90,
+            retry_after_seconds: 30 * 86_400,
+            excluded_page_kinds: vec![
+                "pcp_summary".to_owned(),
+                "summary_projection".to_owned(),
+                "validity_assessment".to_owned(),
+                "conversation_event".to_owned(),
+                "tombstone".to_owned(),
+            ],
+        }
+    }
 }
 
 impl Default for CompactionMaintenanceConfig {
@@ -170,6 +212,22 @@ impl MaintenanceConfig {
             !self.compaction.enabled || self.compaction.candidate_window >= 2,
             "PCP compaction candidate_window must be at least 2"
         );
+        anyhow::ensure!(
+            !self.retention.enabled || self.retention.candidate_window > 0,
+            "PCP retention candidate_window must be positive"
+        );
+        anyhow::ensure!(
+            !self.retention.enabled || self.retention.routing_chars_per_page > 0,
+            "PCP retention routing_chars_per_page must be positive"
+        );
+        anyhow::ensure!(
+            !self.retention.enabled || (1..=64).contains(&self.retention.max_revisions_per_cycle),
+            "PCP retention max_revisions_per_cycle must be between 1 and 64"
+        );
+        anyhow::ensure!(
+            !self.retention.enabled || (1..=3_650).contains(&self.retention.lease_days),
+            "PCP retention lease_days must be between 1 and 3650"
+        );
         Ok(())
     }
 
@@ -192,9 +250,12 @@ impl MaintenanceConfig {
             .iter()
             .map(|scope| scope.replace("{owner_id}", owner_id))
             .collect();
-        let access_mode = match self.mode {
-            MaintenanceMode::Observe => AccessMode::Read,
-            MaintenanceMode::Apply => AccessMode::Write,
+        let access_mode = if self.mode == MaintenanceMode::Apply
+            || (self.retention.enabled && self.retention.apply)
+        {
+            AccessMode::Write
+        } else {
+            AccessMode::Read
         };
         access_mode.session(
             AccessPrincipal {
@@ -210,6 +271,10 @@ impl MaintenanceConfig {
 
     pub fn applies_changes(&self) -> bool {
         self.mode == MaintenanceMode::Apply
+    }
+
+    pub fn applies_retention_changes(&self) -> bool {
+        self.retention.enabled && self.retention.apply
     }
 
     pub fn worker_actor(&self) -> Actor {

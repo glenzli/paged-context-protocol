@@ -1,347 +1,99 @@
-# Paged-Context-Protocol (PCP) - v0.6.0-draft
+# Paged-Context-Protocol (PCP) - v0.7.0-draft
 
-> Status: Draft. v0.6 removes the earlier two-level Page/Revision object and
-> the independent version systems for Summary and Validity. Core now centers
-> on immutable Pages, Relations between Pages, and optional Refs.
+> Status: Draft. v0.7 restores stable Pages and immutable Revisions while separating semantic identity, version history, and physical retention.
 
-Paged-Context-Protocol (PCP) is a model-facing, user-owned protocol for durable
-context. It lets authorized Hosts and models discover, read, write, and trace a
-shared information space without prescribing one retrieval, summarization, or
-reasoning workflow.
+Paged-Context-Protocol (PCP) is a model-facing, user-owned protocol for durable context. Authorized Hosts and models can discover, read, write, and trace one persistent information space without adopting a fixed retrieval, summarization, compaction, or reasoning workflow.
 
 PCP's boundary is:
 
-> **Maintain an addressable, immutable, traceable Page graph. Leave when to
-> recall, how to interpret, whether to write, and what enters current attention
-> to the model and Host.**
+> **Maintain stable Pages, immutable Revisions, Page Relations, and exact provenance. Leave recall, interpretation, write admission, and active attention to the model and Host.**
 
-## 1. Core Objects
+## 1. Core objects
 
-### 1.1 Page
+### Page
 
-A Page is PCP's only persistent content object. A Page:
+A Page is a stable semantic object, not a content version. It has a `pageId`, `headRevisionId`, owner, Scope namespace, open `kind`, `mutability`, lifecycle, and timestamps.
 
-- has a globally stable `page_id`;
-- belongs to one `namespace` (Scope);
-- cannot be edited in place after creation;
-- may contain a payload, stable references to large external objects, or both;
-- may refer to other Pages through Relations;
-- may represent either a raw event or a model-derived summary, judgment, or
-  aggregate.
+- `sealed` Pages represent raw messages, file snapshots, tool results, and other evidence. They cannot publish a second Revision.
+- `revisioned` Pages represent maintained understanding such as Summaries, Topics, profiles, and project state.
+- Mutability is a content invariant, not a retention tier.
+- Lifecycle controls default discovery and does not assert truth.
 
-Minimal Page envelope:
+### Revision
 
-```json
-{
-  "pageId": "pg_01...",
-  "ownerId": "usr_01...",
-  "namespace": "project:example",
-  "visibility": "private",
-  "lifecycleStatus": "active",
-  "createdAt": "2026-08-03T10:00:00+08:00",
-  "createdBy": {
-    "actorType": "user|model|tool|system",
-    "actorId": "..."
-  },
-  "payload": {
-    "mediaType": "text/markdown",
-    "content": "..."
-  },
-  "sourceRefs": [],
-  "provenance": []
-}
-```
+A Revision is an immutable Page snapshot with `revisionId`, `pageId`, optional `previousRevisionId`, payload or source references, creator, times, facets, and provenance. A revisioned Page advances its head through compare-and-swap. Ordinary version history uses `previousRevisionId`; it MUST NOT create an intra-Page `supersedes` Relation. A collected Revision MUST fail exact reads explicitly rather than silently resolving to the current Page head.
 
-At least one of `payload` and `sourceRefs` SHOULD be non-empty. Object storage
-may hold large images, audio, and other assets while the Page preserves a
-stable reference, media type, routing description, and source.
+Immutable does not mean retained forever. A Store may reclaim unprotected historical Revisions. Current heads, sealed evidence, provenance inputs reachable from protected roots, Relation basis Revisions, and explicit retention roots remain protected. Default Search and full-text indexes cover Page heads only.
 
-Implementation-defined `facets` MAY assist indexing. They are not Core
-identity, do not replace payload, sources, or Relations, and SHOULD NOT enter
-model context unconditionally.
+### Relation
 
-### 1.2 Relation
+A Relation is a maintainable semantic assertion between stable Pages. Optional `basisRevisionIds` capture the exact versions observed when the assertion was made. Navigation follows Pages; audit follows Revisions.
 
-A Relation is a directed fact between two immutable Pages:
+Core conventions include `summarizes`, `assesses`, cross-Page `supersedes`, and `aggregates`. Exact generation dependency belongs in Revision provenance; a `derived_from` Page Relation is added only when it also has navigation value.
 
-```json
-{
-  "fromPageId": "pg_new",
-  "relationType": "supersedes",
-  "toPageId": "pg_old",
-  "createdAt": "...",
-  "createdBy": { "actorType": "model", "actorId": "..." }
-}
-```
+Relations MUST NOT be inferred from temporal adjacency, shared Scope, co-retrieval, or vector similarity. Conversation order belongs to a Host event stream. Duplicate triples should be coalesced, and incorrect Relations may be retracted without mutating either Page.
 
-Core Relations are:
+### Provenance
 
-- `supersedes`: the source is a newer interpretation, state, or content
-  successor; the target remains readable;
-- `summarizes`: the source is a routing Summary for the target;
-- `derived_from`: the source directly used information from the target;
-- `assesses`: the source judges how the target should currently be used.
+Provenance belongs to a Revision and references the exact input Revision IDs actually used. It records operation, actor, time, tool or model where useful, and external sources. Relations support navigation; provenance reconstructs what a generation depended on.
 
-Hosts MAY add domain Relations such as `responds_to`, `supports`,
-`contradicts`, and `aggregates`. The `summarizes`, `derived_from`, and
-`aggregates` derivation subgraph MUST be acyclic. `supersedes` MUST form
-traceable directed successor chains without cycles.
+### Scope and Alias
 
-A Relation MUST come from an explicit assertion. The Store MUST NOT create a
-Relation merely because two Pages are adjacent in time or write order, share a
-Scope, co-occur in search results, or are similar in an embedding space. In
-particular:
+Every Page belongs to one namespace. Search, Read, graph traversal, and writes obey AccessSession Scope Grants; similarity never widens authorization.
 
-- `responds_to` means a demonstrable reply or generation dependency, not only
-  that a user message occurred after the latest assistant message;
-- `continues` means semantic continuation and requires judgment by the Host,
-  user, or model;
-- ordinary conversation order belongs in a temporal projection or Host event
-  stream, not in a `follows` edge that pollutes the Page graph.
+An Alias is an optional human entry point or compatibility redirect from a name to a Page ID. It is not Page identity, evidence, or a derivation node. Legacy Refs may migrate to Aliases.
 
-The Store SHOULD create only structural Relations determined by the current
-operation, such as `supersedes`, `summarizes`, and `assesses`, plus
-`derived_from` when the caller supplies exact input Pages. Domain-semantic
-Relations belong to the Host, user, or model.
+## 2. Summary, validity, and consolidation
 
-A Relation is a maintainable assertion separate from Page content. Retracting
-an incorrect, stale, or mechanically generated Relation does not mutate either
-endpoint Page. Implementations SHOULD audit the retraction actor, time, and
-reason. Exact audit views MAY retain retracted Relations, but default Search
-and graph traversal MUST ignore them.
+A Summary is an ordinary revisioned Page connected to its target by `summarizes`. Only long, dense, or future-useful content needs one. A better Summary publishes a new Revision of the same Summary Page instead of creating another Page.
 
-A Relation does not grant access to its other endpoint.
-
-### 1.3 Ref
-
-A Ref is an optional mutable locator:
+Typical recall is:
 
 ```text
-ref_id -> head_page_id
+Search/Browse current Summary and Page heads
+  -> model selects stable Page IDs
+  -> Read current or exact Revisions
+  -> optionally follow Page Relations or exact provenance
 ```
 
-Refs provide stable entry points for concepts such as “current user
-orientation” or “current project state.” Advancing a Ref never edits an old
-Page. The Host creates a new Page, links it with `supersedes`, and atomically
-advances the Ref.
+Validity assessments are ordinary Pages as well. Page lifecycle controls discovery; standings such as live, qualified, disputed, or retracted come from assessment content and evidence.
 
-A Ref is not content or evidence and does not participate in the derivation
-DAG. Durable provenance MUST resolve to exact Page IDs, not only to a Ref that
-may move later.
+Consolidation lossily converges Pages that genuinely represent one durable object. It publishes a new Revision on one canonical revisioned Page, records all exact input Revisions in provenance, links the canonical Page to absorbed Pages with cross-Page `supersedes`, and removes absorbed Pages from default recall. Similarity may discover candidates but never decides the merge.
 
-### 1.4 Scope
+## 3. Interface semantics
 
-Every Page MUST belong to one `namespace`. Recommended forms include:
+A Core surface should provide bounded Search, current or exact Read, sealed or revisioned writes, CAS revision, atomic consolidation, Summary and validity writes, Page Relations, Scope discovery, audit, a bounded `plan_revision_retention(scopes, policy)` dry run, and finite idempotent Revision retention leases.
 
-```text
-user:<user-id>
-project:<project-id>
-task:<task-id>
-conversation:<conversation-id>
-```
+Hosts should fill mechanical actor, time, Scope, structural Relation, and provenance fields. Search returns candidates rather than truth and defaults to current heads. Historical Revisions remain exactly addressable for audit but do not re-enter default retrieval.
 
-A unified address space is not global injection. Search, Read, graph traversal,
-and writes MUST respect the AccessSession's Scope Grants. Semantic similarity
-must never silently widen an authorization boundary.
+## 4. Responsibility boundaries
 
-## 2. Summary and Detail
+The protocol defines Page and Revision identity, sealed/revisioned invariants, Page Relations, exact provenance, Scope authorization, CAS publication, and retention safety constraints.
 
-A Summary is not a versioned field on another Page and not a separate storage
-object. It is an ordinary derived Page connected to its target by `summarizes`.
+The Store and Runtime own transactions, current-head indexes, authorization enforcement, relation retraction, retention, cold storage, GC roots, candidate discovery, and maintenance job lifecycle. Physical residency does not enter model context.
 
-Only long, dense, or future-useful content SHOULD receive a Summary. Short or
-low-value events may remain available through exact, lexical, or temporal
-search without a Summary.
+The Host owns event capture and order, Page kinds, revision policy, Summary/Topic/profile policy, semantic judgment, model routing, proactive exploration, attention boundaries, and active-context assembly.
 
-A typical recall path is:
+PCP does not define a fixed prompt, vector algorithm, summarization threshold, background-agent topology, or user-profile schema.
 
-```text
-Search/Browse compact routing text
-  -> model selects candidate Page IDs
-  -> Read exact Page content
-  -> optionally follow Relations or provenance
-```
+## 5. Retention
 
-A model may instead use exact search, full-text search, graph traversal, or a
-known Page ID. PCP does not prescribe a fixed summary-detail state machine.
+Implementations may classify Revisions as current, protected, reclaimable, cold, or stubbed, but those are Store states rather than protocol fields. Current heads, sealed evidence, provenance inputs reachable from protected roots, Relation-basis inputs, and explicit snapshots or leases are protected. Unreferenced intermediate Revisions may be compacted or deleted after roots are recalculated. IDs are never silently reused.
 
-A better Summary MUST be a new Summary Page that `supersedes` the old Summary.
-Cross-Page topic organization is likewise represented by ordinary aggregate or
-Summary Pages linked to their exact sources.
+An exact read of a collected Revision MUST report that it is unavailable and MUST NOT fall back to the current Page head. `previousRevisionId` records publication order rather than permanent retention, so a retained history may contain physical gaps.
 
-### 2.1 Multi-Page Consolidation
+Before collection, a Runtime should expose a deterministic dry-run plan. The plan reports scanned and protected counts, candidate Revision and Page counts, protection reasons, estimated candidate bytes, and bounded candidate and protected samples. Estimated bytes compare candidate payload size; they do not promise immediate database-file shrinkage.
 
-A long-running Memory layer cannot only add Summaries and Relations. When a
-model determines that several current Pages express one durable subject, fact,
-or state, it may write one self-contained Page that `supersedes` every replaced
-Page. This operation is consolidation, not summarization: the new Page is
-directly usable content for future recall, not merely an index into old Detail.
+The planner begins from current heads, sealed evidence, recent-version and minimum-age windows, Relation basis Revisions, current projections, live idempotency records, explicit snapshots, and leases. Protection then closes over cross-Page provenance reachable from protected roots. Provenance owned only by a candidate does not keep the whole candidate subtree alive, and ordinary same-Page `previousRevisionId` links are not GC roots. A dependency crossing an unauthorized Scope conservatively protects the authorized input without exposing the outside object.
 
-Consolidation MUST be atomic and:
+Explicit retention uses finite, idempotently renewable Revision leases rather than Page content fields. A lease binds an exact Revision, authorized Scope, holder Principal, reason, and expiration; an expired lease is no longer a protection root. A Runtime may offer bounded routing views of actual collection candidates to a Host semantic worker, but the model selects candidates and reasons only. It does not choose global GC policy or bypass Store authorization and protection closure. Permanent retention, early revocation, and collection remain explicit operator actions rather than silent consequences of an ordinary model decision.
 
-- take at least two exact Page IDs that are still current;
-- select one canonical Page as the result identity; atomically converge every
-  input Ref on the new Page and return the canonical Ref;
-- record every input and the `consolidate` operation in provenance;
-- keep every input exactly readable through lineage while removing it from
-  default Search, index browsing, and current graph views;
-- refuse to collapse incompatible, contradictory, or merely adjacent Pages,
-  which should instead remain separate, aggregate, or receive assessments.
+A dry run performs no deletion. A future apply operation MUST recalculate roots inside the write transaction and atomically remove candidate Revisions, candidate-owned compatibility projections or source edges, and expired idempotency records. Implementations advertise planning and application separately through `supportsRevisionRetentionPlanning` and `supportsRevisionRetention`; planning support does not imply collection support.
 
-Similarity, temporal adjacency, and shared Scope may discover candidates but
-MUST NOT trigger consolidation by themselves. A Host, user, or model owns the
-semantic judgment and lossy synthesis. An implementation MAY provide an
-optional background maintainer, but PCP does not prescribe its schedule,
-similarity threshold, or model.
+Retention policy is configured by Host, Page kind, storage budget, and value; models should not choose GC parameters on every write.
 
-### 2.2 Consolidation Proposal and Commit Boundary
+## 6. Migration from v0.6
 
-PCP Core accepts only a consolidation commit whose semantic judgment is
-complete. Candidate discovery, model prompts, job leases, retries, and cooldown
-state are not Pages or Core Relations. A final commit contains at least:
+The v0.6 reference database already stored stable `page_id` and exact `revision_id` while its public vocabulary exposed `Ref ~= Page` and `Page ~= Revision`. A v0.7 migration restores those identities, backfills Page metadata and Revision parents, removes intra-Page `supersedes`, normalizes Relations to Page endpoints with exact basis Revisions, converges Summary and Validity updates on stable maintained Pages, rebuilds head-only indexes, and removes identity Refs. An implementation that actually exposes an Alias API may explicitly migrate non-identity Refs instead.
 
-- two or more exact input Page IDs that are still current;
-- one canonical Page ID from that input set;
-- new content that is independently useful for future recall;
-- the deciding Actor plus Host-determined provenance and idempotency identity.
-
-Candidates and proposals are transient work objects. Discovery alone gives them
-no durable semantics. An implementation may let a background maintainer expose
-a bounded routing surface, ask a semantic worker to select candidates, read
-exact Detail, and return one of:
-
-```text
-consolidate | keep_separate | defer
-```
-
-Only `consolidate` crosses the Core commit boundary. In one transaction the
-Store MUST revalidate Scope, current Ref heads, input standing, canonical
-identity, DAG constraints, and idempotency. Worker judgment cannot bypass those
-invariants. `keep_separate` and `defer` are maintainer policy state and SHOULD
-NOT masquerade as user-memory Pages unless the Host explicitly judges the
-decision itself to have durable informational value.
-
-## 3. Validity and Change
-
-Later information never rewrites Page content. It may:
-
-- create a new Page that `supersedes` an old Page;
-- create an assessment Page that `assesses` a target and is `derived_from`
-  evidence Pages;
-- add `supports`, `contradicts`, or implementation-defined semantic Relations.
-
-When a target has multiple assessments, a newer assessment SHOULD `supersede`
-the prior assessment. A Store may project a current standing such as `live`,
-`qualified`, `disputed`, `superseded`, or `retracted`, but that projection MUST
-trace back to the assessment and evidence Pages that produced it.
-
-Default discovery may return only effective Pages, but exact Page reads and
-complete lineage retrieval MUST remain available.
-
-## 4. Provenance
-
-A model- or tool-generated Page SHOULD record:
-
-- creation Actor and time;
-- exact input Page IDs;
-- the producing operation and tool or model identity;
-- required external source references.
-
-The Host SHOULD fill deterministic identity, time, Scope, structural Relations,
-and provenance rather than asking the model to reproduce mechanical metadata.
-The model supplies content, intent, and the exact Pages it actually used.
-
-Summaries, aggregates, and assessments MUST NOT masquerade as raw evidence.
-Derived paths SHOULD remain traceable to sources subject to authorization and
-retention policy.
-
-## 5. Model Interface
-
-A Core capability surface SHOULD provide at least:
-
-- `search_pages(query, scopes, strategy?, limit?, cursor?)`
-- `read_pages(page_ids, view?, max_chars?)`
-- `write_page(content, scope?, based_on_page_ids?)`
-- `supersede_page(target_page_id, content, based_on_page_ids?)`
-- `consolidate_pages(canonical_page_id, replaced_page_ids, content)`
-- `write_summary(target_page_id, content, based_on_page_ids?)`
-- `assess_validity(target_page_id, standing, rationale, evidence_page_ids)`
-- `relate_pages(from_page_id, relation_type, to_page_id)`
-
-Hosts MAY expose Scope discovery, Ref resolution, audit, and administrative
-operations. Default model tools SHOULD remain compact. The Host should produce
-structural Relations, Actor, time, idempotency, and routine provenance.
-
-Search results are candidates, not truth. An implementation may use lexical,
-exact, temporal, graph, vector, or hybrid retrieval, but it MUST:
-
-- return bounded results and cursors;
-- identify the matched Page ID, Scope, projection, and truncated routing text;
-- remain inside the AccessSession;
-- allow exact Page reads afterward;
-- avoid presenting Pages with an incoming `supersedes` Relation as current by
-  default while retaining exact access to them.
-
-## 6. Host and Store Responsibilities
-
-The Host owns authentication, AccessSessions, Scope selection, budgets, raw
-event capture, event-stream order, domain-semantic Relation judgment, tool
-orchestration, and admission into active model context.
-
-The Store owns immutable Pages, caller-asserted Relations, structural
-Relations, atomic Ref advancement, atomic consolidation, effective-Page
-projection, indexes, authorization enforcement, persistence, audit, and
-integrity checks. It does not invent domain-semantic Relations from temporal
-adjacency or similarity or decide which content should be lossily consolidated.
-
-PCP does not define user-profile policy, autonomous exploration, interruption
-value, fixed prompts, model routing, context-window compaction, or background
-agent topology. Those belong to concrete Hosts such as symbiont-d.
-
-### 6.1 Optional Runtime Maintainer
-
-A reference implementation may provide a non-normative maintainer between the
-Store and a semantic worker:
-
-```text
-Store inventory / Summary routes
-  -> Runtime selects a bounded maintenance job
-  -> Semantic worker selects and synthesizes
-  -> Runtime fills mechanical metadata
-  -> Store validates and commits atomically
-```
-
-The maintainer owns its lifecycle, schedule, budgets, timeout, retry, cooldown,
-worker integration, and operational records. That state does not belong in the
-PCP Page graph. The semantic worker decides whether a Summary is worthwhile,
-which Pages are genuinely equivalent, whether they conflict, and how to perform
-lossy synthesis, but it does not advance Refs or write Relations directly. The
-Store continues to own authorization, persistence, and structural invariants.
-
-Maintenance MUST be explicitly enabled under a separate Principal and explicit
-Scopes. Without a configured semantic worker, a reference Runtime MUST NOT
-silently degrade into a similarity-threshold merger. Similarity, co-recall, and
-implementation-defined routing hints may reduce what the worker reads; they
-remain candidate filters rather than commit evidence.
-
-Observation, approval, and automatic application are Runtime/Host policy, not
-protocol state. A reference Runtime SHOULD default to observation under a
-read-only Principal; model-completed proposals may enter Core commit APIs only
-after apply mode is selected explicitly.
-
-## 7. Compatibility and Migration
-
-To migrate a v0.4/v0.5 Page/Revision implementation to v0.6:
-
-1. each old `revision_id` becomes an immutable `page_id`;
-2. each old `page_id` becomes an optional Ref;
-3. adjacent Revisions of one old logical object become a `supersedes` chain;
-4. Summary sidecars become Summary Pages with `summarizes` and required
-   `supersedes` Relations;
-5. Validity assessments become assessment Pages with `assesses`,
-   `derived_from`, and required `supersedes` Relations;
-6. migration MUST be idempotent and preceded by a recoverable backup.
-
-A reference implementation may temporarily retain legacy table and Rust type
-names internally. Public JSON, model tools, and operator consoles SHOULD expose
-the v0.6 Page, Relation, and Ref semantics.
+Migration MUST be transactional, idempotent, and preceded by a recoverable backup.

@@ -80,12 +80,14 @@ impl SqlitePcpStore {
             let mut storage = StorageHealth::default();
             for scope in scopes.values() {
                 storage.current_pages += scope.current_pages;
-                storage.immutable_pages += scope.immutable_pages;
+                storage.pages += scope.pages;
+                storage.revisions += scope.revisions;
                 storage.content_chars += scope.content_chars;
             }
-            let (refs, redirected_refs) = ref_health(&connection, &allowed_scopes)?;
-            storage.refs = refs;
-            storage.redirected_refs = redirected_refs;
+            storage.historical_revisions = storage.revisions.saturating_sub(storage.pages);
+            let (sealed_pages, revisioned_pages) = mutability_health(&connection, &allowed_scopes)?;
+            storage.sealed_pages = sealed_pages;
+            storage.revisioned_pages = revisioned_pages;
             let (created, long_pages, summarized_long_pages) =
                 current_page_details(&connection, &allowed_scopes, &window_started_at)?;
             storage.current_pages_created = created;
@@ -209,10 +211,10 @@ impl SqlitePcpStore {
                     p95_duration_ms: percentile(&mut value.durations, 95),
                 })
                 .collect();
-            let average_relations_per_page = if storage.immutable_pages == 0 {
+            let average_relations_per_page = if storage.pages == 0 {
                 0.0
             } else {
-                relations as f64 / storage.immutable_pages as f64
+                relations as f64 / storage.pages as f64
             };
 
             Ok(HealthSnapshot {
@@ -259,22 +261,13 @@ fn storage_by_scope(
     let values = scope_values(allowed_scopes);
     let current_sql = format!(
         "
-        SELECT revision.namespace, count(DISTINCT revision.revision_id),
+        SELECT page.namespace, count(*),
                sum(length(COALESCE(revision.payload_content, '')))
         FROM pcp_pages page
         JOIN pcp_revisions revision ON revision.revision_id = page.current_revision_id
-        WHERE revision.namespace IN ({placeholders})
-          AND revision.lifecycle_status = 'active'
-          AND NOT EXISTS (
-              SELECT 1
-              FROM pcp_relations newer
-              LEFT JOIN pcp_relation_retractions retraction
-                ON retraction.relation_id = newer.relation_id
-              WHERE newer.relation_type = 'supersedes'
-                AND newer.to_revision_id = revision.revision_id
-                AND retraction.relation_id IS NULL
-          )
-        GROUP BY revision.namespace
+        WHERE page.namespace IN ({placeholders})
+          AND page.lifecycle_status = 'active'
+        GROUP BY page.namespace
         "
     );
     let mut statement = connection
@@ -298,22 +291,41 @@ fn storage_by_scope(
         }
     }
 
+    let page_sql = format!(
+        "SELECT namespace, count(*) FROM pcp_pages WHERE namespace IN ({placeholders}) GROUP BY namespace"
+    );
+    let mut statement = connection
+        .prepare(&page_sql)
+        .context("prepare PCP Page health")?;
+    let rows = statement
+        .query_map(params_from_iter(values.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+        })
+        .context("query PCP Page health")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect PCP Page health")?;
+    for (namespace, pages) in rows {
+        if let Some(scope) = scopes.get_mut(&namespace) {
+            scope.pages = pages;
+        }
+    }
+
     let revision_sql = format!(
         "SELECT namespace, count(*) FROM pcp_revisions WHERE namespace IN ({placeholders}) GROUP BY namespace"
     );
     let mut statement = connection
         .prepare(&revision_sql)
-        .context("prepare PCP immutable Page health")?;
+        .context("prepare PCP Revision health")?;
     let rows = statement
         .query_map(params_from_iter(values.iter()), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
         })
-        .context("query PCP immutable Page health")?
+        .context("query PCP Revision health")?
         .collect::<rusqlite::Result<Vec<_>>>()
-        .context("collect PCP immutable Page health")?;
-    for (namespace, immutable_pages) in rows {
+        .context("collect PCP Revision health")?;
+    for (namespace, revisions) in rows {
         if let Some(scope) = scopes.get_mut(&namespace) {
-            scope.immutable_pages = immutable_pages;
+            scope.revisions = revisions;
         }
     }
     Ok(scopes)
@@ -334,30 +346,20 @@ fn current_page_details(
             sum(CASE WHEN revision.created_at >= ?{} THEN 1 ELSE 0 END),
             sum(CASE WHEN revision.payload_media_type LIKE 'text/%'
                           AND length(COALESCE(revision.payload_content, '')) >= ?{}
-                          AND COALESCE(json_extract(revision.facets_json, '$.kind'), '')
-                              NOT IN ('summary', 'page_summary', 'summary_projection')
+                          AND page.kind <> 'summary_projection'
                      THEN 1 ELSE 0 END),
             sum(CASE WHEN revision.payload_media_type LIKE 'text/%'
                           AND length(COALESCE(revision.payload_content, '')) >= ?{}
-                          AND COALESCE(json_extract(revision.facets_json, '$.kind'), '')
-                              NOT IN ('summary', 'page_summary', 'summary_projection')
+                          AND page.kind <> 'summary_projection'
                           AND EXISTS (
-                              SELECT 1 FROM pcp_summary_heads summary
-                              WHERE summary.target_revision_id = revision.revision_id
+                              SELECT 1 FROM pcp_page_summary_heads summary
+                              WHERE summary.target_page_id = page.page_id
                           )
                      THEN 1 ELSE 0 END)
         FROM pcp_pages page
         JOIN pcp_revisions revision ON revision.revision_id = page.current_revision_id
-        WHERE revision.namespace IN ({placeholders})
-          AND revision.lifecycle_status = 'active'
-          AND NOT EXISTS (
-              SELECT 1 FROM pcp_relations newer
-              LEFT JOIN pcp_relation_retractions retraction
-                ON retraction.relation_id = newer.relation_id
-              WHERE newer.relation_type = 'supersedes'
-                AND newer.to_revision_id = revision.revision_id
-                AND retraction.relation_id IS NULL
-          )
+        WHERE page.namespace IN ({placeholders})
+          AND page.lifecycle_status = 'active'
         ",
         allowed_scopes.len() + 1,
         allowed_scopes.len() + 2,
@@ -374,22 +376,26 @@ fn current_page_details(
         .context("query PCP current Page details")
 }
 
-fn ref_health(
+fn mutability_health(
     connection: &rusqlite::Connection,
     allowed_scopes: &BTreeSet<String>,
 ) -> Result<(u64, u64)> {
     let sql = format!(
-        "SELECT count(*), count(DISTINCT head_page_id) FROM pcp_refs WHERE namespace IN ({})",
+        "SELECT
+             sum(CASE WHEN mutability = 'sealed' THEN 1 ELSE 0 END),
+             sum(CASE WHEN mutability = 'revisioned' THEN 1 ELSE 0 END)
+         FROM pcp_pages WHERE namespace IN ({})",
         placeholders(allowed_scopes.len())
     );
     let values = scope_values(allowed_scopes);
     connection
         .query_row(&sql, params_from_iter(values.iter()), |row| {
-            let refs = row.get::<_, i64>(0)? as u64;
-            let unique_heads = row.get::<_, i64>(1)? as u64;
-            Ok((refs, refs.saturating_sub(unique_heads)))
+            Ok((
+                row.get::<_, Option<i64>>(0)?.unwrap_or(0) as u64,
+                row.get::<_, Option<i64>>(1)?.unwrap_or(0) as u64,
+            ))
         })
-        .context("query PCP Ref health")
+        .context("query PCP Page mutability health")
 }
 
 fn graph_health(
@@ -402,7 +408,7 @@ fn graph_health(
         "
         SELECT relation.relation_type, count(*)
         FROM pcp_relations relation
-        JOIN pcp_revisions source ON source.revision_id = relation.from_revision_id
+        JOIN pcp_pages source ON source.page_id = relation.from_page_id
         LEFT JOIN pcp_relation_retractions retraction
           ON retraction.relation_id = relation.relation_id
         WHERE source.namespace IN ({placeholders})
@@ -429,25 +435,16 @@ fn graph_health(
     let isolated_sql = format!(
         "
         SELECT count(*) FROM (
-            SELECT DISTINCT revision.revision_id
+            SELECT page.page_id
             FROM pcp_pages page
-            JOIN pcp_revisions revision ON revision.revision_id = page.current_revision_id
-            WHERE revision.namespace IN ({placeholders})
-              AND revision.lifecycle_status = 'active'
-              AND NOT EXISTS (
-                  SELECT 1 FROM pcp_relations newer
-                  LEFT JOIN pcp_relation_retractions retraction
-                    ON retraction.relation_id = newer.relation_id
-                  WHERE newer.relation_type = 'supersedes'
-                    AND newer.to_revision_id = revision.revision_id
-                    AND retraction.relation_id IS NULL
-              )
+            WHERE page.namespace IN ({placeholders})
+              AND page.lifecycle_status = 'active'
               AND NOT EXISTS (
                   SELECT 1 FROM pcp_relations relation
                   LEFT JOIN pcp_relation_retractions retraction
                     ON retraction.relation_id = relation.relation_id
-                  WHERE (relation.from_revision_id = revision.revision_id
-                         OR relation.to_revision_id = revision.revision_id)
+                  WHERE (relation.from_page_id = page.page_id
+                         OR relation.to_page_id = page.page_id)
                     AND retraction.relation_id IS NULL
               )
         )

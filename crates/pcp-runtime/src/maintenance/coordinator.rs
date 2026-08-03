@@ -1,17 +1,21 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
+use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
 use pcp_client::PcpApi;
 use pcp_core::{
-    ConsolidatePagesRequest, LifecycleStatus, PagePayload, Projection, ReadPagesRequest,
+    ConsolidatePagesRequest, LifecycleStatus, PagePayload, PlanRevisionRetentionRequest,
+    Projection, PutRevisionRetentionLeaseRequest, ReadPagesRequest, RetentionPolicy,
     WriteSummaryRequest,
 };
 use serde::Serialize;
 
 use super::{
-    MaintenanceConfig, MaintenanceWorkerRequest, MaintenanceWorkerResponse,
+    MaintenanceConfig, MaintenanceWorkerRequest, MaintenanceWorkerResponse, RetentionMilestone,
     SemanticMaintenanceWorker,
-    ledger::{MaintenanceLedger, compaction_key, selection_window_key, summary_key},
+    ledger::{
+        MaintenanceLedger, compaction_key, retention_window_key, selection_window_key, summary_key,
+    },
     worker::{MaintenanceDetailPage, MaintenanceRoutingPage},
 };
 
@@ -24,6 +28,8 @@ pub struct MaintenanceCycleReport {
     pub summaries_proposed: u32,
     pub consolidations_committed: u32,
     pub consolidations_proposed: u32,
+    pub retention_leases_written: u32,
+    pub retention_leases_proposed: u32,
     pub kept_separate: u32,
     pub deferred: u32,
 }
@@ -75,14 +81,18 @@ impl RuntimeMaintainer {
                     if report.summaries_written > 0
                         || report.summaries_proposed > 0
                         || report.consolidations_committed > 0
-                        || report.consolidations_proposed > 0 =>
+                        || report.consolidations_proposed > 0
+                        || report.retention_leases_written > 0
+                        || report.retention_leases_proposed > 0 =>
                 {
                     eprintln!(
-                        "PCP maintenance: {} Summary proposed / {} written, {} consolidation proposed / {} committed after {} worker calls",
+                        "PCP maintenance: {} Summary proposed / {} written, {} consolidation proposed / {} committed, {} retention proposed / {} leased after {} worker calls",
                         report.summaries_proposed,
                         report.summaries_written,
                         report.consolidations_proposed,
                         report.consolidations_committed,
+                        report.retention_leases_proposed,
+                        report.retention_leases_written,
                         report.worker_calls
                     );
                     false
@@ -119,10 +129,19 @@ impl RuntimeMaintainer {
         {
             jobs_remaining -= 1;
         }
-        if self.config.compaction.enabled && jobs_remaining > 0 {
-            self.run_compaction_job(&inventory, &mut report)
+        if self.config.compaction.enabled
+            && jobs_remaining > 0
+            && self
+                .run_compaction_job(&inventory, &mut report)
                 .await
-                .context("run PCP compaction maintenance job")?;
+                .context("run PCP compaction maintenance job")?
+        {
+            jobs_remaining -= 1;
+        }
+        if self.config.retention.enabled && jobs_remaining > 0 {
+            self.run_retention_job(&mut report)
+                .await
+                .context("run PCP semantic retention maintenance job")?;
         }
 
         self.ledger.save(&self.config.state_path).await?;
@@ -161,6 +180,7 @@ impl RuntimeMaintainer {
                 if self.config.applies_changes() {
                     self.client
                         .write_summary(WriteSummaryRequest {
+                            target_page_id: candidate.page_id.clone(),
                             target_revision_id: page_id.clone(),
                             expected_summary_revision_id: None,
                             content,
@@ -250,7 +270,12 @@ impl RuntimeMaintainer {
 
         let routing_by_id = routing_pages
             .iter()
-            .map(|page| (page.page_id.clone(), page.namespace.clone()))
+            .map(|page| {
+                (
+                    page.page_id.clone(),
+                    (page.namespace.clone(), page.revision_id.clone()),
+                )
+            })
             .collect::<HashMap<_, _>>();
         let excluded_candidate_sets = self.ledger.active_compaction_sets();
         report.worker_calls += 1;
@@ -298,11 +323,11 @@ impl RuntimeMaintainer {
                 .all(|page_id| routing_by_id.contains_key(page_id)),
             "semantic worker selected a Page outside the offered candidate window"
         );
-        let namespace = &routing_by_id[&page_ids[0]];
+        let namespace = &routing_by_id[&page_ids[0]].0;
         anyhow::ensure!(
             page_ids
                 .iter()
-                .all(|page_id| &routing_by_id[page_id] == namespace),
+                .all(|page_id| &routing_by_id[page_id].0 == namespace),
             "semantic worker selected consolidation Pages from different Scopes"
         );
         let key = compaction_key(&page_ids);
@@ -316,8 +341,15 @@ impl RuntimeMaintainer {
             "semantic worker selected a consolidation candidate still in cooldown"
         );
 
+        let selected_revision_ids = page_ids
+            .iter()
+            .map(|page_id| routing_by_id[page_id].1.clone())
+            .collect();
         let pages = self
-            .read_detail_pages(page_ids.clone(), self.config.compaction.max_input_chars)
+            .read_detail_pages(
+                selected_revision_ids,
+                self.config.compaction.max_input_chars,
+            )
             .await?;
         anyhow::ensure!(
             pages.len() == page_ids.len(),
@@ -351,8 +383,16 @@ impl RuntimeMaintainer {
                         .max();
                     self.client
                         .consolidate_pages(ConsolidatePagesRequest {
-                            canonical_revision_id: canonical_page_id,
-                            replaced_revision_ids: page_ids.clone(),
+                            canonical_page_id: canonical.page_id.clone(),
+                            expected_canonical_revision_id: canonical.revision_id.clone(),
+                            replaced_pages: pages
+                                .iter()
+                                .filter(|page| page.page_id != canonical.page_id)
+                                .map(|page| pcp_core::ConsolidationInput {
+                                    page_id: page.page_id.clone(),
+                                    expected_revision_id: page.revision_id.clone(),
+                                })
+                                .collect(),
                             created_by: self.config.worker_actor(),
                             lifecycle_status: LifecycleStatus::Active,
                             observed_at,
@@ -402,6 +442,168 @@ impl RuntimeMaintainer {
         Ok(true)
     }
 
+    async fn run_retention_job(&mut self, report: &mut MaintenanceCycleReport) -> Result<bool> {
+        let plan = self
+            .client
+            .plan_revision_retention(PlanRevisionRetentionRequest {
+                scopes: Vec::new(),
+                policy: RetentionPolicy {
+                    minimum_age_days: self.config.retention.minimum_age_days,
+                    keep_recent_revisions_per_page: self
+                        .config
+                        .retention
+                        .keep_recent_revisions_per_page,
+                    sample_limit: self
+                        .config
+                        .retention
+                        .candidate_window
+                        .saturating_mul(4)
+                        .clamp(1, 1_000)
+                        .try_into()
+                        .unwrap_or(1_000),
+                },
+            })
+            .await?;
+        let candidates = plan
+            .candidates
+            .into_iter()
+            .filter(|candidate| {
+                !excluded_kind(
+                    &Some(candidate.kind.clone()),
+                    &self.config.retention.excluded_page_kinds,
+                )
+            })
+            .take(self.config.retention.candidate_window)
+            .collect::<Vec<_>>();
+        let revision_ids = candidates
+            .iter()
+            .map(|candidate| candidate.revision_id.clone())
+            .collect::<Vec<_>>();
+        let max_chars = self
+            .config
+            .retention
+            .candidate_window
+            .saturating_mul(self.config.retention.routing_chars_per_page.max(1))
+            .try_into()
+            .unwrap_or(u32::MAX);
+        let mut details = self
+            .read_detail_pages(revision_ids, max_chars)
+            .await?
+            .into_iter()
+            .map(|page| (page.revision_id.clone(), page))
+            .collect::<HashMap<_, _>>();
+        let routing_pages = candidates
+            .into_iter()
+            .filter_map(|candidate| {
+                details.remove(&candidate.revision_id).map(|detail| {
+                    MaintenanceRoutingPage::from_detail(
+                        detail,
+                        candidate.kind,
+                        self.config.retention.routing_chars_per_page,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if routing_pages.is_empty() {
+            return Ok(false);
+        }
+        let key = retention_window_key(
+            &routing_pages
+                .iter()
+                .map(|page| page.revision_id.clone())
+                .collect::<Vec<_>>(),
+        );
+        if !self.ledger.eligible(&key) {
+            return Ok(false);
+        }
+        let offered = routing_pages
+            .iter()
+            .map(|page| {
+                (
+                    page.revision_id.clone(),
+                    (page.namespace.clone(), page.page_id.clone()),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        report.worker_calls += 1;
+        match self
+            .worker
+            .evaluate(MaintenanceWorkerRequest::SelectRetentionMilestones {
+                pages: routing_pages,
+                max_revisions: self.config.retention.max_revisions_per_cycle,
+                lease_days: self.config.retention.lease_days,
+            })
+            .await?
+        {
+            MaintenanceWorkerResponse::Retain { mut milestones } => {
+                normalize_milestones(
+                    &mut milestones,
+                    &offered,
+                    self.config.retention.max_revisions_per_cycle,
+                )?;
+                if self.config.applies_retention_changes() {
+                    let expires_at = (Utc::now()
+                        + ChronoDuration::days(i64::from(self.config.retention.lease_days)))
+                    .to_rfc3339_opts(SecondsFormat::Millis, true);
+                    for milestone in &milestones {
+                        let (namespace, _) = offered
+                            .get(&milestone.revision_id)
+                            .context("validated retention milestone disappeared")?;
+                        self.client
+                            .put_revision_retention_lease(PutRevisionRetentionLeaseRequest {
+                                namespace: namespace.clone(),
+                                revision_id: milestone.revision_id.clone(),
+                                reason: milestone.reason.clone(),
+                                expires_at: expires_at.clone(),
+                                idempotency_key: format!(
+                                    "maintenance:semantic-milestone:{}",
+                                    milestone.revision_id
+                                ),
+                            })
+                            .await?;
+                    }
+                    report.retention_leases_written = report
+                        .retention_leases_written
+                        .saturating_add(milestones.len().try_into().unwrap_or(u32::MAX));
+                    self.ledger.record(
+                        key,
+                        "retention_leased",
+                        self.config.retention.retry_after_seconds,
+                    );
+                } else {
+                    report.retention_leases_proposed = report
+                        .retention_leases_proposed
+                        .saturating_add(milestones.len().try_into().unwrap_or(u32::MAX));
+                    self.ledger.record(
+                        key,
+                        "observed_retention",
+                        self.config.retention.retry_after_seconds,
+                    );
+                }
+            }
+            MaintenanceWorkerResponse::NoCandidate { .. } => {
+                self.ledger.record(
+                    key,
+                    "no_retention_candidate",
+                    self.config.retention.retry_after_seconds,
+                );
+            }
+            MaintenanceWorkerResponse::Defer { .. } => {
+                self.ledger.record(
+                    key,
+                    "retention_deferred",
+                    self.config.retention.retry_after_seconds,
+                );
+                report.deferred += 1;
+            }
+            other => anyhow::bail!(
+                "semantic worker returned {} for a select_retention_milestones request",
+                response_name(&other)
+            ),
+        }
+        Ok(true)
+    }
+
     async fn read_detail_pages(
         &self,
         page_ids: Vec<String>,
@@ -410,6 +612,7 @@ impl RuntimeMaintainer {
         let pages = self
             .client
             .read_pages(ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids: page_ids,
                 projections: vec![
                     Projection::Manifest,
@@ -424,6 +627,32 @@ impl RuntimeMaintainer {
             .await?;
         Ok(pages.into_iter().map(MaintenanceDetailPage::from).collect())
     }
+}
+
+fn normalize_milestones(
+    milestones: &mut Vec<RetentionMilestone>,
+    offered: &HashMap<String, (String, String)>,
+    maximum: usize,
+) -> Result<()> {
+    milestones.sort_by(|left, right| left.revision_id.cmp(&right.revision_id));
+    milestones.dedup_by(|left, right| left.revision_id == right.revision_id);
+    anyhow::ensure!(
+        !milestones.is_empty() && milestones.len() <= maximum,
+        "semantic worker selected an invalid number of retention milestones"
+    );
+    for milestone in milestones {
+        anyhow::ensure!(
+            offered.contains_key(&milestone.revision_id),
+            "semantic worker selected a Revision outside the retention window"
+        );
+        let reason = milestone.reason.trim();
+        anyhow::ensure!(
+            !reason.is_empty() && reason.chars().count() <= 1_000,
+            "semantic worker returned an invalid retention reason"
+        );
+        milestone.reason = reason.to_owned();
+    }
+    Ok(())
 }
 
 fn excluded_kind(kind: &Option<String>, excluded: &[String]) -> bool {
@@ -443,6 +672,7 @@ fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
         MaintenanceWorkerResponse::WriteSummary { .. } => "write_summary",
         MaintenanceWorkerResponse::Candidate { .. } => "candidate",
         MaintenanceWorkerResponse::Consolidate { .. } => "consolidate",
+        MaintenanceWorkerResponse::Retain { .. } => "retain",
         MaintenanceWorkerResponse::KeepSeparate { .. } => "keep_separate",
         MaintenanceWorkerResponse::NoCandidate { .. } => "no_candidate",
         MaintenanceWorkerResponse::Defer { .. } => "defer",

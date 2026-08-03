@@ -20,9 +20,11 @@ pub struct HealthSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct StorageHealth {
     pub current_pages: u64,
-    pub immutable_pages: u64,
-    pub refs: u64,
-    pub redirected_refs: u64,
+    pub pages: u64,
+    pub revisions: u64,
+    pub historical_revisions: u64,
+    pub sealed_pages: u64,
+    pub revisioned_pages: u64,
     pub content_chars: u64,
     pub current_pages_created: u64,
     pub long_pages: u64,
@@ -89,7 +91,8 @@ pub struct OperationHealth {
 pub struct ScopeHealth {
     pub namespace: String,
     pub current_pages: u64,
-    pub immutable_pages: u64,
+    pub pages: u64,
+    pub revisions: u64,
     pub content_chars: u64,
     pub calls: u64,
     pub failures: u64,

@@ -5,9 +5,10 @@ use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessDecision, AccessPermission, AccessSession, AssessPageValidityRequest,
     Capabilities, ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest,
-    OperationTelemetry, Projection, ProvenanceEvent, ReadPage, ReadPagesRequest, Relation,
-    RevisePageRequest, Scope, SearchPagesRequest, SearchResult, WritePageRequest, WriteResult,
-    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    OperationTelemetry, PlanRevisionRetentionRequest, Projection, ProvenanceEvent,
+    PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
+    RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult,
+    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::{DurablePageInventoryItem, HealthSnapshot, PcpStore, TombstoneCascadeResult};
 use serde::Serialize;
@@ -356,6 +357,115 @@ impl PcpStore for SqlitePcpStore {
         .await
     }
 
+    async fn plan_revision_retention(
+        &self,
+        access: &AccessSession,
+        mut request: PlanRevisionRetentionRequest,
+    ) -> Result<RevisionRetentionPlan> {
+        let observation = OperationObservation::start();
+        let requested_scopes = request.scopes.clone();
+        let scopes = match authorize_scopes(access, &[AccessPermission::Audit], &requested_scopes) {
+            Ok(scopes) => scopes,
+            Err(error) => {
+                return complete(
+                    self,
+                    access,
+                    "plan_revision_retention",
+                    requested_scopes,
+                    Err(error),
+                    true,
+                    observation,
+                )
+                .await;
+            }
+        };
+        request.scopes = scopes.clone();
+        let result = SqlitePcpStore::plan_revision_retention(self, request).await;
+        complete(
+            self,
+            access,
+            "plan_revision_retention",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
+    }
+
+    async fn put_revision_retention_lease(
+        &self,
+        access: &AccessSession,
+        request: PutRevisionRetentionLeaseRequest,
+    ) -> Result<RevisionRetentionLease> {
+        let observation = OperationObservation::start().with_input_count(1);
+        let scope = request.namespace.clone();
+        if let Err(error) = authorize_exact(access, &scope, AccessPermission::Write) {
+            return complete(
+                self,
+                access,
+                "put_revision_retention_lease",
+                vec![scope],
+                Err(error),
+                true,
+                observation,
+            )
+            .await;
+        }
+        let result = SqlitePcpStore::put_revision_retention_lease(
+            self,
+            access.principal.principal_id.clone(),
+            request,
+        )
+        .await;
+        complete(
+            self,
+            access,
+            "put_revision_retention_lease",
+            vec![scope],
+            result,
+            false,
+            observation,
+        )
+        .await
+    }
+
+    async fn active_revision_retention_leases(
+        &self,
+        access: &AccessSession,
+        requested_scopes: Vec<String>,
+        limit: u32,
+    ) -> Result<Vec<RevisionRetentionLease>> {
+        let observation = OperationObservation::start();
+        let scopes = match authorize_scopes(access, &[AccessPermission::Audit], &requested_scopes) {
+            Ok(scopes) => scopes,
+            Err(error) => {
+                return complete(
+                    self,
+                    access,
+                    "active_revision_retention_leases",
+                    requested_scopes,
+                    Err(error),
+                    true,
+                    observation,
+                )
+                .await;
+            }
+        };
+        let result =
+            SqlitePcpStore::active_revision_retention_leases(self, scopes.clone(), limit).await;
+        complete(
+            self,
+            access,
+            "active_revision_retention_leases",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
+    }
+
     async fn write_page(
         &self,
         access: &AccessSession,
@@ -382,11 +492,11 @@ impl PcpStore for SqlitePcpStore {
             if !request.initial_relations.is_empty() {
                 authorize_exact(access, &target_scope, AccessPermission::Link)?;
                 let relation_scopes = self
-                    .revision_namespaces(
+                    .page_namespaces(
                         request
                             .initial_relations
                             .iter()
-                            .map(|relation| relation.to_revision_id.clone())
+                            .map(|relation| relation.to_page_id.clone())
                             .collect(),
                     )
                     .await?;
@@ -460,11 +570,11 @@ impl PcpStore for SqlitePcpStore {
             if !request.initial_relations.is_empty() {
                 authorize_exact(access, &target_scope, AccessPermission::Link)?;
                 let relation_scopes = self
-                    .revision_namespaces(
+                    .page_namespaces(
                         request
                             .initial_relations
                             .iter()
-                            .map(|relation| relation.to_revision_id.clone())
+                            .map(|relation| relation.to_page_id.clone())
                             .collect(),
                     )
                     .await?;
@@ -506,13 +616,17 @@ impl PcpStore for SqlitePcpStore {
         access: &AccessSession,
         request: ConsolidatePagesRequest,
     ) -> Result<WriteResult> {
-        let observation =
-            OperationObservation::start().with_input_count(request.replaced_revision_ids.len());
-        let mut target_ids = request.replaced_revision_ids.clone();
-        target_ids.push(request.canonical_revision_id.clone());
+        let observation = OperationObservation::start()
+            .with_input_count(request.replaced_pages.len().saturating_add(1));
+        let mut target_ids = request
+            .replaced_pages
+            .iter()
+            .map(|input| input.page_id.clone())
+            .collect::<Vec<_>>();
+        target_ids.push(request.canonical_page_id.clone());
         target_ids.sort();
         target_ids.dedup();
-        let mut scopes = match self.revision_namespaces(target_ids).await {
+        let mut scopes = match self.page_namespaces(target_ids).await {
             Ok(scopes) => scopes,
             Err(error) => {
                 return complete(
@@ -574,9 +688,9 @@ impl PcpStore for SqlitePcpStore {
     ) -> Result<Relation> {
         let observation = OperationObservation::start().with_input_count(2);
         let scopes = match self
-            .revision_namespaces(vec![
-                request.from_revision_id.clone(),
-                request.to_revision_id.clone(),
+            .page_namespaces(vec![
+                request.from_page_id.clone(),
+                request.to_page_id.clone(),
             ])
             .await
         {

@@ -12,9 +12,10 @@ use async_trait::async_trait;
 use pcp_client::{DurablePageInventoryItem, HealthSnapshot, PcpApi, TombstoneCascadeResult};
 use pcp_core::{
     AccessAuditEvent, AccessSession, AssessPageValidityRequest, Capabilities,
-    ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest, ReadPage, ReadPagesRequest,
-    Relation, RevisePageRequest, Scope, SearchPagesRequest, SearchResult, WritePageRequest,
-    WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest, PlanRevisionRetentionRequest,
+    PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
+    RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult,
+    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use tokio::net::UnixStream;
 
@@ -216,6 +217,49 @@ impl PcpApi for RemotePcpClient {
                 usize::try_from(value).context("PCP content character count exceeds usize")
             }
             _ => Err(unexpected("content_char_count")),
+        }
+    }
+
+    async fn plan_revision_retention(
+        &self,
+        request: PlanRevisionRetentionRequest,
+    ) -> Result<RevisionRetentionPlan> {
+        match self
+            .request(RpcOperation::PlanRevisionRetention(request))
+            .await?
+        {
+            RpcValue::RevisionRetentionPlan(value) => Ok(value),
+            _ => Err(unexpected("plan_revision_retention")),
+        }
+    }
+
+    async fn put_revision_retention_lease(
+        &self,
+        request: PutRevisionRetentionLeaseRequest,
+    ) -> Result<RevisionRetentionLease> {
+        match self
+            .request(RpcOperation::PutRevisionRetentionLease(request))
+            .await?
+        {
+            RpcValue::RevisionRetentionLease(value) => Ok(value),
+            _ => Err(unexpected("put_revision_retention_lease")),
+        }
+    }
+
+    async fn active_revision_retention_leases(
+        &self,
+        requested_scopes: Vec<String>,
+        limit: u32,
+    ) -> Result<Vec<RevisionRetentionLease>> {
+        match self
+            .request(RpcOperation::ActiveRevisionRetentionLeases {
+                requested_scopes,
+                limit,
+            })
+            .await?
+        {
+            RpcValue::RevisionRetentionLeases(value) => Ok(value),
+            _ => Err(unexpected("active_revision_retention_leases")),
         }
     }
 

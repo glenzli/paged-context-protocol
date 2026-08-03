@@ -3,13 +3,16 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use chrono::{Duration, SecondsFormat, Utc};
 use pcp_client::{EmbeddedPcpClient, PcpApi};
 use pcp_core::{
     AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    AssessPageValidityRequest, ConsolidatePagesRequest, CreateScopeRequest, LifecycleStatus,
-    LinkPagesRequest, PagePayload, Projection, ProvenanceEvent, ReadPagesRequest,
-    RevisePageRequest, ScopeGrant, SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch,
-    SourceRef, ValidityStanding, WritePageRequest, WriteSummaryRequest,
+    AssessPageValidityRequest, ConsolidatePagesRequest, ConsolidationInput, CreateScopeRequest,
+    LifecycleStatus, LinkPagesRequest, PageMutability, PagePayload, PlanRevisionRetentionRequest,
+    Projection, ProvenanceEvent, PutRevisionRetentionLeaseRequest, ReadPagesRequest,
+    RetentionPolicy, RetentionProtectionReason, RevisePageRequest, ScopeGrant, SearchFilters,
+    SearchMode, SearchPagesRequest, SearchTermMatch, SourceRef, ValidityStanding, WritePageRequest,
+    WriteSummaryRequest,
 };
 use pcp_store::PcpStore;
 use serde_json::json;
@@ -80,9 +83,10 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
         .expect("write Scope B page");
     admin
         .link_pages(LinkPagesRequest {
-            from_revision_id: page_a.revision_id.clone(),
+            from_page_id: page_a.page_id.clone(),
             relation_type: "related_to".to_owned(),
-            to_revision_id: page_b.revision_id.clone(),
+            to_page_id: page_b.page_id.clone(),
+            basis_revision_ids: vec![page_a.revision_id.clone(), page_b.revision_id.clone()],
             created_by: actor.clone(),
             idempotency_key: Some("access:cross-link".to_owned()),
         })
@@ -114,6 +118,7 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
     assert!(
         client_a
             .read_pages(ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids: vec![page_b.revision_id.clone()],
                 projections: vec![Projection::Payload],
                 max_chars: 4_000,
@@ -129,6 +134,7 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
     );
     let page_with_relations = client_a
         .read_pages(ReadPagesRequest {
+            page_ids: Vec::new(),
             revision_ids: vec![page_a.revision_id.clone()],
             projections: vec![Projection::Relations],
             max_chars: 4_000,
@@ -150,6 +156,55 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
         .await
         .expect("traverse only authorized graph neighbors");
     assert!(graph.hits.is_empty());
+    assert!(
+        client_a
+            .plan_revision_retention(PlanRevisionRetentionRequest {
+                scopes: vec![scope_a.clone()],
+                policy: RetentionPolicy::default(),
+            })
+            .await
+            .is_err()
+    );
+    let retention = admin
+        .plan_revision_retention(PlanRevisionRetentionRequest {
+            scopes: vec![scope_a.clone()],
+            policy: RetentionPolicy::default(),
+        })
+        .await
+        .expect("audit-authorized retention plan");
+    assert_eq!(retention.scanned_pages, 1);
+    let lease_request = PutRevisionRetentionLeaseRequest {
+        namespace: scope_a.clone(),
+        revision_id: page_a.revision_id.clone(),
+        reason: "Explicit test milestone".to_owned(),
+        expires_at: (Utc::now() + Duration::days(30)).to_rfc3339_opts(SecondsFormat::Millis, true),
+        idempotency_key: "access-test:retention".to_owned(),
+    };
+    assert!(
+        client_a
+            .put_revision_retention_lease(lease_request.clone())
+            .await
+            .is_err()
+    );
+    let lease = admin
+        .put_revision_retention_lease(lease_request)
+        .await
+        .expect("write-authorized retention lease");
+    assert_eq!(lease.revision_id, page_a.revision_id);
+    assert!(
+        client_a
+            .active_revision_retention_leases(vec![scope_a.clone()], 10)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        admin
+            .active_revision_retention_leases(vec![scope_a.clone()], 10)
+            .await
+            .expect("audit retention leases")
+            .len(),
+        1
+    );
 
     let summary_only_client = pcp_client(
         Arc::clone(&store),
@@ -260,6 +315,7 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
     );
     let derived_page = client_b
         .read_pages(ReadPagesRequest {
+            page_ids: Vec::new(),
             revision_ids: vec![derived.revision_id],
             projections: vec![Projection::Payload, Projection::Provenance],
             max_chars: 4_000,
@@ -406,6 +462,7 @@ async fn aggregates_privacy_preserving_runtime_health() {
     assert!(miss.hits.is_empty());
     admin
         .read_pages(ReadPagesRequest {
+            page_ids: Vec::new(),
             revision_ids: vec![first.revision_id.clone()],
             projections: vec![Projection::Manifest, Projection::Summary],
             max_chars: 2_000,
@@ -414,6 +471,7 @@ async fn aggregates_privacy_preserving_runtime_health() {
         .expect("read Summary route");
     admin
         .read_pages(ReadPagesRequest {
+            page_ids: Vec::new(),
             revision_ids: vec![second.revision_id.clone()],
             projections: vec![Projection::Payload],
             max_chars: 2_000,
@@ -422,8 +480,12 @@ async fn aggregates_privacy_preserving_runtime_health() {
         .expect("read detail route");
     admin
         .consolidate_pages(ConsolidatePagesRequest {
-            canonical_revision_id: first.revision_id.clone(),
-            replaced_revision_ids: vec![first.revision_id, second.revision_id],
+            canonical_page_id: first.page_id.clone(),
+            expected_canonical_revision_id: first.revision_id.clone(),
+            replaced_pages: vec![ConsolidationInput {
+                page_id: second.page_id,
+                expected_revision_id: second.revision_id,
+            }],
             created_by: actor,
             lifecycle_status: LifecycleStatus::Active,
             observed_at: None,
@@ -469,9 +531,10 @@ async fn aggregates_privacy_preserving_runtime_health() {
         .await
         .expect("read PCP health snapshot");
     assert_eq!(health.storage.current_pages, 1);
-    assert_eq!(health.storage.immutable_pages, 3);
-    assert_eq!(health.storage.refs, 2);
-    assert_eq!(health.storage.redirected_refs, 1);
+    assert_eq!(health.storage.pages, 2);
+    assert_eq!(health.storage.revisions, 3);
+    assert_eq!(health.storage.historical_revisions, 1);
+    assert_eq!(health.storage.revisioned_pages, 2);
     assert_eq!(health.recall.searches, 2);
     assert_eq!(health.recall.zero_result_searches, 1);
     assert_eq!(health.recall.returned_pages, 2);
@@ -480,7 +543,7 @@ async fn aggregates_privacy_preserving_runtime_health() {
     assert_eq!(health.consolidation.runs, 1);
     assert_eq!(health.consolidation.input_pages, 2);
     assert_eq!(health.consolidation.net_page_reduction, 1);
-    assert_eq!(health.graph.relations, 2);
+    assert_eq!(health.graph.relations, 1);
     assert!(health.activity.calls >= 7);
     assert_eq!(health.activity.measured_calls + 1, health.activity.calls);
 
@@ -696,9 +759,10 @@ async fn stores_searches_revises_and_links_pages() {
     store
         .link_pages(
             LinkPagesRequest {
-                from_revision_id: second.revision_id.clone(),
+                from_page_id: second.page_id.clone(),
                 relation_type: "depends_on".to_owned(),
-                to_revision_id: revised.revision_id.clone(),
+                to_page_id: revised.page_id.clone(),
+                basis_revision_ids: vec![second.revision_id.clone(), revised.revision_id.clone()],
                 created_by: actor.clone(),
                 idempotency_key: Some("link:first".to_owned()),
             },
@@ -707,25 +771,115 @@ async fn stores_searches_revises_and_links_pages() {
         .await
         .expect("link pages");
 
-    let graph = store
+    let revised_second = store
+        .revise_page(
+            RevisePageRequest {
+                page_id: second.page_id.clone(),
+                expected_revision_id: second.revision_id.clone(),
+                created_by: actor.clone(),
+                lifecycle_status: LifecycleStatus::Active,
+                observed_at: None,
+                valid_from: None,
+                valid_to: None,
+                payload: Some(PagePayload {
+                    media_type: "text/markdown".to_owned(),
+                    content: "The related open question is now more precise.".to_owned(),
+                }),
+                source_refs: Vec::new(),
+                facets: None,
+                provenance: vec![ProvenanceEvent {
+                    operation: "revise".to_owned(),
+                    actor: actor.clone(),
+                    timestamp: "2026-07-29T00:05:00Z".to_owned(),
+                    input_revision_ids: vec![second.revision_id.clone()],
+                    tool_or_model: Some("test".to_owned()),
+                }],
+                initial_relations: Vec::new(),
+                idempotency_key: Some("revision:second".to_owned()),
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("revise linked Page");
+
+    let graph_from_old_revision = store
         .search_pages(SearchPagesRequest {
-            query: second.revision_id,
+            query: second.revision_id.clone(),
             scopes: vec![namespace.clone()],
             mode: SearchMode::Graph,
             term_match: SearchTermMatch::All,
             projections: pcp_core::default_search_projections(),
-            filters: SearchFilters::default(),
+            filters: SearchFilters {
+                relation_types: vec!["depends_on".to_owned()],
+                ..SearchFilters::default()
+            },
             limit: 10,
             cursor: None,
         })
         .await
-        .expect("search graph");
-    assert_eq!(graph.hits.len(), 1);
-    assert_eq!(graph.hits[0].revision_id, revised.revision_id);
+        .expect("search Page relation from historical Revision");
+    assert_eq!(graph_from_old_revision.hits.len(), 1);
+    assert_eq!(
+        graph_from_old_revision.hits[0].revision_id,
+        revised.revision_id
+    );
+
+    let graph_to_revised_page = store
+        .search_pages(SearchPagesRequest {
+            query: revised.revision_id.clone(),
+            scopes: vec![namespace.clone()],
+            mode: SearchMode::Graph,
+            term_match: SearchTermMatch::All,
+            projections: pcp_core::default_search_projections(),
+            filters: SearchFilters {
+                relation_types: vec!["depends_on".to_owned()],
+                ..SearchFilters::default()
+            },
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .expect("follow Page relation to current head");
+    assert_eq!(graph_to_revised_page.hits.len(), 1);
+    assert_eq!(
+        graph_to_revised_page.hits[0].revision_id,
+        revised_second.revision_id
+    );
+
+    let relation_filtered = store
+        .search_pages(SearchPagesRequest {
+            query: String::new(),
+            scopes: vec![namespace.clone()],
+            mode: SearchMode::Temporal,
+            term_match: SearchTermMatch::All,
+            projections: pcp_core::default_search_projections(),
+            filters: SearchFilters {
+                relation_types: vec!["depends_on".to_owned()],
+                ..SearchFilters::default()
+            },
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .expect("filter current Pages by stable relation");
+    assert_eq!(relation_filtered.hits.len(), 2);
+    assert!(
+        relation_filtered
+            .hits
+            .iter()
+            .any(|hit| { hit.revision_id == revised_second.revision_id })
+    );
+    assert!(
+        relation_filtered
+            .hits
+            .iter()
+            .all(|hit| { hit.revision_id != second.revision_id })
+    );
 
     let read = store
         .read_pages(
             ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids: vec![revised.revision_id.clone()],
                 projections: vec![
                     Projection::Payload,
@@ -740,12 +894,12 @@ async fn stores_searches_revises_and_links_pages() {
         .expect("read revised page");
     assert_eq!(read.len(), 1);
     assert_eq!(read[0].history.len(), 2);
-    assert_eq!(read[0].relations.len(), 2);
+    assert_eq!(read[0].relations.len(), 1);
     assert!(
         read[0]
             .relations
             .iter()
-            .any(|relation| relation.relation_type == "supersedes")
+            .all(|relation| relation.relation_type != "supersedes")
     );
     assert!(read[0].revision.source_refs.is_empty());
     assert!(read[0].revision.provenance.is_empty());
@@ -756,6 +910,7 @@ async fn stores_searches_revises_and_links_pages() {
     let traced = store
         .read_pages(
             ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids: vec![revised.revision_id],
                 projections: vec![Projection::Sources, Projection::Provenance],
                 max_chars: 10_000,
@@ -937,6 +1092,7 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
         &"rolling current map ".repeat(20),
         "summary:operational",
     );
+    operational.kind = "runtime_context".to_owned();
     operational.facets = Some(json!({"kind": "runtime_context"}));
     store
         .write_page(operational, vec![namespace.clone()])
@@ -961,6 +1117,7 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
     let summary = store
         .write_summary(
             WriteSummaryRequest {
+                target_page_id: page.page_id.clone(),
                 target_revision_id: page.revision_id.clone(),
                 expected_summary_revision_id: None,
                 content:
@@ -978,6 +1135,7 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
     let duplicate = store
         .write_summary(
             WriteSummaryRequest {
+                target_page_id: page.page_id.clone(),
                 target_revision_id: page.revision_id.clone(),
                 expected_summary_revision_id: None,
                 content: "Ignored duplicate content.".to_owned(),
@@ -1043,6 +1201,7 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
     let read = store
         .read_pages(
             ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids: vec![page.revision_id.clone()],
                 projections: vec![Projection::Summary],
                 max_chars: 10_000,
@@ -1063,6 +1222,7 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
     let summary_detail = store
         .read_pages(
             ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids: vec![summary.summary_revision_id.clone()],
                 projections: vec![
                     Projection::Payload,
@@ -1086,7 +1246,7 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
         "summary_projection"
     );
     assert!(summary_detail[0].relations.iter().any(|relation| {
-        relation.relation_type == "summarizes" && relation.to_revision_id == page.revision_id
+        relation.relation_type == "summarizes" && relation.to_page_id == page.page_id
     }));
 
     let summary_graph = store
@@ -1125,6 +1285,7 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
     let revised = store
         .write_summary(
             WriteSummaryRequest {
+                target_page_id: page.page_id.clone(),
                 target_revision_id: page.revision_id.clone(),
                 expected_summary_revision_id: Some(summary.summary_revision_id.clone()),
                 content:
@@ -1140,7 +1301,7 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
         .await
         .expect("revise summary");
     assert_ne!(revised.summary_revision_id, summary.summary_revision_id);
-    assert_ne!(revised.summary_page_id, summary.summary_page_id);
+    assert_eq!(revised.summary_page_id, summary.summary_page_id);
     assert!(
         store
             .next_summary_candidate(
@@ -1159,6 +1320,7 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
     let conflict = store
         .write_summary(
             WriteSummaryRequest {
+                target_page_id: page.page_id.clone(),
                 target_revision_id: page.revision_id,
                 expected_summary_revision_id: Some(summary.summary_revision_id),
                 content: "Stale update.".to_owned(),
@@ -1234,9 +1396,10 @@ async fn rejects_cycles_in_the_derivation_subgraph() {
     store
         .link_pages(
             LinkPagesRequest {
-                from_revision_id: second.revision_id.clone(),
+                from_page_id: second.page_id.clone(),
                 relation_type: "aggregates".to_owned(),
-                to_revision_id: first.revision_id.clone(),
+                to_page_id: first.page_id.clone(),
+                basis_revision_ids: vec![second.revision_id.clone(), first.revision_id.clone()],
                 created_by: actor.clone(),
                 idempotency_key: Some("dag:forward".to_owned()),
             },
@@ -1248,9 +1411,10 @@ async fn rejects_cycles_in_the_derivation_subgraph() {
     let cycle = store
         .link_pages(
             LinkPagesRequest {
-                from_revision_id: first.revision_id,
+                from_page_id: first.page_id,
                 relation_type: "derived_from".to_owned(),
-                to_revision_id: second.revision_id,
+                to_page_id: second.page_id,
+                basis_revision_ids: vec![first.revision_id, second.revision_id],
                 created_by: actor,
                 idempotency_key: Some("dag:cycle".to_owned()),
             },
@@ -1404,6 +1568,7 @@ async fn retracts_derived_pages_and_restores_preexisting_pages() {
     let restored = store
         .read_pages(
             ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids: vec![restored_revision],
                 projections: vec![Projection::Payload],
                 max_chars: 1_000,
@@ -1505,8 +1670,9 @@ async fn validity_is_revisioned_and_routes_before_detail() {
     let first = store
         .assess_page_validity(
             AssessPageValidityRequest {
+                target_page_id: target.page_id.clone(),
                 target_revision_id: target.revision_id.clone(),
-                expected_assessment_id: None,
+                expected_assessment_revision_id: None,
                 standing: ValidityStanding::Qualified,
                 rationale: "Later evidence narrows the unconditional claim.".to_owned(),
                 scope: Some("Persisted, uncanceled intents only.".to_owned()),
@@ -1551,6 +1717,7 @@ async fn validity_is_revisioned_and_routes_before_detail() {
     let routed = store
         .read_pages(
             ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids: vec![target.revision_id.clone()],
                 projections: vec![Projection::Manifest, Projection::Validity],
                 max_chars: 1_000,
@@ -1561,7 +1728,10 @@ async fn validity_is_revisioned_and_routes_before_detail() {
         .expect("read validity without detail");
     assert!(routed[0].revision.payload.is_none());
     let validity = routed[0].validity.as_ref().expect("validity projection");
-    assert_eq!(validity.assessment_id, first.assessment_id);
+    assert_eq!(
+        validity.assessment_revision_id,
+        first.assessment_revision_id
+    );
     assert_eq!(
         validity.basis_revision_ids,
         vec![evidence.revision_id.clone()]
@@ -1570,8 +1740,9 @@ async fn validity_is_revisioned_and_routes_before_detail() {
     let revised = store
         .assess_page_validity(
             AssessPageValidityRequest {
+                target_page_id: target.page_id.clone(),
                 target_revision_id: target.revision_id.clone(),
-                expected_assessment_id: Some(first.assessment_id.clone()),
+                expected_assessment_revision_id: Some(first.assessment_revision_id.clone()),
                 standing: ValidityStanding::Superseded,
                 rationale: "A newer durable state replaces the earlier guarantee.".to_owned(),
                 scope: None,
@@ -1584,9 +1755,12 @@ async fn validity_is_revisioned_and_routes_before_detail() {
         )
         .await
         .expect("revise validity");
+    assert_eq!(revised.assessment_page_id, first.assessment_page_id);
+    assert_ne!(revised.assessment_revision_id, first.assessment_revision_id);
     let latest = store
         .read_pages(
             ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids: vec![target.revision_id],
                 projections: vec![Projection::Validity, Projection::History],
                 max_chars: 1_000,
@@ -1599,8 +1773,8 @@ async fn validity_is_revisioned_and_routes_before_detail() {
         latest[0]
             .validity
             .as_ref()
-            .and_then(|value| value.previous_assessment_id.as_deref()),
-        Some(first.assessment_id.as_str())
+            .and_then(|value| value.previous_assessment_revision_id.as_deref()),
+        Some(first.assessment_revision_id.as_str())
     );
     assert_eq!(
         latest[0].validity.as_ref().map(|value| &value.standing),
@@ -1610,13 +1784,13 @@ async fn validity_is_revisioned_and_routes_before_detail() {
         latest[0]
             .validity
             .as_ref()
-            .map(|value| value.assessment_id.as_str()),
-        Some(revised.assessment_id.as_str())
+            .map(|value| value.assessment_revision_id.as_str()),
+        Some(revised.assessment_revision_id.as_str())
     );
     assert_eq!(latest[0].validity_history.len(), 1);
     assert_eq!(
-        latest[0].validity_history[0].assessment_id,
-        first.assessment_id
+        latest[0].validity_history[0].assessment_revision_id,
+        first.assessment_revision_id
     );
 
     let _ = std::fs::remove_dir_all(root);
@@ -1634,6 +1808,8 @@ fn write_request(
         namespace: namespace.to_owned(),
         visibility: "private".to_owned(),
         lifecycle_status: LifecycleStatus::Active,
+        kind: "document".to_owned(),
+        mutability: PageMutability::Revisioned,
         created_by: actor,
         observed_at: None,
         valid_from: None,
@@ -1661,6 +1837,184 @@ fn principal(principal_id: &str, principal_type: AccessPrincipalType) -> AccessP
 fn pcp_client(store: Arc<SqlitePcpStore>, access: AccessSession) -> Arc<dyn PcpApi> {
     let store: Arc<dyn PcpStore> = store;
     EmbeddedPcpClient::shared(store, access)
+}
+
+#[tokio::test]
+async fn plans_revision_retention_from_roots_without_deleting_history() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-retention-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
+        .await
+        .expect("open store");
+    let owner_id = store.owner_id().to_owned();
+    let namespace = "project:retention".to_owned();
+    store
+        .create_scope(CreateScopeRequest {
+            owner_id: owner_id.clone(),
+            namespace: namespace.clone(),
+            display_name: "Retention planning".to_owned(),
+            description: None,
+            parent_namespace: None,
+            visibility: "private".to_owned(),
+        })
+        .await
+        .expect("create Scope");
+    let actor = Actor {
+        actor_type: ActorType::Model,
+        actor_id: "model:retention".to_owned(),
+    };
+    let first = store
+        .write_page(
+            write_request(
+                &owner_id,
+                &namespace,
+                actor.clone(),
+                "Revision zero.",
+                "retention:revision:0",
+            ),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write revisioned Page");
+    let mut revisions = vec![first.clone()];
+    let mut current = first;
+    for index in 1..4 {
+        current = store
+            .revise_page(
+                RevisePageRequest {
+                    page_id: current.page_id.clone(),
+                    expected_revision_id: current.revision_id.clone(),
+                    created_by: actor.clone(),
+                    lifecycle_status: LifecycleStatus::Active,
+                    observed_at: None,
+                    valid_from: None,
+                    valid_to: None,
+                    payload: Some(PagePayload {
+                        media_type: "text/markdown".to_owned(),
+                        content: format!("Revision {index}."),
+                    }),
+                    source_refs: Vec::new(),
+                    facets: None,
+                    provenance: Vec::new(),
+                    initial_relations: Vec::new(),
+                    idempotency_key: Some(format!("retention:revision:{index}")),
+                },
+                vec![namespace.clone()],
+            )
+            .await
+            .expect("revise Page");
+        revisions.push(current.clone());
+    }
+    let anchor = store
+        .write_page(
+            write_request(
+                &owner_id,
+                &namespace,
+                actor.clone(),
+                "Stable relation anchor.",
+                "retention:anchor",
+            ),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write relation anchor");
+    store
+        .link_pages(
+            LinkPagesRequest {
+                from_page_id: anchor.page_id,
+                relation_type: "depends_on".to_owned(),
+                to_page_id: current.page_id,
+                basis_revision_ids: vec![revisions[0].revision_id.clone()],
+                created_by: actor,
+                idempotency_key: Some("retention:relation".to_owned()),
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("link exact historical basis");
+
+    let plan = store
+        .plan_revision_retention(PlanRevisionRetentionRequest {
+            scopes: vec![namespace],
+            policy: RetentionPolicy {
+                minimum_age_days: 0,
+                keep_recent_revisions_per_page: 2,
+                sample_limit: 20,
+            },
+        })
+        .await
+        .expect("plan Revision retention");
+
+    assert_eq!(plan.scanned_pages, 2);
+    assert_eq!(plan.scanned_revisions, 5);
+    assert_eq!(plan.candidate_revisions, 1);
+    assert_eq!(plan.candidates[0].revision_id, revisions[1].revision_id);
+    assert!(plan.candidate_estimated_bytes > 0);
+    assert_eq!(plan.expired_idempotency_records, 5);
+    assert!(plan.protection_reasons.iter().any(|count| {
+        count.reason == RetentionProtectionReason::RelationBasis && count.revisions == 3
+    }));
+    assert!(plan.protected_samples.iter().any(|sample| {
+        sample.revision_id == revisions[0].revision_id
+            && sample
+                .reasons
+                .contains(&RetentionProtectionReason::RelationBasis)
+    }));
+
+    store
+        .put_revision_retention_lease(
+            "service:retention-test".to_owned(),
+            PutRevisionRetentionLeaseRequest {
+                namespace: "project:retention".to_owned(),
+                revision_id: revisions[1].revision_id.clone(),
+                reason: "Preserve a semantic milestone while it remains useful".to_owned(),
+                expires_at: (Utc::now() + Duration::days(90))
+                    .to_rfc3339_opts(SecondsFormat::Millis, true),
+                idempotency_key: "retention:lease:milestone".to_owned(),
+            },
+        )
+        .await
+        .expect("write explicit retention lease");
+    let leased_plan = store
+        .plan_revision_retention(PlanRevisionRetentionRequest {
+            scopes: vec!["project:retention".to_owned()],
+            policy: RetentionPolicy {
+                minimum_age_days: 0,
+                keep_recent_revisions_per_page: 2,
+                sample_limit: 20,
+            },
+        })
+        .await
+        .expect("plan Revision retention with semantic lease");
+    assert_eq!(leased_plan.active_retention_leases, 1);
+    assert_eq!(leased_plan.candidate_revisions, 0);
+    assert!(leased_plan.protected_samples.iter().any(|sample| {
+        sample.revision_id == revisions[1].revision_id
+            && sample
+                .reasons
+                .contains(&RetentionProtectionReason::ExplicitLease)
+    }));
+
+    let history = store
+        .read_pages(
+            ReadPagesRequest {
+                page_ids: vec![revisions[0].page_id.clone()],
+                revision_ids: Vec::new(),
+                projections: vec![Projection::History],
+                max_chars: 8_000,
+            },
+            vec!["project:retention".to_owned()],
+        )
+        .await
+        .expect("retention plan leaves history untouched");
+    assert_eq!(history[0].history.len(), 4);
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -1722,8 +2076,16 @@ async fn consolidates_current_pages_into_one_canonical_head() {
         .map(|page| page.revision_id.clone())
         .collect::<Vec<_>>();
     let request = ConsolidatePagesRequest {
-        canonical_revision_id: pages[0].revision_id.clone(),
-        replaced_revision_ids: input_ids.clone(),
+        canonical_page_id: pages[0].page_id.clone(),
+        expected_canonical_revision_id: pages[0].revision_id.clone(),
+        replaced_pages: pages
+            .iter()
+            .skip(1)
+            .map(|page| ConsolidationInput {
+                page_id: page.page_id.clone(),
+                expected_revision_id: page.revision_id.clone(),
+            })
+            .collect(),
         created_by: actor.clone(),
         lifecycle_status: LifecycleStatus::Active,
         observed_at: None,
@@ -1756,8 +2118,8 @@ async fn consolidates_current_pages_into_one_canonical_head() {
             store
                 .current_revision_id(input.page_id.clone(), vec![namespace.clone()])
                 .await
-                .expect("read redirected input Ref"),
-            consolidated.revision_id
+                .expect("read absorbed Page head"),
+            input.revision_id
         );
     }
     assert_eq!(
@@ -1770,6 +2132,7 @@ async fn consolidates_current_pages_into_one_canonical_head() {
     let read = store
         .read_pages(
             ReadPagesRequest {
+                page_ids: Vec::new(),
                 revision_ids: vec![consolidated.revision_id.clone()],
                 projections: vec![Projection::Provenance, Projection::Relations],
                 max_chars: 8_000,
@@ -1784,7 +2147,7 @@ async fn consolidates_current_pages_into_one_canonical_head() {
             .iter()
             .filter(|relation| relation.relation_type == "supersedes")
             .count(),
-        3
+        2
     );
     assert!(read.revision.provenance.iter().any(|event| {
         event.operation == "consolidate"
@@ -1856,6 +2219,7 @@ async fn durable_inventory_uses_current_heads_and_excludes_runtime_pages() {
     store
         .write_summary(
             WriteSummaryRequest {
+                target_page_id: durable.page_id.clone(),
                 target_revision_id: durable.revision_id.clone(),
                 expected_summary_revision_id: None,
                 content: "A durable protocol decision used by future retrieval.".to_owned(),
@@ -1875,6 +2239,7 @@ async fn durable_inventory_uses_current_heads_and_excludes_runtime_pages() {
         "A raw chat message must not become a reconciliation candidate.",
         "inventory:conversation",
     );
+    conversation.kind = "conversation_event".to_owned();
     conversation.facets = Some(json!({"kind": "conversation_event", "role": "user"}));
     store
         .write_page(conversation, vec![namespace.clone()])

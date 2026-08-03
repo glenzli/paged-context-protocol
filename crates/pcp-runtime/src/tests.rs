@@ -3,7 +3,8 @@ use std::{sync::Arc, time::SystemTime};
 use pcp_client::{EmbeddedPcpClient, PcpApi};
 use pcp_core::{
     AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    ConsolidatePagesRequest, CreateScopeRequest, LifecycleStatus, PagePayload, Projection,
+    ConsolidatePagesRequest, ConsolidationInput, CreateScopeRequest, LifecycleStatus,
+    PageMutability, PagePayload, PlanRevisionRetentionRequest, Projection, RetentionPolicy,
     SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch, WritePageRequest,
 };
 use pcp_rpc::{RemotePcpClient, RuntimeEndpoint, serve_unix, serve_unix_endpoints};
@@ -241,7 +242,7 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
         .as_nanos();
     let root = std::env::temp_dir().join(format!("pcp-runtime-{nonce}"));
     std::fs::create_dir_all(&root).expect("create runtime test directory");
-    let socket_path = root.join("runtime.sock");
+    let socket_path = std::path::PathBuf::from("/tmp").join(format!("pcp-runtime-{nonce}.sock"));
     let store = Arc::new(
         SqlitePcpStore::open(root.join("context.sqlite3"))
             .await
@@ -261,9 +262,11 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
     let store: Arc<dyn PcpStore> = store;
     let embedded = EmbeddedPcpClient::shared(store, access);
     let server_path = socket_path.clone();
-    let server = tokio::spawn(async move { serve_unix(server_path, embedded).await });
-
-    let remote = connect_when_ready(&socket_path).await;
+    let mut server = tokio::spawn(async move { serve_unix(server_path, embedded).await });
+    let remote = tokio::select! {
+        result = &mut server => panic!("PCP runtime stopped before connect: {result:?}"),
+        remote = connect_when_ready(&socket_path) => remote,
+    };
     assert!(
         RemotePcpClient::connect_expected(&socket_path, "host:not-this-endpoint")
             .await
@@ -301,6 +304,8 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
             namespace: namespace.clone(),
             visibility: "private".to_owned(),
             lifecycle_status: LifecycleStatus::Active,
+            kind: "document".to_owned(),
+            mutability: PageMutability::Revisioned,
             created_by: Actor {
                 actor_type: ActorType::Model,
                 actor_id: "model:runtime-test".to_owned(),
@@ -347,8 +352,12 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
     assert_eq!(remote.page_count(Vec::new()).await.expect("count pages"), 2);
     let consolidated = remote
         .consolidate_pages(ConsolidatePagesRequest {
-            canonical_revision_id: written.revision_id.clone(),
-            replaced_revision_ids: vec![written.revision_id.clone(), second.revision_id.clone()],
+            canonical_page_id: written.page_id.clone(),
+            expected_canonical_revision_id: written.revision_id.clone(),
+            replaced_pages: vec![ConsolidationInput {
+                page_id: second.page_id.clone(),
+                expected_revision_id: second.revision_id.clone(),
+            }],
             created_by: Actor {
                 actor_type: ActorType::Model,
                 actor_id: "model:runtime-test".to_owned(),
@@ -373,15 +382,15 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
         remote
             .current_revision_id(written.page_id)
             .await
-            .expect("resolve canonical Ref"),
+            .expect("resolve canonical Page"),
         consolidated.revision_id
     );
     assert_eq!(
         remote
             .current_revision_id(second.page_id)
             .await
-            .expect("resolve redirected Ref"),
-        consolidated.revision_id
+            .expect("resolve superseded Page"),
+        second.revision_id
     );
     let health = remote
         .health_snapshot(Vec::new(), 24)
@@ -391,6 +400,19 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
     assert_eq!(health.consolidation.runs, 1);
     assert_eq!(health.consolidation.input_pages, 2);
     assert!(health.recall.searches >= 1);
+    let retention = remote
+        .plan_revision_retention(PlanRevisionRetentionRequest {
+            scopes: vec![namespace],
+            policy: RetentionPolicy {
+                minimum_age_days: 0,
+                keep_recent_revisions_per_page: 0,
+                sample_limit: 10,
+            },
+        })
+        .await
+        .expect("plan retention through remote client");
+    assert_eq!(retention.scanned_pages, 2);
+    assert_eq!(retention.scanned_revisions, 3);
     let (audit, _) = remote.access_log(50, None).await.expect("read access log");
     assert!(audit.iter().all(|event| {
         event.principal.principal_id == "host:runtime-test"
@@ -425,6 +447,8 @@ fn test_page(
         namespace: namespace.to_owned(),
         visibility: "private".to_owned(),
         lifecycle_status: LifecycleStatus::Active,
+        kind: "document".to_owned(),
+        mutability: PageMutability::Revisioned,
         created_by: Actor {
             actor_type: ActorType::Model,
             actor_id: "model:runtime-test".to_owned(),

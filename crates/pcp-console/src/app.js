@@ -1,6 +1,7 @@
 import { createPageInspector } from "/page-inspector.js";
 import { createQualityView } from "/quality-view.js";
 import { createHealthView } from "/health-view.js";
+import { createRetentionView } from "/retention-view.js";
 
 const PAGE_LIMIT = 20;
 const ACCESS_LIMIT = 50;
@@ -69,6 +70,13 @@ const qualityView = createQualityView({
   openPage: (pageId) => pageInspector.open(pageId),
 });
 const healthView = createHealthView({ request: api, showError, formatNumber });
+const retentionView = createRetentionView({
+  request: api,
+  showError,
+  formatNumber,
+  formatTime,
+  openPage: (pageId) => pageInspector.open(pageId),
+});
 
 function metric(label, value, tone = "") {
   const node = element("div", `metric${tone ? ` tone-${tone}` : ""}`);
@@ -169,6 +177,21 @@ function renderOverview(data) {
     element("dd", "mono", value),
   ]));
 
+  const capabilities = data.capabilities;
+  const capabilityRows = [
+    ["Revisioned Pages", capabilities.supportsRevisionedPages],
+    ["Provenance graph", capabilities.supportsProvenanceGraph],
+    ["Consolidation", capabilities.supportsConsolidation],
+    ["Retention planning", capabilities.supportsRevisionRetentionPlanning],
+    ["Retention leases", capabilities.supportsRevisionRetentionLeases],
+    ["Retention collection", capabilities.supportsRevisionRetention],
+    ["Durable deletion", capabilities.supportsDurableDeletion],
+  ];
+  byId("capability-details").replaceChildren(...capabilityRows.flatMap(([label, enabled]) => [
+    element("dt", "", label),
+    element("dd", enabled ? "capability-yes" : "capability-no", enabled ? "Available" : "Unavailable"),
+  ]));
+
   const selector = byId("scope-filter");
   const current = selector.value;
   const all = element("option", "", "All scopes");
@@ -179,6 +202,8 @@ function renderOverview(data) {
     return option;
   }));
   selector.value = current;
+  retentionView.setScopes(data.scopes);
+  retentionView.setCapabilities(capabilities);
 }
 
 function aggregatePanel(label, entries) {
@@ -333,6 +358,7 @@ async function activateView(name, { reload = false } = {}) {
   if (name === "health") {
     await Promise.all([healthView.load({ reload }), qualityView.load({ reload })]);
   }
+  if (name === "retention") await retentionView.load({ reload });
   if (name === "access" && (reload || !state.access.loaded)) await loadAccess();
 }
 
@@ -354,6 +380,7 @@ async function refresh() {
         qualityView.load({ reload: true }),
       ]);
     }
+    if (state.activeView === "retention") await retentionView.load({ reload: true });
     if (state.activeView === "access") await loadAccess();
   } catch (error) { showError(error); }
 }

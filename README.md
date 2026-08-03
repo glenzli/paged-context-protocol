@@ -1,4 +1,4 @@
-# Paged-Context-Protocol (PCP) - v0.6.0-draft
+# Paged-Context-Protocol (PCP) - v0.7.0-draft
 
 ![Paged-Context-Protocol banner](assets/banner.png)
 
@@ -19,8 +19,8 @@ Context 之间保持统一身份、可追溯组织和按需物化。
 完整 Storage 太大，无法直接进入注意力；传统 Memory 往往只保留粗糙压缩，又容易丢失来源、
 版本和适用范围。
 
-**Paged-Context-Protocol (PCP)** 定义一个由用户拥有的不可变 Page 图。原始事件、文件、
-历史讨论、模型总结和跨项目关系都以 Page 存在，并按需进入模型注意力。
+**Paged-Context-Protocol (PCP)** 定义一个由用户拥有的 Page 图。Page 是稳定语义对象，
+Revision 是不可变内容快照。原始事件、文件、历史讨论、模型总结和跨项目关系按需进入模型注意力。
 这里的 Context 是跨时间存在的信息连续体；模型当前窗口只是其中一个临时 working set。
 
 PCP 不是特定的 context manager、Memory 数据库或 Storage 格式。它定义三者之间可互操作、
@@ -28,8 +28,8 @@ PCP 不是特定的 context manager、Memory 数据库或 Storage 格式。它�
 
 ```text
 Source / Event
-  -> immutable Page              (Storage)
-  -> Relation / optional Ref     (Memory organization)
+  -> stable Page + Revision      (Storage)
+  -> Relation / optional Alias   (Memory organization)
   -> Search / Read               (Attention boundary)
   -> Active working context
 ```
@@ -39,12 +39,13 @@ Source / Event
 ### 核心原则
 
 - **用户拥有信息连续性**：历史不会绑定在单一模型、服务商、会话或项目目录中。
-- **不可变内容身份**：Page 创建后不原地修改；变化由新 Page 与 `supersedes` 表达。
+- **稳定对象与不可变快照**：原始 Page 为 `sealed`；维护型 Page 为 `revisioned`；已产生的
+  Revision 永不改写，但普通中间 Revision 可按依赖和保留策略回收。
 - **原始历史可恢复**：在授权范围内保留可搜索来源；摘要和模型整理是可重建的派生层。
 - **稀疏模型记忆**：只有值得索引的内容才创建 Summary Page，模型再按需读取目标 Page。
-- **可回溯整理图**：总结、聚合、判断与后继关系都能逐层返回精确来源 Page。
+- **可回溯整理图**：Relation 连接稳定 Page，Provenance 与 relation basis 引用精确 Revision。
 - **活跃记忆可收缩**：经模型确认的 consolidation 可以用一个 canonical Page 替代多个当前
-  语义 Page，同时保留完整 lineage。
+  语义 Page，同时保留受依赖的精确 lineage 与聚合审计。
 - **显式关系断言**：时间相邻和内容相似不会自动成为 Relation；领域关系由 Host、用户或模型判断。
 - **显式注意力物化**：已返回候选与读取内容必须以明确 Page 身份进入模型可见上下文。
 - **显式作用域**：统一地址空间不等于全局注入，跨项目召回必须由 Scope、权限或关系允许。
@@ -53,14 +54,14 @@ Source / Event
 ### PCP 不规定什么
 
 PCP 不规定四处理器、Intent Focus、固定四级变焦、XML Linear Flow、Chain-of-Thought 或
-`Consult/Explore/Shelve/Purge` 状态机。它定义 Page、Scope、Provenance、Relation、可选 Ref、
+`Consult/Explore/Shelve/Purge` 状态机。它定义 Page、Revision、Scope、Provenance、Relation、可选 Alias、
 Summary Page、attention materialization 和基础 I/O 语义，
 但不规定模型必须采用哪条召回路径，也不替模型决定某项内容何时最值得进入注意力。
 
 ### 当前状态
 
-`v0.6.0-draft` 将旧 Page/Revision 双层模型收敛为不可变 Page，并把 Summary 与有效性判断
-统一为派生 Page。参考实现包含从旧数据结构幂等升级的迁移。
+`v0.7.0-draft` 恢复稳定 Page 与不可变 Revision 的双层身份。Summary、Topic、Profile 和当前
+状态可以持续修订同一 Page；默认检索只索引 Page head。参考实现包含从 v0.6 数据幂等升级的迁移。
 
 旧 `v0.3.0-alpha` 作为一次重要的设计阶段被完整保留，并附有淘汰原因和迁移说明：
 [deprecated/v0.3.0-alpha](deprecated/v0.3.0-alpha/README.md)。
@@ -75,9 +76,9 @@ their visibility usually still ends at the current session and project. Complete
 Storage is too large to place directly into attention, while conventional Memory
 often preserves only coarse compression and loses source, revision, or scope.
 
-**Paged-Context-Protocol (PCP)** defines a user-owned graph of immutable Pages.
-Raw events, files, past discussions, model summaries, and cross-project
-Relations can share stable identities and enter model attention through
+**Paged-Context-Protocol (PCP)** defines a user-owned graph of stable Pages with
+immutable Revisions. Raw events, files, past discussions, model summaries, and cross-project
+Relations can enter model attention through
 different Projections on demand. Context here is an information continuum across
 time; the model's current window is only one temporary working set.
 
@@ -86,8 +87,8 @@ defines an interoperable and traceable paging boundary among them:
 
 ```text
 Source / Event
-  -> immutable Page              (Storage)
-  -> Relation / optional Ref     (Memory organization)
+  -> stable Page + Revision      (Storage)
+  -> Relation / optional Alias   (Memory organization)
   -> Search / Read               (Attention boundary)
   -> Active working context
 ```
@@ -99,17 +100,18 @@ separate Memory service or profile.
 
 - **The user owns information continuity**: history is not bound to one model,
   provider, session, or project directory.
-- **Immutable content identity**: Pages are never edited in place; a new Page
-  and `supersedes` express change.
+- **Stable objects and immutable snapshots**: raw Pages are `sealed`; maintained
+  Pages are `revisioned`; published Revisions are never overwritten, while
+  unreferenced intermediate Revisions may be collected by retention policy.
 - **Recoverable raw history**: authorized sources remain searchable; summaries
   and model organization are rebuildable derived layers.
 - **Sparse model memory**: only content worth indexing receives a Summary Page;
   models then read exact target Pages on demand.
-- **Traceable organization graph**: summaries, aggregates, assessments, and
-  successor chains lead back to exact source Pages.
+- **Traceable organization graph**: Relations connect stable Pages while
+  Provenance and relation basis point to exact Revisions.
 - **Contracting active memory**: model-approved consolidation can replace
-  several current semantic Pages with one canonical Page without losing
-  lineage.
+  several current semantic Pages with one canonical Page while retaining
+  depended-on exact lineage and aggregate audit evidence.
 - **Explicit Relation assertions**: temporal adjacency and similarity do not
   become graph edges automatically; domain Relations require Host, user, or
   model judgment.
@@ -124,16 +126,17 @@ separate Memory service or profile.
 
 PCP no longer mandates four processors, Intent Focus, fixed zoom levels, an XML
 Linear Flow, Chain-of-Thought, or a `Consult/Explore/Shelve/Purge` state machine.
-It defines Page, Scope, Provenance, Relation, optional Refs, Summary Pages,
+It defines Page, Revision, Scope, Provenance, Relation, optional Aliases, Summary Pages,
 Detail reads, attention materialization, and basic I/O semantics without
 prescribing a recall path or deciding when a specific item is most worthy of
 model attention.
 
 ### Current Status
 
-`v0.6.0-draft` collapses the old Page/Revision model into immutable Pages and
-represents Summaries and validity assessments as derived Pages. The reference
-implementation includes an idempotent migration from the earlier layout.
+`v0.7.0-draft` restores stable Page identity above immutable Revisions.
+Summaries, Topics, Profiles, and current-state documents may revise one Page,
+while default retrieval indexes only Page heads. The reference implementation
+includes an idempotent migration from v0.6 data.
 
 The complete `v0.3.0-alpha` generation is preserved as a significant design
 stage, together with its deprecation rationale and migration notes:
@@ -146,12 +149,12 @@ stage, together with its deprecation rationale and migration notes:
 仓库包含一个正在演进的 Rust 参考实现。它用于验证协议边界，不把某一种数据库、检索策略或
 Host 行为变成协议要求：
 
-- `pcp-core`：Page、Relation、Ref 语义与请求类型。
+- `pcp-core`：Page、Revision、Relation、Alias 语义与请求类型。
 - `pcp-store`：与具体数据库无关、携带 AccessSession 的异步 Store 契约。
 - `pcp-client`：面向 Host 的传输无关能力接口，以及当前的 embedded 适配器。
 - `pcp-rpc`：轻量 Unix socket wire、远端 client 与通用 server transport。
 - `pcp-console`：通过专用审计 Principal 运行的只读本地 Web Inspector。
-- `pcp-sqlite`：本地不可变 Page、检索、Summary、有效性、Ref 与 DAG 关系。
+- `pcp-sqlite`：本地 Page/Revision、head-only 检索、Summary、有效性与 DAG 关系。
 - `pcp-runtime`：打开 Store、固定接入身份并管理多端点 broker 生命周期；可选维护器以独立
   Principal 调度 Summary 与 consolidation，但不内置语义模型。
 - `pcp-cli`：面向本地 Store 的检查、搜索、读取与导出工具。
@@ -161,7 +164,7 @@ The repository includes an evolving Rust reference implementation. It exercises
 the protocol boundary without making one database, retrieval policy, or Host
 behavior normative:
 
-- `pcp-core`: Page, Relation, Ref semantics, and request types.
+- `pcp-core`: Page, Revision, Relation, and Alias semantics and request types.
 - `pcp-store`: a database-independent async Store contract with AccessSession
   enforcement.
 - `pcp-client`: the transport-independent Host API and the current embedded
@@ -170,7 +173,7 @@ behavior normative:
   server transport.
 - `pcp-console`: a read-only local Web Inspector using a dedicated audit
   Principal.
-- `pcp-sqlite`: immutable local Pages, retrieval, Summaries, validity, Refs,
+- `pcp-sqlite`: local Page/Revision storage, head-only retrieval, Summaries, validity,
   and DAG Relations.
 - `pcp-runtime`: Store composition, fixed endpoint identities, the
   multi-endpoint broker lifecycle, and an optional semantic-worker maintenance
@@ -181,7 +184,16 @@ behavior normative:
 ```bash
 cargo test --workspace
 PCP_STORE_PATH=data/context.sqlite3 cargo run -p pcp-cli -- doctor
+PCP_STORE_PATH=data/context.sqlite3 cargo run -p pcp-cli -- retention-plan 30 2 100
 ```
+
+`retention-plan` 只生成有界的 Revision 保留规划，不删除数据。三个参数依次是最小保留天数、
+每个 Page 至少保留的最近 Revision 数量和样本上限。当前参考 Runtime 将规划能力与实际回收能力
+分开声明。
+
+`retention-plan` produces a bounded Revision-retention dry run and never deletes data. Its
+arguments are minimum age in days, recent Revisions retained per Page, and sample limit. The
+reference Runtime advertises planning separately from physical collection.
 
 模型如何决定写入、召回、总结或让信息进入注意力，仍属于 Model Client 或 Host 策略。
 The decision to write, recall, summarize, or admit information into attention
@@ -284,6 +296,11 @@ stores counts, projection names, duration, and response size; query text and Pag
 content are deliberately excluded. Markdown Page content is rendered for reading,
 including KaTeX-compatible inline and display math; non-Markdown payloads and
 the metadata views remain escaped plain text.
+
+The Retention view is also read-only. It can change dry-run parameters for one
+request, compare protection roots and candidate samples, and inspect active
+semantic retention leases with their holder, reason, and expiration. It does
+not persist GC policy, create permanent pins, revoke leases, or collect data.
 
 The CLI uses that endpoint when `PCP_RUNTIME_SOCKET` is set. Supplying
 `PCP_CLIENT_ID` additionally verifies that the endpoint exposes the expected
