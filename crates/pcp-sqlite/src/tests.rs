@@ -6,10 +6,10 @@ use std::{
 use pcp_client::{EmbeddedPcpClient, PcpApi};
 use pcp_core::{
     AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    AssessPageValidityRequest, CreateScopeRequest, LifecycleStatus, LinkPagesRequest, PagePayload,
-    Projection, ProvenanceEvent, ReadPagesRequest, RevisePageRequest, ScopeGrant, SearchFilters,
-    SearchMode, SearchPagesRequest, SearchTermMatch, SourceRef, ValidityStanding, WritePageRequest,
-    WriteSummaryRequest,
+    AssessPageValidityRequest, ConsolidatePagesRequest, CreateScopeRequest, LifecycleStatus,
+    LinkPagesRequest, PagePayload, Projection, ProvenanceEvent, ReadPagesRequest,
+    RevisePageRequest, ScopeGrant, SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch,
+    SourceRef, ValidityStanding, WritePageRequest, WriteSummaryRequest,
 };
 use pcp_store::PcpStore;
 use serde_json::json;
@@ -1477,6 +1477,154 @@ fn principal(principal_id: &str, principal_type: AccessPrincipalType) -> AccessP
 fn pcp_client(store: Arc<SqlitePcpStore>, access: AccessSession) -> Arc<dyn PcpApi> {
     let store: Arc<dyn PcpStore> = store;
     EmbeddedPcpClient::shared(store, access)
+}
+
+#[tokio::test]
+async fn consolidates_current_pages_into_one_canonical_head() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-consolidation-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
+        .await
+        .expect("open store");
+    let owner_id = store.owner_id().to_owned();
+    let namespace = "project:consolidation".to_owned();
+    store
+        .create_scope(CreateScopeRequest {
+            owner_id: owner_id.clone(),
+            namespace: namespace.clone(),
+            display_name: "Consolidation project".to_owned(),
+            description: None,
+            parent_namespace: None,
+            visibility: "private".to_owned(),
+        })
+        .await
+        .expect("create scope");
+    let actor = Actor {
+        actor_type: ActorType::Model,
+        actor_id: "model:consolidation".to_owned(),
+    };
+    let mut pages = Vec::new();
+    for (index, content) in [
+        "The runtime keeps durable state.",
+        "Durable state survives task restarts.",
+        "The same runtime state remains auditable.",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        pages.push(
+            store
+                .write_page(
+                    write_request(
+                        &owner_id,
+                        &namespace,
+                        actor.clone(),
+                        content,
+                        &format!("consolidation:{index}"),
+                    ),
+                    vec![namespace.clone()],
+                )
+                .await
+                .expect("write consolidation input"),
+        );
+    }
+    let input_ids = pages
+        .iter()
+        .map(|page| page.revision_id.clone())
+        .collect::<Vec<_>>();
+    let request = ConsolidatePagesRequest {
+        canonical_revision_id: pages[0].revision_id.clone(),
+        replaced_revision_ids: input_ids.clone(),
+        created_by: actor.clone(),
+        lifecycle_status: LifecycleStatus::Active,
+        observed_at: None,
+        valid_from: None,
+        valid_to: None,
+        payload: Some(PagePayload {
+            media_type: "text/markdown".to_owned(),
+            content: "The runtime preserves auditable durable state across task restarts."
+                .to_owned(),
+        }),
+        source_refs: Vec::new(),
+        facets: Some(json!({"kind": "memory_synthesis"})),
+        provenance: Vec::new(),
+        idempotency_key: Some("consolidation:apply".to_owned()),
+    };
+    let consolidated = store
+        .consolidate_pages(request.clone(), vec![namespace.clone()])
+        .await
+        .expect("consolidate Pages");
+    assert_eq!(consolidated.page_id, pages[0].page_id);
+    assert_eq!(
+        store
+            .current_revision_id(pages[0].page_id.clone(), vec![namespace.clone()])
+            .await
+            .expect("read canonical head"),
+        consolidated.revision_id
+    );
+    for input in &pages[1..] {
+        assert_eq!(
+            store
+                .current_revision_id(input.page_id.clone(), vec![namespace.clone()])
+                .await
+                .expect("read redirected input Ref"),
+            consolidated.revision_id
+        );
+    }
+    assert_eq!(
+        store
+            .page_count(vec![namespace.clone()])
+            .await
+            .expect("count effective Pages"),
+        1
+    );
+    let read = store
+        .read_pages(
+            ReadPagesRequest {
+                revision_ids: vec![consolidated.revision_id.clone()],
+                projections: vec![Projection::Provenance, Projection::Relations],
+                max_chars: 8_000,
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("read consolidated Page")
+        .remove(0);
+    assert_eq!(
+        read.relations
+            .iter()
+            .filter(|relation| relation.relation_type == "supersedes")
+            .count(),
+        3
+    );
+    assert!(read.revision.provenance.iter().any(|event| {
+        event.operation == "consolidate"
+            && input_ids
+                .iter()
+                .all(|input| event.input_revision_ids.contains(input))
+    }));
+
+    let replay = store
+        .consolidate_pages(request.clone(), vec![namespace.clone()])
+        .await
+        .expect("replay idempotent consolidation");
+    assert_eq!(replay.revision_id, consolidated.revision_id);
+    assert!(!replay.created);
+    let mut stale = request;
+    stale.idempotency_key = Some("consolidation:stale".to_owned());
+    assert!(
+        store
+            .consolidate_pages(stale, vec![namespace])
+            .await
+            .is_err()
+    );
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]

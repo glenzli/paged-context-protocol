@@ -43,6 +43,8 @@ Source / Event
 - **原始历史可恢复**：在授权范围内保留可搜索来源；摘要和模型整理是可重建的派生层。
 - **稀疏模型记忆**：只有值得索引的内容才创建 Summary Page，模型再按需读取目标 Page。
 - **可回溯整理图**：总结、聚合、判断与后继关系都能逐层返回精确来源 Page。
+- **活跃记忆可收缩**：经模型确认的 consolidation 可以用一个 canonical Page 替代多个当前
+  语义 Page，同时保留完整 lineage。
 - **显式关系断言**：时间相邻和内容相似不会自动成为 Relation；领域关系由 Host、用户或模型判断。
 - **显式注意力物化**：已返回候选与读取内容必须以明确 Page 身份进入模型可见上下文。
 - **显式作用域**：统一地址空间不等于全局注入，跨项目召回必须由 Scope、权限或关系允许。
@@ -105,6 +107,9 @@ separate Memory service or profile.
   models then read exact target Pages on demand.
 - **Traceable organization graph**: summaries, aggregates, assessments, and
   successor chains lead back to exact source Pages.
+- **Contracting active memory**: model-approved consolidation can replace
+  several current semantic Pages with one canonical Page without losing
+  lineage.
 - **Explicit Relation assertions**: temporal adjacency and similarity do not
   become graph edges automatically; domain Relations require Host, user, or
   model judgment.

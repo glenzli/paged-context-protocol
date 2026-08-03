@@ -170,6 +170,9 @@ async fn dispatch(client: &dyn PcpApi, operation: RpcOperation) -> Result<RpcVal
         RpcOperation::RevisePage(request) => {
             RpcValue::WriteResult(client.revise_page(request).await?)
         }
+        RpcOperation::ConsolidatePages(request) => {
+            RpcValue::WriteResult(client.consolidate_pages(request).await?)
+        }
         RpcOperation::LinkPages(request) => RpcValue::Relation(client.link_pages(request).await?),
         RpcOperation::WriteSummary(request) => {
             RpcValue::SummaryResult(client.write_summary(request).await?)

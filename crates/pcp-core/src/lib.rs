@@ -13,7 +13,7 @@ pub use model::{
     WriteSummaryResult, WriteValidityResult,
 };
 pub use request::{
-    AssessPageValidityRequest, CreateScopeRequest, InitialRelation, LinkPagesRequest,
-    ReadPagesRequest, RevisePageRequest, SearchFilters, SearchPagesRequest, WritePageRequest,
-    WriteSummaryRequest, default_search_projections,
+    AssessPageValidityRequest, ConsolidatePagesRequest, CreateScopeRequest, InitialRelation,
+    LinkPagesRequest, ReadPagesRequest, RevisePageRequest, SearchFilters, SearchPagesRequest,
+    WritePageRequest, WriteSummaryRequest, default_search_projections,
 };

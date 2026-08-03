@@ -1,10 +1,11 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessDecision, AccessPermission, AccessSession, AssessPageValidityRequest,
-    Capabilities, CreateScopeRequest, LinkPagesRequest, Projection, ProvenanceEvent, ReadPage,
-    ReadPagesRequest, Relation, RevisePageRequest, Scope, SearchPagesRequest, SearchResult,
-    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    Capabilities, ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest, Projection,
+    ProvenanceEvent, ReadPage, ReadPagesRequest, Relation, RevisePageRequest, Scope,
+    SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
+    WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::{DurablePageInventoryItem, PcpStore, TombstoneCascadeResult};
 
@@ -309,6 +310,51 @@ impl PcpStore for SqlitePcpStore {
         }
         let result = SqlitePcpStore::revise_page(self, request, audit_scopes.clone()).await;
         complete(self, access, "revise_page", audit_scopes, result, false).await
+    }
+
+    async fn consolidate_pages(
+        &self,
+        access: &AccessSession,
+        request: ConsolidatePagesRequest,
+    ) -> Result<WriteResult> {
+        let mut target_ids = request.replaced_revision_ids.clone();
+        target_ids.push(request.canonical_revision_id.clone());
+        target_ids.sort();
+        target_ids.dedup();
+        let mut scopes = match self.revision_namespaces(target_ids).await {
+            Ok(scopes) => scopes,
+            Err(error) => {
+                return complete(
+                    self,
+                    access,
+                    "consolidate_pages",
+                    Vec::new(),
+                    Err(error),
+                    false,
+                )
+                .await;
+            }
+        };
+        let authorization = async {
+            for scope in &scopes {
+                authorize_exact(access, scope, AccessPermission::Write)?;
+                authorize_exact(access, scope, AccessPermission::Revise)?;
+            }
+            let target_scope = scopes
+                .first()
+                .cloned()
+                .context("PCP consolidation has no target Scope")?;
+            let provenance_scopes =
+                authorize_provenance(self, access, &target_scope, &request.provenance).await?;
+            extend_unique(&mut scopes, provenance_scopes);
+            Ok(())
+        }
+        .await;
+        if let Err(error) = authorization {
+            return complete(self, access, "consolidate_pages", scopes, Err(error), true).await;
+        }
+        let result = SqlitePcpStore::consolidate_pages(self, request, scopes.clone()).await;
+        complete(self, access, "consolidate_pages", scopes, result, false).await
     }
 
     async fn link_pages(

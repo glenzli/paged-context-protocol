@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use pcp_client::{DurablePageInventoryItem, TombstoneCascadeResult};
 use pcp_core::{
     AccessAuditEvent, AccessSession, Actor, AssessPageValidityRequest, Capabilities,
-    CreateScopeRequest, LinkPagesRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
-    Scope, SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
-    WriteSummaryResult, WriteValidityResult,
+    ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest, ReadPage, ReadPagesRequest,
+    Relation, RevisePageRequest, Scope, SearchPagesRequest, SearchResult, WritePageRequest,
+    WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -62,6 +62,7 @@ pub(crate) enum RpcOperation {
     },
     WritePage(WritePageRequest),
     RevisePage(RevisePageRequest),
+    ConsolidatePages(ConsolidatePagesRequest),
     LinkPages(LinkPagesRequest),
     WriteSummary(WriteSummaryRequest),
     NextSummaryCandidate {

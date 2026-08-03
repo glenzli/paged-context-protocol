@@ -380,7 +380,10 @@ fn validate_scope(request: &CreateScopeRequest) -> Result<()> {
     Ok(())
 }
 
-fn validate_document(payload: Option<&PagePayload>, source_refs: &[SourceRef]) -> Result<()> {
+pub(crate) fn validate_document(
+    payload: Option<&PagePayload>,
+    source_refs: &[SourceRef],
+) -> Result<()> {
     if payload.is_none() && source_refs.is_empty() {
         anyhow::bail!("a PCP page requires a payload or source reference");
     }
@@ -421,7 +424,7 @@ fn ensure_scope_access(
     Ok(())
 }
 
-fn ensure_revision_access(
+pub(crate) fn ensure_revision_access(
     transaction: &Transaction<'_>,
     revision_id: &str,
     allowed_scopes: &HashSet<String>,
@@ -439,7 +442,7 @@ fn ensure_revision_access(
     Ok(())
 }
 
-fn ensure_provenance_access(
+pub(crate) fn ensure_provenance_access(
     transaction: &Transaction<'_>,
     provenance: &[ProvenanceEvent],
     allowed_scopes: &HashSet<String>,
@@ -676,7 +679,7 @@ fn read_relation(transaction: &Transaction<'_>, relation_id: &str) -> Result<Rel
         .context("read idempotent PCP relation")
 }
 
-fn lookup_write_idempotency(
+pub(crate) fn lookup_write_idempotency(
     transaction: &Transaction<'_>,
     actor_id: &str,
     operation: &str,
@@ -706,7 +709,7 @@ fn lookup_write_idempotency(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn record_idempotency(
+pub(crate) fn record_idempotency(
     transaction: &Transaction<'_>,
     actor_id: &str,
     operation: &str,
@@ -741,7 +744,7 @@ fn record_idempotency(
     Ok(())
 }
 
-fn complete_provenance(
+pub(crate) fn complete_provenance(
     mut provenance: Vec<ProvenanceEvent>,
     operation: &str,
     actor: &Actor,

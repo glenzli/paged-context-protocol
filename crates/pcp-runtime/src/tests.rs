@@ -3,8 +3,8 @@ use std::{sync::Arc, time::SystemTime};
 use pcp_client::{EmbeddedPcpClient, PcpApi};
 use pcp_core::{
     AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    CreateScopeRequest, LifecycleStatus, PagePayload, Projection, SearchFilters, SearchMode,
-    SearchPagesRequest, SearchTermMatch, WritePageRequest,
+    ConsolidatePagesRequest, CreateScopeRequest, LifecycleStatus, PagePayload, Projection,
+    SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch, WritePageRequest,
 };
 use pcp_rpc::{RemotePcpClient, RuntimeEndpoint, serve_unix, serve_unix_endpoints};
 use pcp_sqlite::SqlitePcpStore;
@@ -226,7 +226,7 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
     );
     let written = remote
         .write_page(WritePageRequest {
-            owner_id,
+            owner_id: owner_id.clone(),
             namespace: namespace.clone(),
             visibility: "private".to_owned(),
             lifecycle_status: LifecycleStatus::Active,
@@ -252,7 +252,7 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
     let found = remote
         .search_pages(SearchPagesRequest {
             query: "server bound principal".to_owned(),
-            scopes: vec![namespace],
+            scopes: vec![namespace.clone()],
             mode: SearchMode::Text,
             term_match: SearchTermMatch::All,
             projections: vec![Projection::Payload],
@@ -264,7 +264,54 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
         .expect("search through remote client");
     assert_eq!(found.hits.len(), 1);
     assert_eq!(found.hits[0].revision_id, written.revision_id);
+    let second = remote
+        .write_page(test_page(
+            &owner_id,
+            &namespace,
+            "The same durable state is available through a second Page.",
+            "runtime:test:page:second",
+        ))
+        .await
+        .expect("write second remote Page");
+    assert_eq!(remote.page_count(Vec::new()).await.expect("count pages"), 2);
+    let consolidated = remote
+        .consolidate_pages(ConsolidatePagesRequest {
+            canonical_revision_id: written.revision_id.clone(),
+            replaced_revision_ids: vec![written.revision_id.clone(), second.revision_id.clone()],
+            created_by: Actor {
+                actor_type: ActorType::Model,
+                actor_id: "model:runtime-test".to_owned(),
+            },
+            lifecycle_status: LifecycleStatus::Active,
+            observed_at: None,
+            valid_from: None,
+            valid_to: None,
+            payload: Some(PagePayload {
+                media_type: "text/markdown".to_owned(),
+                content: "The remote runtime preserves one auditable durable state.".to_owned(),
+            }),
+            source_refs: Vec::new(),
+            facets: None,
+            provenance: Vec::new(),
+            idempotency_key: Some("runtime:test:consolidation".to_owned()),
+        })
+        .await
+        .expect("consolidate through remote client");
     assert_eq!(remote.page_count(Vec::new()).await.expect("count pages"), 1);
+    assert_eq!(
+        remote
+            .current_revision_id(written.page_id)
+            .await
+            .expect("resolve canonical Ref"),
+        consolidated.revision_id
+    );
+    assert_eq!(
+        remote
+            .current_revision_id(second.page_id)
+            .await
+            .expect("resolve redirected Ref"),
+        consolidated.revision_id
+    );
     let (audit, _) = remote.access_log(50, None).await.expect("read access log");
     assert!(audit.iter().all(|event| {
         event.principal.principal_id == "host:runtime-test"

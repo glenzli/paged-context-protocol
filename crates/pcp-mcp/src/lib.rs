@@ -4,10 +4,10 @@ use chrono::{SecondsFormat, Utc};
 use pcp_client::PcpApi;
 use pcp_core::{
     AccessAuditEvent, AccessPermission, AccessSession, Actor, ActorType, AssessPageValidityRequest,
-    Capabilities, CreateScopeRequest, InitialRelation, LifecycleStatus, LinkPagesRequest,
-    PagePayload, Projection, ProvenanceEvent, ReadPage, ReadPagesRequest, Relation,
-    RevisePageRequest, Scope, SearchFilters, SearchMode, SearchPagesRequest, SearchResult,
-    SearchTermMatch, ValidityStanding, WritePageRequest, WriteSummaryRequest,
+    Capabilities, ConsolidatePagesRequest, CreateScopeRequest, InitialRelation, LifecycleStatus,
+    LinkPagesRequest, PagePayload, Projection, ProvenanceEvent, ReadPage, ReadPagesRequest,
+    Relation, RevisePageRequest, Scope, SearchFilters, SearchMode, SearchPagesRequest,
+    SearchResult, SearchTermMatch, ValidityStanding, WritePageRequest, WriteSummaryRequest,
 };
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -131,6 +131,14 @@ pub struct SupersedePageParams {
     content: String,
     #[serde(default)]
     based_on_page_ids: Vec<String>,
+}
+
+#[derive(Debug, JsonSchema, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsolidatePagesParams {
+    canonical_page_id: String,
+    replaced_page_ids: Vec<String>,
+    content: String,
 }
 
 #[derive(Debug, JsonSchema, serde::Deserialize)]
@@ -477,6 +485,68 @@ impl PcpMcpServer {
             .revise_page(request)
             .await
             .map_err(|error| operation_error("supersede PCP Page", error))?;
+        Ok(Json(PageWriteResult {
+            page_id: written.revision_id,
+            created: written.created,
+        }))
+    }
+
+    #[tool(
+        name = "pcp_consolidate_pages",
+        description = "Replace two or more current Pages that express one durable subject with one model-written Page. Preserve one selected Page as the canonical Ref; all inputs remain traceable but leave default recall.",
+        annotations(
+            title = "Consolidate PCP Pages",
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
+    )]
+    pub async fn pcp_consolidate_pages(
+        &self,
+        Parameters(params): Parameters<ConsolidatePagesParams>,
+    ) -> Result<Json<PageWriteResult>, McpError> {
+        let canonical = self
+            .client
+            .read_pages(ReadPagesRequest {
+                revision_ids: vec![params.canonical_page_id.clone()],
+                projections: vec![
+                    Projection::Manifest,
+                    Projection::Sources,
+                    Projection::Facets,
+                ],
+                max_chars: 8_000,
+            })
+            .await
+            .map_err(|error| operation_error("read canonical PCP Page", error))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| operation_error("read canonical PCP Page", "Page not found"))?;
+        let actor = session_actor(self.client.as_ref());
+        let mut replaced_page_ids = params.replaced_page_ids;
+        replaced_page_ids.push(params.canonical_page_id.clone());
+        replaced_page_ids.sort();
+        replaced_page_ids.dedup();
+        let written = self
+            .client
+            .consolidate_pages(ConsolidatePagesRequest {
+                canonical_revision_id: params.canonical_page_id,
+                replaced_revision_ids: replaced_page_ids.clone(),
+                created_by: actor.clone(),
+                lifecycle_status: LifecycleStatus::Active,
+                observed_at: None,
+                valid_from: None,
+                valid_to: None,
+                payload: Some(PagePayload {
+                    media_type: "text/markdown".to_owned(),
+                    content: params.content,
+                }),
+                source_refs: canonical.revision.source_refs,
+                facets: canonical.revision.facets,
+                provenance: vec![provenance("consolidate", &actor, replaced_page_ids)],
+                idempotency_key: None,
+            })
+            .await
+            .map_err(|error| operation_error("consolidate PCP Pages", error))?;
         Ok(Json(PageWriteResult {
             page_id: written.revision_id,
             created: written.created,

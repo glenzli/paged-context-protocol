@@ -1,10 +1,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
-    AccessAuditEvent, AccessSession, AssessPageValidityRequest, Capabilities, CreateScopeRequest,
-    LinkPagesRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest, Scope,
-    SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
-    WriteSummaryResult, WriteValidityResult,
+    AccessAuditEvent, AccessSession, AssessPageValidityRequest, Capabilities,
+    ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest, ReadPage, ReadPagesRequest,
+    Relation, RevisePageRequest, Scope, SearchPagesRequest, SearchResult, WritePageRequest,
+    WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -92,6 +92,11 @@ pub trait PcpStore: Send + Sync {
         &self,
         access: &AccessSession,
         request: RevisePageRequest,
+    ) -> Result<WriteResult>;
+    async fn consolidate_pages(
+        &self,
+        access: &AccessSession,
+        request: ConsolidatePagesRequest,
     ) -> Result<WriteResult>;
     async fn link_pages(
         &self,

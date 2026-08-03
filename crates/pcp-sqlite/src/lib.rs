@@ -1,5 +1,6 @@
 mod access;
 mod adapter;
+mod consolidate;
 mod immutable_page_migration;
 mod inventory;
 mod read;

@@ -357,6 +357,8 @@ pub struct Capabilities {
     pub supports_immutable_pages: bool,
     pub supports_refs: bool,
     pub supports_revision_conflicts: bool,
+    #[serde(default)]
+    pub supports_consolidation: bool,
     pub supports_durable_deletion: bool,
     pub supports_provenance_graph: bool,
     pub supports_access_sessions: bool,

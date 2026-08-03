@@ -11,10 +11,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use pcp_client::{DurablePageInventoryItem, PcpApi, TombstoneCascadeResult};
 use pcp_core::{
-    AccessAuditEvent, AccessSession, AssessPageValidityRequest, Capabilities, CreateScopeRequest,
-    LinkPagesRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest, Scope,
-    SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
-    WriteSummaryResult, WriteValidityResult,
+    AccessAuditEvent, AccessSession, AssessPageValidityRequest, Capabilities,
+    ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest, ReadPage, ReadPagesRequest,
+    Relation, RevisePageRequest, Scope, SearchPagesRequest, SearchResult, WritePageRequest,
+    WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use tokio::net::UnixStream;
 
@@ -230,6 +230,16 @@ impl PcpApi for RemotePcpClient {
         match self.request(RpcOperation::RevisePage(request)).await? {
             RpcValue::WriteResult(value) => Ok(value),
             _ => Err(unexpected("revise_page")),
+        }
+    }
+
+    async fn consolidate_pages(&self, request: ConsolidatePagesRequest) -> Result<WriteResult> {
+        match self
+            .request(RpcOperation::ConsolidatePages(request))
+            .await?
+        {
+            RpcValue::WriteResult(value) => Ok(value),
+            _ => Err(unexpected("consolidate_pages")),
         }
     }
 

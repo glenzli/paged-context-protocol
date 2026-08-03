@@ -5,9 +5,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessPermission, AccessPrincipal, AccessSession, AssessPageValidityRequest,
-    Capabilities, CreateScopeRequest, LinkPagesRequest, ReadPage, ReadPagesRequest, Relation,
-    RevisePageRequest, Scope, ScopeGrant, SearchPagesRequest, SearchResult, WritePageRequest,
-    WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    Capabilities, ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest, ReadPage,
+    ReadPagesRequest, Relation, RevisePageRequest, Scope, ScopeGrant, SearchPagesRequest,
+    SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult,
+    WriteValidityResult,
 };
 use pcp_store::PcpStore;
 pub use pcp_store::{DurablePageInventoryItem, TombstoneCascadeResult};
@@ -115,6 +116,7 @@ pub trait PcpApi: Send + Sync {
     async fn content_char_count(&self, requested_scopes: Vec<String>) -> Result<usize>;
     async fn write_page(&self, request: WritePageRequest) -> Result<WriteResult>;
     async fn revise_page(&self, request: RevisePageRequest) -> Result<WriteResult>;
+    async fn consolidate_pages(&self, request: ConsolidatePagesRequest) -> Result<WriteResult>;
     async fn link_pages(&self, request: LinkPagesRequest) -> Result<Relation>;
     async fn write_summary(&self, request: WriteSummaryRequest) -> Result<WriteSummaryResult>;
     async fn next_summary_candidate(
@@ -246,6 +248,10 @@ impl PcpApi for EmbeddedPcpClient {
 
     async fn revise_page(&self, request: RevisePageRequest) -> Result<WriteResult> {
         self.store.revise_page(&self.access, request).await
+    }
+
+    async fn consolidate_pages(&self, request: ConsolidatePagesRequest) -> Result<WriteResult> {
+        self.store.consolidate_pages(&self.access, request).await
     }
 
     async fn link_pages(&self, request: LinkPagesRequest) -> Result<Relation> {

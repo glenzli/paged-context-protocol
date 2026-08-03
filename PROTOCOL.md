@@ -147,6 +147,26 @@ summary-detail 状态机。
 更好的 Summary 必须创建新 Summary Page，并以 `supersedes` 指向旧 Summary。多 Page 的主题
 整理同样是普通聚合或 Summary Page，由关系连接来源。
 
+### 2.1 多 Page 合并
+
+长期运行的 Memory 层不能只增加 Summary 与 Relation。模型判断多个当前 Page 实际表达同一
+持久主题、事实或状态时，可以创建一个内容自洽的新 Page，并以该 Page `supersedes` 所有
+被替代 Page。这个操作称为 consolidation，而不是 Summary：新 Page 是后续召回可直接使用的
+内容，不只是通往旧 Detail 的索引。
+
+Consolidation 必须是原子的，并且：
+
+- 输入至少包含两个仍为当前状态的精确 Page IDs；
+- 明确选择一个 canonical Page 作为合并结果的身份；所有输入 Ref 原子地收敛到新 Page，调用方
+  获得 canonical Ref；
+- 新 Page 的 provenance 记录全部输入和 `consolidate` 操作；
+- 所有输入仍可精确读取和沿 lineage 追溯，但退出默认 Search、索引和当前关系图；
+- 输入不一致、相互矛盾或只是部分相关时不得强行合并，应保留、聚合或 assessment。
+
+相似度、时间邻接和共享 Scope 只能帮助发现候选，不能自行触发 consolidation。语义判断和
+有损内容生成必须由 Host、用户或模型完成。实现可以提供可选后台维护器，但 PCP 不规定固定
+调度周期、相似度阈值或模型。
+
 ## 3. 有效性与变化
 
 Page 的内容永远不被后续事实改写。后续信息可以：
@@ -184,6 +204,7 @@ Summary、聚合与 assessment 不能伪装成原始证据。任何派生链都�
 - `read_pages(page_ids, view?, max_chars?)`
 - `write_page(content, scope?, based_on_page_ids?)`
 - `supersede_page(target_page_id, content, based_on_page_ids?)`
+- `consolidate_pages(canonical_page_id, replaced_page_ids, content)`
 - `write_summary(target_page_id, content, based_on_page_ids?)`
 - `assess_validity(target_page_id, standing, rationale, evidence_page_ids)`
 - `relate_pages(from_page_id, relation_type, to_page_id)`
@@ -205,8 +226,9 @@ Search 返回的是候选，不是真值。实现可以使用全文索引、精�
 Host 负责：认证、AccessSession、Scope 选择、预算、原始事件捕获、event stream 顺序、领域
 语义关系判断、工具编排，以及哪些内容进入当前模型上下文。
 
-Store 负责：不可变 Page、调用方断言的 Relation、结构性 Relation、Ref 的原子推进、索引、
-权限执行、持久化、审计和完整性检查。Store 不根据时间邻接或相似度发明领域语义关系。
+Store 负责：不可变 Page、调用方断言的 Relation、结构性 Relation、Ref 的原子推进、原子
+consolidation、当前有效 Page 投影、索引、权限执行、持久化、审计和完整性检查。Store 不根据
+时间邻接或相似度发明领域语义关系，也不自行决定哪些内容应被有损合并。
 
 PCP 不定义：用户画像策略、主动探索策略、注意力价值判断、固定 Prompt、模型路由、窗口压缩
 算法或后台 Agent 拓扑。这些属于 symbiont-d 等具体 Host。

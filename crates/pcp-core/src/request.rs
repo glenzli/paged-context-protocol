@@ -86,6 +86,33 @@ pub struct RevisePageRequest {
     pub idempotency_key: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsolidatePagesRequest {
+    #[serde(rename = "canonicalPageId", alias = "canonicalRevisionId")]
+    pub canonical_revision_id: String,
+    #[serde(rename = "replacedPageIds", alias = "replacedRevisionIds")]
+    pub replaced_revision_ids: Vec<String>,
+    pub created_by: Actor,
+    pub lifecycle_status: LifecycleStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<PagePayload>,
+    #[serde(default)]
+    pub source_refs: Vec<SourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facets: Option<Value>,
+    #[serde(default)]
+    pub provenance: Vec<ProvenanceEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchFilters {

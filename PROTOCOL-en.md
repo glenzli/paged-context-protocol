@@ -169,6 +169,31 @@ A better Summary MUST be a new Summary Page that `supersedes` the old Summary.
 Cross-Page topic organization is likewise represented by ordinary aggregate or
 Summary Pages linked to their exact sources.
 
+### 2.1 Multi-Page Consolidation
+
+A long-running Memory layer cannot only add Summaries and Relations. When a
+model determines that several current Pages express one durable subject, fact,
+or state, it may write one self-contained Page that `supersedes` every replaced
+Page. This operation is consolidation, not summarization: the new Page is
+directly usable content for future recall, not merely an index into old Detail.
+
+Consolidation MUST be atomic and:
+
+- take at least two exact Page IDs that are still current;
+- select one canonical Page as the result identity; atomically converge every
+  input Ref on the new Page and return the canonical Ref;
+- record every input and the `consolidate` operation in provenance;
+- keep every input exactly readable through lineage while removing it from
+  default Search, index browsing, and current graph views;
+- refuse to collapse incompatible, contradictory, or merely adjacent Pages,
+  which should instead remain separate, aggregate, or receive assessments.
+
+Similarity, temporal adjacency, and shared Scope may discover candidates but
+MUST NOT trigger consolidation by themselves. A Host, user, or model owns the
+semantic judgment and lossy synthesis. An implementation MAY provide an
+optional background maintainer, but PCP does not prescribe its schedule,
+similarity threshold, or model.
+
 ## 3. Validity and Change
 
 Later information never rewrites Page content. It may:
@@ -211,6 +236,7 @@ A Core capability surface SHOULD provide at least:
 - `read_pages(page_ids, view?, max_chars?)`
 - `write_page(content, scope?, based_on_page_ids?)`
 - `supersede_page(target_page_id, content, based_on_page_ids?)`
+- `consolidate_pages(canonical_page_id, replaced_page_ids, content)`
 - `write_summary(target_page_id, content, based_on_page_ids?)`
 - `assess_validity(target_page_id, standing, rationale, evidence_page_ids)`
 - `relate_pages(from_page_id, relation_type, to_page_id)`
@@ -236,9 +262,10 @@ event capture, event-stream order, domain-semantic Relation judgment, tool
 orchestration, and admission into active model context.
 
 The Store owns immutable Pages, caller-asserted Relations, structural
-Relations, atomic Ref advancement, indexes, authorization enforcement,
-persistence, audit, and integrity checks. It does not invent domain-semantic
-Relations from temporal adjacency or similarity.
+Relations, atomic Ref advancement, atomic consolidation, effective-Page
+projection, indexes, authorization enforcement, persistence, audit, and
+integrity checks. It does not invent domain-semantic Relations from temporal
+adjacency or similarity or decide which content should be lossily consolidated.
 
 PCP does not define user-profile policy, autonomous exploration, interruption
 value, fixed prompts, model routing, context-window compaction, or background

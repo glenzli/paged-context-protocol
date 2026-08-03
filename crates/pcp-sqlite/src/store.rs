@@ -68,6 +68,7 @@ impl SqlitePcpStore {
             supports_immutable_pages: true,
             supports_refs: true,
             supports_revision_conflicts: true,
+            supports_consolidation: true,
             supports_durable_deletion: false,
             supports_provenance_graph: true,
             supports_access_sessions: true,
