@@ -261,7 +261,9 @@ The first version is intentionally read-only. Its default view summarizes the
 runtime and available Scopes. Page and access lists are cursor-paginated; a Page
 opens on its Summary or bounded preview, while full Detail and a navigable
 one-hop Relation graph are loaded only when requested. It also exposes the
-metadata-only access timeline.
+metadata-only access timeline. Markdown Page content is rendered for reading,
+including KaTeX-compatible inline and display math; non-Markdown payloads and
+the metadata views remain escaped plain text.
 
 The CLI uses that endpoint when `PCP_RUNTIME_SOCKET` is set. Supplying
 `PCP_CLIENT_ID` additionally verifies that the endpoint exposes the expected

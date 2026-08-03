@@ -1,0 +1,16 @@
+{
+  "name": "pcp-console-web",
+  "private": true,
+  "scripts": {
+    "build:web": "esbuild frontend/page-content-source.js --bundle --format=esm --minify --loader:.woff2=dataurl --loader:.woff=dataurl --loader:.ttf=dataurl --outfile=src/page-content.js",
+    "test:web": "node --test frontend/*.test.mjs"
+  },
+  "dependencies": {
+    "dompurify": "^3.4.12",
+    "katex": "^0.16.47",
+    "marked": "^15.0.12"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12"
+  }
+}

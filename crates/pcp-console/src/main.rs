@@ -107,6 +107,8 @@ fn router(state: AppState) -> Router {
         .route("/", get(index))
         .route("/app.js", get(app_js))
         .route("/page-inspector.js", get(page_inspector_js))
+        .route("/page-content.js", get(page_content_js))
+        .route("/page-content.css", get(page_content_css))
         .route("/page-graph.js", get(page_graph_js))
         .route("/quality-view.js", get(quality_view_js))
         .route("/styles.css", get(styles_css))
@@ -159,6 +161,20 @@ async fn page_inspector_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         include_str!("page-inspector.js"),
+    )
+}
+
+async fn page_content_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("page-content.js"),
+    )
+}
+
+async fn page_content_css() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("page-content.css"),
     )
 }
 

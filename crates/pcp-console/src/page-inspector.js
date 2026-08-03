@@ -1,4 +1,5 @@
 import { createTopologyMap, relationFamily } from "./page-graph.js";
+import { renderPageContent } from "./page-content.js";
 
 export function createPageInspector({ request, showError, formatTime }) {
   const dialog = document.getElementById("page-dialog");
@@ -45,6 +46,12 @@ export function createPageInspector({ request, showError, formatTime }) {
     return element("pre", "", value ? JSON.stringify(value, null, 2) : fallback);
   }
 
+  function contentBlock(content, mediaType = "text/markdown") {
+    const block = element("div", "page-content");
+    renderPageContent(block, content, mediaType);
+    return block;
+  }
+
   function actorLabel(actor) {
     if (!actor) return "-";
     const prefix = `${actor.actorType}:`;
@@ -72,6 +79,9 @@ export function createPageInspector({ request, showError, formatTime }) {
 
   function renderSummary(page) {
     const preview = page.summary?.content || page.page.payload?.content || "No summary projection";
+    const previewMediaType = page.summary
+      ? "text/markdown"
+      : page.page.payload?.mediaType || "text/plain";
     const facts = element("dl", "details-grid compact-details");
     const rows = [
       ["Scope", page.page.namespace],
@@ -87,7 +97,7 @@ export function createPageInspector({ request, showError, formatTime }) {
     ]));
 
     const sections = [
-      detailSection(page.summary ? "Summary" : "Preview", element("div", "summary-copy", preview)),
+      detailSection(page.summary ? "Summary" : "Preview", contentBlock(preview, previewMediaType)),
       detailSection("Page", facts),
     ];
     if (page.validity) sections.push(detailSection("Validity", jsonBlock(page.validity, "No validity assessment")));
@@ -249,6 +259,7 @@ export function createPageInspector({ request, showError, formatTime }) {
   }
 
   function renderRaw(page) {
+    const payload = page.page.payload;
     const manifest = {
       lifecycleStatus: page.page.lifecycleStatus,
       createdAt: page.page.createdAt,
@@ -259,7 +270,10 @@ export function createPageInspector({ request, showError, formatTime }) {
       facets: page.page.facets,
     };
     rawPane.replaceChildren(
-      detailSection("Detail", element("pre", "", page.page.payload?.content || "No payload projection")),
+      detailSection(
+        payload?.mediaType ? `Detail · ${payload.mediaType}` : "Detail",
+        contentBlock(payload?.content || "No payload projection", payload?.mediaType || "text/plain"),
+      ),
       detailSection("Manifest", jsonBlock(manifest, "No manifest")),
       detailSection("Sources and provenance", jsonBlock({
         sourceRefs: page.page.sourceRefs,
