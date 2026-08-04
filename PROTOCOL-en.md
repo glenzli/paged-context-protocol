@@ -58,11 +58,11 @@ Search/Browse current Summary and Page heads
 
 Validity assessments are ordinary Pages as well. Page lifecycle controls discovery; standings such as live, qualified, disputed, or retracted come from assessment content and evidence.
 
-Consolidation lossily converges Pages that genuinely represent one durable object. It publishes a new Revision on one canonical revisioned Page, records all exact input Revisions in provenance, links the canonical Page to absorbed Pages with cross-Page `supersedes`, and removes absorbed Pages from default recall. Similarity may discover candidates but never decides the merge.
+Consolidation lossily converges Pages that genuinely represent one durable object. It publishes a new Revision on one canonical revisioned Page, records all exact input Revisions in provenance, links the canonical Page to absorbed Pages with cross-Page `supersedes`, and removes absorbed Pages from default recall. Canonical and absorbed Pages MUST share `kind` and `mutability`; a Host-declared stable domain identity conflict is a hard rejection. Similarity may discover candidates but never decides the merge.
 
 ## 3. Interface semantics
 
-A Core surface should provide bounded Search, current or exact Read, sealed or revisioned writes, CAS revision, atomic consolidation, Summary and validity writes, Page Relations, Scope discovery, audit, a bounded `plan_revision_retention(scopes, policy)` dry run, and finite idempotent Revision retention leases.
+A Core surface should provide bounded Search, current or exact Read, sealed or revisioned writes, CAS revision, atomic consolidation, Summary and validity writes, Page Relations, Scope discovery, audit, a bounded `plan_revision_retention(scopes, policy)` dry run, explicit `collect_revision_retention(scopes, policy, confirmed_revision_ids)`, and finite idempotent Revision retention leases.
 
 Hosts should fill mechanical actor, time, Scope, structural Relation, and provenance fields. Search returns candidates rather than truth and defaults to current heads. Historical Revisions remain exactly addressable for audit but do not re-enter default retrieval.
 
@@ -88,7 +88,7 @@ The planner begins from current heads, sealed evidence, recent-version and minim
 
 Explicit retention uses finite, idempotently renewable Revision leases rather than Page content fields. A lease binds an exact Revision, authorized Scope, holder Principal, reason, and expiration; an expired lease is no longer a protection root. A Runtime may offer bounded routing views of actual collection candidates to a Host semantic worker, but the model selects candidates and reasons only. It does not choose global GC policy or bypass Store authorization and protection closure. Permanent retention, early revocation, and collection remain explicit operator actions rather than silent consequences of an ordinary model decision.
 
-A dry run performs no deletion. A future apply operation MUST recalculate roots inside the write transaction and atomically remove candidate Revisions, candidate-owned compatibility projections or source edges, and expired idempotency records. Implementations advertise planning and application separately through `supportsRevisionRetentionPlanning` and `supportsRevisionRetention`; planning support does not imply collection support.
+A dry run performs no deletion. Collection requires a separately authorized caller to submit exact candidate Revision IDs. The Store MUST recalculate roots inside the write transaction and reject the entire batch if any ID is no longer eligible. A successful collection atomically removes candidate Revisions, candidate-owned compatibility projections or source edges, and only past-window idempotency records linked to those candidates. It keeps replay metadata for current heads and surviving operations, and writes a content-free collection ledger so an old Revision ID remains distinguishable from one that never existed. Implementations advertise planning and application separately through `supportsRevisionRetentionPlanning` and `supportsRevisionRetention`; planning support does not imply collection support.
 
 Retention policy is configured by Host, Page kind, storage budget, and value; models should not choose GC parameters on every write.
 

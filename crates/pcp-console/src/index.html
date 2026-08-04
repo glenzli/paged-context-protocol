@@ -78,7 +78,10 @@
 
     <section id="view-health" class="view">
       <div class="view-heading">
-        <div><h2>Memory health</h2><span id="health-status" class="muted" aria-live="polite">Not loaded</span></div>
+        <div class="view-heading-copy">
+          <div><h2>Operational health</h2><span id="health-status" class="muted" aria-live="polite">Not loaded</span></div>
+          <p class="view-description">Runtime activity and stored-memory shape from metadata. These signals do not judge whether content is true or relevant.</p>
+        </div>
         <label class="window-control">Window
           <select id="health-window" aria-label="Health analysis window">
             <option value="24">24 hours</option>
@@ -91,7 +94,10 @@
       <div id="health-metrics" class="metrics"></div>
       <div id="health-signals" class="health-signals"></div>
 
-      <div class="section-heading"><h2>Recall and consolidation</h2></div>
+      <div class="section-heading section-heading-copy">
+        <h2>Runtime behavior</h2>
+        <span class="muted">How clients retrieve, revise, and contract the current memory surface.</span>
+      </div>
       <div id="health-flows" class="aggregate-grid"></div>
 
       <div class="section-heading"><h2>Activity trend</h2></div>
@@ -129,27 +135,31 @@
 
     <section id="view-retention" class="view">
       <div class="view-heading">
-        <div><h2>Revision retention</h2><span id="retention-status" class="muted" aria-live="polite">Not loaded</span></div>
+        <div class="view-heading-copy">
+          <div><h2>Revision retention plan</h2><span id="retention-status" class="muted" aria-live="polite">Not loaded</span></div>
+          <p class="view-description">A read-only dry run over historical Revisions. Current Page heads and sealed evidence cannot become candidates.</p>
+        </div>
       </div>
       <form id="retention-controls" class="retention-controls">
         <label>Scope
           <select id="retention-scope" name="scope"><option value="">All scopes</option></select>
         </label>
-        <label>Minimum age
-          <span class="input-unit"><input id="retention-minimum-age" name="minimumAgeDays" type="number" min="0" max="36500" step="1" value="30"><span>days</span></span>
+        <label>Older than
+          <span class="input-unit"><input id="retention-minimum-age" name="minimumAgeDays" type="number" min="0" max="36500" step="1" value="30" aria-label="Minimum candidate age in days"><span>days</span></span>
         </label>
-        <label>Recent per Page
+        <label>Keep newest per Page
           <input id="retention-recent" name="keepRecentRevisionsPerPage" type="number" min="0" max="1000" step="1" value="2">
         </label>
-        <label>Samples
+        <label>Preview rows
           <input id="retention-samples" name="sampleLimit" type="number" min="1" max="100" step="1" value="50">
         </label>
-        <button id="retention-run" type="submit">Run plan</button>
+        <button id="retention-run" type="submit">Run dry run</button>
       </form>
+      <p class="control-note">Eligibility requires both age and absence of every protection root. Preview rows only limits the tables below.</p>
       <div id="retention-mode" class="health-signals"></div>
       <div id="retention-metrics" class="metrics"></div>
 
-      <div class="section-heading"><h2>Semantic retention leases</h2><span id="retention-lease-status" class="muted"></span></div>
+      <div class="section-heading section-heading-copy"><h2>Explicit retention leases</h2><span id="retention-lease-status" class="muted"></span></div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Page</th><th>Scope</th><th>Holder</th><th>Reason</th><th>Expires</th></tr></thead>
@@ -157,15 +167,15 @@
         </table>
       </div>
 
-      <div class="section-heading"><h2>Protection roots</h2></div>
+      <div class="section-heading section-heading-copy"><h2>Why Revisions are protected</h2><span class="muted">Reasons overlap; one Revision can match several rows.</span></div>
       <div class="table-wrap">
-        <table>
-          <thead><tr><th>Reason</th><th>Revisions</th><th>Protected share</th></tr></thead>
+        <table class="retention-reason-table">
+          <thead><tr><th>Reason</th><th>Meaning</th><th>Revisions</th><th>Share of scanned</th></tr></thead>
           <tbody id="retention-reason-rows"></tbody>
         </table>
       </div>
 
-      <div class="section-heading"><h2>Candidate sample</h2><span id="retention-candidate-status" class="muted"></span></div>
+      <div class="section-heading section-heading-copy"><h2>Eligible historical Revisions</h2><span id="retention-candidate-status" class="muted"></span></div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Page</th><th>Scope</th><th>Kind</th><th>Created</th><th>Estimated size</th></tr></thead>
@@ -173,7 +183,7 @@
         </table>
       </div>
 
-      <div class="section-heading"><h2>Protected historical sample</h2><span id="retention-protected-status" class="muted"></span></div>
+      <div class="section-heading section-heading-copy"><h2>Protected historical Revisions</h2><span id="retention-protected-status" class="muted"></span></div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Page</th><th>Scope</th><th>Kind</th><th>Reasons</th><th>Created</th></tr></thead>

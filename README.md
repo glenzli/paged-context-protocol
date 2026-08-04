@@ -136,7 +136,8 @@ model attention.
 `v0.7.0-draft` restores stable Page identity above immutable Revisions.
 Summaries, Topics, Profiles, and current-state documents may revise one Page,
 while default retrieval indexes only Page heads. The reference implementation
-includes an idempotent migration from v0.6 data.
+includes an idempotent migration from v0.6 data, deterministic retention plans,
+finite Revision leases, and protected collection with a content-free ledger.
 
 The complete `v0.3.0-alpha` generation is preserved as a significant design
 stage, together with its deprecation rationale and migration notes:
@@ -154,10 +155,10 @@ Host 行为变成协议要求：
 - `pcp-client`：面向 Host 的传输无关能力接口，以及当前的 embedded 适配器。
 - `pcp-rpc`：轻量 Unix socket wire、远端 client 与通用 server transport。
 - `pcp-console`：通过专用审计 Principal 运行的只读本地 Web Inspector。
-- `pcp-sqlite`：本地 Page/Revision、head-only 检索、Summary、有效性与 DAG 关系。
+- `pcp-sqlite`：本地 Page/Revision、head-only 检索、Summary、有效性、DAG 关系与受保护的历史 Revision 回收。
 - `pcp-runtime`：打开 Store、固定接入身份并管理多端点 broker 生命周期；可选维护器以独立
   Principal 调度 Summary 与 consolidation，但不内置语义模型。
-- `pcp-cli`：面向本地 Store 的检查、搜索、读取与导出工具。
+- `pcp-cli`：面向本地 Store 的检查、搜索、读取、保留规划、显式回收与导出工具。
 - `pcp-mcp`：基于官方 Rust MCP SDK 的本地 stdio 工具服务器。
 
 The repository includes an evolving Rust reference implementation. It exercises
@@ -174,11 +175,12 @@ behavior normative:
 - `pcp-console`: a read-only local Web Inspector using a dedicated audit
   Principal.
 - `pcp-sqlite`: local Page/Revision storage, head-only retrieval, Summaries, validity,
-  and DAG Relations.
+  DAG Relations, and protected historical-Revision collection.
 - `pcp-runtime`: Store composition, fixed endpoint identities, the
   multi-endpoint broker lifecycle, and an optional semantic-worker maintenance
   coordinator that does not embed model policy.
-- `pcp-cli`: inspection, search, read, and export commands for a local Store.
+- `pcp-cli`: inspection, search, read, retention planning, explicit collection,
+  and export commands for a local Store.
 - `pcp-mcp`: a local stdio tool server built on the official Rust MCP SDK.
 
 ```bash
@@ -194,6 +196,18 @@ PCP_STORE_PATH=data/context.sqlite3 cargo run -p pcp-cli -- retention-plan 30 2 
 `retention-plan` produces a bounded Revision-retention dry run and never deletes data. Its
 arguments are minimum age in days, recent Revisions retained per Page, and sample limit. The
 reference Runtime advertises planning separately from physical collection.
+
+当前能力与协议中的可选面保持显式区分：稳定 Page/Revision、CAS 修订、head-only 检索、
+关系/provenance、consolidation、保留规划、有限租约和显式回收已经实现；Alias 与 durable
+Page deletion 通过 Capabilities 报告为 unavailable，冷存占位也尚未实现。`retention-collect`
+要求管理权限与 `--confirm`，重新规划后只提交仍符合条件的精确 Revision ID；Console 始终只读。
+
+The current capability boundary is explicit: stable Pages/Revisions, CAS updates,
+head-only retrieval, Relations/provenance, consolidation, retention planning,
+finite leases, and explicit collection are implemented. Aliases and durable Page
+deletion are advertised as unavailable; cold-storage stubs are also not implemented.
+`retention-collect` requires admin access and `--confirm`, replans before submitting
+exact eligible Revision IDs, and is never exposed as a Console mutation.
 
 模型如何决定写入、召回、总结或让信息进入注意力，仍属于 Model Client 或 Host 策略。
 The decision to write, recall, summarize, or admit information into attention
@@ -285,7 +299,7 @@ PCP_CONSOLE_BIND=127.0.0.1:4318 \
   target/release/pcp-console
 ```
 
-The first version is intentionally read-only. Its default view summarizes the
+The Console is intentionally read-only. Its default view summarizes the
 runtime and available Scopes. Page and access lists are cursor-paginated; a Page
 opens on its Summary or bounded preview, while full Detail and a navigable
 one-hop Relation graph are loaded only when requested. It also exposes the
@@ -297,10 +311,13 @@ content are deliberately excluded. Markdown Page content is rendered for reading
 including KaTeX-compatible inline and display math; non-Markdown payloads and
 the metadata views remain escaped plain text.
 
-The Retention view is also read-only. It can change dry-run parameters for one
-request, compare protection roots and candidate samples, and inspect active
-semantic retention leases with their holder, reason, and expiration. It does
-not persist GC policy, create permanent pins, revoke leases, or collect data.
+The Health view labels operational activity and structural indicators separately
+from semantic quality: non-empty Search does not prove relevance, and Relation
+density does not prove correctness. The Retention view is also read-only. It can
+change dry-run parameters for one request, distinguish current heads, protected
+history, and eligible history, explain overlapping protection roots, and inspect
+active finite leases with their holder, reason, and expiration. It does not
+persist GC policy, create permanent pins, revoke leases, or collect data.
 
 The CLI uses that endpoint when `PCP_RUNTIME_SOCKET` is set. Supplying
 `PCP_CLIENT_ID` additionally verifies that the endpoint exposes the expected

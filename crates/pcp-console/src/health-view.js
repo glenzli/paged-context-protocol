@@ -11,9 +11,10 @@ export function createHealthView({ request, showError, formatNumber }) {
     return node;
   }
 
-  function metric(label, value, tone = "") {
+  function metric(label, value, tone = "", note = "") {
     const node = element("div", `metric${tone ? ` tone-${tone}` : ""}`);
     node.append(element("div", "metric-label", label), element("div", "metric-value", value));
+    if (note) node.append(element("div", "metric-note", note));
     return node;
   }
 
@@ -41,9 +42,11 @@ export function createHealthView({ request, showError, formatNumber }) {
     return `${(bytes / 1_000_000).toFixed(2)} MB`;
   }
 
-  function panel(label, entries) {
+  function panel(label, description, entries) {
     const node = element("section", "aggregate-panel");
-    node.append(element("h3", "", label));
+    const heading = element("div", "aggregate-panel-heading");
+    heading.append(element("h3", "", label), element("p", "", description));
+    node.append(heading);
     for (const [name, value, tone] of entries) {
       const row = element("div", `aggregate-row${tone ? ` health-${tone}` : ""}`);
       row.append(element("span", "", name), element("strong", "", value));
@@ -53,7 +56,7 @@ export function createHealthView({ request, showError, formatNumber }) {
   }
 
   function renderSignals(data) {
-    const signals = [];
+    const signals = [["info", "Health uses operation metadata and structural counts. Non-empty recall does not prove relevance, and graph density does not prove correctness."]];
     if (!data.activity.calls) {
       signals.push(["info", "No workload calls were observed in this window. Telemetry begins with the upgraded runtime."]);
     }
@@ -62,8 +65,8 @@ export function createHealthView({ request, showError, formatNumber }) {
     }
     if (data.recall.searches) {
       const zeroRate = data.recall.zeroResultSearches / data.recall.searches;
-      if (zeroRate >= 0.35) signals.push(["warning", `${percentage(data.recall.zeroResultSearches, data.recall.searches)} of searches returned no Page.`]);
-      else signals.push(["positive", `${percentage(data.recall.searches - data.recall.zeroResultSearches, data.recall.searches)} of searches returned at least one Page.`]);
+      if (zeroRate >= 0.35) signals.push(["warning", `${percentage(data.recall.zeroResultSearches, data.recall.searches)} of measured searches returned no Page.`]);
+      else signals.push(["positive", `${percentage(data.recall.searches - data.recall.zeroResultSearches, data.recall.searches)} of measured searches returned at least one Page; relevance still requires client or human evaluation.`]);
       const recallCalls = data.recall.searches + data.recall.summaryReads + data.recall.detailReads;
       const callsPerHour = recallCalls / data.windowHours;
       const readsPerSearch = (data.recall.summaryReads + data.recall.detailReads) / data.recall.searches;
@@ -75,11 +78,11 @@ export function createHealthView({ request, showError, formatNumber }) {
       const coverage = data.storage.summarizedLongPages / data.storage.longPages;
       signals.push([
         coverage >= 0.7 ? "positive" : "warning",
-        `${percentage(data.storage.summarizedLongPages, data.storage.longPages)} of long current Pages have a Summary route.`,
+        `${percentage(data.storage.summarizedLongPages, data.storage.longPages)} of all long active Pages have a Summary route.`,
       ]);
     }
     if (data.consolidation.runs) {
-      signals.push(["info", `Consolidation removed ${formatNumber(data.consolidation.netPageReduction)} redundant current Page${data.consolidation.netPageReduction === 1 ? "" : "s"} in this window.`]);
+      signals.push(["info", `Consolidation absorbed ${formatNumber(data.consolidation.netPageReduction)} current Page${data.consolidation.netPageReduction === 1 ? "" : "s"} in this window; semantic correctness is not inferred from the count.`]);
     }
     if (data.activity.failed || data.activity.denied) {
       signals.push(["danger", `${formatNumber(data.activity.failed)} failed and ${formatNumber(data.activity.denied)} denied calls need inspection.`]);
@@ -165,35 +168,35 @@ export function createHealthView({ request, showError, formatNumber }) {
   function render(data) {
     const failureCount = data.activity.failed + data.activity.denied;
     byId("health-metrics").replaceChildren(
-      metric("Current Pages", formatNumber(data.storage.currentPages)),
-      metric("New current Pages", `+${formatNumber(data.storage.currentPagesCreated)}`, data.storage.currentPagesCreated ? "info" : ""),
-      metric("Workload calls", formatNumber(data.activity.calls)),
-      metric("Call exceptions", formatNumber(failureCount), failureCount ? "danger" : "positive"),
+      metric("Active Pages", formatNumber(data.storage.currentPages), "", "Current heads participating in default recall"),
+      metric("Heads updated", `+${formatNumber(data.storage.currentPagesCreated)}`, data.storage.currentPagesCreated ? "info" : "", "Active head Revisions published in this window"),
+      metric("Workload calls", formatNumber(data.activity.calls), "", "Authorized client operations in this window"),
+      metric("Failed / denied", `${formatNumber(data.activity.failed)} / ${formatNumber(data.activity.denied)}`, failureCount ? "danger" : "positive", "Runtime failures and authorization denials"),
     );
     byId("health-flows").replaceChildren(
-      panel("Recall", [
+      panel("Recall activity", "Retrieval volume and reach, not result quality.", [
         ["Searches", `${formatNumber(data.recall.searches)} · ${hourlyRate(data.recall.searches, data.windowHours)}/h`],
-        ["Zero-result", percentage(data.recall.zeroResultSearches, data.recall.searches), data.recall.zeroResultSearches ? "warning" : "positive"],
+        ["Zero-result", percentage(data.recall.zeroResultSearches, data.recall.searches), data.recall.searches && data.recall.zeroResultSearches / data.recall.searches >= 0.35 ? "warning" : "positive"],
         ["Pages returned", `${formatNumber(data.recall.returnedPages)} · ${decimalRatio(data.recall.returnedPages, data.recall.searches)}/search`],
         ["Summary / detail reads", `${formatNumber(data.recall.summaryReads)} / ${formatNumber(data.recall.detailReads)} · ${decimalRatio(data.recall.summaryReads + data.recall.detailReads, data.recall.searches)}/search`],
       ]),
-      panel("Consolidation", [
+      panel("History contraction", "Page convergence during the selected window.", [
         ["Runs", formatNumber(data.consolidation.runs)],
-        ["Input Pages", formatNumber(data.consolidation.inputPages)],
-        ["Net contraction", formatNumber(data.consolidation.netPageReduction), data.consolidation.netPageReduction ? "positive" : ""],
+        ["Pages examined", formatNumber(data.consolidation.inputPages)],
+        ["Pages absorbed", formatNumber(data.consolidation.netPageReduction), data.consolidation.netPageReduction ? "positive" : ""],
         ["Historical Revisions", formatNumber(data.storage.historicalRevisions)],
       ]),
-      panel("Shape", [
-        ["Pages / Revisions", `${formatNumber(data.storage.pages)} / ${formatNumber(data.storage.revisions)}`],
+      panel("Stored shape", "Current structure and retained history; no target density is assumed.", [
+        ["All / active Pages", `${formatNumber(data.storage.pages)} / ${formatNumber(data.storage.currentPages)}`],
         ["Sealed / revisioned", `${formatNumber(data.storage.sealedPages)} / ${formatNumber(data.storage.revisionedPages)}`],
         ["Relations", formatNumber(data.graph.relations)],
-        ["Relations / Page", data.graph.averageRelationsPerPage.toFixed(1)],
+        ["Isolated active Pages", formatNumber(data.graph.isolatedCurrentPages)],
       ]),
-      panel("Runtime", [
+      panel("Runtime service", "Observed telemetry coverage and response latency.", [
+        ["Telemetry coverage", percentage(data.activity.measuredCalls, data.activity.calls)],
         ["Principals", formatNumber(data.activity.principals)],
         ["p50 latency", duration(data.activity.p50DurationMs)],
         ["p95 latency", duration(data.activity.p95DurationMs)],
-        ["Long-page Summary", percentage(data.storage.summarizedLongPages, data.storage.longPages)],
       ]),
     );
     renderSignals(data);

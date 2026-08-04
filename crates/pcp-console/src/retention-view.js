@@ -12,9 +12,10 @@ export function createRetentionView({ request, showError, formatNumber, formatTi
     return node;
   }
 
-  function metric(label, value, tone = "") {
+  function metric(label, value, tone = "", note = "") {
     const node = element("div", `metric${tone ? ` tone-${tone}` : ""}`);
     node.append(element("div", "metric-label", label), element("div", "metric-value", value));
+    if (note) node.append(element("div", "metric-note", note));
     return node;
   }
 
@@ -42,6 +43,24 @@ export function createRetentionView({ request, showError, formatNumber, formatTi
     })[reason] || reason;
   }
 
+  function reasonDescription(reason, policy) {
+    return ({
+      current_head: "The Page version used by default reads",
+      sealed_evidence: "Immutable source evidence",
+      recent_revision_window: `Newest ${policy.keepRecentRevisionsPerPage} Revision${policy.keepRecentRevisionsPerPage === 1 ? "" : "s"} on each Page`,
+      minimum_age_window: `Created less than ${policy.minimumAgeDays} day${policy.minimumAgeDays === 1 ? "" : "s"} ago`,
+      relation_endpoint: "Exact version recorded at a Relation endpoint",
+      relation_basis: "Evidence used to assert a Relation",
+      projection_head: "Current Summary or Validity projection",
+      summary_record: "Referenced by a Summary record",
+      validity_record: "Referenced by a Validity assessment",
+      idempotency_window: "Needed to replay a recent write safely",
+      provenance_dependency: "Input to another protected Revision",
+      explicit_lease: "Held by a finite retention lease",
+      invalid_timestamp: "Age cannot be proven safely",
+    })[reason] || "Store-defined protection root";
+  }
+
   function pageButton(pageId, revisionId) {
     const button = element("button", "page-link");
     button.type = "button";
@@ -61,17 +80,18 @@ export function createRetentionView({ request, showError, formatNumber, formatTi
   function renderReasons(plan) {
     const rows = (plan.protectionReasons || []).map((entry) => {
       const row = document.createElement("tr");
-      const share = plan.protectedRevisions
-        ? `${Math.round((entry.revisions / plan.protectedRevisions) * 100)}%`
+      const share = plan.scannedRevisions
+        ? `${Math.round((entry.revisions / plan.scannedRevisions) * 100)}%`
         : "-";
       row.append(
         element("td", "", reasonLabel(entry.reason)),
+        element("td", "muted", reasonDescription(entry.reason, plan.policy)),
         element("td", "", formatNumber(entry.revisions)),
         element("td", "muted", share),
       );
       return row;
     });
-    byId("retention-reason-rows").replaceChildren(...(rows.length ? rows : [emptyRow("No protection roots", 3)]));
+    byId("retention-reason-rows").replaceChildren(...(rows.length ? rows : [emptyRow("No protection roots", 4)]));
   }
 
   function renderCandidates(plan) {
@@ -88,7 +108,7 @@ export function createRetentionView({ request, showError, formatNumber, formatTi
       );
       return row;
     });
-    byId("retention-candidate-rows").replaceChildren(...(rows.length ? rows : [emptyRow("No candidate Revisions", 5)]));
+    byId("retention-candidate-rows").replaceChildren(...(rows.length ? rows : [emptyRow("No eligible historical Revisions under this policy", 5)]));
     byId("retention-candidate-status").textContent = plan.candidatesTruncated
       ? `${formatNumber(plan.candidates.length)} shown of ${formatNumber(plan.candidateRevisions)}`
       : `${formatNumber(plan.candidateRevisions)} total`;
@@ -109,12 +129,13 @@ export function createRetentionView({ request, showError, formatNumber, formatTi
       return row;
     });
     byId("retention-protected-rows").replaceChildren(...(rows.length ? rows : [emptyRow("No protected historical samples", 5)]));
+    const protectedHistory = Math.max(0, plan.protectedRevisions - protectionCount(plan, "current_head"));
     byId("retention-protected-status").textContent = plan.protectedSamplesTruncated
-      ? `${formatNumber(plan.protectedSamples.length)} samples shown`
-      : `${formatNumber(plan.protectedSamples.length)} samples`;
+      ? `${formatNumber(plan.protectedSamples.length)} shown of ${formatNumber(protectedHistory)}`
+      : `${formatNumber(protectedHistory)} total`;
   }
 
-  function renderLeases(leases) {
+  function renderLeases(leases, total) {
     const rows = leases.map((lease) => {
       const row = document.createElement("tr");
       const page = element("td");
@@ -128,33 +149,48 @@ export function createRetentionView({ request, showError, formatNumber, formatTi
       );
       return row;
     });
-    byId("retention-lease-rows").replaceChildren(...(rows.length ? rows : [emptyRow("No active semantic retention leases", 5)]));
-    byId("retention-lease-status").textContent = `${formatNumber(leases.length)} active`;
+    byId("retention-lease-rows").replaceChildren(...(rows.length ? rows : [emptyRow("No active explicit retention leases", 5)]));
+    byId("retention-lease-status").textContent = leases.length < total
+      ? `${formatNumber(leases.length)} shown of ${formatNumber(total)} active`
+      : `${formatNumber(total)} active`;
+  }
+
+  function protectionCount(plan, reason) {
+    return (plan.protectionReasons || []).find((entry) => entry.reason === reason)?.revisions || 0;
   }
 
   function render({ plan, leases = [] }) {
     const hasCandidates = plan.candidateRevisions > 0;
+    const currentHeads = protectionCount(plan, "current_head");
+    const protectedHistory = Math.max(0, plan.protectedRevisions - currentHeads);
     byId("retention-metrics").replaceChildren(
-      metric("Scanned Revisions", formatNumber(plan.scannedRevisions)),
-      metric("Protected", formatNumber(plan.protectedRevisions), "positive"),
-      metric("Candidates", formatNumber(plan.candidateRevisions), hasCandidates ? "warning" : "positive"),
-      metric("Estimated candidate size", formatBytes(plan.candidateEstimatedBytes), hasCandidates ? "info" : ""),
+      metric("Scanned Revisions", formatNumber(plan.scannedRevisions), "", `${formatNumber(plan.scannedPages)} stable Pages`),
+      metric("Current heads", formatNumber(currentHeads), "positive", "Always protected"),
+      metric("Protected history", formatNumber(protectedHistory), "positive", "Historical versions still required"),
+      metric("Eligible history", formatNumber(plan.candidateRevisions), hasCandidates ? "warning" : "positive", `${formatBytes(plan.candidateEstimatedBytes)} across ${formatNumber(plan.candidatePages)} Pages`),
     );
 
     const collectionAvailable = Boolean(capabilities?.supportsRevisionRetention);
-    const signal = element(
+    const outcome = element(
       "div",
-      `health-signal tone-${collectionAvailable ? "warning" : "info"}`,
-      collectionAvailable
-        ? `Physical collection available · ${formatNumber(plan.candidatePages)} candidate Pages · ${formatNumber(plan.activeRetentionLeases)} active semantic leases`
-        : `Collection planning only · physical removal unavailable · ${formatNumber(plan.activeRetentionLeases)} active semantic leases · cutoff ${formatTime(plan.cutoffAt)}`,
+      `health-signal tone-${hasCandidates ? "warning" : "positive"}`,
+      hasCandidates
+        ? `${formatNumber(plan.candidateRevisions)} historical Revisions are eligible because they predate ${formatTime(plan.cutoffAt)} and have no protection root.`
+        : `No historical Revision is eligible under this policy. ${formatNumber(protectedHistory)} historical Revisions remain protected.`,
     );
-    byId("retention-mode").replaceChildren(signal);
-    renderLeases(leases);
+    const boundary = element(
+      "div",
+      "health-signal tone-info",
+      collectionAvailable
+        ? "This Console is dry-run only. The Runtime supports collection through a separately authorized admin client."
+        : "This Console is dry-run only, and the Runtime does not advertise physical collection.",
+    );
+    byId("retention-mode").replaceChildren(outcome, boundary);
+    renderLeases(leases, plan.activeRetentionLeases);
     renderReasons(plan);
     renderCandidates(plan);
     renderProtected(plan);
-    byId("retention-status").textContent = `${plan.scopes.length} scope${plan.scopes.length === 1 ? "" : "s"} · updated ${new Date(plan.generatedAt).toLocaleTimeString()}`;
+    byId("retention-status").textContent = `${plan.scopes.length} scope${plan.scopes.length === 1 ? "" : "s"} · dry run updated ${new Date(plan.generatedAt).toLocaleTimeString()}`;
   }
 
   function setScopes(scopes) {

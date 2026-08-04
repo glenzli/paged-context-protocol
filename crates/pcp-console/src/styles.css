@@ -97,6 +97,7 @@ main { max-width: 1280px; margin: 0 auto; padding: 22px; }
 .metric:last-child { border-right: 0; }
 .metric-label { color: var(--muted); margin-bottom: 6px; }
 .metric-value { font-size: 18px; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.metric-note { margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.35; }
 .metric.tone-info { background: var(--accent-soft); }
 .metric.tone-info .metric-value { color: var(--accent); }
 .metric.tone-positive { background: var(--positive-soft); }
@@ -107,8 +108,11 @@ main { max-width: 1280px; margin: 0 auto; padding: 22px; }
 .metric.tone-danger .metric-value { color: var(--danger); }
 .section-heading { display: flex; align-items: center; margin-top: 26px; margin-bottom: 8px; }
 .section-heading > .muted { margin-left: 8px; }
+.section-heading-copy { flex-wrap: wrap; gap: 3px 8px; }
 .view-heading { display: flex; align-items: center; justify-content: space-between; min-height: 34px; margin-bottom: 10px; }
 .view-heading h2 { display: inline; margin-right: 8px; }
+.view-heading-copy { min-width: 0; }
+.view-description { max-width: 760px; margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
 .window-control { display: flex; align-items: center; gap: 7px; color: var(--muted); }
 .window-control select { min-height: 30px; padding-top: 2px; padding-bottom: 2px; }
 h2 { margin: 0; font-size: 13px; }
@@ -135,7 +139,9 @@ input:focus, select:focus { border-color: var(--accent); }
 .aggregate-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 #health-flows { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .aggregate-panel { min-width: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); overflow: hidden; }
-.aggregate-panel h3 { margin: 0; padding: 9px 11px; border-bottom: 1px solid var(--line); background: var(--surface-subtle); color: var(--muted); font-size: 12px; }
+.aggregate-panel-heading { min-height: 62px; padding: 9px 11px; border-bottom: 1px solid var(--line); background: var(--surface-subtle); }
+.aggregate-panel-heading h3 { margin: 0; color: var(--text); font-size: 12px; }
+.aggregate-panel-heading p { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.35; }
 .aggregate-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 11px; border-bottom: 1px solid var(--line); }
 .aggregate-row:last-child { border-bottom: 0; }
 .aggregate-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -170,10 +176,15 @@ input:focus, select:focus { border-color: var(--accent); }
 .retention-controls label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
 .retention-controls input, .retention-controls select { width: 100%; color: var(--text); }
 .retention-controls button { min-height: 34px; }
+.control-note { margin: -4px 0 10px; color: var(--muted); font-size: 11px; }
 .input-unit { position: relative; display: block; }
 .input-unit input { padding-right: 42px; }
 .input-unit > span { position: absolute; right: 9px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
 .retention-reasons { color: var(--muted); line-height: 1.55; }
+.retention-reason-table th:nth-child(1) { width: 18%; }
+.retention-reason-table th:nth-child(2) { width: 48%; }
+.retention-reason-table th:nth-child(3),
+.retention-reason-table th:nth-child(4) { width: 17%; }
 dialog { width: min(960px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow: auto; padding: 0; border: 1px solid var(--strong-line); border-radius: 7px; background: var(--surface); color: var(--text); box-shadow: 0 18px 55px rgba(0, 0, 0, .22); }
 dialog::backdrop { background: rgba(0, 0, 0, .38); }
 .dialog-header { position: sticky; z-index: 2; top: 0; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 13px 15px; border-bottom: 1px solid var(--line); background: var(--surface); }
