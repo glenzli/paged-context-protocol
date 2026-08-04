@@ -137,7 +137,7 @@ input, select { min-height: 34px; border: 1px solid var(--strong-line); border-r
 input:focus, select:focus { border-color: var(--accent); }
 .list-footer { min-height: 46px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .aggregate-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-#health-flows { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+#health-flows { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
 .aggregate-panel { min-width: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); overflow: hidden; }
 .aggregate-panel-heading { min-height: 62px; padding: 9px 11px; border-bottom: 1px solid var(--line); background: var(--surface-subtle); }
 .aggregate-panel-heading h3 { margin: 0; color: var(--text); font-size: 12px; }
@@ -151,6 +151,10 @@ input:focus, select:focus { border-color: var(--accent); }
 .aggregate-row.health-positive strong { color: var(--positive); }
 .aggregate-row.health-warning strong { color: var(--warning); }
 .aggregate-row.health-danger strong { color: var(--danger); }
+#health-flows .aggregate-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(72px, 52%); align-items: start; }
+#health-flows .aggregate-row span, #health-flows .aggregate-row strong { min-width: 0; overflow-wrap: anywhere; }
+#health-flows .aggregate-row span { overflow: visible; text-overflow: clip; white-space: normal; }
+#health-flows .aggregate-row strong { text-align: right; }
 .health-signals { display: grid; gap: 7px; margin-top: 12px; }
 .health-signal { padding: 9px 11px; border: 1px solid var(--line); border-left-width: 3px; border-radius: 5px; background: var(--surface); }
 .health-signal.tone-info { border-left-color: var(--accent); }
@@ -296,7 +300,6 @@ pre { margin: 0; max-height: 420px; overflow: auto; padding: 11px; border: 1px s
   .retention-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .retention-controls button { align-self: end; }
   .aggregate-grid { grid-template-columns: 1fr; }
-  #health-flows { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .details-grid { grid-template-columns: 120px minmax(0, 1fr); }
   .graph-lanes { grid-template-columns: 1fr; }
   .graph-query-controls, .topology-header { align-items: flex-start; flex-direction: column; }
