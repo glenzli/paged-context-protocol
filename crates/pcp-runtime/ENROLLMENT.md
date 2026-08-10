@@ -39,13 +39,13 @@ share one generation-specific endpoint:
       "protocol": "pcp.runtime.observer",
       "protocol_versions": ["20260810.1"],
       "binding": "infra.local.unix-socket",
-      "endpoint": "sockets/p....sock"
+      "endpoint": "sockets/7K2M9Q4V6W8X1Y3Z.sock"
     },
     {
       "protocol": "pcp.runtime.enrollment",
       "protocol_versions": ["20260810.1"],
       "binding": "infra.local.unix-socket",
-      "endpoint": "sockets/p....sock"
+      "endpoint": "sockets/7K2M9Q4V6W8X1Y3Z.sock"
     }
   ]
 }
@@ -63,9 +63,9 @@ for the observer.
 
 ## Trust And Credential Model
 
-Before reading application bytes, every public or administration endpoint
-requires the peer effective UID to equal the Runtime UID. All sockets are mode
-`0600`.
+Before reading application bytes, every public, administration, or dynamic PCP
+RPC endpoint requires the peer effective UID to equal the Runtime UID. All
+sockets are mode `0600`.
 
 The client generates 32 random bytes and persists them as 64 lowercase
 hexadecimal characters. The credential is sent in `begin`, `status`, and
@@ -228,7 +228,7 @@ Active:
         "generation": "proc_..."
       },
       "binding": "infra.local.unix-socket",
-      "endpoint": "sockets/pcp-s....sock",
+      "endpoint": "sockets/4F6H8J1K3M5N7P9Q.sock",
       "access": {
         "principal": {
           "principalId": "host:symbiont-d",
@@ -247,7 +247,10 @@ The client resolves `endpoint` against the selected Infra Protocol runtime root,
 connects with the existing PCP RPC transport, and verifies that the RPC
 descriptor's `access` equals the returned `access`. The session identity's
 `kind`, `instance_id`, and `generation` MUST exactly match the selected discovery
-registration.
+registration. Dynamic endpoints use the same canonical
+`sockets/<opaque>.sock` binding shape as discovery offers: the opaque ID is at
+most 16 filename-safe ASCII characters, and Runtime validates the final path
+before binding and retries with a new ID on collision.
 
 ## Administration
 

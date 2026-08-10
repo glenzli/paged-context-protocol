@@ -28,6 +28,7 @@ use super::{
     state::{EnrollmentState, StateFile, StoredDecision, StoredRegistration, StoredRequest},
     transport::AdminServer,
 };
+use crate::infra_socket::BoundInfraSocket;
 
 const LOCAL_UNIX_SOCKET_BINDING: &str = "infra.local.unix-socket";
 const MAX_PENDING_REQUESTS: usize = 16;
@@ -316,12 +317,11 @@ impl EnrollmentHandler {
             &self.inner.owner_id,
             &self.inner.service.generation,
         )?;
-        let endpoint = session_socket_endpoint(&Uuid::new_v4());
-        let socket_path = self.inner.runtime_root.join(&endpoint);
-        let client = EmbeddedPcpClient::shared(Arc::clone(&self.inner.store), access.clone());
-        let running = RunningRuntimeEndpoint::start(&socket_path, client)
-            .await
+        let bound = BoundInfraSocket::bind(&self.inner.runtime_root)
             .map_err(|_| ProtocolError::unavailable())?;
+        let (endpoint, socket_path, listener) = bound.into_parts();
+        let client = EmbeddedPcpClient::shared(Arc::clone(&self.inner.store), access.clone());
+        let running = RunningRuntimeEndpoint::from_bound_listener(&socket_path, listener, client);
         let wire = EnrollmentSession {
             registration_id: registration.registration_id.clone(),
             service: self.inner.service.clone(),
@@ -778,31 +778,6 @@ fn internal_admin_error(_error: anyhow::Error) -> Vec<u8> {
 
 fn format_time(value: chrono::DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Millis, true)
-}
-
-fn compact_id(id: &Uuid) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut encoded = String::with_capacity(22);
-    for chunk in id.as_bytes().chunks(3) {
-        let first = chunk[0];
-        let second = chunk.get(1).copied();
-        let third = chunk.get(2).copied();
-        encoded.push(ALPHABET[(first >> 2) as usize] as char);
-        encoded.push(ALPHABET[(((first & 0b11) << 4) | second.unwrap_or(0) >> 4) as usize] as char);
-        if let Some(second) = second {
-            encoded.push(
-                ALPHABET[(((second & 0b1111) << 2) | third.unwrap_or(0) >> 6) as usize] as char,
-            );
-        }
-        if let Some(third) = third {
-            encoded.push(ALPHABET[(third & 0b111111) as usize] as char);
-        }
-    }
-    encoded
-}
-
-pub(super) fn session_socket_endpoint(id: &Uuid) -> String {
-    format!("sockets/s{}.sock", compact_id(id))
 }
 
 struct ProtocolError {

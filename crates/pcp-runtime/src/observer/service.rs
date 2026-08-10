@@ -1,12 +1,6 @@
 use std::{
     fs,
-    os::{
-        fd::AsRawFd,
-        unix::{
-            ffi::OsStrExt,
-            fs::{FileTypeExt, MetadataExt, PermissionsExt},
-        },
-    },
+    os::fd::AsRawFd,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -39,6 +33,7 @@ use super::{
 };
 use crate::enrollment::service::{EnrollmentHandler, request_schema};
 use crate::enrollment::{EnrollmentConfig, EnrollmentManager};
+use crate::infra_socket::BoundInfraSocket;
 
 const SERVICE_KIND: &str = "pcp";
 const INTEGRITY_INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -79,15 +74,8 @@ impl ObserverService {
         .await?;
         config.enrollment_enabled = enrollment.is_some();
         let enrollment_handler = enrollment.as_ref().map(EnrollmentManager::handler);
-        let endpoint = config.socket_endpoint(&compact_socket_id(&generation_id))?;
-        let socket_path = config.socket_path(&endpoint);
-        validate_socket_path_length(&socket_path)?;
-        prepare_socket_path(&socket_path).await?;
-        let listener = UnixListener::bind(&socket_path)
-            .with_context(|| format!("bind PCP observer socket {}", socket_path.display()))?;
-        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("secure PCP observer socket {}", socket_path.display()))?;
-        validate_private_socket(&socket_path)?;
+        let (endpoint, socket_path, listener) =
+            BoundInfraSocket::bind(&config.runtime_root)?.into_parts();
         let socket_file = SocketFile(socket_path.clone());
 
         let source = Arc::new(SnapshotSource::new(
@@ -452,75 +440,6 @@ fn peer_effective_uid(stream: &UnixStream) -> Result<u32> {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn peer_effective_uid(_stream: &UnixStream) -> Result<u32> {
     anyhow::bail!("PCP observer peer credentials are unsupported on this platform")
-}
-
-async fn prepare_socket_path(path: &Path) -> Result<()> {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return Ok(());
-    };
-    anyhow::ensure!(
-        metadata.file_type().is_socket(),
-        "PCP observer path exists and is not a socket: {}",
-        path.display()
-    );
-    if UnixStream::connect(path).await.is_ok() {
-        anyhow::bail!("a PCP observer is already listening at {}", path.display());
-    }
-    tokio::fs::remove_file(path)
-        .await
-        .with_context(|| format!("remove stale PCP observer socket {}", path.display()))?;
-    Ok(())
-}
-
-fn validate_private_socket(path: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("inspect PCP observer socket {}", path.display()))?;
-    anyhow::ensure!(
-        metadata.file_type().is_socket() && metadata.uid() == current_uid(),
-        "PCP observer endpoint is not a current-user Unix socket: {}",
-        path.display()
-    );
-    anyhow::ensure!(
-        metadata.permissions().mode() & 0o777 == 0o600,
-        "PCP observer socket must be mode 0600: {}",
-        path.display()
-    );
-    Ok(())
-}
-
-fn validate_socket_path_length(path: &Path) -> Result<()> {
-    // SAFETY: sockaddr_un is a plain C struct and all-zero is a valid initialization.
-    let address = unsafe { std::mem::zeroed::<libc::sockaddr_un>() };
-    let capacity = address.sun_path.len();
-    anyhow::ensure!(
-        path.as_os_str().as_bytes().len() < capacity,
-        "PCP observer socket path is too long for this platform (must be under {capacity} bytes): {}",
-        path.display()
-    );
-    Ok(())
-}
-
-fn compact_socket_id(id: &Uuid) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let bytes = id.as_bytes();
-    let mut encoded = String::with_capacity(23);
-    encoded.push('p');
-    for chunk in bytes.chunks(3) {
-        let first = chunk[0];
-        let second = chunk.get(1).copied();
-        let third = chunk.get(2).copied();
-        encoded.push(ALPHABET[(first >> 2) as usize] as char);
-        encoded.push(ALPHABET[(((first & 0b11) << 4) | second.unwrap_or(0) >> 4) as usize] as char);
-        if let Some(second) = second {
-            encoded.push(
-                ALPHABET[(((second & 0b1111) << 2) | third.unwrap_or(0) >> 6) as usize] as char,
-            );
-        }
-        if let Some(third) = third {
-            encoded.push(ALPHABET[(third & 0b111111) as usize] as char);
-        }
-    }
-    encoded
 }
 
 struct SocketFile(PathBuf);

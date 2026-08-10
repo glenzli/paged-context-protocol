@@ -37,7 +37,7 @@ Runtime advertises this protocol through
     "protocol": "pcp.runtime.observer",
     "protocol_versions": ["20260810.1"],
     "binding": "infra.local.unix-socket",
-    "endpoint": "sockets/p....sock"
+    "endpoint": "sockets/7K2M9Q4V6W8X1Y3Z.sock"
   }]
 }
 ```
@@ -66,7 +66,10 @@ socket. `launchd` may supervise Runtime but is not a discovery mechanism.
 
 ## Binding And Trust Boundary
 
-The endpoint is a runtime-root-relative `sockets/<opaque>.sock` path. Its parent
+The endpoint is a runtime-root-relative `sockets/<opaque>.sock` path. The opaque
+ID is a collision-resistant string of at most 16 filename-safe ASCII characters.
+Runtime validates the final absolute path, including its terminating NUL, before
+binding and retries with a new opaque ID on an address collision. Its parent
 directories are owner-only and the socket mode is `0600`. Before reading any
 application bytes, the provider obtains peer credentials from the connected
 Unix stream and requires the peer effective UID to equal its own.

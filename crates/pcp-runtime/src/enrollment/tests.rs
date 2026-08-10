@@ -5,9 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(target_os = "macos")]
-use std::os::unix::ffi::OsStrExt;
-
+use crate::{EnrollmentConfig, ObserverConfig, ObserverService};
 use pcp_client::PcpApi;
 use pcp_core::{AccessPermission, AccessPrincipalType};
 use pcp_rpc::{
@@ -18,33 +16,6 @@ use pcp_rpc::{
 };
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
-#[cfg(target_os = "macos")]
-use uuid::Uuid;
-
-use crate::{EnrollmentConfig, ObserverConfig, ObserverService};
-
-#[cfg(target_os = "macos")]
-#[test]
-fn dynamic_session_endpoint_fits_the_canonical_macos_runtime_root() {
-    let root = ObserverConfig::canonical_runtime_root_for_test()
-        .expect("resolve canonical macOS Infra runtime root");
-    let endpoint = super::service::session_socket_endpoint(&Uuid::nil());
-    let socket_path = root.join(&endpoint);
-    // SAFETY: sockaddr_un is a plain C struct and all-zero is a valid initialization.
-    let address = unsafe { std::mem::zeroed::<libc::sockaddr_un>() };
-    let path_bytes = socket_path.as_os_str().as_bytes().len();
-
-    assert_eq!(
-        endpoint.as_bytes().len(),
-        "sockets/".len() + 23 + ".sock".len()
-    );
-    assert!(
-        path_bytes < address.sun_path.len(),
-        "dynamic session socket path is {path_bytes} bytes, but macOS sun_path requires fewer than {}: {}",
-        address.sun_path.len(),
-        socket_path.display()
-    );
-}
 
 #[tokio::test]
 async fn enrollment_approves_identity_bound_session_and_survives_generation_change() {
@@ -131,6 +102,7 @@ async fn enrollment_approves_identity_bound_session_and_survives_generation_chan
     };
     assert_eq!(first_session.service.generation, first_generation);
     assert!(std::path::Path::new(&first_session.endpoint).is_relative());
+    assert_canonical_infra_socket_endpoint(&first_session.endpoint);
     assert!(
         first_session
             .access
@@ -246,6 +218,20 @@ async fn enrollment_requires_the_client_credential_for_status() {
     assert!(public.begin(duplicate_scope).await.is_err());
     observer.shutdown().await.expect("stop provider");
     let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+fn assert_canonical_infra_socket_endpoint(endpoint: &str) {
+    let opaque = endpoint
+        .strip_prefix("sockets/")
+        .and_then(|value| value.strip_suffix(".sock"))
+        .expect("canonical Infra Unix socket endpoint");
+    assert!(!opaque.is_empty() && opaque.len() <= 16);
+    assert!(opaque.bytes().next().unwrap().is_ascii_alphanumeric());
+    assert!(
+        opaque
+            .bytes()
+            .all(|byte| { byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') })
+    );
 }
 
 fn begin_params(credential: &str) -> BeginEnrollmentParams {

@@ -1,5 +1,6 @@
 mod config;
 mod enrollment;
+mod infra_socket;
 mod maintenance;
 mod observer;
 

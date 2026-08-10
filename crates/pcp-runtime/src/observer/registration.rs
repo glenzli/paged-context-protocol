@@ -85,15 +85,6 @@ impl ObserverConfig {
             .join(format!("pcp--{}.json", self.instance_id))
     }
 
-    pub(crate) fn socket_endpoint(&self, socket_id: &str) -> Result<String> {
-        validate_file_token(socket_id, "observer socket ID")?;
-        Ok(format!("sockets/{socket_id}.sock"))
-    }
-
-    pub(crate) fn socket_path(&self, endpoint: &str) -> PathBuf {
-        self.runtime_root.join(endpoint)
-    }
-
     fn authority_path(&self) -> PathBuf {
         self.registration_dir()
             .join(format!(".pcp--{}.publisher.lock", self.instance_id))
@@ -112,11 +103,11 @@ impl ObserverConfig {
             lease_ttl: Duration::from_millis(150),
         }
     }
+}
 
-    #[cfg(all(test, target_os = "macos"))]
-    pub(crate) fn canonical_runtime_root_for_test() -> Result<PathBuf> {
-        platform_runtime_root()
-    }
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn canonical_runtime_root_for_test() -> Result<PathBuf> {
+    platform_runtime_root()
 }
 
 #[cfg(target_os = "macos")]

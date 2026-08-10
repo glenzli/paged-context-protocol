@@ -1,5 +1,8 @@
 use std::{
-    os::unix::fs::{FileTypeExt, PermissionsExt},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{FileTypeExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -40,16 +43,25 @@ impl RunningRuntimeEndpoint {
     pub async fn start(socket_path: impl AsRef<Path>, client: Arc<dyn PcpApi>) -> Result<Self> {
         let socket_path = socket_path.as_ref().to_path_buf();
         let listener = bind_unix(&socket_path).await?;
+        Ok(Self::from_bound_listener(socket_path, listener, client))
+    }
+
+    pub fn from_bound_listener(
+        socket_path: impl AsRef<Path>,
+        listener: UnixListener,
+        client: Arc<dyn PcpApi>,
+    ) -> Self {
+        let socket_path = socket_path.as_ref().to_path_buf();
         let task = tokio::spawn(async move {
             if let Err(error) = serve_listener(listener, client).await {
                 eprintln!("PCP runtime endpoint failed: {error:#}");
             }
         });
-        Ok(Self {
+        Self {
             _guard: SocketGuard(socket_path.clone()),
             socket_path,
             task: Some(task),
-        })
+        }
     }
 
     pub fn socket_path(&self) -> &Path {
@@ -160,6 +172,7 @@ async fn prepare_socket_path(socket_path: &Path) -> Result<()> {
 }
 
 async fn handle_connection(mut stream: UnixStream, client: Arc<dyn PcpApi>) -> Result<()> {
+    verify_peer_user(&stream)?;
     while let Some(request) = read_frame::<RpcRequest>(&mut stream).await? {
         let id = request.id;
         let outcome = match dispatch(client.as_ref(), request.operation).await {
@@ -171,6 +184,65 @@ async fn handle_connection(mut stream: UnixStream, client: Arc<dyn PcpApi>) -> R
         write_frame(&mut stream, &RpcResponse { id, outcome }).await?;
     }
     Ok(())
+}
+
+fn verify_peer_user(stream: &UnixStream) -> Result<()> {
+    ensure_same_user(peer_effective_uid(stream)?, current_uid())
+}
+
+fn ensure_same_user(peer_uid: u32, expected_uid: u32) -> Result<()> {
+    anyhow::ensure!(
+        peer_uid == expected_uid,
+        "PCP runtime rejected a peer owned by another OS user"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn peer_effective_uid(stream: &UnixStream) -> Result<u32> {
+    let mut uid = 0;
+    let mut gid = 0;
+    // SAFETY: getpeereid writes to the two valid scalar pointers for this connected socket.
+    let result = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error()).context("read PCP runtime peer credentials");
+    }
+    Ok(uid)
+}
+
+#[cfg(target_os = "linux")]
+fn peer_effective_uid(stream: &UnixStream) -> Result<u32> {
+    let mut credentials = std::mem::MaybeUninit::<libc::ucred>::zeroed();
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: getsockopt writes at most length bytes into the correctly sized ucred buffer.
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            credentials.as_mut_ptr().cast(),
+            &mut length,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error()).context("read PCP runtime peer credentials");
+    }
+    anyhow::ensure!(
+        length as usize == std::mem::size_of::<libc::ucred>(),
+        "PCP runtime peer credentials have an unexpected size"
+    );
+    // SAFETY: getsockopt succeeded and reported a complete ucred value.
+    Ok(unsafe { credentials.assume_init() }.uid)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn peer_effective_uid(_stream: &UnixStream) -> Result<u32> {
+    anyhow::bail!("PCP runtime peer credentials are unsupported on this platform")
+}
+
+fn current_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions and does not dereference pointers.
+    unsafe { libc::geteuid() }
 }
 
 async fn dispatch(client: &dyn PcpApi, operation: RpcOperation) -> Result<RpcValue> {
@@ -312,5 +384,16 @@ struct SocketGuard(PathBuf);
 impl Drop for SocketGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_same_user;
+
+    #[test]
+    fn runtime_peer_must_have_the_provider_effective_uid() {
+        assert!(ensure_same_user(501, 501).is_ok());
+        assert!(ensure_same_user(502, 501).is_err());
     }
 }

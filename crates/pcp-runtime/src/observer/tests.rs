@@ -196,11 +196,11 @@ async fn observer_publishes_serves_renews_and_expires_naturally() {
     );
     assert_eq!(manifest.offers[0].binding, LOCAL_UNIX_SOCKET_BINDING);
     assert_eq!(
-        config.socket_path(&manifest.offers[0].endpoint),
+        config.runtime_root.join(&manifest.offers[0].endpoint),
         socket_path
     );
     assert!(Path::new(&manifest.offers[0].endpoint).is_relative());
-    assert!(manifest.offers[0].endpoint.starts_with("sockets/"));
+    assert_canonical_infra_socket_endpoint(&manifest.offers[0].endpoint);
     assert!(!manifest_json.to_string().contains("console_url"));
     assert!(!manifest_json.to_string().contains("infra-observer"));
     assert_private_layout(&config, &manifest_path, &socket_path);
@@ -417,6 +417,20 @@ fn decode_line<T: serde::de::DeserializeOwned>(response: &[u8]) -> T {
 fn read_manifest(path: &Path) -> DiscoveryRegistration {
     serde_json::from_slice(&fs::read(path).expect("read registration manifest"))
         .expect("decode registration manifest")
+}
+
+fn assert_canonical_infra_socket_endpoint(endpoint: &str) {
+    let opaque = endpoint
+        .strip_prefix("sockets/")
+        .and_then(|value| value.strip_suffix(".sock"))
+        .expect("canonical Infra Unix socket endpoint");
+    assert!(!opaque.is_empty() && opaque.len() <= 16);
+    assert!(opaque.bytes().next().unwrap().is_ascii_alphanumeric());
+    assert!(
+        opaque
+            .bytes()
+            .all(|byte| { byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') })
+    );
 }
 
 fn read_json(path: &Path) -> Value {
