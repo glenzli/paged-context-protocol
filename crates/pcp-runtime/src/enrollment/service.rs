@@ -316,8 +316,7 @@ impl EnrollmentHandler {
             &self.inner.owner_id,
             &self.inner.service.generation,
         )?;
-        let socket_id = format!("pcp-s{}", compact_id(&Uuid::new_v4()));
-        let endpoint = format!("sockets/{socket_id}.sock");
+        let endpoint = session_socket_endpoint(&Uuid::new_v4());
         let socket_path = self.inner.runtime_root.join(&endpoint);
         let client = EmbeddedPcpClient::shared(Arc::clone(&self.inner.store), access.clone());
         let running = RunningRuntimeEndpoint::start(&socket_path, client)
@@ -800,6 +799,10 @@ fn compact_id(id: &Uuid) -> String {
         }
     }
     encoded
+}
+
+pub(super) fn session_socket_endpoint(id: &Uuid) -> String {
+    format!("sockets/s{}.sock", compact_id(id))
 }
 
 struct ProtocolError {

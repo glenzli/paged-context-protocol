@@ -112,6 +112,11 @@ impl ObserverConfig {
             lease_ttl: Duration::from_millis(150),
         }
     }
+
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn canonical_runtime_root_for_test() -> Result<PathBuf> {
+        platform_runtime_root()
+    }
 }
 
 #[cfg(target_os = "macos")]

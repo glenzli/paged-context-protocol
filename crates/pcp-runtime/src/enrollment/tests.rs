@@ -5,6 +5,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStrExt;
+
 use pcp_client::PcpApi;
 use pcp_core::{AccessPermission, AccessPrincipalType};
 use pcp_rpc::{
@@ -15,8 +18,33 @@ use pcp_rpc::{
 };
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
+#[cfg(target_os = "macos")]
+use uuid::Uuid;
 
 use crate::{EnrollmentConfig, ObserverConfig, ObserverService};
+
+#[cfg(target_os = "macos")]
+#[test]
+fn dynamic_session_endpoint_fits_the_canonical_macos_runtime_root() {
+    let root = ObserverConfig::canonical_runtime_root_for_test()
+        .expect("resolve canonical macOS Infra runtime root");
+    let endpoint = super::service::session_socket_endpoint(&Uuid::nil());
+    let socket_path = root.join(&endpoint);
+    // SAFETY: sockaddr_un is a plain C struct and all-zero is a valid initialization.
+    let address = unsafe { std::mem::zeroed::<libc::sockaddr_un>() };
+    let path_bytes = socket_path.as_os_str().as_bytes().len();
+
+    assert_eq!(
+        endpoint.as_bytes().len(),
+        "sockets/".len() + 23 + ".sock".len()
+    );
+    assert!(
+        path_bytes < address.sun_path.len(),
+        "dynamic session socket path is {path_bytes} bytes, but macOS sun_path requires fewer than {}: {}",
+        address.sun_path.len(),
+        socket_path.display()
+    );
+}
 
 #[tokio::test]
 async fn enrollment_approves_identity_bound_session_and_survives_generation_change() {
