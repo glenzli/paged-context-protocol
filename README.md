@@ -58,6 +58,10 @@ Provenance、Relation、稀疏 Summary、Validity、consolidation 与 Revision r
 PCP 仍是开放协议，允许独立实现。“官方”表示该实现由 PCP 项目维护和发布，不表示 SQLite、某种
 检索算法、某个模型或 Host 工作流自动成为协议要求；合规边界以 [`PROTOCOL.md`](PROTOCOL.md) 为准。
 
+![PCP Console 使用合成演示数据展示本地 Store 概览](assets/console-overview.png)
+
+> 实际 PCP Console 界面；截图使用合成演示数据，不包含真实 Page 内容、Scope 或客户端身份。
+
 | Crate | 职责 |
 | --- | --- |
 | `pcp-core` | 核心对象、请求、投影与 capability 类型 |
@@ -129,10 +133,10 @@ target/release/pcp-runtime --config examples/runtime.toml
 这是本地用户边界，不能防御已经以同一 OS 用户运行的恶意进程。需要强隔离时，应使用独立端点、
 最小 Scope 和独立模型上下文，因为 Storage 权限无法撤回已经进入模型窗口的信息。
 
-Runtime 还会通过 [Infra Discovery](https://github.com/glenzli/infra-protocol) 发布
-`pcp.runtime.enrollment@20260810.1`。本机客户端可以申请 Principal、访问模式与 Scope，在 Console 中
-由用户批准后取得当前 generation 的身份绑定 RPC 端点；Runtime 重启后，客户端重新发现并凭持久
-registration 打开新会话，不再依赖硬编码 socket 路径。
+Runtime 还会通过 [Infra Discovery](https://github.com/glenzli/infra-protocol) 发布客户端授权注册能力。
+本机客户端可以申请 Principal、访问模式与 Scope，在 Console 中由用户批准后取得当前 generation 的
+身份绑定 RPC 端点；Runtime 重启后，客户端重新发现并凭持久 registration 打开新会话，不再依赖
+硬编码 socket 路径。
 
 [Symbiont](https://github.com/glenzli/symbiont-d) 迁移顺序与完整合同见
 [`crates/pcp-runtime/ENROLLMENT.md`](crates/pcp-runtime/ENROLLMENT.md)。
@@ -147,11 +151,11 @@ registration 打开新会话，不再依赖硬编码 socket 路径。
 
 ### 设施观测
 
-Runtime 默认通过 `infra.discovery.registration@20260810.1` 发布
-`pcp.runtime.observer@20260810.1` offer。[Infra Sentinel](https://github.com/glenzli/infra-sentinel)
-经 owner-only Unix socket 读取版本化、聚合且经过脱敏的 snapshot，包括运行时间、24 小时请求量、
-失败/拒绝、当前 Page 数，以及可用时的 p95 与遥测覆盖率。该接口不暴露 Page 内容、查询、Scope 名称、
-原始审计或维护动作；Console 只是 PCP snapshot 中可选的深链，不属于 discovery 或 observer 数据接口。
+Runtime 通过 [Infra Discovery](https://github.com/glenzli/infra-protocol) 发布只读 observer 能力。
+[Infra Sentinel](https://github.com/glenzli/infra-sentinel) 经 owner-only Unix socket 读取版本化、聚合且
+经过脱敏的 snapshot，包括运行时间、24 小时请求量、失败/拒绝、当前 Page 数，以及可用时的 p95 与
+遥测覆盖率。该接口不暴露 Page 内容、查询、Scope 名称、原始审计或维护动作；Console 只是 PCP
+snapshot 中可选的深链，不属于 discovery 或 observer 数据接口。
 
 合同与 Python wire 示例见
 [`crates/pcp-runtime/OBSERVER.md`](crates/pcp-runtime/OBSERVER.md)。

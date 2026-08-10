@@ -75,6 +75,11 @@ means that this implementation is maintained and released by the PCP project; it
 does not make SQLite, one retrieval algorithm, one model, or a Host workflow
 normative. Conformance is defined by [`PROTOCOL-en.md`](PROTOCOL-en.md).
 
+![PCP Console showing a local Store overview with synthetic demo data](assets/console-overview.png)
+
+> Actual PCP Console interface shown with synthetic demo data. No real Page content,
+> Scope, or client identity is included.
+
 | Crate | Role |
 | --- | --- |
 | `pcp-core` | Core objects, requests, projections, and capability types |
@@ -158,7 +163,7 @@ not protection from a hostile process already running as the same OS user. Stron
 isolation requires separate endpoints, minimal Scopes, and separate model contexts,
 because Storage authorization cannot retract information already visible to a model.
 
-Runtime also advertises `pcp.runtime.enrollment@20260810.1` through
+Runtime also advertises approved client enrollment through
 [Infra Discovery](https://github.com/glenzli/infra-protocol). A local client
 requests a Principal, access mode, and Scopes; after approval in Console it
 receives an identity-bound RPC endpoint for the current generation. Following a
@@ -182,8 +187,8 @@ See [`crates/pcp-runtime/README.md`](crates/pcp-runtime/README.md).
 
 ### Infrastructure Observation
 
-Runtime advertises `pcp.runtime.observer@20260810.1` through
-`infra.discovery.registration@20260810.1`.
+Runtime advertises a read-only observer capability through
+[Infra Discovery](https://github.com/glenzli/infra-protocol).
 [Infra Sentinel](https://github.com/glenzli/infra-sentinel) reads a versioned,
 aggregate-only, redacted snapshot over an owner-only Unix socket: uptime,
 24-hour calls, failures and denials, current Page count, and optional p95 latency
