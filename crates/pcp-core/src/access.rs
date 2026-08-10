@@ -18,12 +18,13 @@ pub enum AccessPermission {
     Retract,
     ManageScope,
     Audit,
+    Observe,
     Collect,
     DeriveAcrossScopes,
 }
 
 impl AccessPermission {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::ListScopes,
         Self::Search,
         Self::ReadSummary,
@@ -36,6 +37,7 @@ impl AccessPermission {
         Self::Retract,
         Self::ManageScope,
         Self::Audit,
+        Self::Observe,
         Self::Collect,
         Self::DeriveAcrossScopes,
     ];
@@ -54,6 +56,7 @@ impl AccessPermission {
             Self::Retract => "retract",
             Self::ManageScope => "manage_scope",
             Self::Audit => "audit",
+            Self::Observe => "observe",
             Self::Collect => "collect",
             Self::DeriveAcrossScopes => "derive_across_scopes",
         }

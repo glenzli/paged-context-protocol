@@ -4,6 +4,11 @@
 background maintenance. It is a reference deployment component, not part of the
 normative PCP data model.
 
+It also advertises the versioned, aggregate-only
+`pcp.runtime.observer@20260810.1` protocol through Infra Discovery, as defined in
+[`OBSERVER.md`](OBSERVER.md). The observer has its own owner-only Unix socket. Its
+application protocol does not reuse Console HTTP DTOs or expose PCP content.
+
 ## Boundary
 
 | Layer | Owns | Does not own |

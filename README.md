@@ -204,6 +204,25 @@ The maintainer never performs automatic Revision collection.
 
 详见 / See [`crates/pcp-runtime/README.md`](crates/pcp-runtime/README.md).
 
+### 设施观测 / Infrastructure Observation
+
+Runtime 默认通过 `infra.discovery.registration@20260810.1` 发布
+`pcp.runtime.observer@20260810.1` offer。Infra Sentinel 经 owner-only Unix socket 读取版本化、
+聚合且经过脱敏的 snapshot，包括运行时间、24 小时请求量、失败/拒绝、当前 Page 数，以及可用时的
+p95 与遥测覆盖率。该接口不暴露 Page 内容、查询、Scope 名称、原始审计或维护动作；Console 只是
+PCP snapshot 中可选的深链，不属于 discovery 或 observer 数据接口。
+
+Runtime advertises `pcp.runtime.observer@20260810.1` through
+`infra.discovery.registration@20260810.1`. Infra Sentinel reads a versioned,
+aggregate-only, redacted snapshot over an owner-only Unix socket: uptime,
+24-hour calls, failures and denials, current Page count, and optional p95 latency
+and telemetry coverage. Page content, queries, Scope names, raw audit, and
+maintenance actions are excluded. Console is only an optional PCP snapshot deep
+link, not part of discovery or the observer data interface.
+
+合同与 Python wire 示例 / Contract and Python wire example:
+[`crates/pcp-runtime/OBSERVER.md`](crates/pcp-runtime/OBSERVER.md).
+
 ### Codex / MCP
 
 MCP 可以直接打开 embedded SQLite Store：
@@ -229,11 +248,14 @@ codex mcp add pcp \
   -- /absolute/path/to/paged-context-protocol/target/release/pcp-mcp
 ```
 
-`PCP_ACCESS_MODE` 可为 `read`、`audit`、`write` 或 `admin`。即使在 `admin` 模式，跨 Scope 派生仍需
+`PCP_ACCESS_MODE` 可为 `observe`、`read`、`audit`、`write` 或 `admin`。`observe` 只允许读取聚合
+Health，不能列出或读取 Page、搜索、读取原始审计或执行维护动作。即使在 `admin` 模式，跨 Scope 派生仍需
 单独启用。`pcp_whoami` 用于检查服务端注入的 Principal 与授权范围；读工具不产生内容写入，Page、
 Summary、Relation、Scope 与 Validity 工具会被 MCP 标记为写操作。
 
-`PCP_ACCESS_MODE` may be `read`, `audit`, `write`, or `admin`. Cross-Scope derivation
+`PCP_ACCESS_MODE` may be `observe`, `read`, `audit`, `write`, or `admin`. `observe`
+can read aggregate Health only; it cannot list or read Pages, search, read raw
+audit events, or invoke maintenance actions. Cross-Scope derivation
 still requires a separate opt-in even in `admin` mode. `pcp_whoami` reports the
 server-injected Principal and grants. Read tools do not mutate content; Page,
 Summary, Relation, Scope, and Validity tools are marked as writes for MCP approval.
@@ -262,5 +284,6 @@ PCP_CONSOLE_BIND=127.0.0.1:4318 \
 
 - 当前协议 / Current specification: **[PROTOCOL.md (中文)](PROTOCOL.md)** · **[PROTOCOL-en.md (English)](PROTOCOL-en.md)**
 - Runtime 说明 / Runtime notes: **[crates/pcp-runtime/README.md](crates/pcp-runtime/README.md)**
+- PCP Runtime observer contract: **[crates/pcp-runtime/OBSERVER.md](crates/pcp-runtime/OBSERVER.md)**
 - 历史版本与淘汰原因 / Historical generations and deprecation rationale: **[deprecated/](deprecated/README.md)**
 - License: **[MIT](LICENSE)**

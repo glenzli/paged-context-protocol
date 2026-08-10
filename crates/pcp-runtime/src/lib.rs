@@ -1,5 +1,6 @@
 mod config;
 mod maintenance;
+mod observer;
 
 pub use config::{RuntimeConfig, RuntimeEndpointConfig};
 pub use maintenance::{
@@ -9,6 +10,7 @@ pub use maintenance::{
     RetentionMilestone, RuntimeMaintainer, SemanticMaintenanceWorker, SummaryMaintenanceConfig,
     WorkerCommandConfig,
 };
+pub use observer::{ObserverConfig, ObserverService};
 
 #[cfg(test)]
 mod tests;

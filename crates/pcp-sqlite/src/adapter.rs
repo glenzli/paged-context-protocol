@@ -17,7 +17,7 @@ use serde_json::Value;
 
 use crate::{
     SqlitePcpStore,
-    access::{authorize_exact, authorize_scopes},
+    access::{authorize_exact, authorize_scopes, authorize_scopes_any},
 };
 
 #[async_trait]
@@ -1106,7 +1106,11 @@ impl PcpStore for SqlitePcpStore {
         window_hours: u32,
     ) -> Result<HealthSnapshot> {
         let observation = OperationObservation::start();
-        let scopes = match authorize_scopes(access, &[AccessPermission::Audit], &requested_scopes) {
+        let scopes = match authorize_scopes_any(
+            access,
+            &[AccessPermission::Observe, AccessPermission::Audit],
+            &requested_scopes,
+        ) {
             Ok(scopes) => scopes,
             Err(error) => {
                 return complete(

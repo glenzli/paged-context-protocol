@@ -9,7 +9,9 @@ use anyhow::{Context, Result};
 use pcp_client::{AccessMode, EmbeddedPcpClient};
 use pcp_core::{AccessPrincipal, AccessPrincipalType};
 use pcp_rpc::{RuntimeEndpoint, serve_unix, serve_unix_endpoints};
-use pcp_runtime::{CommandSemanticWorker, RuntimeConfig, RuntimeMaintainer};
+use pcp_runtime::{
+    CommandSemanticWorker, ObserverConfig, ObserverService, RuntimeConfig, RuntimeMaintainer,
+};
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 
@@ -73,7 +75,10 @@ async fn run_broker(config_path: PathBuf) -> Result<()> {
     } else {
         None
     };
-    let result = serve_unix_endpoints(endpoints).await;
+    let mut observer =
+        ObserverService::start(ObserverConfig::from_env(&owner_id)?, Arc::clone(&store)).await?;
+    let result =
+        supervise_runtime(tokio::spawn(serve_unix_endpoints(endpoints)), &mut observer).await;
     if let Some(task) = maintenance_task {
         task.abort();
         let _ = task.await;
@@ -125,8 +130,55 @@ async fn run_single_endpoint() -> Result<()> {
             .await
             .with_context(|| format!("open PCP Store {}", store_path.display()))?,
     );
-    let client = EmbeddedPcpClient::shared(store, access);
-    serve_unix(socket_path, client).await
+    let owner_id = store.owner_id().to_owned();
+    let client = EmbeddedPcpClient::shared(Arc::clone(&store), access);
+    let mut observer =
+        ObserverService::start(ObserverConfig::from_env(&owner_id)?, Arc::clone(&store)).await?;
+    supervise_runtime(tokio::spawn(serve_unix(socket_path, client)), &mut observer).await
+}
+
+async fn supervise_runtime(
+    mut runtime: tokio::task::JoinHandle<Result<()>>,
+    observer: &mut Option<ObserverService>,
+) -> Result<()> {
+    let result = if let Some(observer) = observer.as_mut() {
+        tokio::select! {
+            result = &mut runtime => flatten_runtime_join(result),
+            result = observer.wait() => match result {
+                Ok(()) => Err(anyhow::anyhow!("PCP observer stopped unexpectedly")),
+                Err(error) => Err(error).context("PCP observer stopped"),
+            },
+            signal = shutdown_signal() => signal,
+        }
+    } else {
+        tokio::select! {
+            result = &mut runtime => flatten_runtime_join(result),
+            signal = shutdown_signal() => signal,
+        }
+    };
+
+    runtime.abort();
+    let _ = runtime.await;
+    let observer_shutdown = if let Some(observer) = observer.as_mut() {
+        observer.shutdown().await
+    } else {
+        Ok(())
+    };
+    result.and(observer_shutdown)
+}
+
+fn flatten_runtime_join(result: Result<Result<()>, tokio::task::JoinError>) -> Result<()> {
+    result.context("join PCP runtime endpoints")?
+}
+
+async fn shutdown_signal() -> Result<()> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("install PCP SIGTERM handler")?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result.context("wait for PCP interrupt")?,
+        _ = terminate.recv() => {}
+    }
+    Ok(())
 }
 
 fn required_scopes() -> Result<Vec<String>> {
@@ -156,6 +208,6 @@ fn parse_principal_type(value: &str) -> Result<AccessPrincipalType> {
 
 fn print_help() {
     println!(
-        "pcp-runtime [--config <runtime.toml>]\n\nUse --config or PCP_RUNTIME_CONFIG for a multi-endpoint broker. Without a config, one identity-bound endpoint is read from PCP_STORE_PATH, PCP_RUNTIME_SOCKET, PCP_CLIENT_ID, PCP_CLIENT_TYPE, PCP_ACCESS_MODE, and PCP_ALLOWED_SCOPES."
+        "pcp-runtime [--config <runtime.toml>]\n\nUse --config or PCP_RUNTIME_CONFIG for a multi-endpoint broker. Without a config, one identity-bound endpoint is read from PCP_STORE_PATH, PCP_RUNTIME_SOCKET, PCP_CLIENT_ID, PCP_CLIENT_TYPE, PCP_ACCESS_MODE, and PCP_ALLOWED_SCOPES. PCP observer discovery uses the platform Infra Protocol runtime root or the final INFRA_PROTOCOL_RUNTIME_DIR override; set PCP_OBSERVER_ENABLED=0 to disable it."
     );
 }

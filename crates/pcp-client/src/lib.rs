@@ -17,6 +17,7 @@ pub use pcp_store::{DurablePageInventoryItem, HealthSnapshot, TombstoneCascadeRe
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AccessMode {
+    Observe,
     Read,
     Audit,
     Write,
@@ -42,6 +43,9 @@ impl AccessMode {
     }
 
     fn permissions(self, allow_cross_scope_derivation: bool) -> Vec<AccessPermission> {
+        if self == Self::Observe {
+            return vec![AccessPermission::Observe];
+        }
         let mut permissions = vec![
             AccessPermission::ListScopes,
             AccessPermission::Search,
@@ -79,6 +83,7 @@ impl FromStr for AccessMode {
 
     fn from_str(value: &str) -> Result<Self> {
         match value {
+            "observe" => Ok(Self::Observe),
             "read" => Ok(Self::Read),
             "audit" => Ok(Self::Audit),
             "write" => Ok(Self::Write),
@@ -416,5 +421,28 @@ mod tests {
         assert!(session.allows("project:test", AccessPermission::Audit));
         assert!(!session.allows("project:test", AccessPermission::Write));
         assert!(!session.allows("project:test", AccessPermission::Retract));
+    }
+
+    #[test]
+    fn observe_mode_exposes_only_aggregate_observation() {
+        let session = AccessMode::Observe.session(
+            AccessPrincipal {
+                principal_id: "observer:test".to_owned(),
+                principal_type: AccessPrincipalType::Service,
+                display_name: None,
+            },
+            "session:observer",
+            vec!["project:test".to_owned()],
+            false,
+        );
+
+        assert!(session.allows("project:test", AccessPermission::Observe));
+        assert!(!session.allows("project:test", AccessPermission::ListScopes));
+        assert!(!session.allows("project:test", AccessPermission::Search));
+        assert!(!session.allows("project:test", AccessPermission::ReadSummary));
+        assert!(!session.allows("project:test", AccessPermission::ReadDetail));
+        assert!(!session.allows("project:test", AccessPermission::Audit));
+        assert!(!session.allows("project:test", AccessPermission::Write));
+        assert!(!session.allows("project:test", AccessPermission::Collect));
     }
 }

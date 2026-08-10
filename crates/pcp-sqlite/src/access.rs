@@ -36,6 +36,42 @@ pub(crate) fn authorize_scopes(
     Ok(resolved)
 }
 
+pub(crate) fn authorize_scopes_any(
+    access: &AccessSession,
+    permissions: &[AccessPermission],
+    requested_scopes: &[String],
+) -> Result<Vec<String>> {
+    let mut available = access
+        .grants
+        .iter()
+        .filter(|grant| {
+            permissions
+                .iter()
+                .any(|permission| grant.allows(*permission))
+        })
+        .map(|grant| grant.namespace.clone())
+        .collect::<Vec<_>>();
+    available.sort();
+    available.dedup();
+    if requested_scopes.is_empty() {
+        if available.is_empty() {
+            anyhow::bail!("PCP access session has no authorized Scope for this operation");
+        }
+        return Ok(available);
+    }
+    let available = available.into_iter().collect::<HashSet<_>>();
+    let mut resolved = Vec::with_capacity(requested_scopes.len());
+    for scope in requested_scopes {
+        if !available.contains(scope) {
+            anyhow::bail!("PCP Scope is not authorized for this operation: {scope}");
+        }
+        if !resolved.contains(scope) {
+            resolved.push(scope.clone());
+        }
+    }
+    Ok(resolved)
+}
+
 pub(crate) fn authorize_exact(
     access: &AccessSession,
     namespace: &str,
