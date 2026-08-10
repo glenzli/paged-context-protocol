@@ -98,7 +98,7 @@ or a Host workflow normative.
 | `pcp-client` | 面向 Host 的传输无关 `PcpApi` 与 embedded client / Transport-independent `PcpApi` and embedded client |
 | `pcp-rpc` | 本地 Unix socket 协议、远端 client 与 server transport / Local Unix-socket wire, remote client, and server transport |
 | `pcp-sqlite` | SQLite Page/Revision Store、迁移、检索、审计与回收 / SQLite Page/Revision Store, migrations, retrieval, audit, and retention |
-| `pcp-runtime` | 固定身份的多端点 broker 与可选维护协调器 / Fixed-identity multi-endpoint broker and optional maintenance coordinator |
+| `pcp-runtime` | 身份绑定端点、客户端授权注册与可选维护协调器 / Identity-bound endpoints, approved client enrollment, and optional maintenance coordinator |
 | `pcp-cli` | 检查、检索、读取、导出、整合与保留操作 / Inspection, retrieval, read, export, consolidation, and retention operations |
 | `pcp-mcp` | 基于官方 Rust MCP SDK 的本地 stdio 工具服务器 / Local stdio tool server built on the official Rust MCP SDK |
 | `pcp-console` | 独立、只读的本地 Web Inspector / Independent read-only local Web Inspector |
@@ -113,9 +113,9 @@ or a Host workflow normative.
   modes, plus bounded Projection reads.
 - Summary、Validity、Relation、Provenance、consolidation 与访问审计。
   / Summary, Validity, Relation, Provenance, consolidation, and access audit.
-- 固定接入身份的 embedded/RPC client、Runtime broker、CLI、MCP 与只读 Console。
-  / Fixed-identity embedded and RPC clients, Runtime broker, CLI, MCP, and
-  read-only Console.
+- 身份绑定的 embedded/RPC client、可发现且经用户批准的 Runtime 注册、CLI、MCP 与 Console。
+  / Identity-bound embedded and RPC clients, discoverable user-approved Runtime
+  enrollment, CLI, MCP, and Console.
 - 确定性 Revision 保留规划、有限租约、受保护的显式回收，以及多维 Health 诊断。
   / Deterministic Revision-retention planning, finite leases, protected explicit
   collection, and multidimensional Health diagnostics.
@@ -171,7 +171,8 @@ Codex -------> MCP -----> PcpApi
 Operator ----> CLI -----> PcpApi
 ```
 
-多 client 部署可以从 [`examples/runtime.toml`](examples/runtime.toml) 启动 broker：
+多 client 部署可以从 [`examples/runtime.toml`](examples/runtime.toml) 启动 broker；这些静态端点也可在
+客户端迁移到自动发现与授权注册期间继续使用：
 For multiple clients, start the broker from [`examples/runtime.toml`](examples/runtime.toml):
 
 ```bash
@@ -188,6 +189,19 @@ choose their own identity. Socket mode is `0600`. This is a local-user boundary,
 not protection from a hostile process already running as the same OS user. Strong
 isolation requires separate endpoints, minimal Scopes, and separate model contexts,
 because Storage authorization cannot retract information already visible to a model.
+
+Runtime 还会通过 Infra Discovery 发布 `pcp.runtime.enrollment@20260810.1`。本机客户端可以申请
+Principal、访问模式与 Scope，在 Console 中由用户批准后取得当前 generation 的身份绑定 RPC 端点；
+Runtime 重启后，客户端重新发现并凭持久 registration 打开新会话，不再依赖硬编码 socket 路径。
+
+Runtime also advertises `pcp.runtime.enrollment@20260810.1` through Infra
+Discovery. A local client requests a Principal, access mode, and Scopes; after
+approval in Console it receives an identity-bound RPC endpoint for the current
+generation. Following a Runtime restart, it rediscovers and reopens the durable
+registration instead of relying on a hard-coded socket path.
+
+合同与 Symbiont 迁移顺序 / Contract and Symbiont migration:
+[`crates/pcp-runtime/ENROLLMENT.md`](crates/pcp-runtime/ENROLLMENT.md).
 
 ### Runtime 维护 / Runtime Maintenance
 
@@ -260,17 +274,18 @@ still requires a separate opt-in even in `admin` mode. `pcp_whoami` reports the
 server-injected Principal and grants. Read tools do not mutate content; Page,
 Summary, Relation, Scope, and Validity tools are marked as writes for MCP approval.
 
-### 只读 Console / Read-only Console
+### Console
 
-Console 应连接一个独立的 `audit` 端点。它提供 Page、Relation、访问时间线、Retention 和 Health
-视图，但不提供写入、修订、关联、撤回、Scope 管理或回收操作。Health 将存储形态、活动、召回、
-整合、关系与运行状况分开呈现，不合成为不透明总分；操作遥测不保存查询文本或 Page 内容。
+Console 应连接一个独立的 `audit` 端点。其 Store Inspector 只读，提供 Page、Relation、访问时间线、
+Retention 和 Health 视图；唯一的控制面动作是批准、拒绝或撤销本机客户端注册。Health 将存储形态、
+活动、召回、整合、关系与运行状况分开呈现，不合成为不透明总分；操作遥测不保存查询文本或 Page 内容。
 
-The Console should use a dedicated `audit` endpoint. It exposes Page, Relation,
-access-timeline, Retention, and Health views without write, revise, link, retract,
-Scope-management, or collection operations. Health presents storage shape,
-activity, recall, consolidation, graph, and operations separately rather than as
-an opaque score. Operational telemetry excludes query text and Page content.
+The Console should use a dedicated `audit` endpoint. Its Store Inspector is
+read-only and exposes Page, Relation, access-timeline, Retention, and Health
+views; its only control-plane actions approve, reject, or revoke local client
+registrations. Health presents storage shape, activity, recall, consolidation,
+graph, and operations separately rather than as an opaque score. Operational
+telemetry excludes query text and Page content.
 
 ```bash
 cargo build --release -p pcp-console
@@ -280,10 +295,19 @@ PCP_CONSOLE_BIND=127.0.0.1:4318 \
   target/release/pcp-console
 ```
 
+Console 与 Runtime 默认从各自静态 endpoint 的同级目录使用
+`pcp-enrollment-admin.sock`。若 operator endpoint 与 broker 的第一个 endpoint 不在同一目录，需为
+二者设置同一个 `PCP_ENROLLMENT_ADMIN_SOCKET` 绝对路径。
+
+Console and Runtime default to `pcp-enrollment-admin.sock` beside their static
+endpoint. If the operator endpoint and the broker's first endpoint use different
+directories, set the same absolute `PCP_ENROLLMENT_ADMIN_SOCKET` for both.
+
 ## 规范与历史 / Specification and History
 
 - 当前协议 / Current specification: **[PROTOCOL.md (中文)](PROTOCOL.md)** · **[PROTOCOL-en.md (English)](PROTOCOL-en.md)**
 - Runtime 说明 / Runtime notes: **[crates/pcp-runtime/README.md](crates/pcp-runtime/README.md)**
 - PCP Runtime observer contract: **[crates/pcp-runtime/OBSERVER.md](crates/pcp-runtime/OBSERVER.md)**
+- PCP Runtime enrollment contract: **[crates/pcp-runtime/ENROLLMENT.md](crates/pcp-runtime/ENROLLMENT.md)**
 - 历史版本与淘汰原因 / Historical generations and deprecation rationale: **[deprecated/](deprecated/README.md)**
 - License: **[MIT](LICENSE)**

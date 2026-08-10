@@ -42,6 +42,10 @@ Runtime advertises this protocol through
 }
 ```
 
+The registration may contain additional PCP-owned offers, including
+`pcp.runtime.enrollment`. Observer consumers select this exact protocol and
+ignore offers they do not implement.
+
 The Store's persistent owner ID is the stable `instance_id`. Each Runtime start
 uses a new `generation` and a process-unique socket endpoint. The snapshot
 identity MUST equal the selected registration's `kind`, `instance_id`, and
@@ -51,7 +55,9 @@ The runtime root, registration path, permissions, lease validation, atomic
 replacement, publisher handoff, endpoint resolution, and consumer validation
 follow the Infra Discovery specification. `INFRA_PROTOCOL_RUNTIME_DIR` may set
 the final absolute runtime root. Otherwise the platform canonical root is used.
-`PCP_OBSERVER_ENABLED=0` disables publication.
+`PCP_OBSERVER_ENABLED=0` disables the observer offer. If enrollment remains
+enabled, Runtime still publishes the same PCP service registration with only the
+enrollment offer.
 
 Runtime renews the 45-second lease every 15 seconds. One stable PCP identity has
 one exclusive publisher. On shutdown, Runtime stops renewal and leaves the

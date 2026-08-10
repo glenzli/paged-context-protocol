@@ -10,7 +10,8 @@ use pcp_client::{AccessMode, EmbeddedPcpClient};
 use pcp_core::{AccessPrincipal, AccessPrincipalType};
 use pcp_rpc::{RuntimeEndpoint, serve_unix, serve_unix_endpoints};
 use pcp_runtime::{
-    CommandSemanticWorker, ObserverConfig, ObserverService, RuntimeConfig, RuntimeMaintainer,
+    CommandSemanticWorker, EnrollmentConfig, ObserverConfig, ObserverService, RuntimeConfig,
+    RuntimeMaintainer,
 };
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
@@ -43,6 +44,8 @@ async fn main() -> Result<()> {
 
 async fn run_broker(config_path: PathBuf) -> Result<()> {
     let config = RuntimeConfig::load(&config_path)?;
+    let store_path = config.store_path.clone();
+    let runtime_socket_hint = config.endpoints[0].socket_path.clone();
     let store = Arc::new(
         SqlitePcpStore::open(config.store_path.clone())
             .await
@@ -75,8 +78,14 @@ async fn run_broker(config_path: PathBuf) -> Result<()> {
     } else {
         None
     };
+    let observer_config = ObserverConfig::from_env(&owner_id)?;
+    let enrollment_config = EnrollmentConfig::from_env(
+        observer_config.runtime_root.clone(),
+        store_path,
+        runtime_socket_hint,
+    )?;
     let mut observer =
-        ObserverService::start(ObserverConfig::from_env(&owner_id)?, Arc::clone(&store)).await?;
+        ObserverService::start(observer_config, enrollment_config, Arc::clone(&store)).await?;
     let result =
         supervise_runtime(tokio::spawn(serve_unix_endpoints(endpoints)), &mut observer).await;
     if let Some(task) = maintenance_task {
@@ -132,8 +141,14 @@ async fn run_single_endpoint() -> Result<()> {
     );
     let owner_id = store.owner_id().to_owned();
     let client = EmbeddedPcpClient::shared(Arc::clone(&store), access);
+    let observer_config = ObserverConfig::from_env(&owner_id)?;
+    let enrollment_config = EnrollmentConfig::from_env(
+        observer_config.runtime_root.clone(),
+        store_path,
+        socket_path.clone(),
+    )?;
     let mut observer =
-        ObserverService::start(ObserverConfig::from_env(&owner_id)?, Arc::clone(&store)).await?;
+        ObserverService::start(observer_config, enrollment_config, Arc::clone(&store)).await?;
     supervise_runtime(tokio::spawn(serve_unix(socket_path, client)), &mut observer).await
 }
 
@@ -208,6 +223,6 @@ fn parse_principal_type(value: &str) -> Result<AccessPrincipalType> {
 
 fn print_help() {
     println!(
-        "pcp-runtime [--config <runtime.toml>]\n\nUse --config or PCP_RUNTIME_CONFIG for a multi-endpoint broker. Without a config, one identity-bound endpoint is read from PCP_STORE_PATH, PCP_RUNTIME_SOCKET, PCP_CLIENT_ID, PCP_CLIENT_TYPE, PCP_ACCESS_MODE, and PCP_ALLOWED_SCOPES. PCP observer discovery uses the platform Infra Protocol runtime root or the final INFRA_PROTOCOL_RUNTIME_DIR override; set PCP_OBSERVER_ENABLED=0 to disable it."
+        "pcp-runtime [--config <runtime.toml>]\n\nUse --config or PCP_RUNTIME_CONFIG for a multi-endpoint broker. Without a config, one identity-bound endpoint is read from PCP_STORE_PATH, PCP_RUNTIME_SOCKET, PCP_CLIENT_ID, PCP_CLIENT_TYPE, PCP_ACCESS_MODE, and PCP_ALLOWED_SCOPES. PCP observer and enrollment discovery use the platform Infra Protocol runtime root or the final INFRA_PROTOCOL_RUNTIME_DIR override. PCP_OBSERVER_ENABLED and PCP_ENROLLMENT_ENABLED disable their respective offers."
     );
 }

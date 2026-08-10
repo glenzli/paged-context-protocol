@@ -16,6 +16,7 @@
     <div class="headline" aria-live="polite">
       <span><b id="headline-pages">-</b> pages</span>
       <span><b id="headline-content">-</b> content</span>
+      <button id="enrollment-open" type="button" hidden>Clients <span id="enrollment-badge" class="count-badge" hidden></span></button>
       <button id="refresh" type="button">Refresh</button>
     </div>
   </header>
@@ -229,6 +230,23 @@
     <div id="detail-graph" class="page-detail detail-view"></div>
     <div id="detail-history" class="page-detail detail-view"></div>
     <div id="detail-raw" class="page-detail detail-view"></div>
+  </dialog>
+
+  <dialog id="enrollment-dialog" class="enrollment-dialog">
+    <header class="dialog-header">
+      <div><strong>Client access</strong><div class="muted">Applications requesting access to this PCP Store</div></div>
+      <button id="enrollment-close" type="button">Close</button>
+    </header>
+    <div class="enrollment-content">
+      <section>
+        <div class="section-heading"><h2>Pending approval</h2></div>
+        <div id="enrollment-pending" class="enrollment-list"></div>
+      </section>
+      <section>
+        <div class="section-heading"><h2>Approved clients</h2></div>
+        <div id="enrollment-registered" class="enrollment-list"></div>
+      </section>
+    </div>
   </dialog>
 
   <div id="error" class="error" hidden></div>

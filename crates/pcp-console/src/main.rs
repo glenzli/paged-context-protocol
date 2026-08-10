@@ -4,16 +4,16 @@ use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use pcp_client::PcpApi;
 use pcp_core::{
     PlanRevisionRetentionRequest, Projection, ReadPage, ReadPagesRequest, RetentionPolicy,
     SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch,
 };
-use pcp_rpc::RemotePcpClient;
+use pcp_rpc::{EnrollmentAdminClient, EnrollmentAdminResponse, RemotePcpClient};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, time::Instant};
@@ -32,6 +32,7 @@ mod graph_view;
 #[derive(Clone)]
 struct AppState {
     client: Arc<RemotePcpClient>,
+    enrollment: EnrollmentAdminClient,
 }
 
 #[derive(Debug)]
@@ -100,6 +101,14 @@ async fn main() -> Result<()> {
     let principal_id =
         env::var("PCP_CLIENT_ID").unwrap_or_else(|_| DEFAULT_PRINCIPAL_ID.to_owned());
     let client = connect_runtime(&socket_path, &principal_id).await?;
+    let enrollment_socket = env::var_os("PCP_ENROLLMENT_ADMIN_SOCKET")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            socket_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("pcp-enrollment-admin.sock")
+        });
     let bind = env::var("PCP_CONSOLE_BIND")
         .unwrap_or_else(|_| DEFAULT_BIND.to_owned())
         .parse::<SocketAddr>()
@@ -112,6 +121,7 @@ async fn main() -> Result<()> {
         listener,
         router(AppState {
             client: Arc::new(client),
+            enrollment: EnrollmentAdminClient::new(enrollment_socket),
         }),
     )
     .await
@@ -141,6 +151,19 @@ fn router(state: AppState) -> Router {
         .route("/api/metrics", get(health_metrics))
         .route("/api/retention", get(retention_plan))
         .route("/api/access", get(access_log))
+        .route("/api/enrollment", get(enrollment_snapshot))
+        .route(
+            "/api/enrollment/requests/{request_id}/approve",
+            post(approve_enrollment),
+        )
+        .route(
+            "/api/enrollment/requests/{request_id}/reject",
+            post(reject_enrollment),
+        )
+        .route(
+            "/api/enrollment/registrations/{registration_id}/revoke",
+            post(revoke_enrollment),
+        )
         .with_state(state)
 }
 
@@ -443,6 +466,50 @@ async fn access_log(
         .access_log(query.limit.unwrap_or(100).clamp(1, 500), query.cursor)
         .await?;
     Ok(Json(json!({"events": events, "nextCursor": next_cursor})))
+}
+
+async fn enrollment_snapshot(
+    State(state): State<AppState>,
+) -> Result<Json<EnrollmentAdminResponse>, ApiError> {
+    Ok(Json(state.enrollment.snapshot().await?))
+}
+
+async fn approve_enrollment(
+    State(state): State<AppState>,
+    Path(request_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<EnrollmentAdminResponse>, ApiError> {
+    require_console_mutation(&headers)?;
+    Ok(Json(state.enrollment.approve(request_id).await?))
+}
+
+async fn reject_enrollment(
+    State(state): State<AppState>,
+    Path(request_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<EnrollmentAdminResponse>, ApiError> {
+    require_console_mutation(&headers)?;
+    Ok(Json(state.enrollment.reject(request_id).await?))
+}
+
+async fn revoke_enrollment(
+    State(state): State<AppState>,
+    Path(registration_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<EnrollmentAdminResponse>, ApiError> {
+    require_console_mutation(&headers)?;
+    Ok(Json(state.enrollment.revoke(registration_id).await?))
+}
+
+fn require_console_mutation(headers: &HeaderMap) -> Result<(), ApiError> {
+    if headers
+        .get("x-pcp-console")
+        .and_then(|value| value.to_str().ok())
+        != Some("1")
+    {
+        return Err(anyhow::anyhow!("missing PCP Console mutation header").into());
+    }
+    Ok(())
 }
 
 fn selected_scopes(client: &RemotePcpClient, selected: Option<&str>) -> Vec<String> {

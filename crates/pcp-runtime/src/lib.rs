@@ -1,8 +1,10 @@
 mod config;
+mod enrollment;
 mod maintenance;
 mod observer;
 
 pub use config::{RuntimeConfig, RuntimeEndpointConfig};
+pub use enrollment::{EnrollmentConfig, EnrollmentManager};
 pub use maintenance::{
     CommandSemanticWorker, CompactionMaintenanceConfig, MaintenanceConfig, MaintenanceCycleReport,
     MaintenanceDetailPage, MaintenanceMode, MaintenanceRelation, MaintenanceRoutingPage,

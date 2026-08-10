@@ -34,6 +34,7 @@ use super::{
     registration::{current_uid, prepare_runtime_layout},
     service::ensure_same_user,
 };
+use crate::EnrollmentConfig;
 
 #[test]
 fn issue_severity_serializes_to_the_pcp_protocol_enum() {
@@ -153,10 +154,14 @@ async fn observer_publishes_serves_renews_and_expires_naturally() {
     let config = ObserverConfig::for_test(root.clone(), "pcp-test");
     let manifest_path = config.manifest_path();
     let store: Arc<dyn PcpStore> = store;
-    let mut observer = ObserverService::start(config.clone(), Arc::clone(&store))
-        .await
-        .expect("start observer")
-        .expect("observer enabled");
+    let mut observer = ObserverService::start(
+        config.clone(),
+        EnrollmentConfig::disabled_for_test(root.clone()),
+        Arc::clone(&store),
+    )
+    .await
+    .expect("start observer")
+    .expect("observer enabled");
     let generation = observer.generation().to_owned();
     let socket_path = observer.socket_path().to_owned();
 
@@ -259,7 +264,13 @@ async fn observer_publishes_serves_renews_and_expires_naturally() {
         })
     );
 
-    let second = match ObserverService::start(config.clone(), store.clone()).await {
+    let second = match ObserverService::start(
+        config.clone(),
+        EnrollmentConfig::disabled_for_test(root.clone()),
+        store.clone(),
+    )
+    .await
+    {
         Ok(_) => panic!("one stable identity must have one publisher"),
         Err(error) => error,
     };
@@ -269,7 +280,9 @@ async fn observer_publishes_serves_renews_and_expires_naturally() {
     assert_eq!(error.schema, ERROR_SCHEMA);
     assert_eq!(error.schema_version, PCP_OBSERVER_PROTOCOL_VERSION);
     assert_eq!(error.code, "invalid_request");
-    let oversized = request_line(&socket_path, vec![b'x'; 4_097]).await;
+    let mut oversized_request = vec![b'x'; 4_096];
+    oversized_request.push(b'\n');
+    let oversized = request_line(&socket_path, oversized_request).await;
     let oversized: ObserverError = decode_line(&oversized);
     assert_eq!(oversized.code, "invalid_request");
 
@@ -291,10 +304,14 @@ async fn observer_publishes_serves_renews_and_expires_naturally() {
         "shutdown must not rewrite or remove the stable manifest"
     );
 
-    let mut replacement = ObserverService::start(config.clone(), store)
-        .await
-        .expect("start replacement observer")
-        .expect("replacement observer enabled");
+    let mut replacement = ObserverService::start(
+        config.clone(),
+        EnrollmentConfig::disabled_for_test(root.clone()),
+        store,
+    )
+    .await
+    .expect("start replacement observer")
+    .expect("replacement observer enabled");
     assert_ne!(replacement.generation(), generation);
     assert_eq!(
         read_manifest(&manifest_path).service.generation,
@@ -314,10 +331,14 @@ async fn observer_omits_metrics_without_known_values() {
             .expect("open empty observer test store"),
     );
     let config = ObserverConfig::for_test(root.clone(), "pcp-empty-test");
-    let mut observer = ObserverService::start(config.clone(), store)
-        .await
-        .expect("start empty observer")
-        .expect("observer enabled");
+    let mut observer = ObserverService::start(
+        config.clone(),
+        EnrollmentConfig::disabled_for_test(root.clone()),
+        store,
+    )
+    .await
+    .expect("start empty observer")
+    .expect("observer enabled");
     let socket_path = observer.socket_path().to_owned();
 
     let snapshot = request_snapshot(&socket_path).await;

@@ -57,6 +57,11 @@ button {
 }
 button:hover { background: var(--surface-subtle); }
 button:disabled { cursor: default; opacity: .55; }
+.primary-button { border-color: var(--accent); background: var(--accent); color: var(--surface); }
+.primary-button:hover { filter: brightness(.94); background: var(--accent); }
+.danger-button { border-color: var(--danger); color: var(--danger); }
+.count-badge { display: inline-grid; min-width: 18px; height: 18px; margin-left: 5px; padding: 0 5px; place-items: center; border-radius: 9px; background: var(--danger); color: #fff; font-size: 11px; font-weight: 700; }
+.count-badge[hidden] { display: none; }
 .topbar {
   height: 54px;
   display: flex;
@@ -191,6 +196,15 @@ input:focus, select:focus { border-color: var(--accent); }
 .retention-reason-table th:nth-child(4) { width: 17%; }
 dialog { width: min(960px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow: auto; padding: 0; border: 1px solid var(--strong-line); border-radius: 7px; background: var(--surface); color: var(--text); box-shadow: 0 18px 55px rgba(0, 0, 0, .22); }
 dialog::backdrop { background: rgba(0, 0, 0, .38); }
+.enrollment-dialog { width: min(720px, calc(100vw - 32px)); }
+.enrollment-content { display: grid; gap: 4px; padding: 0 15px 18px; }
+.enrollment-content .section-heading { margin-top: 18px; }
+.enrollment-list { display: grid; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--surface); }
+.enrollment-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-width: 0; padding: 11px; border-bottom: 1px solid var(--line); }
+.enrollment-row:last-child { border-bottom: 0; }
+.enrollment-identity { display: grid; min-width: 0; gap: 2px; overflow-wrap: anywhere; }
+.enrollment-actions { display: flex; flex: 0 0 auto; gap: 7px; }
+.enrollment-empty { border: 0; }
 .dialog-header { position: sticky; z-index: 2; top: 0; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 13px 15px; border-bottom: 1px solid var(--line); background: var(--surface); }
 .dialog-header > div { min-width: 0; overflow-wrap: anywhere; }
 .dialog-header > button { flex: 0 0 auto; }

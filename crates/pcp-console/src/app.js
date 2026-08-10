@@ -10,6 +10,7 @@ const state = {
   activeView: "overview",
   pages: { loaded: false, busy: false, cursor: null, count: 0 },
   access: { loaded: false, busy: false, cursor: null, count: 0, events: [] },
+  enrollment: { available: false, seenPending: new Set() },
 };
 const byId = (id) => document.getElementById(id);
 
@@ -45,14 +46,123 @@ function projectionLabel(value) {
   })[value] || value || "-";
 }
 
-async function api(path) {
-  const response = await fetch(path, { headers: { Accept: "application/json" } });
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    headers: { Accept: "application/json", ...(options.headers || {}) },
+  });
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     try { message = (await response.json()).error || message; } catch (_) {}
     throw new Error(message);
   }
   return response.status === 204 ? null : response.json();
+}
+
+async function enrollmentMutation(path) {
+  return api(path, {
+    method: "POST",
+    headers: { "X-PCP-Console": "1" },
+  });
+}
+
+function enrollmentAccessLabel(access) {
+  const scopes = access.scopes.join(", ");
+  return `${access.mode} / ${scopes}${access.allow_cross_scope_derivation ? " / cross-scope derivation" : ""}`;
+}
+
+function enrollmentIdentity(client) {
+  const principal = client.principal;
+  return principal.displayName || principal.principalId;
+}
+
+function enrollmentRow(item, pending) {
+  const row = element("article", "enrollment-row");
+  const identity = element("div", "enrollment-identity");
+  identity.append(
+    element("strong", "", enrollmentIdentity(item.client)),
+    element("span", "mono muted", item.client.principal.principalId),
+    element("span", "muted", enrollmentAccessLabel(pending ? item.requested_access : item.approved_access)),
+  );
+  const actions = element("div", "enrollment-actions");
+  if (pending) {
+    const reject = element("button", "", "Reject");
+    reject.type = "button";
+    reject.addEventListener("click", async () => {
+      reject.disabled = true;
+      try {
+        await enrollmentMutation(`/api/enrollment/requests/${encodeURIComponent(item.request_id)}/reject`);
+        await loadEnrollment({ autoOpen: false });
+      } catch (error) {
+        reject.disabled = false;
+        showError(error);
+      }
+    });
+    const approve = element("button", "primary-button", "Approve");
+    approve.type = "button";
+    approve.addEventListener("click", async () => {
+      approve.disabled = true;
+      try {
+        await enrollmentMutation(`/api/enrollment/requests/${encodeURIComponent(item.request_id)}/approve`);
+        await loadEnrollment({ autoOpen: false });
+      } catch (error) {
+        approve.disabled = false;
+        showError(error);
+      }
+    });
+    actions.append(reject, approve);
+  } else {
+    const revoke = element("button", "danger-button", "Revoke");
+    revoke.type = "button";
+    revoke.addEventListener("click", async () => {
+      revoke.disabled = true;
+      try {
+        await enrollmentMutation(`/api/enrollment/registrations/${encodeURIComponent(item.registration_id)}/revoke`);
+        await loadEnrollment({ autoOpen: false });
+      } catch (error) {
+        revoke.disabled = false;
+        showError(error);
+      }
+    });
+    actions.append(revoke);
+  }
+  row.append(identity, actions);
+  return row;
+}
+
+function renderEnrollment(data, autoOpen) {
+  const snapshot = data.result;
+  if (snapshot.status !== "snapshot") throw new Error("Unexpected enrollment response");
+  state.enrollment.available = true;
+  byId("enrollment-open").hidden = false;
+  const pending = snapshot.pending || [];
+  const registered = snapshot.registrations || [];
+  const badge = byId("enrollment-badge");
+  badge.textContent = String(pending.length);
+  badge.hidden = pending.length === 0;
+
+  const pendingList = byId("enrollment-pending");
+  pendingList.replaceChildren(...pending.map((item) => enrollmentRow(item, true)));
+  if (pending.length === 0) pendingList.append(element("div", "empty enrollment-empty", "No pending requests"));
+  const registeredList = byId("enrollment-registered");
+  registeredList.replaceChildren(...registered.map((item) => enrollmentRow(item, false)));
+  if (registered.length === 0) registeredList.append(element("div", "empty enrollment-empty", "No approved clients"));
+
+  const unseen = pending.filter((item) => !state.enrollment.seenPending.has(item.request_id));
+  if (autoOpen && unseen.length > 0 && !document.querySelector("dialog[open]")) {
+    byId("enrollment-dialog").showModal();
+  }
+  if (byId("enrollment-dialog").open) {
+    pending.forEach((item) => state.enrollment.seenPending.add(item.request_id));
+  }
+}
+
+async function loadEnrollment({ autoOpen = true } = {}) {
+  try {
+    renderEnrollment(await api("/api/enrollment"), autoOpen);
+  } catch (_) {
+    if (!state.enrollment.available) byId("enrollment-open").hidden = true;
+  }
 }
 
 function showError(error) {
@@ -389,6 +499,11 @@ document.querySelectorAll(".tab").forEach((tab) => {
   tab.addEventListener("click", () => activateView(tab.dataset.view).catch(showError));
 });
 byId("refresh").addEventListener("click", refresh);
+byId("enrollment-open").addEventListener("click", () => {
+  byId("enrollment-dialog").showModal();
+  loadEnrollment({ autoOpen: false });
+});
+byId("enrollment-close").addEventListener("click", () => byId("enrollment-dialog").close());
 byId("page-search").addEventListener("submit", (event) => {
   event.preventDefault();
   state.pages.cursor = null;
@@ -405,3 +520,5 @@ byId("access-more").addEventListener("click", () => loadAccess({ append: true })
 byId("health-window").addEventListener("change", () => healthView.load({ reload: true }).catch(showError));
 
 refresh();
+loadEnrollment();
+window.setInterval(() => loadEnrollment(), 3000);

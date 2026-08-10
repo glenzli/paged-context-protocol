@@ -1,13 +1,20 @@
 # PCP Runtime
 
-`pcp-runtime` composes a Store, fixed-identity local RPC endpoints, and optional
-background maintenance. It is a reference deployment component, not part of the
-normative PCP data model.
+`pcp-runtime` composes a Store, identity-bound local RPC endpoints, user-approved
+client enrollment, and optional background maintenance. It is a reference
+deployment component, not part of the normative PCP data model.
 
 It also advertises the versioned, aggregate-only
 `pcp.runtime.observer@20260810.1` protocol through Infra Discovery, as defined in
 [`OBSERVER.md`](OBSERVER.md). The observer has its own owner-only Unix socket. Its
 application protocol does not reuse Console HTTP DTOs or expose PCP content.
+
+Runtime also advertises `pcp.runtime.enrollment@20260810.1` on the same public
+Infra Discovery endpoint. A client can request an identity and Scope set, wait
+for approval in PCP Console, and then receive a generation-specific PCP RPC
+endpoint. The canonical wire contract and staged Symbiont migration are in
+[`ENROLLMENT.md`](ENROLLMENT.md). Static configured endpoints remain available
+during migration.
 
 ## Boundary
 

@@ -37,12 +37,16 @@ use super::{
     },
     snapshot::SnapshotSource,
 };
+use crate::enrollment::service::{EnrollmentHandler, request_schema};
+use crate::enrollment::{EnrollmentConfig, EnrollmentManager};
 
 const SERVICE_KIND: &str = "pcp";
 const INTEGRITY_INTERVAL: Duration = Duration::from_secs(10 * 60);
+const ENROLLMENT_HEALTH_INTERVAL: Duration = Duration::from_secs(1);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_REQUEST_FRAME_BYTES: usize = 4 * 1024;
+const MAX_OBSERVER_REQUEST_FRAME_BYTES: usize = 4 * 1024;
+const MAX_PUBLIC_REQUEST_FRAME_BYTES: usize = pcp_rpc::ENROLLMENT_MAX_REQUEST_FRAME_BYTES;
 const MAX_RESPONSE_FRAME_BYTES: usize = 1024 * 1024;
 
 pub struct ObserverService {
@@ -50,10 +54,15 @@ pub struct ObserverService {
     task: Option<JoinHandle<Result<()>>>,
     socket_path: PathBuf,
     generation: String,
+    enrollment: Option<EnrollmentManager>,
 }
 
 impl ObserverService {
-    pub async fn start(config: ObserverConfig, store: Arc<dyn PcpStore>) -> Result<Option<Self>> {
+    pub async fn start(
+        mut config: ObserverConfig,
+        enrollment_config: EnrollmentConfig,
+        store: Arc<dyn PcpStore>,
+    ) -> Result<Option<Self>> {
         if !config.enabled {
             return Ok(None);
         }
@@ -61,6 +70,15 @@ impl ObserverService {
         let authority = PublicationAuthority::acquire(&config)?;
         let generation_id = Uuid::new_v4();
         let generation = format!("proc_{}", generation_id.simple());
+        let enrollment = EnrollmentManager::start(
+            enrollment_config,
+            Arc::clone(&store),
+            config.instance_id.clone(),
+            generation.clone(),
+        )
+        .await?;
+        config.enrollment_enabled = enrollment.is_some();
+        let enrollment_handler = enrollment.as_ref().map(EnrollmentManager::handler);
         let endpoint = config.socket_endpoint(&compact_socket_id(&generation_id))?;
         let socket_path = config.socket_path(&endpoint);
         validate_socket_path_length(&socket_path)?;
@@ -91,6 +109,7 @@ impl ObserverService {
             task_config,
             endpoint,
             source,
+            enrollment_handler,
             shutdown_rx,
         ));
         Ok(Some(Self {
@@ -98,6 +117,7 @@ impl ObserverService {
             task: Some(task),
             socket_path,
             generation,
+            enrollment,
         }))
     }
 
@@ -110,13 +130,26 @@ impl ObserverService {
     }
 
     pub async fn wait(&mut self) -> Result<()> {
-        let result = self
-            .task
-            .as_mut()
-            .context("PCP observer task is not running")?
-            .await;
-        self.task = None;
-        result.context("join PCP observer task")?
+        loop {
+            if self
+                .enrollment
+                .as_ref()
+                .is_some_and(EnrollmentManager::is_finished)
+            {
+                anyhow::bail!("PCP enrollment admin service stopped unexpectedly");
+            }
+            let task = self
+                .task
+                .as_mut()
+                .context("PCP observer task is not running")?;
+            tokio::select! {
+                result = task => {
+                    self.task = None;
+                    return result.context("join PCP observer task")?;
+                }
+                _ = tokio::time::sleep(ENROLLMENT_HEALTH_INTERVAL) => {}
+            }
+        }
     }
 
     pub async fn shutdown(&mut self) -> Result<()> {
@@ -125,6 +158,9 @@ impl ObserverService {
             task.await.context("join PCP observer shutdown")??;
         }
         self.cleanup_socket();
+        if let Some(enrollment) = self.enrollment.as_mut() {
+            enrollment.shutdown().await;
+        }
         Ok(())
     }
 
@@ -152,6 +188,7 @@ async fn run_observer(
     config: ObserverConfig,
     endpoint: String,
     source: Arc<SnapshotSource>,
+    enrollment: Option<EnrollmentHandler>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut connections = JoinSet::new();
@@ -171,7 +208,8 @@ async fn run_observer(
             accepted = listener.accept() => {
                 let (stream, _) = accepted.context("accept PCP observer client")?;
                 let source = Arc::clone(&source);
-                connections.spawn(async move { handle_connection(stream, source).await });
+                let enrollment = enrollment.clone();
+                connections.spawn(async move { handle_connection(stream, source, enrollment).await });
             }
             _ = renewal.tick() => {
                 registration.write(&discovery_registration(
@@ -225,11 +263,15 @@ async fn refresh_integrity(
     }
 }
 
-async fn handle_connection(stream: UnixStream, source: Arc<SnapshotSource>) -> Result<()> {
+async fn handle_connection(
+    stream: UnixStream,
+    source: Arc<SnapshotSource>,
+    enrollment: Option<EnrollmentHandler>,
+) -> Result<()> {
     verify_peer_user(&stream)?;
     let (read_half, mut write_half) = stream.into_split();
     let mut request_bytes = Vec::new();
-    let mut limited = BufReader::new(read_half).take((MAX_REQUEST_FRAME_BYTES + 1) as u64);
+    let mut limited = BufReader::new(read_half).take((MAX_PUBLIC_REQUEST_FRAME_BYTES + 1) as u64);
     let read = timeout(
         REQUEST_TIMEOUT,
         limited.read_until(b'\n', &mut request_bytes),
@@ -239,21 +281,28 @@ async fn handle_connection(stream: UnixStream, source: Arc<SnapshotSource>) -> R
     if read == 0 {
         return Ok(());
     }
-    let response =
-        if request_bytes.len() > MAX_REQUEST_FRAME_BYTES || !request_bytes.ends_with(b"\n") {
-            encode_error("invalid_request", "request must be one bounded JSON line")?
-        } else {
-            match validate_request(&request_bytes) {
-                Ok(()) => match source.capture().await {
-                    Ok(snapshot) => encode_response(&snapshot)?,
-                    Err(_) => encode_error(
-                        "snapshot_unavailable",
-                        "snapshot is temporarily unavailable",
-                    )?,
-                },
-                Err(error) => encode_error("invalid_request", &error)?,
-            }
-        };
+    let response = if request_bytes.len() > MAX_PUBLIC_REQUEST_FRAME_BYTES
+        || !request_bytes.ends_with(b"\n")
+    {
+        encode_error("invalid_request", "request must be one bounded JSON line")?
+    } else if request_schema(&request_bytes).as_deref() == Some(pcp_rpc::ENROLLMENT_REQUEST_SCHEMA)
+    {
+        match enrollment {
+            Some(enrollment) => enrollment.handle_public(&request_bytes).await,
+            None => encode_error("unsupported_protocol", "PCP enrollment is disabled")?,
+        }
+    } else {
+        match validate_request(&request_bytes) {
+            Ok(()) => match source.capture().await {
+                Ok(snapshot) => encode_response(&snapshot)?,
+                Err(_) => encode_error(
+                    "snapshot_unavailable",
+                    "snapshot is temporarily unavailable",
+                )?,
+            },
+            Err(error) => encode_error("invalid_request", &error)?,
+        }
+    };
     let response = if response.len().saturating_add(1) <= MAX_RESPONSE_FRAME_BYTES {
         response
     } else {
@@ -277,6 +326,9 @@ async fn handle_connection(stream: UnixStream, source: Arc<SnapshotSource>) -> R
 }
 
 fn validate_request(bytes: &[u8]) -> std::result::Result<(), String> {
+    if bytes.len() > MAX_OBSERVER_REQUEST_FRAME_BYTES {
+        return Err("PCP observer request exceeds 4096 bytes".to_owned());
+    }
     let request = serde_json::from_slice::<SnapshotRequest>(bytes)
         .map_err(|_| "request is not valid PCP observer JSON".to_owned())?;
     if request.schema != REQUEST_SCHEMA
@@ -322,13 +374,29 @@ fn discovery_registration(
             renewed_at: renewed.to_rfc3339_opts(SecondsFormat::Millis, true),
             expires_at: expires.to_rfc3339_opts(SecondsFormat::Millis, true),
         },
-        offers: vec![DiscoveryOffer {
+        offers: discovery_offers(config, endpoint),
+    })
+}
+
+fn discovery_offers(config: &ObserverConfig, endpoint: &str) -> Vec<DiscoveryOffer> {
+    let mut offers = Vec::new();
+    if config.observer_enabled {
+        offers.push(DiscoveryOffer {
             protocol: PCP_OBSERVER_PROTOCOL_ID.to_owned(),
             protocol_versions: vec![PCP_OBSERVER_PROTOCOL_VERSION.to_owned()],
             binding: LOCAL_UNIX_SOCKET_BINDING.to_owned(),
             endpoint: endpoint.to_owned(),
-        }],
-    })
+        });
+    }
+    if config.enrollment_enabled {
+        offers.push(DiscoveryOffer {
+            protocol: pcp_rpc::PCP_ENROLLMENT_PROTOCOL_ID.to_owned(),
+            protocol_versions: vec![pcp_rpc::PCP_ENROLLMENT_PROTOCOL_VERSION.to_owned()],
+            binding: LOCAL_UNIX_SOCKET_BINDING.to_owned(),
+            endpoint: endpoint.to_owned(),
+        });
+    }
+    offers
 }
 
 fn verify_peer_user(stream: &UnixStream) -> Result<()> {

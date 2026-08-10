@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result};
 use pcp_client::PcpApi;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::wire::{
     PcpDescriptor, RpcOperation, RpcOutcome, RpcRequest, RpcResponse, RpcValue, read_frame,
@@ -28,6 +28,52 @@ static SERVER_STARTED_AT_UNIX_MS: LazyLock<u64> = LazyLock::new(|| {
 pub struct RuntimeEndpoint {
     pub socket_path: PathBuf,
     pub client: Arc<dyn PcpApi>,
+}
+
+pub struct RunningRuntimeEndpoint {
+    socket_path: PathBuf,
+    task: Option<JoinHandle<()>>,
+    _guard: SocketGuard,
+}
+
+impl RunningRuntimeEndpoint {
+    pub async fn start(socket_path: impl AsRef<Path>, client: Arc<dyn PcpApi>) -> Result<Self> {
+        let socket_path = socket_path.as_ref().to_path_buf();
+        let listener = bind_unix(&socket_path).await?;
+        let task = tokio::spawn(async move {
+            if let Err(error) = serve_listener(listener, client).await {
+                eprintln!("PCP runtime endpoint failed: {error:#}");
+            }
+        });
+        Ok(Self {
+            _guard: SocketGuard(socket_path.clone()),
+            socket_path,
+            task: Some(task),
+        })
+    }
+
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.task.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    pub async fn shutdown(mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for RunningRuntimeEndpoint {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
 }
 
 pub async fn serve_unix_endpoints(endpoints: Vec<RuntimeEndpoint>) -> Result<()> {
@@ -53,21 +99,37 @@ pub async fn serve_unix_endpoints(endpoints: Vec<RuntimeEndpoint>) -> Result<()>
 
 pub async fn serve_unix(socket_path: impl AsRef<Path>, client: Arc<dyn PcpApi>) -> Result<()> {
     let socket_path = socket_path.as_ref().to_path_buf();
-    prepare_socket_path(&socket_path).await?;
-    let listener = UnixListener::bind(&socket_path)
-        .with_context(|| format!("bind PCP runtime socket {}", socket_path.display()))?;
-    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("secure PCP runtime socket {}", socket_path.display()))?;
-    let _guard = SocketGuard(socket_path.clone());
+    let listener = bind_unix(&socket_path).await?;
+    let _guard = SocketGuard(socket_path);
+    serve_listener(listener, client).await
+}
 
+async fn bind_unix(socket_path: &Path) -> Result<UnixListener> {
+    prepare_socket_path(socket_path).await?;
+    let listener = UnixListener::bind(socket_path)
+        .with_context(|| format!("bind PCP runtime socket {}", socket_path.display()))?;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("secure PCP runtime socket {}", socket_path.display()))?;
+    Ok(listener)
+}
+
+async fn serve_listener(listener: UnixListener, client: Arc<dyn PcpApi>) -> Result<()> {
+    let mut connections = JoinSet::new();
     loop {
-        let (stream, _) = listener.accept().await.context("accept PCP RPC client")?;
-        let client = Arc::clone(&client);
-        tokio::spawn(async move {
-            if let Err(error) = handle_connection(stream, client).await {
-                eprintln!("PCP runtime connection failed: {error:#}");
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted.context("accept PCP RPC client")?;
+                let client = Arc::clone(&client);
+                connections.spawn(handle_connection(stream, client));
             }
-        });
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => eprintln!("PCP runtime connection failed: {error:#}"),
+                    Err(error) => eprintln!("PCP runtime connection task failed: {error}"),
+                }
+            }
+        }
     }
 }
 

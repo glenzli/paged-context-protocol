@@ -21,6 +21,8 @@ const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 #[derive(Clone, Debug)]
 pub struct ObserverConfig {
     pub enabled: bool,
+    pub observer_enabled: bool,
+    pub enrollment_enabled: bool,
     pub runtime_root: PathBuf,
     pub instance_id: String,
     pub console_url: Option<String>,
@@ -30,12 +32,18 @@ pub struct ObserverConfig {
 
 impl ObserverConfig {
     pub fn from_env(owner_id: &str) -> Result<Self> {
-        let enabled = env::var("PCP_OBSERVER_ENABLED")
+        let observer_enabled = env::var("PCP_OBSERVER_ENABLED")
             .map(|value| !matches!(value.as_str(), "0" | "false" | "no"))
             .unwrap_or(true);
+        let enrollment_enabled = env::var("PCP_ENROLLMENT_ENABLED")
+            .map(|value| !matches!(value.as_str(), "0" | "false" | "no"))
+            .unwrap_or(true);
+        let enabled = observer_enabled || enrollment_enabled;
         if !enabled {
             return Ok(Self {
                 enabled,
+                observer_enabled,
+                enrollment_enabled,
                 runtime_root: PathBuf::new(),
                 instance_id: owner_id.to_owned(),
                 console_url: None,
@@ -54,6 +62,8 @@ impl ObserverConfig {
         validate_file_token(owner_id, "observer instance_id")?;
         Ok(Self {
             enabled,
+            observer_enabled,
+            enrollment_enabled,
             runtime_root,
             instance_id: owner_id.to_owned(),
             console_url: env::var("PCP_OBSERVER_CONSOLE_URL").ok(),
@@ -93,6 +103,8 @@ impl ObserverConfig {
     pub fn for_test(runtime_root: PathBuf, instance_id: impl Into<String>) -> Self {
         Self {
             enabled: true,
+            observer_enabled: true,
+            enrollment_enabled: false,
             runtime_root,
             instance_id: instance_id.into(),
             console_url: Some("http://127.0.0.1:4318/".to_owned()),
