@@ -7,7 +7,6 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use chrono::{SecondsFormat, Utc};
 use pcp_store::PcpStore;
 use serde::Serialize;
 use tokio::{
@@ -15,13 +14,13 @@ use tokio::{
     net::{UnixListener, UnixStream},
     sync::watch,
     task::{JoinHandle, JoinSet},
-    time::{MissedTickBehavior, timeout},
+    time::timeout,
 };
 use uuid::Uuid;
 
 use super::{
     contract::{
-        DISCOVERY_REGISTRATION_SCHEMA, DISCOVERY_SCHEMA_VERSION, DiscoveryLease, DiscoveryOffer,
+        DISCOVERY_REGISTRATION_SCHEMA, DISCOVERY_SCHEMA_VERSION, DiscoveryOffer,
         DiscoveryRegistration, DiscoveryService, ERROR_SCHEMA, LOCAL_UNIX_SOCKET_BINDING,
         ObserverError, PCP_OBSERVER_PROTOCOL_ID, PCP_OBSERVER_PROTOCOL_VERSION, REQUEST_SCHEMA,
         SnapshotRequest,
@@ -85,17 +84,13 @@ impl ObserverService {
             config.console_url.clone(),
         ));
         let registration = RegistrationFile::new(config.manifest_path(), &generation);
-        registration.publish(&discovery_registration(&config, &generation, &endpoint)?)?;
+        registration.publish(&discovery_registration(&config, &generation, &endpoint))?;
 
-        let task_config = config.clone();
         let (shutdown, shutdown_rx) = watch::channel(false);
         let task = tokio::spawn(run_observer(
             listener,
             socket_file,
             authority,
-            registration,
-            task_config,
-            endpoint,
             source,
             enrollment_handler,
             shutdown_rx,
@@ -167,14 +162,10 @@ impl Drop for ObserverService {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_observer(
     listener: UnixListener,
     _socket: SocketFile,
     _authority: PublicationAuthority,
-    registration: RegistrationFile,
-    config: ObserverConfig,
-    endpoint: String,
     source: Arc<SnapshotSource>,
     enrollment: Option<EnrollmentHandler>,
     mut shutdown: watch::Receiver<bool>,
@@ -182,9 +173,6 @@ async fn run_observer(
     let mut connections = JoinSet::new();
     let mut integrity_task = tokio::spawn(refresh_integrity(Arc::clone(&source), shutdown.clone()));
     let mut integrity_finished = false;
-    let mut renewal = tokio::time::interval(config.renew_interval);
-    renewal.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    renewal.tick().await;
 
     loop {
         tokio::select! {
@@ -198,13 +186,6 @@ async fn run_observer(
                 let source = Arc::clone(&source);
                 let enrollment = enrollment.clone();
                 connections.spawn(async move { handle_connection(stream, source, enrollment).await });
-            }
-            _ = renewal.tick() => {
-                registration.renew(&discovery_registration(
-                    &config,
-                    source.generation(),
-                    &endpoint,
-                )?)?;
             }
             Some(result) = connections.join_next(), if !connections.is_empty() => {
                 match result {
@@ -230,7 +211,6 @@ async fn run_observer(
         integrity_task.abort();
         let _ = integrity_task.await;
     }
-    drop(registration);
     Ok(())
 }
 
@@ -345,12 +325,8 @@ fn discovery_registration(
     config: &ObserverConfig,
     generation: &str,
     endpoint: &str,
-) -> Result<DiscoveryRegistration> {
-    let renewed = Utc::now();
-    let expires = renewed
-        + chrono::Duration::from_std(config.lease_ttl)
-            .context("convert PCP discovery lease TTL")?;
-    Ok(DiscoveryRegistration {
+) -> DiscoveryRegistration {
+    DiscoveryRegistration {
         schema: DISCOVERY_REGISTRATION_SCHEMA.to_owned(),
         schema_version: DISCOVERY_SCHEMA_VERSION.to_owned(),
         service: DiscoveryService {
@@ -358,12 +334,8 @@ fn discovery_registration(
             instance_id: config.instance_id.clone(),
             generation: generation.to_owned(),
         },
-        lease: DiscoveryLease {
-            renewed_at: renewed.to_rfc3339_opts(SecondsFormat::Millis, true),
-            expires_at: expires.to_rfc3339_opts(SecondsFormat::Millis, true),
-        },
         offers: discovery_offers(config, endpoint),
-    })
+    }
 }
 
 fn discovery_offers(config: &ObserverConfig, endpoint: &str) -> Vec<DiscoveryOffer> {

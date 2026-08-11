@@ -7,7 +7,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use chrono::{DateTime, Utc};
 use pcp_client::{AccessMode, EmbeddedPcpClient, PcpApi};
 use pcp_core::{
     AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType, CreateScopeRequest,
@@ -148,7 +147,7 @@ async fn observe_access_reads_only_aggregate_health() {
 }
 
 #[tokio::test]
-async fn observer_publishes_serves_renews_and_expires_naturally() {
+async fn observer_publishes_serves_retains_and_replaces_its_manifest() {
     let root = test_root("wire");
     let (store, _, namespace, _, secret) = fixture(&root).await;
     let config = ObserverConfig::for_test(root.clone(), "pcp-test");
@@ -169,15 +168,11 @@ async fn observer_publishes_serves_renews_and_expires_naturally() {
     let manifest_json = read_json(&manifest_path);
     assert_eq!(
         object_keys(&manifest_json),
-        BTreeSet::from(["lease", "offers", "schema", "schema_version", "service"])
+        BTreeSet::from(["offers", "schema", "schema_version", "service"])
     );
     assert_eq!(
         object_keys(&manifest_json["service"]),
         BTreeSet::from(["generation", "instance_id", "kind"])
-    );
-    assert_eq!(
-        object_keys(&manifest_json["lease"]),
-        BTreeSet::from(["expires_at", "renewed_at"])
     );
     assert_eq!(
         object_keys(&manifest_json["offers"][0]),
@@ -185,6 +180,7 @@ async fn observer_publishes_serves_renews_and_expires_naturally() {
     );
     assert_eq!(manifest.schema, DISCOVERY_REGISTRATION_SCHEMA);
     assert_eq!(manifest.schema_version, DISCOVERY_SCHEMA_VERSION);
+    assert_eq!(manifest.schema_version, "20260812.1");
     assert_eq!(manifest.service.kind, "pcp");
     assert_eq!(manifest.service.instance_id, "pcp-test");
     assert_eq!(manifest.service.generation, generation);
@@ -205,11 +201,10 @@ async fn observer_publishes_serves_renews_and_expires_naturally() {
     assert!(!manifest_json.to_string().contains("infra-observer"));
     assert_private_layout(&config, &manifest_path, &socket_path);
     assert_no_registration_temporary_files(&config);
-
-    let renewed_at = parse_timestamp(&manifest.lease.renewed_at);
-    let expires_at = parse_timestamp(&manifest.lease.expires_at);
-    assert!(renewed_at < expires_at);
-    assert!(expires_at - renewed_at <= chrono::Duration::seconds(120));
+    let published_manifest = fs::read(&manifest_path).expect("read published manifest");
+    let published_metadata = fs::symlink_metadata(&manifest_path).expect("published metadata");
+    let published_inode = published_metadata.ino();
+    let published_modified = published_metadata.modified().expect("published mtime");
 
     let snapshot = request_snapshot(&socket_path).await;
     let encoded = serde_json::to_string(&snapshot).expect("encode snapshot for inspection");
@@ -287,20 +282,24 @@ async fn observer_publishes_serves_renews_and_expires_naturally() {
     assert_eq!(oversized.code, "invalid_request");
 
     tokio::time::sleep(Duration::from_millis(90)).await;
-    let renewed = read_manifest(&manifest_path);
-    assert!(
-        parse_timestamp(&renewed.lease.renewed_at) > parse_timestamp(&manifest.lease.renewed_at)
+    let steady_metadata = fs::symlink_metadata(&manifest_path).expect("steady manifest metadata");
+    assert_eq!(
+        fs::read(&manifest_path).expect("read steady manifest"),
+        published_manifest,
+        "a running provider must not rewrite an unchanged declaration"
     );
-    assert_eq!(renewed.service.generation, manifest.service.generation);
+    assert_eq!(steady_metadata.ino(), published_inode);
+    assert_eq!(
+        steady_metadata.modified().expect("steady mtime"),
+        published_modified
+    );
 
     observer.shutdown().await.expect("stop observer");
-    assert!(manifest_path.exists(), "manifest must expire naturally");
+    assert!(manifest_path.exists(), "stable manifest must be retained");
     assert!(!socket_path.exists(), "generation socket must be removed");
-    let expired_manifest = fs::read(&manifest_path).expect("read retained manifest");
-    sleep_until_expired(&renewed.lease.expires_at).await;
     assert_eq!(
-        fs::read(&manifest_path).expect("read naturally expired manifest"),
-        expired_manifest,
+        fs::read(&manifest_path).expect("read retained manifest"),
+        published_manifest,
         "shutdown must not rewrite or remove the stable manifest"
     );
 
@@ -482,20 +481,6 @@ fn assert_no_registration_temporary_files(config: &ObserverConfig) {
             "temporary manifest remains: {name}"
         );
     }
-}
-
-fn parse_timestamp(value: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(value)
-        .expect("parse RFC 3339 timestamp")
-        .with_timezone(&Utc)
-}
-
-async fn sleep_until_expired(expires_at: &str) {
-    let remaining = parse_timestamp(expires_at) - Utc::now();
-    if let Ok(duration) = remaining.to_std() {
-        tokio::time::sleep(duration + Duration::from_millis(20)).await;
-    }
-    assert!(parse_timestamp(expires_at) <= Utc::now());
 }
 
 async fn fixture(root: &Path) -> (Arc<SqlitePcpStore>, String, String, String, String) {

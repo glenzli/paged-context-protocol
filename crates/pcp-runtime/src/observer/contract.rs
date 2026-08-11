@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const DISCOVERY_REGISTRATION_SCHEMA: &str = "infra.discovery.registration";
-pub const DISCOVERY_SCHEMA_VERSION: &str = "20260810.1";
+pub const DISCOVERY_SCHEMA_VERSION: &str = "20260812.1";
 pub const LOCAL_UNIX_SOCKET_BINDING: &str = "infra.local.unix-socket";
 
 pub const PCP_OBSERVER_PROTOCOL_ID: &str = "pcp.runtime.observer";
@@ -18,7 +18,6 @@ pub struct DiscoveryRegistration {
     pub schema: String,
     pub schema_version: String,
     pub service: DiscoveryService,
-    pub lease: DiscoveryLease,
     pub offers: Vec<DiscoveryOffer>,
 }
 
@@ -27,12 +26,6 @@ pub struct DiscoveryService {
     pub kind: String,
     pub instance_id: String,
     pub generation: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct DiscoveryLease {
-    pub renewed_at: String,
-    pub expires_at: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -54,10 +54,6 @@ impl SnapshotSource {
         }
     }
 
-    pub(super) fn generation(&self) -> &str {
-        &self.generation
-    }
-
     pub(super) async fn refresh_integrity(&self) {
         let result = self.store.integrity_check().await;
         let state = match result {

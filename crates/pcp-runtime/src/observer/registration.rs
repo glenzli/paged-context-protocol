@@ -7,15 +7,12 @@ use std::{
         unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     },
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use anyhow::{Context, Result};
 
 use super::contract::DiscoveryRegistration;
 
-pub const RENEW_INTERVAL: Duration = Duration::from_secs(15);
-pub const LEASE_TTL: Duration = Duration::from_secs(45);
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug)]
@@ -26,8 +23,6 @@ pub struct ObserverConfig {
     pub runtime_root: PathBuf,
     pub instance_id: String,
     pub console_url: Option<String>,
-    pub(crate) renew_interval: Duration,
-    pub(crate) lease_ttl: Duration,
 }
 
 impl ObserverConfig {
@@ -47,8 +42,6 @@ impl ObserverConfig {
                 runtime_root: PathBuf::new(),
                 instance_id: owner_id.to_owned(),
                 console_url: None,
-                renew_interval: RENEW_INTERVAL,
-                lease_ttl: LEASE_TTL,
             });
         }
         let runtime_root = env::var_os("INFRA_PROTOCOL_RUNTIME_DIR")
@@ -67,8 +60,6 @@ impl ObserverConfig {
             runtime_root,
             instance_id: owner_id.to_owned(),
             console_url: env::var("PCP_OBSERVER_CONSOLE_URL").ok(),
-            renew_interval: RENEW_INTERVAL,
-            lease_ttl: LEASE_TTL,
         })
     }
 
@@ -99,8 +90,6 @@ impl ObserverConfig {
             runtime_root,
             instance_id: instance_id.into(),
             console_url: Some("http://127.0.0.1:4318/".to_owned()),
-            renew_interval: Duration::from_millis(40),
-            lease_ttl: Duration::from_millis(150),
         }
     }
 }
@@ -259,14 +248,6 @@ impl RegistrationFile {
     }
 
     pub fn publish(&self, manifest: &DiscoveryRegistration) -> Result<()> {
-        self.write(manifest, true)
-    }
-
-    pub fn renew(&self, manifest: &DiscoveryRegistration) -> Result<()> {
-        self.write(manifest, false)
-    }
-
-    fn write(&self, manifest: &DiscoveryRegistration, durable: bool) -> Result<()> {
         let mut bytes =
             serde_json::to_vec(manifest).context("encode Infra Discovery registration")?;
         bytes.push(b'\n');
@@ -290,10 +271,8 @@ impl RegistrationFile {
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
         file.write_all(&bytes)
             .context("write Infra Discovery registration")?;
-        if durable {
-            file.sync_all()
-                .context("sync Infra Discovery registration")?;
-        }
+        file.sync_all()
+            .context("sync Infra Discovery registration")?;
         drop(file);
         fs::rename(&self.temporary_path, &self.path).with_context(|| {
             format!(
@@ -302,7 +281,7 @@ impl RegistrationFile {
             )
         })?;
         validate_private_manifest(&self.path)?;
-        if durable && let Some(parent) = self.path.parent() {
+        if let Some(parent) = self.path.parent() {
             File::open(parent)
                 .and_then(|directory| directory.sync_all())
                 .context("sync Infra Discovery registration directory")?;

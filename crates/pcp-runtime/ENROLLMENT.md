@@ -17,22 +17,18 @@ migration.
 ## Discovery
 
 Runtime advertises enrollment through
-`infra.discovery.registration@20260810.1` using the
+`infra.discovery.registration@20260812.1` using the
 `infra.local.unix-socket` binding. The observer and enrollment protocols may
 share one generation-specific endpoint:
 
 ```json
 {
   "schema": "infra.discovery.registration",
-  "schema_version": "20260810.1",
+  "schema_version": "20260812.1",
   "service": {
     "kind": "pcp",
     "instance_id": "owner_...",
     "generation": "proc_..."
-  },
-  "lease": {
-    "renewed_at": "2026-08-10T12:00:00.000Z",
-    "expires_at": "2026-08-10T12:00:45.000Z"
   },
   "offers": [
     {
@@ -52,10 +48,12 @@ share one generation-specific endpoint:
 ```
 
 The Store owner ID is the stable `instance_id`. Every Runtime start has a new
-`generation` and public socket. A client MUST select an unexpired registration,
-an exact supported protocol version, and a valid relative endpoint according to
-the Infra Discovery specification. It MUST rediscover after a generation change
-instead of retaining the public socket path.
+`generation` and public socket. A client MUST select an exact supported protocol
+version and a valid relative endpoint according to the Infra Discovery
+specification. The manifest is only a candidate declaration; connection success,
+not its presence or modification time, establishes endpoint availability. After
+a connection failure, the client MUST rescan before retrying, and it MUST
+rediscover after a generation change instead of retaining the public socket path.
 
 `PCP_ENROLLMENT_ENABLED=0` disables the enrollment offer and service. It does not
 disable the observer offer. `INFRA_PROTOCOL_RUNTIME_DIR` has the same meaning as
@@ -297,7 +295,7 @@ revoked ID both return `not_found`.
 Symbiont can migrate without a coordinated flag day:
 
 1. Keep its current configured PCP Runtime socket as a temporary fallback.
-2. Discover an unexpired `pcp.runtime.enrollment@20260810.1` offer.
+2. Discover a compatible `pcp.runtime.enrollment@20260810.1` offer.
 3. Generate and durably store one enrollment credential; call `begin` with the
    existing `host:symbiont-d` claim and current Scope request.
 4. Poll `status` until PCP Console approves or rejects the request.

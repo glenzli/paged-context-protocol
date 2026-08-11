@@ -17,21 +17,17 @@ plane, not the normative PCP Page model and not the PCP Console API.
 ## Discovery
 
 Runtime advertises this protocol through
-`infra.discovery.registration@20260810.1` with the
+`infra.discovery.registration@20260812.1` with the
 `infra.local.unix-socket` binding:
 
 ```json
 {
   "schema": "infra.discovery.registration",
-  "schema_version": "20260810.1",
+  "schema_version": "20260812.1",
   "service": {
     "kind": "pcp",
     "instance_id": "owner_...",
     "generation": "proc_..."
-  },
-  "lease": {
-    "renewed_at": "2026-08-10T12:00:00.000Z",
-    "expires_at": "2026-08-10T12:00:45.000Z"
   },
   "offers": [{
     "protocol": "pcp.runtime.observer",
@@ -51,7 +47,7 @@ uses a new `generation` and a process-unique socket endpoint. The snapshot
 identity MUST equal the selected registration's `kind`, `instance_id`, and
 `generation`.
 
-The runtime root, registration path, permissions, lease validation, atomic
+The runtime root, registration path, permissions, atomic
 replacement, publisher handoff, endpoint resolution, and consumer validation
 follow the Infra Discovery specification. `INFRA_PROTOCOL_RUNTIME_DIR` may set
 the final absolute runtime root. Otherwise the platform canonical root is used.
@@ -59,10 +55,12 @@ the final absolute runtime root. Otherwise the platform canonical root is used.
 enabled, Runtime still publishes the same PCP service registration with only the
 enrollment offer.
 
-Runtime renews the 45-second lease every 15 seconds. One stable PCP identity has
-one exclusive publisher. On shutdown, Runtime stops renewal and leaves the
-stable manifest to expire naturally; it removes only its generation-specific
-socket. `launchd` may supervise Runtime but is not a discovery mechanism.
+The manifest is a candidate declaration, not a liveness signal. Runtime publishes
+it once after the endpoint is ready and does not periodically rewrite it. One
+stable PCP identity has one exclusive publisher. On shutdown, Runtime leaves the
+stable manifest in place and removes only its generation-specific socket. A later
+Runtime atomically replaces the manifest with a new generation. `launchd` may
+supervise Runtime but is not a discovery mechanism.
 
 ## Binding And Trust Boundary
 
