@@ -50,6 +50,7 @@ impl SqlitePcpStore {
         allowed_scopes: Vec<String>,
         window_hours: u32,
     ) -> Result<HealthSnapshot> {
+        self.flush_access_audit().await?;
         let window_hours = window_hours.clamp(MIN_WINDOW_HOURS, MAX_WINDOW_HOURS);
         let generated = Utc::now();
         let window_started = generated - Duration::hours(i64::from(window_hours));

@@ -1,13 +1,11 @@
 use std::collections::HashSet;
 
+use crate::{SqlitePcpStore, audit_writer::AccessAuditRecord};
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
 use pcp_core::{
     AccessAuditEvent, AccessDecision, AccessPermission, AccessSession, OperationTelemetry,
 };
-use rusqlite::params;
-
-use crate::SqlitePcpStore;
 
 const MAX_AUDIT_DETAIL_CHARS: usize = 320;
 
@@ -160,7 +158,7 @@ impl SqlitePcpStore {
         access: &AccessSession,
         operation: &str,
         scopes: &[String],
-        decision: AccessDecision,
+        decision: &AccessDecision,
         detail: Option<&str>,
         telemetry: Option<&OperationTelemetry>,
     ) -> Result<()> {
@@ -172,32 +170,26 @@ impl SqlitePcpStore {
         let decision = decision.as_str().to_owned();
         let detail = detail.map(bound_detail);
         let telemetry_json = telemetry.map(serde_json::to_string).transpose()?;
-        self.run("access audit write", move |connection| {
-            connection
-                .execute(
-                    "
-                    INSERT INTO pcp_access_log (
-                        event_id, occurred_at, principal_json, session_id,
-                        operation, scopes_json, decision, detail, telemetry_json
-                    ) VALUES (
-                        'acc_' || lower(hex(randomblob(16))), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
-                    )
-                    ",
-                    params![
-                        occurred_at,
-                        principal_json,
-                        session_id,
-                        operation,
-                        scopes_json,
-                        decision,
-                        detail,
-                        telemetry_json,
-                    ],
-                )
-                .context("record PCP access event")?;
-            Ok(())
-        })
-        .await
+        let durable = decision != AccessDecision::Allowed.as_str();
+        let record = AccessAuditRecord {
+            occurred_at,
+            principal_json,
+            session_id,
+            operation,
+            scopes_json,
+            decision,
+            detail,
+            telemetry_json,
+        };
+        if durable {
+            self.audit_writer.append_durable(record).await
+        } else {
+            self.audit_writer.enqueue(record).await
+        }
+    }
+
+    pub(crate) async fn flush_access_audit(&self) -> Result<()> {
+        self.audit_writer.flush().await
     }
 
     pub(crate) async fn read_access_log(
@@ -206,6 +198,7 @@ impl SqlitePcpStore {
         limit: u32,
         cursor: Option<String>,
     ) -> Result<(Vec<AccessAuditEvent>, Option<String>)> {
+        self.flush_access_audit().await?;
         let allowed_scopes = allowed_scopes.into_iter().collect::<HashSet<_>>();
         let limit = limit.clamp(1, 100) as usize;
         let offset = cursor

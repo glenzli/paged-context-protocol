@@ -1,5 +1,6 @@
 mod access;
 mod adapter;
+mod audit_writer;
 mod consolidate;
 mod health;
 mod immutable_page_migration;

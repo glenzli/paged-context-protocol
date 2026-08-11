@@ -99,6 +99,13 @@ normative. Conformance is defined by [`PROTOCOL-en.md`](PROTOCOL-en.md).
 - Head-only default retrieval, `auto`, `exact`, `text`, `graph`, and `temporal`
   modes, plus bounded Projection reads.
 - Summary, Validity, Relation, Provenance, consolidation, and access audit.
+- Allowed access events are committed in bounded batches of at most 512 events or
+  one second, with at least 500 ms between automatic commits; overload applies
+  backpressure instead of silently dropping events. Denied and failed events use a
+  security coalescing window of at most 100 ms once admitted to the writer and are
+  durable before the call returns. Raw allowed events are retained for 30 days and
+  pruned in batches of at most 5,000; this policy never automatically removes
+  security-relevant events.
 - Identity-bound embedded and RPC clients, discoverable user-approved Runtime
   enrollment, CLI, MCP, and Console.
 - Deterministic Revision-retention planning, finite leases, protected explicit

@@ -79,6 +79,9 @@ PCP 仍是开放协议，允许独立实现。“官方”表示该实现由 PCP
 - 稳定 Page、不可变 Revision、`sealed`/`revisioned`、CAS 修订与 v0.6 数据幂等迁移。
 - head-only 默认检索，`auto`、`exact`、`text`、`graph`、`temporal` 模式，以及有界 Projection 读取。
 - Summary、Validity、Relation、Provenance、consolidation 与访问审计。
+- allowed 访问事件以最多 512 条或 1 秒的有界批次写入，自动提交至少间隔 500 ms；队列过载时
+  反压而不静默丢弃。denied/failed 进入 writer 后使用最多 100 ms 的安全合并窗口，并在调用返回前
+  持久化。原始 allowed 日志保留 30 天、每批最多清理 5,000 条；安全相关事件不会被该策略自动清理。
 - 身份绑定的 embedded/RPC client、可发现且经用户批准的 Runtime 注册、CLI、MCP 与 Console。
 - 确定性 Revision 保留规划、有限租约、受保护的显式回收，以及多维 Health 诊断。
 

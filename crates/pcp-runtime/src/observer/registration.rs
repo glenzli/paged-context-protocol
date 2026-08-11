@@ -258,7 +258,15 @@ impl RegistrationFile {
         }
     }
 
-    pub fn write(&self, manifest: &DiscoveryRegistration) -> Result<()> {
+    pub fn publish(&self, manifest: &DiscoveryRegistration) -> Result<()> {
+        self.write(manifest, true)
+    }
+
+    pub fn renew(&self, manifest: &DiscoveryRegistration) -> Result<()> {
+        self.write(manifest, false)
+    }
+
+    fn write(&self, manifest: &DiscoveryRegistration, durable: bool) -> Result<()> {
         let mut bytes =
             serde_json::to_vec(manifest).context("encode Infra Discovery registration")?;
         bytes.push(b'\n');
@@ -282,8 +290,10 @@ impl RegistrationFile {
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
         file.write_all(&bytes)
             .context("write Infra Discovery registration")?;
-        file.sync_all()
-            .context("sync Infra Discovery registration")?;
+        if durable {
+            file.sync_all()
+                .context("sync Infra Discovery registration")?;
+        }
         drop(file);
         fs::rename(&self.temporary_path, &self.path).with_context(|| {
             format!(
@@ -292,7 +302,7 @@ impl RegistrationFile {
             )
         })?;
         validate_private_manifest(&self.path)?;
-        if let Some(parent) = self.path.parent() {
+        if durable && let Some(parent) = self.path.parent() {
             File::open(parent)
                 .and_then(|directory| directory.sync_all())
                 .context("sync Infra Discovery registration directory")?;

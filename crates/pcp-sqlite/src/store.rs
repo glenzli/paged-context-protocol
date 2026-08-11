@@ -1,11 +1,18 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use pcp_core::{Capabilities, Projection, SearchMode};
 use rusqlite::Connection;
 use tokio::task;
 
-use crate::schema;
+use crate::{
+    audit_writer::{AccessAuditPolicy, AccessAuditWriter},
+    schema,
+};
 
 pub const MAX_SEARCH_RESULTS: u32 = 50;
 pub const MAX_READ_PAGES: u32 = 20;
@@ -16,12 +23,20 @@ pub(crate) const MAX_PAGE_CHARS: usize = 256_000;
 pub struct SqlitePcpStore {
     pub(crate) path: PathBuf,
     owner_id: String,
+    pub(crate) audit_writer: Arc<AccessAuditWriter>,
 }
 
 impl SqlitePcpStore {
     pub async fn open(path: PathBuf) -> Result<Self> {
+        Self::open_with_access_audit_policy(path, AccessAuditPolicy::default()).await
+    }
+
+    pub(crate) async fn open_with_access_audit_policy(
+        path: PathBuf,
+        audit_policy: AccessAuditPolicy,
+    ) -> Result<Self> {
         let path_for_open = path.clone();
-        let owner_id = task::spawn_blocking(move || -> Result<String> {
+        let (owner_id, audit_writer) = task::spawn_blocking(move || -> Result<_> {
             if let Some(parent) = path_for_open.parent() {
                 std::fs::create_dir_all(parent).with_context(|| {
                     format!("create PCP database directory {}", parent.display())
@@ -29,11 +44,18 @@ impl SqlitePcpStore {
             }
             let mut connection = open_connection(&path_for_open)?;
             schema::initialize(&mut connection)?;
-            schema::owner_id(&connection)
+            let owner_id = schema::owner_id(&connection)?;
+            drop(connection);
+            let audit_writer = AccessAuditWriter::start(path_for_open, audit_policy)?;
+            Ok((owner_id, Arc::new(audit_writer)))
         })
         .await
         .context("join PCP database initialization")??;
-        Ok(Self { path, owner_id })
+        Ok(Self {
+            path,
+            owner_id,
+            audit_writer,
+        })
     }
 
     pub fn owner_id(&self) -> &str {
@@ -121,11 +143,14 @@ impl SqlitePcpStore {
     }
 }
 
-fn open_connection(path: &Path) -> Result<Connection> {
+pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
     let connection =
         Connection::open(path).with_context(|| format!("open PCP database {}", path.display()))?;
     connection
         .execute_batch("PRAGMA foreign_keys = ON;")
         .context("enable PCP foreign keys")?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .context("configure PCP SQLite busy timeout")?;
     Ok(connection)
 }

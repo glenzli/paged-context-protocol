@@ -85,7 +85,7 @@ impl ObserverService {
             config.console_url.clone(),
         ));
         let registration = RegistrationFile::new(config.manifest_path(), &generation);
-        registration.write(&discovery_registration(&config, &generation, &endpoint)?)?;
+        registration.publish(&discovery_registration(&config, &generation, &endpoint)?)?;
 
         let task_config = config.clone();
         let (shutdown, shutdown_rx) = watch::channel(false);
@@ -200,7 +200,7 @@ async fn run_observer(
                 connections.spawn(async move { handle_connection(stream, source, enrollment).await });
             }
             _ = renewal.tick() => {
-                registration.write(&discovery_registration(
+                registration.renew(&discovery_registration(
                     &config,
                     source.generation(),
                     &endpoint,

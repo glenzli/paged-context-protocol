@@ -1233,16 +1233,15 @@ where
             access,
             operation,
             &scopes,
-            decision,
+            &decision,
             detail,
             Some(&telemetry),
         )
         .await;
-    match (result, audit) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
+    if let Err(error) = audit {
+        eprintln!("PCP {decision:?} access audit failed for {operation}: {error:#}");
     }
+    result
 }
 
 struct OperationObservation {
