@@ -10,7 +10,7 @@ use anyhow::Result;
 use chrono::{SecondsFormat, Utc};
 use pcp_core::{AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, ScopeGrant};
 use pcp_store::{
-    ActivityHealth, ConsolidationHealth, GraphHealth, HealthSnapshot, PcpStore, RecallHealth,
+    ActivityHealth, GraphHealth, HealthSnapshot, PackingHealth, PcpStore, RecallHealth,
     StorageHealth,
 };
 use serde_json::{Value, json};
@@ -320,7 +320,7 @@ fn empty_health_snapshot() -> HealthSnapshot {
         storage: StorageHealth::default(),
         activity: ActivityHealth::default(),
         recall: RecallHealth::default(),
-        consolidation: ConsolidationHealth::default(),
+        packing: PackingHealth::default(),
         graph: GraphHealth::default(),
         operations: Vec::new(),
         scopes: Vec::new(),

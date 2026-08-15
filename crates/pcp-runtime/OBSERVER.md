@@ -42,7 +42,7 @@ The registration may contain additional PCP-owned offers, including
 `pcp.runtime.enrollment`. Observer consumers select this exact protocol and
 ignore offers they do not implement.
 
-The Store's persistent owner ID is the stable `instance_id`. Each Runtime start
+The Store's persistent `identityId` is the stable `instance_id`. Each Runtime start
 uses a new `generation` and a process-unique socket endpoint. The snapshot
 identity MUST equal the selected registration's `kind`, `instance_id`, and
 `generation`.

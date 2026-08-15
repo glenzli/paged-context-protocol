@@ -8,7 +8,7 @@ client_type = "host"
 client_name = "symbiont-d"
 access_mode = "admin"
 allowed_scopes = [
-  "user:{owner_id}",
+  "user:{identity_id}",
   "project:symbiont-d",
   "conversation:symbiont-d-main",
 ]
@@ -25,15 +25,15 @@ allowed_scopes = [
   "conversation:example-main",
 ]
 
-# Semantic maintenance is deliberately opt-in. Uncomment and point `program`
-# at a local adapter that accepts one JSON request on stdin and emits one JSON
-# decision on stdout. It may call Codex, another model, or a Host-owned service.
+# Semantic maintenance is deliberately opt-in. The preferred provider is an
+# independently authorized Infer Runtime consumer. A command provider remains
+# available for local adapters.
 #
 # [maintenance]
 # enabled = true
 # mode = "observe" # default; use "apply" only after reviewing worker behavior
 # state_path = "../data/maintenance-state.json"
-# allowed_scopes = ["user:{owner_id}", "project:symbiont-d"]
+# allowed_scopes = ["user:{identity_id}", "project:symbiont-d"]
 # interval_seconds = 1800
 # initial_delay_seconds = 300
 # max_jobs_per_cycle = 2
@@ -41,24 +41,34 @@ allowed_scopes = [
 # principal_name = "PCP runtime maintainer"
 #
 # [maintenance.worker]
+# provider = "infer_runtime"
+# credential_file = "/absolute/path/to/pcp-runtime.token"
+# timeout_seconds = 120
+# max_output_tokens = 2048
+# actor_id = "model:infer-runtime-maintenance"
+# actor_type = "model"
+#
+# Command alternative:
+# provider = "command"
 # program = "/absolute/path/to/semantic-worker"
 # args = []
-# timeout_seconds = 120
-# actor_id = "model:maintenance-worker"
-# actor_type = "model"
 #
 # [maintenance.summary]
 # enabled = true
 # minimum_chars = 4000
 # max_input_chars = 32000
 # retry_after_seconds = 86400
+# excluded_page_kinds = ["pcp_summary", "validity_assessment", "source_document"]
+#
+# [maintenance.packing]
+# enabled = true
+# max_pages = 8
+# max_input_chars = 64000
 # excluded_page_kinds = ["pcp_summary", "validity_assessment", "conversation_event"]
 #
-# [maintenance.compaction]
+# [maintenance.relation]
 # enabled = true
-# candidate_window = 32
-# routing_chars_per_page = 480
-# max_pages_per_candidate = 8
-# max_input_chars = 64000
+# candidate_window = 24
+# routing_chars_per_page = 800
 # retry_after_seconds = 86400
-# excluded_page_kinds = ["pcp_summary", "validity_assessment", "conversation_event"]
+# excluded_page_kinds = ["pcp_summary", "summary_projection", "validity_assessment", "tombstone"]

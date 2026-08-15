@@ -2,11 +2,11 @@ use anyhow::{Context, Result};
 use pcp_client::{DurablePageInventoryItem, HealthSnapshot, TombstoneCascadeResult};
 use pcp_core::{
     AccessAuditEvent, AccessSession, Actor, AssessPageValidityRequest, Capabilities,
-    CollectRevisionRetentionRequest, ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest,
-    PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest,
-    Relation, RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease,
-    RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult, WritePageRequest, WriteResult,
-    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    CollectRevisionRetentionRequest, CreateScopeRequest, IngestPageRequest, LinkPagesRequest,
+    PackPagesRequest, PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage,
+    ReadPagesRequest, Relation, RevisePageRequest, RevisionCollectionResult,
+    RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult,
+    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -16,7 +16,7 @@ const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PcpDescriptor {
-    pub owner_id: String,
+    pub identity_id: String,
     pub capabilities: Capabilities,
     pub access: AccessSession,
     #[serde(default)]
@@ -69,9 +69,10 @@ pub(crate) enum RpcOperation {
         requested_scopes: Vec<String>,
         limit: u32,
     },
+    IngestPage(IngestPageRequest),
     WritePage(WritePageRequest),
     RevisePage(RevisePageRequest),
-    ConsolidatePages(ConsolidatePagesRequest),
+    PackPages(PackPagesRequest),
     LinkPages(LinkPagesRequest),
     WriteSummary(WriteSummaryRequest),
     NextSummaryCandidate {
@@ -192,4 +193,36 @@ where
         .context("read PCP RPC frame payload")?;
     let value = serde_json::from_slice(&payload).context("decode PCP RPC frame")?;
     Ok(Some(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use pcp_core::PageRevisionRef;
+
+    use super::*;
+
+    #[test]
+    fn pack_pages_has_a_stable_operation_name_and_exact_input_shape() {
+        let value = serde_json::to_value(RpcOperation::PackPages(PackPagesRequest {
+            pages: vec![PageRevisionRef {
+                page_id: "pg_anchor".to_owned(),
+                revision_id: "rev_head".to_owned(),
+            }],
+            idempotency_key: None,
+        }))
+        .expect("serialize pack_pages RPC operation");
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "pack_pages",
+                "params": {
+                    "pages": [{
+                        "pageId": "pg_anchor",
+                        "revisionId": "rev_head"
+                    }]
+                }
+            })
+        );
+    }
 }

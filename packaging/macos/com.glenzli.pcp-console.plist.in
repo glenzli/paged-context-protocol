@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.glenzli.pcp-console</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@PCP_CONSOLE_BINARY@</string>
+    <string>--managed</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PCP_HOME</key>
+    <string>@PCP_HOME@</string>
+    <key>PCP_RUNTIME_BINARY</key>
+    <string>@PCP_RUNTIME_BINARY@</string>
+    <key>PCP_OBSERVER_CONSOLE_URL</key>
+    <string>http://127.0.0.1:4318/</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>@PCP_PROJECT_ROOT@</string>
+  <key>StandardOutPath</key>
+  <string>@LOG_DIR@/pcp-console-stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>@LOG_DIR@/pcp-console-stderr.log</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>

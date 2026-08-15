@@ -4,9 +4,9 @@ use anyhow::{Context, Result};
 use pcp_client::{AccessMode, EmbeddedPcpClient, PcpApi};
 use pcp_core::{
     AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    CollectRevisionRetentionRequest, ConsolidatePagesRequest, ConsolidationInput, LifecycleStatus,
-    PagePayload, PlanRevisionRetentionRequest, Projection, ReadPage, ReadPagesRequest,
-    RetentionPolicy, RevisePageRequest, SearchFilters, SearchMode, SearchPagesRequest,
+    CollectRevisionRetentionRequest, LifecycleStatus, PagePayload, PlanRevisionRetentionRequest,
+    Projection, ReadPage, ReadPagesRequest, RetentionPolicy, RevisePageRequest, SearchFilters,
+    SearchMode, SearchPagesRequest,
 };
 use pcp_rpc::RemotePcpClient;
 use pcp_sqlite::SqlitePcpStore;
@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
             let session_id = format!("pcp-cli:{}", std::process::id());
             let access = match command.as_str() {
                 "retention-plan" => AccessMode::Audit.session(principal, session_id, scopes, false),
-                "retention-collect" | "consolidate" | "revise" => {
+                "retention-collect" | "revise" => {
                     AccessMode::Admin.session(principal, session_id, scopes, false)
                 }
                 _ => AccessSession::read_only(principal, session_id, scopes),
@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
         .collect::<Vec<_>>();
     match command.as_str() {
         "describe" => print_json(&json!({
-            "ownerId": client.owner_id(),
+            "identityId": client.identity_id(),
             "capabilities": client.capabilities(),
             "access": client.access(),
             "source": source
@@ -128,7 +128,7 @@ async fn main() -> Result<()> {
             let pages = export_pages(client.as_ref(), scopes).await?;
             print_json(&json!({
                 "protocolVersion": client.capabilities().protocol_version,
-                "ownerId": client.owner_id(),
+                "identityId": client.identity_id(),
                 "pages": pages
             }))?;
         }
@@ -139,7 +139,7 @@ async fn main() -> Result<()> {
             print_json(&json!({
                 "source": source,
                 "integrity": integrity,
-                "ownerId": client.owner_id(),
+                "identityId": client.identity_id(),
                 "scopeCount": scope_details.len(),
                 "pageCount": page_count,
                 "status": if integrity == "ok" { "ready" } else { "degraded" }
@@ -222,101 +222,6 @@ async fn main() -> Result<()> {
                         .into_iter()
                         .map(|candidate| candidate.revision_id)
                         .collect(),
-                })
-                .await?;
-            print_json(&result)?;
-        }
-        "consolidate" => {
-            anyhow::ensure!(
-                arguments.next().as_deref() == Some("--confirm"),
-                "pcp consolidate requires --confirm"
-            );
-            let canonical_page_id = arguments
-                .next()
-                .context("pcp consolidate requires a canonical Page ID")?;
-            let replaced_page_ids = arguments.collect::<Vec<_>>();
-            anyhow::ensure!(
-                !replaced_page_ids.is_empty(),
-                "pcp consolidate requires at least one absorbed Page ID"
-            );
-            let mut page_ids = vec![canonical_page_id.clone()];
-            page_ids.extend(replaced_page_ids.iter().cloned());
-            let pages = client
-                .read_pages(ReadPagesRequest {
-                    page_ids,
-                    revision_ids: Vec::new(),
-                    projections: vec![
-                        Projection::Manifest,
-                        Projection::Payload,
-                        Projection::Sources,
-                        Projection::Facets,
-                    ],
-                    max_chars: 256_000,
-                })
-                .await?;
-            anyhow::ensure!(
-                pages.len() == replaced_page_ids.len() + 1,
-                "one or more consolidation Pages could not be read"
-            );
-            let canonical = pages
-                .iter()
-                .find(|page| page.page.page_id == canonical_page_id)
-                .context("canonical Page could not be read")?;
-            let mut content = String::new();
-            std::io::stdin()
-                .read_to_string(&mut content)
-                .context("read consolidated Page content from stdin")?;
-            anyhow::ensure!(
-                !content.trim().is_empty(),
-                "pcp consolidate requires the canonical Markdown payload on stdin"
-            );
-            let replaced_pages = replaced_page_ids
-                .iter()
-                .map(|page_id| {
-                    let page = pages
-                        .iter()
-                        .find(|page| page.page.page_id == *page_id)
-                        .with_context(|| format!("absorbed Page {page_id} could not be read"))?;
-                    Ok(ConsolidationInput {
-                        page_id: page.page.page_id.clone(),
-                        expected_revision_id: page.revision.revision_id.clone(),
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let idempotency_suffix = replaced_pages
-                .iter()
-                .map(|page| page.expected_revision_id.as_str())
-                .collect::<Vec<_>>()
-                .join(":");
-            let result = client
-                .consolidate_pages(ConsolidatePagesRequest {
-                    canonical_page_id: canonical.page.page_id.clone(),
-                    expected_canonical_revision_id: canonical.revision.revision_id.clone(),
-                    replaced_pages,
-                    created_by: Actor {
-                        actor_type: ActorType::Tool,
-                        actor_id: "cli:pcp".to_owned(),
-                    },
-                    lifecycle_status: LifecycleStatus::Active,
-                    observed_at: None,
-                    valid_from: canonical.revision.valid_from.clone(),
-                    valid_to: canonical.revision.valid_to.clone(),
-                    payload: Some(PagePayload {
-                        media_type: canonical
-                            .revision
-                            .payload
-                            .as_ref()
-                            .map(|payload| payload.media_type.clone())
-                            .unwrap_or_else(|| "text/markdown".to_owned()),
-                        content,
-                    }),
-                    source_refs: canonical.revision.source_refs.clone(),
-                    facets: canonical.revision.facets.clone(),
-                    provenance: Vec::new(),
-                    idempotency_key: Some(format!(
-                        "cli:consolidate:{}:{idempotency_suffix}",
-                        canonical.revision.revision_id
-                    )),
                 })
                 .await?;
             print_json(&result)?;
@@ -463,6 +368,6 @@ fn parse_optional_u32(value: Option<String>, name: &str, default: u32) -> Result
 
 fn print_help() {
     println!(
-        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <page-id>\n  export\n  doctor\n  retention-plan [minimum-age-days] [keep-recent-per-page] [sample-limit]\n  retention-collect --confirm [minimum-age-days] [keep-recent-per-page] [sample-limit]\n  consolidate --confirm <canonical-page-id> <absorbed-page-id>... < canonical.md\n  revise --confirm <page-id> < revised.md\n\nSet PCP_RUNTIME_SOCKET to use a running local runtime, or PCP_STORE_PATH for embedded SQLite."
+        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <page-id>\n  export\n  doctor\n  retention-plan [minimum-age-days] [keep-recent-per-page] [sample-limit]\n  retention-collect --confirm [minimum-age-days] [keep-recent-per-page] [sample-limit]\n  revise --confirm <page-id> < revised.md\n\nSet PCP_RUNTIME_SOCKET to use a running local runtime, or PCP_STORE_PATH for embedded SQLite."
     );
 }

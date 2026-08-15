@@ -10,8 +10,8 @@ use pcp_client::{AccessMode, EmbeddedPcpClient};
 use pcp_core::{AccessPrincipal, AccessPrincipalType};
 use pcp_rpc::{RuntimeEndpoint, serve_unix, serve_unix_endpoints};
 use pcp_runtime::{
-    CommandSemanticWorker, EnrollmentConfig, ObserverConfig, ObserverService, RuntimeConfig,
-    RuntimeMaintainer,
+    EnrollmentConfig, MaintenanceMode, MaintenanceRunAudit, ObserverConfig, ObserverService,
+    RuntimeConfig, RuntimeMaintainer, build_semantic_worker, persist_audit,
 };
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
@@ -20,6 +20,7 @@ use pcp_store::PcpStore;
 async fn main() -> Result<()> {
     let mut arguments = env::args().skip(1);
     let config_path = match arguments.next().as_deref() {
+        Some("maintenance") => return run_maintenance_command(arguments).await,
         Some("--config") => Some(PathBuf::from(
             arguments
                 .next()
@@ -42,6 +43,111 @@ async fn main() -> Result<()> {
     run_single_endpoint().await
 }
 
+async fn run_maintenance_command(mut arguments: impl Iterator<Item = String>) -> Result<()> {
+    let action = arguments
+        .next()
+        .context("pcp-runtime maintenance requires an action")?;
+    if action == "--help" || action == "-h" {
+        print_maintenance_help();
+        return Ok(());
+    }
+    anyhow::ensure!(
+        action == "run-once",
+        "unsupported PCP maintenance action: {action}"
+    );
+    let mut config_path = None;
+    let mut mode = None;
+    let mut max_jobs = None;
+    let mut reason = None;
+    while let Some(argument) = arguments.next() {
+        let value = arguments
+            .next()
+            .with_context(|| format!("{argument} requires a value"))?;
+        match argument.as_str() {
+            "--config" => set_option(&mut config_path, PathBuf::from(value), "--config")?,
+            "--mode" => set_option(&mut mode, value, "--mode")?,
+            "--max-jobs" => set_option(
+                &mut max_jobs,
+                value
+                    .parse::<u32>()
+                    .context("--max-jobs must be an unsigned integer")?,
+                "--max-jobs",
+            )?,
+            "--reason" => set_option(&mut reason, value, "--reason")?,
+            other => anyhow::bail!("unknown PCP maintenance run-once option: {other}"),
+        }
+    }
+    let config_path = config_path.context("maintenance run-once requires --config")?;
+    anyhow::ensure!(
+        mode.as_deref() == Some("observe"),
+        "maintenance run-once requires --mode observe"
+    );
+    anyhow::ensure!(
+        max_jobs == Some(1),
+        "maintenance run-once requires --max-jobs 1"
+    );
+    let reason = reason.context("maintenance run-once requires --reason")?;
+    anyhow::ensure!(
+        !reason.trim().is_empty() && reason.len() <= 120 && !reason.contains(['\n', '\r']),
+        "maintenance run-once reason must contain 1-120 non-line-break characters"
+    );
+    run_operator_maintenance_once(config_path, reason).await
+}
+
+async fn run_operator_maintenance_once(config_path: PathBuf, reason: String) -> Result<()> {
+    let mut config = RuntimeConfig::load(&config_path)?;
+    let maintenance = config
+        .maintenance
+        .take()
+        .context("PCP runtime config has no maintenance section")?;
+    anyhow::ensure!(
+        maintenance.enabled && maintenance.mode == MaintenanceMode::Observe,
+        "operator maintenance run-once requires enabled observe maintenance"
+    );
+    let audit_path = maintenance
+        .state_path
+        .with_file_name("maintenance-audit.json");
+    let store = Arc::new(
+        SqlitePcpStore::open(config.store_path.clone())
+            .await
+            .with_context(|| format!("open PCP Store {}", config.store_path.display()))?,
+    );
+    let identity_id = store.identity_id().to_owned();
+    let store: Arc<dyn PcpStore> = store;
+    let client =
+        EmbeddedPcpClient::shared(Arc::clone(&store), maintenance.access_session(&identity_id));
+    let audit = MaintenanceRunAudit::queued(reason);
+    let worker = audit.worker(build_semantic_worker(&maintenance.worker)?);
+    let mut maintainer =
+        RuntimeMaintainer::load_operator_observe_once(client, worker, maintenance).await?;
+    match maintainer.run_operator_observe_once().await {
+        Ok(report) => {
+            let record = audit.complete(report);
+            persist_audit(&audit_path, record.clone()).await?;
+            println!(
+                "{}",
+                serde_json::to_string(&record).context("encode maintenance result")?
+            );
+            Ok(())
+        }
+        Err(error) => {
+            let record = audit.fail("scheduler");
+            persist_audit(&audit_path, record.clone()).await?;
+            eprintln!(
+                "{}",
+                serde_json::to_string(&record).context("encode maintenance result")?
+            );
+            Err(error).context("run PCP operator maintenance once")
+        }
+    }
+}
+
+fn set_option<T>(slot: &mut Option<T>, value: T, name: &str) -> Result<()> {
+    anyhow::ensure!(slot.is_none(), "{name} may be provided only once");
+    *slot = Some(value);
+    Ok(())
+}
+
 async fn run_broker(config_path: PathBuf) -> Result<()> {
     let config = RuntimeConfig::load(&config_path)?;
     let store_path = config.store_path.clone();
@@ -51,7 +157,7 @@ async fn run_broker(config_path: PathBuf) -> Result<()> {
             .await
             .with_context(|| format!("open PCP Store {}", config.store_path.display()))?,
     );
-    let owner_id = store.owner_id().to_owned();
+    let identity_id = store.identity_id().to_owned();
     let store: Arc<dyn PcpStore> = store;
     let endpoints = config
         .endpoints
@@ -62,7 +168,7 @@ async fn run_broker(config_path: PathBuf) -> Result<()> {
                 socket_path: endpoint.socket_path.clone(),
                 client: EmbeddedPcpClient::shared(
                     Arc::clone(&store),
-                    endpoint.access_session(&owner_id, index)?,
+                    endpoint.access_session(&identity_id, index)?,
                 ),
             })
         })
@@ -71,14 +177,14 @@ async fn run_broker(config_path: PathBuf) -> Result<()> {
         config.maintenance.filter(|maintenance| maintenance.enabled)
     {
         let client =
-            EmbeddedPcpClient::shared(Arc::clone(&store), maintenance.access_session(&owner_id));
-        let worker = Arc::new(CommandSemanticWorker::new(&maintenance.worker));
+            EmbeddedPcpClient::shared(Arc::clone(&store), maintenance.access_session(&identity_id));
+        let worker = build_semantic_worker(&maintenance.worker)?;
         let maintainer = RuntimeMaintainer::load(client, worker, maintenance).await?;
         Some(tokio::spawn(maintainer.run_forever()))
     } else {
         None
     };
-    let observer_config = ObserverConfig::from_env(&owner_id)?;
+    let observer_config = ObserverConfig::from_env(&identity_id)?;
     let enrollment_config = EnrollmentConfig::from_env(
         observer_config.runtime_root.clone(),
         store_path,
@@ -139,9 +245,9 @@ async fn run_single_endpoint() -> Result<()> {
             .await
             .with_context(|| format!("open PCP Store {}", store_path.display()))?,
     );
-    let owner_id = store.owner_id().to_owned();
+    let identity_id = store.identity_id().to_owned();
     let client = EmbeddedPcpClient::shared(Arc::clone(&store), access);
-    let observer_config = ObserverConfig::from_env(&owner_id)?;
+    let observer_config = ObserverConfig::from_env(&identity_id)?;
     let enrollment_config = EnrollmentConfig::from_env(
         observer_config.runtime_root.clone(),
         store_path,
@@ -223,6 +329,12 @@ fn parse_principal_type(value: &str) -> Result<AccessPrincipalType> {
 
 fn print_help() {
     println!(
-        "pcp-runtime [--config <runtime.toml>]\n\nUse --config or PCP_RUNTIME_CONFIG for a multi-endpoint broker. Without a config, one identity-bound endpoint is read from PCP_STORE_PATH, PCP_RUNTIME_SOCKET, PCP_CLIENT_ID, PCP_CLIENT_TYPE, PCP_ACCESS_MODE, and PCP_ALLOWED_SCOPES. PCP observer and enrollment discovery use the platform Infra Protocol runtime root or the final INFRA_PROTOCOL_RUNTIME_DIR override. PCP_OBSERVER_ENABLED and PCP_ENROLLMENT_ENABLED disable their respective offers."
+        "pcp-runtime [--config <runtime.toml>]\npcp-runtime maintenance run-once --config <runtime.toml> --mode observe --max-jobs 1 --reason <reason>\n\nUse --config or PCP_RUNTIME_CONFIG for a multi-endpoint broker. The maintenance command is a same-user local operator control: it permits only one observe-mode job, writes a redacted audit record, and does not alter normal scheduler cadence. Without a config, one identity-bound endpoint is read from PCP_STORE_PATH, PCP_RUNTIME_SOCKET, PCP_CLIENT_ID, PCP_CLIENT_TYPE, PCP_ACCESS_MODE, and PCP_ALLOWED_SCOPES. PCP observer and enrollment discovery use the platform Infra Protocol runtime root or the final INFRA_PROTOCOL_RUNTIME_DIR override. PCP_OBSERVER_ENABLED and PCP_ENROLLMENT_ENABLED disable their respective offers."
+    );
+}
+
+fn print_maintenance_help() {
+    println!(
+        "pcp-runtime maintenance run-once --config <runtime.toml> --mode observe --max-jobs 1 --reason <reason>"
     );
 }

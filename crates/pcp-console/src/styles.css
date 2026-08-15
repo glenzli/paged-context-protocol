@@ -265,6 +265,7 @@ pre { margin: 0; max-height: 420px; overflow: auto; padding: 11px; border: 1px s
 .graph-node strong { font-weight: 600; }
 .graph-relation { color: var(--muted); font-size: 11px; text-transform: uppercase; }
 .graph-relation.relation-derivation { color: var(--accent); }
+.graph-relation.relation-provenance { color: #6a7d9c; }
 .graph-relation.relation-conversation { color: var(--positive); }
 .graph-relation.relation-evidence { color: var(--warning); }
 .graph-preview { display: grid; gap: 2px; margin-top: 5px; padding-top: 7px; border-top: 1px solid var(--line); color: var(--text); line-height: 1.45; }
@@ -282,6 +283,7 @@ pre { margin: 0; max-height: 420px; overflow: auto; padding: 11px; border: 1px s
 .topology-map.dragging { cursor: grabbing; }
 .topology-edge { stroke: var(--strong-line); stroke-width: 1; stroke-opacity: .44; vector-effect: non-scaling-stroke; }
 .topology-edge.relation-derivation { stroke: var(--accent); }
+.topology-edge.relation-provenance { stroke: #6a7d9c; stroke-dasharray: 4 3; }
 .topology-edge.relation-conversation { stroke: var(--positive); }
 .topology-edge.relation-evidence { stroke: var(--warning); }
 .topology-node { cursor: pointer; outline: none; }

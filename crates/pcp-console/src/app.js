@@ -278,7 +278,7 @@ function renderOverview(data) {
   const endpointRows = [
     ["Principal", data.principal.principalId],
     ["Principal type", data.principal.principalType],
-    ["Owner", data.ownerId],
+    ["Identity", data.identityId],
     ["Session", data.grants.length ? "active" : "no grants"],
     ["Granted scopes", data.grants.map((grant) => grant.namespace).join(", ")],
   ];
@@ -288,14 +288,13 @@ function renderOverview(data) {
   ]));
 
   const capabilities = data.capabilities;
+  const features = new Set(capabilities.features || []);
   const capabilityRows = [
-    ["Revisioned Pages", capabilities.supportsRevisionedPages],
-    ["Provenance graph", capabilities.supportsProvenanceGraph],
-    ["Consolidation", capabilities.supportsConsolidation],
-    ["Retention planning", capabilities.supportsRevisionRetentionPlanning],
-    ["Retention leases", capabilities.supportsRevisionRetentionLeases],
-    ["Retention collection", capabilities.supportsRevisionRetention],
-    ["Durable deletion", capabilities.supportsDurableDeletion],
+    ["Access audit", features.has("access_audit")],
+    ["Lossless page packing", features.has("lossless_page_packing")],
+    ["Retention planning", features.has("revision_retention_planning")],
+    ["Retention leases", features.has("revision_retention_leases")],
+    ["Retention collection", features.has("revision_retention")],
   ];
   byId("capability-details").replaceChildren(...capabilityRows.flatMap(([label, enabled]) => [
     element("dt", "", label),
@@ -482,6 +481,7 @@ async function openScope(namespace) {
 
 async function refresh() {
   try {
+    await loadRuntimeControl();
     await loadOverview();
     if (state.activeView === "pages") await loadPages();
     if (state.activeView === "health") {
@@ -495,10 +495,36 @@ async function refresh() {
   } catch (error) { showError(error); }
 }
 
+async function loadRuntimeControl() {
+  const control = byId("runtime-restart");
+  const status = await api("/api/runtime");
+  control.hidden = !status.lifecycle.managed;
+  control.disabled = !status.lifecycle.ownsProcess;
+  control.title = status.lifecycle.ownsProcess
+    ? "Restart the PCP Runtime managed by this Console"
+    : "This Console does not own the current Runtime";
+}
+
+async function restartRuntime() {
+  const control = byId("runtime-restart");
+  control.disabled = true;
+  try {
+    await api("/api/runtime/restart", {
+      method: "POST",
+      headers: { "X-PCP-Console": "1" },
+    });
+    await refresh();
+  } catch (error) {
+    showError(error);
+    await loadRuntimeControl().catch(() => {});
+  }
+}
+
 document.querySelectorAll(".tab").forEach((tab) => {
   tab.addEventListener("click", () => activateView(tab.dataset.view).catch(showError));
 });
 byId("refresh").addEventListener("click", refresh);
+byId("runtime-restart").addEventListener("click", restartRuntime);
 byId("enrollment-open").addEventListener("click", () => {
   byId("enrollment-dialog").showModal();
   loadEnrollment({ autoOpen: false });

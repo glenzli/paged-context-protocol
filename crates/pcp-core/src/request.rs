@@ -4,26 +4,23 @@ use serde_json::Value;
 
 use crate::{
     Actor, LifecycleStatus, PageMutability, PagePayload, Projection, ProvenanceEvent, SearchMode,
-    SearchTermMatch, SourceRef, ValidityStanding,
+    SearchTermMatch, SourceRef, SourceSpan, ValidityStanding,
 };
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateScopeRequest {
-    pub owner_id: String,
     pub namespace: String,
     pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_namespace: Option<String>,
-    pub visibility: String,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InitialRelation {
-    #[serde(alias = "relation_type")]
     pub relation_type: String,
     pub to_page_id: String,
     #[serde(default)]
@@ -33,9 +30,7 @@ pub struct InitialRelation {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WritePageRequest {
-    pub owner_id: String,
     pub namespace: String,
-    pub visibility: String,
     pub lifecycle_status: LifecycleStatus,
     pub kind: String,
     #[serde(default)]
@@ -43,6 +38,8 @@ pub struct WritePageRequest {
     pub created_by: Actor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_span: Option<SourceSpan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,6 +56,27 @@ pub struct WritePageRequest {
     pub initial_relations: Vec<InitialRelation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+}
+
+/// Minimal producer-facing write. Runtime supplies identity, actor, lifecycle,
+/// and sealed mutability from the authenticated session.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestPageRequest {
+    pub namespace: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_span: Option<SourceSpan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<PagePayload>,
+    #[serde(default)]
+    pub source_refs: Vec<SourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facets: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_event_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -90,35 +108,21 @@ pub struct RevisePageRequest {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConsolidatePagesRequest {
-    pub canonical_page_id: String,
-    pub expected_canonical_revision_id: String,
-    pub replaced_pages: Vec<ConsolidationInput>,
-    pub created_by: Actor,
-    pub lifecycle_status: LifecycleStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observed_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub valid_from: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub valid_to: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payload: Option<PagePayload>,
-    #[serde(default)]
-    pub source_refs: Vec<SourceRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub facets: Option<Value>,
-    #[serde(default)]
-    pub provenance: Vec<ProvenanceEvent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idempotency_key: Option<String>,
+pub struct PageRevisionRef {
+    pub page_id: String,
+    pub revision_id: String,
 }
 
+/// Ordered exact inputs for one lossless packed Page.
+///
+/// Inputs are sealed leaves, with at most one current packed Page acting as a
+/// stable anchor whose flat payload will be extended.
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConsolidationInput {
-    pub page_id: String,
-    pub expected_revision_id: String,
+pub struct PackPagesRequest {
+    pub pages: Vec<PageRevisionRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema, Serialize)]

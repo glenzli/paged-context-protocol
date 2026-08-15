@@ -89,12 +89,11 @@ impl SqlitePcpStore {
                             &transaction,
                             &page_id,
                             &next_revision_id,
-                            &current.owner_id,
                             &current.namespace,
-                            &current.visibility,
                             fallback.lifecycle_status.as_str(),
                             &timestamp,
                             Some(&timestamp),
+                            fallback.source_span.as_ref(),
                             fallback.valid_from.as_deref(),
                             fallback.valid_to.as_deref(),
                             &actor,
@@ -117,12 +116,11 @@ impl SqlitePcpStore {
                             &transaction,
                             &page_id,
                             &next_revision_id,
-                            &current.owner_id,
                             &current.namespace,
-                            &current.visibility,
                             LifecycleStatus::Tombstoned.as_str(),
                             &timestamp,
                             Some(&timestamp),
+                            None,
                             None,
                             None,
                             &actor,
@@ -239,7 +237,7 @@ fn current_revision(
         .query_row(&sql, [page_id], |row| {
             Ok((
                 revision_from_row(row, true, true, true, true).map_err(to_sql_error)?,
-                row.get(18)?,
+                row.get(17)?,
             ))
         })
         .context("read current PCP Revision for retraction")

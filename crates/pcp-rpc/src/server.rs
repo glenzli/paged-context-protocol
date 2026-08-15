@@ -248,7 +248,7 @@ fn current_uid() -> u32 {
 async fn dispatch(client: &dyn PcpApi, operation: RpcOperation) -> Result<RpcValue> {
     let value = match operation {
         RpcOperation::Describe => RpcValue::Descriptor(PcpDescriptor {
-            owner_id: client.owner_id().to_owned(),
+            identity_id: client.identity_id().to_owned(),
             capabilities: client.capabilities(),
             access: client.access().clone(),
             server_pid: std::process::id(),
@@ -315,14 +315,17 @@ async fn dispatch(client: &dyn PcpApi, operation: RpcOperation) -> Result<RpcVal
                 .active_revision_retention_leases(requested_scopes, limit)
                 .await?,
         ),
+        RpcOperation::IngestPage(request) => {
+            RpcValue::WriteResult(client.ingest_page(request).await?)
+        }
         RpcOperation::WritePage(request) => {
             RpcValue::WriteResult(client.write_page(request).await?)
         }
         RpcOperation::RevisePage(request) => {
             RpcValue::WriteResult(client.revise_page(request).await?)
         }
-        RpcOperation::ConsolidatePages(request) => {
-            RpcValue::WriteResult(client.consolidate_pages(request).await?)
+        RpcOperation::PackPages(request) => {
+            RpcValue::WriteResult(client.pack_pages(request).await?)
         }
         RpcOperation::LinkPages(request) => RpcValue::Relation(client.link_pages(request).await?),
         RpcOperation::WriteSummary(request) => {

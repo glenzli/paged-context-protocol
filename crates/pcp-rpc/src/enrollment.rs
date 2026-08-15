@@ -31,6 +31,7 @@ pub enum RequestedAccessMode {
     Observe,
     Read,
     Audit,
+    Contribute,
     Write,
     Admin,
 }
@@ -536,9 +537,9 @@ mod tests {
                 },
             },
             requested_access: RequestedAccess {
-                mode: RequestedAccessMode::Admin,
+                mode: RequestedAccessMode::Contribute,
                 scopes: vec!["user:self".to_owned()],
-                allow_cross_scope_derivation: true,
+                allow_cross_scope_derivation: false,
             },
             credential: "ab".repeat(32),
         })
@@ -550,7 +551,7 @@ mod tests {
             value["params"]["client"]["principal"]["principalType"],
             "host"
         );
-        assert_eq!(value["params"]["requested_access"]["mode"], "admin");
+        assert_eq!(value["params"]["requested_access"]["mode"], "contribute");
         assert_eq!(
             value["params"]["requested_access"]["scopes"][0],
             "user:self"

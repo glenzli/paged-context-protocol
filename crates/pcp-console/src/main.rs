@@ -8,7 +8,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
-use pcp_client::PcpApi;
+use pcp_client::{PcpApi, PcpTenantApi};
 use pcp_core::{
     PlanRevisionRetentionRequest, Projection, ReadPage, ReadPagesRequest, RetentionPolicy,
     SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch,
@@ -28,11 +28,13 @@ const MAX_HISTORY_REVISIONS: usize = 20;
 const MAX_RETENTION_SAMPLE_LIMIT: u32 = 100;
 
 mod graph_view;
+mod managed;
 
 #[derive(Clone)]
 struct AppState {
     client: Arc<RemotePcpClient>,
     enrollment: EnrollmentAdminClient,
+    runtime: Option<Arc<managed::ManagedRuntime>>,
 }
 
 #[derive(Debug)]
@@ -95,9 +97,17 @@ struct RetentionQuery {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let socket_path = env::var_os("PCP_RUNTIME_SOCKET")
-        .map(PathBuf::from)
-        .context("PCP_RUNTIME_SOCKET must point to the operator endpoint")?;
+    let runtime = match managed::ManagedOptions::parse(env::args_os().skip(1))? {
+        Some(options) => Some(managed::ManagedRuntime::start(options).await?),
+        None => None,
+    };
+    let socket_path = runtime
+        .as_ref()
+        .map(|runtime| runtime.operator_socket().to_path_buf())
+        .or_else(|| env::var_os("PCP_RUNTIME_SOCKET").map(PathBuf::from))
+        .context(
+            "PCP_RUNTIME_SOCKET must point to the operator endpoint unless --managed is used",
+        )?;
     let principal_id =
         env::var("PCP_CLIENT_ID").unwrap_or_else(|_| DEFAULT_PRINCIPAL_ID.to_owned());
     let client = connect_runtime(&socket_path, &principal_id).await?;
@@ -117,15 +127,21 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("bind PCP Console at {bind}"))?;
     println!("PCP Console is listening at http://{bind}");
-    axum::serve(
+    let result = axum::serve(
         listener,
         router(AppState {
             client: Arc::new(client),
             enrollment: EnrollmentAdminClient::new(enrollment_socket),
+            runtime: runtime.clone(),
         }),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await
-    .context("serve PCP Console")
+    .context("serve PCP Console");
+    if let Some(runtime) = runtime {
+        runtime.shutdown().await.context("stop PCP Runtime")?;
+    }
+    result
 }
 
 fn router(state: AppState) -> Router {
@@ -141,6 +157,8 @@ fn router(state: AppState) -> Router {
         .route("/retention-view.js", get(retention_view_js))
         .route("/styles.css", get(styles_css))
         .route("/api/health", get(health))
+        .route("/api/runtime", get(runtime_status))
+        .route("/api/runtime/restart", post(restart_runtime))
         .route("/api/overview", get(overview))
         .route("/api/pages", get(pages))
         .route("/api/pages/{page_id}", get(page_detail))
@@ -261,6 +279,40 @@ async fn health(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn runtime_status(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let reachable = state.client.page_count(Vec::new()).await.is_ok();
+    let managed = match &state.runtime {
+        Some(runtime) => {
+            let status = runtime.status().await;
+            json!({
+                "managed": status.managed,
+                "ownsProcess": status.owns_process,
+                "pid": status.pid,
+                "home": status.home,
+            })
+        }
+        None => json!({"managed": false, "ownsProcess": false}),
+    };
+    Ok(Json(json!({"reachable": reachable, "lifecycle": managed})))
+}
+
+async fn restart_runtime(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let runtime = state
+        .runtime
+        .as_ref()
+        .context("PCP Console was not started in managed mode")?;
+    let status = runtime.restart().await?;
+    Ok(Json(json!({
+        "restarted": true,
+        "pid": status.pid,
+        "home": status.home,
+    })))
+}
+
 async fn overview(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let (integrity, scopes, page_count, content_chars) = tokio::try_join!(
         state.client.integrity_check(),
@@ -270,7 +322,7 @@ async fn overview(State(state): State<AppState>) -> Result<Json<Value>, ApiError
     )?;
     Ok(Json(json!({
         "integrity": integrity,
-        "ownerId": state.client.owner_id(),
+        "identityId": state.client.identity_id(),
         "principal": state.client.access().principal,
         "grants": state.client.access().grants,
         "capabilities": state.client.capabilities(),
@@ -510,6 +562,19 @@ fn require_console_mutation(headers: &HeaderMap) -> Result<(), ApiError> {
         return Err(anyhow::anyhow!("missing PCP Console mutation header").into());
     }
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("install PCP Console SIGTERM handler");
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            if let Err(error) = result {
+                eprintln!("PCP Console interrupt handler failed: {error}");
+            }
+        }
+        _ = terminate.recv() => {}
+    }
 }
 
 fn selected_scopes(client: &RemotePcpClient, selected: Option<&str>) -> Vec<String> {

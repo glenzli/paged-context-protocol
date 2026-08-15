@@ -4,10 +4,10 @@ use chrono::{SecondsFormat, Utc};
 use pcp_client::PcpApi;
 use pcp_core::{
     AccessAuditEvent, AccessPermission, AccessSession, Actor, ActorType, AssessPageValidityRequest,
-    Capabilities, ConsolidatePagesRequest, ConsolidationInput, CreateScopeRequest, InitialRelation,
-    LifecycleStatus, LinkPagesRequest, PageMutability, PagePayload, Projection, ProvenanceEvent,
-    ReadPage, ReadPagesRequest, Relation, RevisePageRequest, Scope, SearchFilters, SearchMode,
-    SearchPagesRequest, SearchResult, SearchTermMatch, ValidityStanding, WritePageRequest,
+    Capabilities, CreateScopeRequest, IngestPageRequest, LifecycleStatus, LinkPagesRequest,
+    PageMutability, PagePayload, Projection, ProvenanceEvent, ReadPage, ReadPagesRequest, Relation,
+    RevisePageRequest, Scope, SearchFilters, SearchMode, SearchPagesRequest, SearchResult,
+    SearchTermMatch, SourceRef, SourceSpan, ValidityStanding, WritePageRequest,
     WriteSummaryRequest,
 };
 use rmcp::{
@@ -19,7 +19,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Serialize;
 
-const SERVER_INSTRUCTIONS: &str = "PCP is a durable graph of stable Pages with immutable Revisions. Call pcp_whoami before cross-Scope work. Search or browse current Page heads, then read only useful Pages or exact Revisions. Use pageId for stable identity and Relations; use revisionId for exact evidence and provenance. PCP does not decide user profile, conversation policy, or what deserves attention; those remain Host decisions.";
+const SERVER_INSTRUCTIONS: &str = "PCP is an identity-scoped durable graph of stable Pages with immutable Revisions. Call pcp_whoami before cross-Scope work. Search or browse current Page heads, then read only useful Pages or exact Revisions. Use pageId for stable identity and Relations; use revisionId for exact evidence and provenance. Ordinary producers should use pcp_ingest_page; maintained interpretations use the advanced write and revise tools.";
 
 #[derive(Clone)]
 pub struct PcpMcpServer {
@@ -29,7 +29,7 @@ pub struct PcpMcpServer {
 #[derive(Debug, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DescribeResult {
-    owner_id: String,
+    identity_id: String,
     integrity: String,
     capabilities: Capabilities,
 }
@@ -116,6 +116,25 @@ pub struct WritePageParams {
 
 #[derive(Debug, JsonSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct IngestPageParams {
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default = "default_page_kind")]
+    kind: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    source_refs: Vec<SourceRef>,
+    #[serde(default)]
+    observed_at: Option<String>,
+    #[serde(default)]
+    source_span: Option<SourceSpan>,
+    #[serde(default)]
+    external_event_id: Option<String>,
+}
+
+#[derive(Debug, JsonSchema, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WriteSummaryParams {
     target_page_id: String,
     target_revision_id: String,
@@ -142,15 +161,6 @@ pub struct RevisePageParams {
     content: String,
     #[serde(default)]
     based_on_revision_ids: Vec<String>,
-}
-
-#[derive(Debug, JsonSchema, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConsolidatePagesParams {
-    canonical_page_id: String,
-    expected_canonical_revision_id: String,
-    replaced_pages: Vec<ConsolidationInput>,
-    content: String,
 }
 
 #[derive(Debug, JsonSchema, serde::Deserialize)]
@@ -225,25 +235,6 @@ impl PcpMcpServer {
         Self { client }
     }
 
-    async fn read_current_pages(&self, page_ids: Vec<String>) -> Result<Vec<ReadPage>, McpError> {
-        if page_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        self.client
-            .read_pages(ReadPagesRequest {
-                page_ids,
-                revision_ids: Vec::new(),
-                projections: vec![
-                    Projection::Manifest,
-                    Projection::Sources,
-                    Projection::Facets,
-                ],
-                max_chars: 32_000,
-            })
-            .await
-            .map_err(|error| operation_error("resolve PCP Pages", error))
-    }
-
     async fn read_exact_revisions(
         &self,
         revision_ids: Vec<String>,
@@ -271,7 +262,7 @@ impl PcpMcpServer {
 impl PcpMcpServer {
     #[tool(
         name = "pcp_describe",
-        description = "Inspect this PCP Store's owner, protocol capabilities, limits, and integrity before planning a larger operation.",
+        description = "Inspect this PCP Store's Identity, protocol capabilities, limits, and integrity before planning a larger operation.",
         annotations(
             title = "Describe PCP Store",
             read_only_hint = true,
@@ -286,9 +277,54 @@ impl PcpMcpServer {
             .await
             .map_err(|error| operation_error("check PCP Store integrity", error))?;
         Ok(Json(DescribeResult {
-            owner_id: self.client.owner_id().to_owned(),
+            identity_id: self.client.identity_id().to_owned(),
             integrity,
             capabilities: self.client.capabilities(),
+        }))
+    }
+
+    #[tool(
+        name = "pcp_ingest_page",
+        description = "Ingest one immutable source event into the authenticated PCP identity. Runtime supplies identity, actor, lifecycle, and sealed mutability. Provide text, sourceRefs, or both; sourceSpan enables later lossless packing.",
+        annotations(
+            title = "Ingest PCP Source Page",
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    pub async fn pcp_ingest_page(
+        &self,
+        Parameters(params): Parameters<IngestPageParams>,
+    ) -> Result<Json<PageWriteResult>, McpError> {
+        let namespace = operation_scope(
+            self.client.as_ref(),
+            params.scope.as_deref(),
+            AccessPermission::Ingest,
+            "ingest",
+        )?;
+        let payload = params.content.map(|content| PagePayload {
+            media_type: "text/markdown".to_owned(),
+            content,
+        });
+        let written = self
+            .client
+            .ingest_page(IngestPageRequest {
+                namespace,
+                kind: params.kind,
+                observed_at: params.observed_at,
+                source_span: params.source_span,
+                payload,
+                source_refs: params.source_refs,
+                facets: None,
+                external_event_id: params.external_event_id,
+            })
+            .await
+            .map_err(|error| operation_error("ingest PCP Page", error))?;
+        Ok(Json(PageWriteResult {
+            page_id: written.page_id,
+            revision_id: written.revision_id,
+            created: written.created,
         }))
     }
 
@@ -445,7 +481,7 @@ impl PcpMcpServer {
 
     #[tool(
         name = "pcp_write_page",
-        description = "Create one durable Page with an immutable first Revision. Choose sealed for raw evidence and revisioned for maintained understanding; exact source Revisions become provenance and stable derived_from links.",
+        description = "Advanced Page creation for maintained understanding. Exact source Revisions become provenance; Page Relations must be asserted separately when they have navigation value. Ordinary source events should use pcp_ingest_page.",
         annotations(
             title = "Write PCP Page",
             read_only_hint = false,
@@ -457,7 +493,12 @@ impl PcpMcpServer {
         &self,
         Parameters(params): Parameters<WritePageParams>,
     ) -> Result<Json<PageWriteResult>, McpError> {
-        let namespace = writable_scope(self.client.as_ref(), params.scope.as_deref())?;
+        let namespace = operation_scope(
+            self.client.as_ref(),
+            params.scope.as_deref(),
+            AccessPermission::Write,
+            "advanced writes",
+        )?;
         let actor = session_actor(self.client.as_ref());
         let source_pages = self
             .read_exact_revisions(params.based_on_revision_ids)
@@ -467,14 +508,13 @@ impl PcpMcpServer {
             .map(|page| page.revision.revision_id.clone())
             .collect::<Vec<_>>();
         let request = WritePageRequest {
-            owner_id: self.client.owner_id().to_owned(),
             namespace,
-            visibility: "private".to_owned(),
             lifecycle_status: LifecycleStatus::Active,
             kind: params.kind,
             mutability: params.mutability,
             created_by: actor.clone(),
             observed_at: None,
+            source_span: None,
             valid_from: None,
             valid_to: None,
             payload: Some(PagePayload {
@@ -487,7 +527,7 @@ impl PcpMcpServer {
                 .then(|| provenance("derive", &actor, source_revisions))
                 .into_iter()
                 .collect(),
-            initial_relations: derived_relations(&source_pages),
+            initial_relations: Vec::new(),
             idempotency_key: None,
         };
         let written = self
@@ -569,68 +609,6 @@ impl PcpMcpServer {
             .revise_page(request)
             .await
             .map_err(|error| operation_error("revise PCP Page", error))?;
-        Ok(Json(PageWriteResult {
-            page_id: written.page_id,
-            revision_id: written.revision_id,
-            created: written.created,
-        }))
-    }
-
-    #[tool(
-        name = "pcp_consolidate_pages",
-        description = "Revise one canonical Page to absorb one or more redundant current Pages. Each Page is paired with its exact expected head; absorbed Pages remain traceable but leave default recall.",
-        annotations(
-            title = "Consolidate PCP Pages",
-            read_only_hint = false,
-            destructive_hint = true,
-            open_world_hint = false
-        )
-    )]
-    pub async fn pcp_consolidate_pages(
-        &self,
-        Parameters(params): Parameters<ConsolidatePagesParams>,
-    ) -> Result<Json<PageWriteResult>, McpError> {
-        let canonical = self
-            .read_current_pages(vec![params.canonical_page_id.clone()])
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| operation_error("read canonical PCP Page", "Page not found"))?;
-        if canonical.revision.revision_id != params.expected_canonical_revision_id {
-            return Err(operation_error(
-                "consolidate PCP Pages",
-                "expectedCanonicalRevisionId is not the current Page head",
-            ));
-        }
-        let actor = session_actor(self.client.as_ref());
-        let mut input_revisions = params
-            .replaced_pages
-            .iter()
-            .map(|page| page.expected_revision_id.clone())
-            .collect::<Vec<_>>();
-        input_revisions.push(params.expected_canonical_revision_id.clone());
-        let written = self
-            .client
-            .consolidate_pages(ConsolidatePagesRequest {
-                canonical_page_id: canonical.page.page_id.clone(),
-                expected_canonical_revision_id: params.expected_canonical_revision_id,
-                replaced_pages: params.replaced_pages,
-                created_by: actor.clone(),
-                lifecycle_status: LifecycleStatus::Active,
-                observed_at: None,
-                valid_from: None,
-                valid_to: None,
-                payload: Some(PagePayload {
-                    media_type: "text/markdown".to_owned(),
-                    content: params.content,
-                }),
-                source_refs: canonical.revision.source_refs.clone(),
-                facets: canonical.revision.facets.clone(),
-                provenance: vec![provenance("consolidate", &actor, input_revisions)],
-                idempotency_key: None,
-            })
-            .await
-            .map_err(|error| operation_error("consolidate PCP Pages", error))?;
         Ok(Json(PageWriteResult {
             page_id: written.page_id,
             revision_id: written.revision_id,
@@ -884,17 +862,20 @@ fn read_view(value: &str) -> Result<Vec<Projection>, McpError> {
     }
 }
 
-fn writable_scope(client: &dyn PcpApi, requested: Option<&str>) -> Result<String, McpError> {
-    let scopes = client
-        .access()
-        .scopes_with_permissions(&[AccessPermission::Write]);
+fn operation_scope(
+    client: &dyn PcpApi,
+    requested: Option<&str>,
+    permission: AccessPermission,
+    operation: &str,
+) -> Result<String, McpError> {
+    let scopes = client.access().scopes_with_permissions(&[permission]);
     if let Some(requested) = requested {
         return scopes
             .contains(&requested.to_owned())
             .then(|| requested.to_owned())
             .ok_or_else(|| {
                 McpError::invalid_params(
-                    format!("Scope is not writable in this PCP session: {requested}"),
+                    format!("Scope is not authorized for {operation}: {requested}"),
                     None,
                 )
             });
@@ -902,11 +883,13 @@ fn writable_scope(client: &dyn PcpApi, requested: Option<&str>) -> Result<String
     match scopes.as_slice() {
         [only] => Ok(only.clone()),
         [] => Err(McpError::invalid_params(
-            "this PCP session has no writable Scope".to_owned(),
+            format!("this PCP session has no Scope authorized for {operation}"),
             None,
         )),
         _ => Err(McpError::invalid_params(
-            "scope is required when this PCP session can write more than one Scope".to_owned(),
+            format!(
+                "scope is required when this PCP session is authorized for {operation} in more than one Scope"
+            ),
             None,
         )),
     }
@@ -927,17 +910,6 @@ fn session_actor(client: &dyn PcpApi) -> Actor {
     }
 }
 
-fn derived_relations(pages: &[ReadPage]) -> Vec<InitialRelation> {
-    pages
-        .iter()
-        .map(|page| InitialRelation {
-            relation_type: "derived_from".to_owned(),
-            to_page_id: page.page.page_id.clone(),
-            basis_revision_ids: vec![page.revision.revision_id.clone()],
-        })
-        .collect()
-}
-
 fn provenance(operation: &str, actor: &Actor, input_revision_ids: Vec<String>) -> ProvenanceEvent {
     ProvenanceEvent {
         operation: operation.to_owned(),
@@ -956,13 +928,15 @@ fn operation_error(context: &str, error: impl std::fmt::Display) -> McpError {
 mod tests {
     use std::{sync::Arc, time::SystemTime};
 
-    use pcp_client::{EmbeddedPcpClient, PcpApi};
+    use pcp_client::{AccessMode, EmbeddedPcpClient, PcpApi};
     use pcp_core::{AccessPrincipal, AccessPrincipalType, AccessSession, CreateScopeRequest};
     use pcp_sqlite::SqlitePcpStore;
     use pcp_store::PcpStore;
     use rmcp::{ServiceExt, handler::server::wrapper::Parameters, model::CallToolRequestParams};
 
-    use super::{AccessLogParams, PcpMcpServer, SearchPagesParams, WritePageParams};
+    use super::{
+        AccessLogParams, IngestPageParams, PcpMcpServer, SearchPagesParams, WritePageParams,
+    };
 
     #[tokio::test]
     async fn tools_write_search_and_enforce_scope_access() {
@@ -977,30 +951,25 @@ mod tests {
                 .await
                 .expect("open store"),
         );
-        let owner_id = store.owner_id().to_owned();
         let namespace = "project:mcp-test".to_owned();
         let server = PcpMcpServer::new(full_client(store, vec![namespace.clone()]));
 
         server
             .pcp_create_scope(Parameters(CreateScopeRequest {
-                owner_id: owner_id.clone(),
                 namespace: namespace.clone(),
                 display_name: "MCP Test".to_owned(),
                 description: None,
                 parent_namespace: None,
-                visibility: "private".to_owned(),
             }))
             .await
             .expect("create authorized scope");
         assert!(
             server
                 .pcp_create_scope(Parameters(CreateScopeRequest {
-                    owner_id: owner_id.clone(),
                     namespace: "project:denied".to_owned(),
                     display_name: "Denied".to_owned(),
                     description: None,
                     parent_namespace: None,
-                    visibility: "private".to_owned(),
                 }))
                 .await
                 .is_err()
@@ -1044,6 +1013,59 @@ mod tests {
         assert!(audit.events.iter().any(|event| {
             event.operation == "write_page" && event.principal.principal_id == "client:pcp-mcp-test"
         }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn contribute_session_ingests_without_advanced_write_authority() {
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("pcp-mcp-contribute-{nonce}"));
+        std::fs::create_dir_all(&root).expect("create test directory");
+        let store = Arc::new(
+            SqlitePcpStore::open(root.join("context.sqlite3"))
+                .await
+                .expect("open store"),
+        );
+        let namespace = "project:mcp-contribute-test".to_owned();
+        PcpMcpServer::new(full_client(Arc::clone(&store), vec![namespace.clone()]))
+            .pcp_create_scope(Parameters(CreateScopeRequest {
+                namespace: namespace.clone(),
+                display_name: "MCP contribute test".to_owned(),
+                description: None,
+                parent_namespace: None,
+            }))
+            .await
+            .expect("create authorized scope");
+
+        let tenant = PcpMcpServer::new(contribute_client(store, vec![namespace.clone()]));
+        tenant
+            .pcp_ingest_page(Parameters(IngestPageParams {
+                scope: Some(namespace.clone()),
+                kind: "conversation_event".to_owned(),
+                content: Some("A tenant contributes one source event.".to_owned()),
+                source_refs: Vec::new(),
+                observed_at: None,
+                source_span: None,
+                external_event_id: Some("mcp:contribute:test".to_owned()),
+            }))
+            .await
+            .expect("ingest with contribute permission");
+        assert!(
+            tenant
+                .pcp_write_page(Parameters(WritePageParams {
+                    scope: Some(namespace),
+                    kind: "maintained_claim".to_owned(),
+                    mutability: pcp_core::PageMutability::Revisioned,
+                    content: "A tenant must not publish maintained state.".to_owned(),
+                    based_on_revision_ids: Vec::new(),
+                }))
+                .await
+                .is_err()
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1110,6 +1132,21 @@ mod tests {
             },
             "session:pcp-mcp-test",
             scopes,
+        );
+        let store: Arc<dyn PcpStore> = store;
+        EmbeddedPcpClient::shared(store, access)
+    }
+
+    fn contribute_client(store: Arc<SqlitePcpStore>, scopes: Vec<String>) -> Arc<dyn PcpApi> {
+        let access = AccessMode::Contribute.session(
+            AccessPrincipal {
+                principal_id: "client:pcp-mcp-contribute-test".to_owned(),
+                principal_type: AccessPrincipalType::ModelClient,
+                display_name: Some("PCP MCP contribute test".to_owned()),
+            },
+            "session:pcp-mcp-contribute-test",
+            scopes,
+            false,
         );
         let store: Arc<dyn PcpStore> = store;
         EmbeddedPcpClient::shared(store, access)

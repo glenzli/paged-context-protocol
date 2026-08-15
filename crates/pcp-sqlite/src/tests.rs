@@ -7,18 +7,125 @@ use chrono::{Duration, SecondsFormat, Utc};
 use pcp_client::{EmbeddedPcpClient, PcpApi};
 use pcp_core::{
     AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    AssessPageValidityRequest, CollectRevisionRetentionRequest, ConsolidatePagesRequest,
-    ConsolidationInput, CreateScopeRequest, LifecycleStatus, LinkPagesRequest, PageMutability,
-    PagePayload, PlanRevisionRetentionRequest, Projection, ProvenanceEvent,
-    PutRevisionRetentionLeaseRequest, ReadPagesRequest, RetentionPolicy, RetentionProtectionReason,
-    RevisePageRequest, ScopeGrant, SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch,
-    SourceRef, ValidityStanding, WritePageRequest, WriteSummaryRequest,
+    AssessPageValidityRequest, CollectRevisionRetentionRequest, CreateScopeRequest,
+    GraphEdgeDirection, GraphEdgeKind, LifecycleStatus, LinkPagesRequest, PackPagesRequest,
+    PageMutability, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest, Projection,
+    ProvenanceEvent, PutRevisionRetentionLeaseRequest, ReadPagesRequest, RetentionPolicy,
+    RetentionProtectionReason, RevisePageRequest, ScopeGrant, SearchFilters, SearchMode,
+    SearchPagesRequest, SearchTermMatch, SourceRef, SourceSpan, ValidityStanding, WritePageRequest,
+    WriteSummaryRequest,
 };
 use pcp_store::PcpStore;
 use rusqlite::Connection;
 use serde_json::json;
 
 use super::SqlitePcpStore;
+
+#[tokio::test]
+async fn stores_minimal_external_source_references() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-sqlite-media-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
+        .await
+        .expect("open media store");
+    let identity_id = store.identity_id().to_owned();
+    let namespace = "project:media".to_owned();
+    store
+        .create_scope(CreateScopeRequest {
+            namespace: namespace.clone(),
+            display_name: "Media".to_owned(),
+            description: None,
+            parent_namespace: None,
+        })
+        .await
+        .expect("create media scope");
+
+    let source = SourceRef {
+        provider_id: "tenant:photos".to_owned(),
+        locator: "opaque-photo-42".to_owned(),
+        media_type: Some("image/jpeg".to_owned()),
+        content_digest: Some("sha256:abc123".to_owned()),
+    };
+    let mut request = write_request(
+        &identity_id,
+        &namespace,
+        Actor {
+            actor_type: ActorType::Tool,
+            actor_id: "tenant:photos".to_owned(),
+        },
+        "A searchable interpretation of the externally held image.",
+        "media:valid",
+    );
+    request.kind = "media_representation".to_owned();
+    request.source_refs = vec![source.clone()];
+    let written = store
+        .write_page(request, vec![namespace.clone()])
+        .await
+        .expect("write media representation");
+    let read = store
+        .read_pages(
+            ReadPagesRequest {
+                page_ids: vec![written.page_id],
+                revision_ids: Vec::new(),
+                projections: vec![Projection::Manifest, Projection::Sources],
+                max_chars: 1_024,
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("read media representation")
+        .pop()
+        .expect("media Page exists");
+    assert_eq!(read.revision.source_refs[0].provider_id, "tenant:photos");
+    assert_eq!(read.revision.source_refs[0].locator, "opaque-photo-42");
+
+    let mut malformed = source;
+    malformed.locator.clear();
+    let mut rejected = write_request(
+        &identity_id,
+        &namespace,
+        Actor {
+            actor_type: ActorType::Tool,
+            actor_id: "tenant:photos".to_owned(),
+        },
+        "This media reference has no provider locator.",
+        "media:invalid",
+    );
+    rejected.source_refs = vec![malformed];
+    assert!(store.write_page(rejected, vec![namespace]).await.is_err());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn rejects_pre_v08_stores_instead_of_migrating_them() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-sqlite-old-schema-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).expect("create old Store fixture");
+    let path = root.join("pcp.sqlite3");
+    Connection::open(&path)
+        .expect("open old Store fixture")
+        .execute("CREATE TABLE pcp_pages (page_id TEXT PRIMARY KEY)", [])
+        .expect("seed old Store fixture");
+
+    let error = SqlitePcpStore::open(path)
+        .await
+        .err()
+        .expect("reject old Store");
+    assert!(error.to_string().contains("requires a new Store"));
+
+    let _ = std::fs::remove_dir_all(root);
+}
 
 #[tokio::test]
 async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
@@ -34,7 +141,7 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
             .await
             .expect("open store"),
     );
-    let owner_id = store.owner_id().to_owned();
+    let identity_id = store.identity_id().to_owned();
     let scope_a = "project:access-a".to_owned();
     let scope_b = "project:access-b".to_owned();
     let admin = pcp_client(
@@ -48,12 +155,10 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
     for namespace in [&scope_a, &scope_b] {
         admin
             .create_scope(CreateScopeRequest {
-                owner_id: owner_id.clone(),
                 namespace: namespace.clone(),
                 display_name: namespace.clone(),
                 description: None,
                 parent_namespace: None,
-                visibility: "private".to_owned(),
             })
             .await
             .expect("create access test Scope");
@@ -64,7 +169,7 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
     };
     let page_a = admin
         .write_page(write_request(
-            &owner_id,
+            &identity_id,
             &scope_a,
             actor.clone(),
             "Visible only to client A.",
@@ -74,7 +179,7 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
         .expect("write Scope A page");
     let page_b = admin
         .write_page(write_request(
-            &owner_id,
+            &identity_id,
             &scope_b,
             actor.clone(),
             "Private beta launch detail.",
@@ -82,7 +187,7 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
         ))
         .await
         .expect("write Scope B page");
-    admin
+    let relation = admin
         .link_pages(LinkPagesRequest {
             from_page_id: page_a.page_id.clone(),
             relation_type: "related_to".to_owned(),
@@ -93,6 +198,19 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
         })
         .await
         .expect("link across authorized Scopes");
+    let reverse = admin
+        .link_pages(LinkPagesRequest {
+            from_page_id: page_b.page_id.clone(),
+            relation_type: "related_to".to_owned(),
+            to_page_id: page_a.page_id.clone(),
+            basis_revision_ids: vec![page_b.revision_id.clone(), page_a.revision_id.clone()],
+            created_by: actor.clone(),
+            idempotency_key: None,
+        })
+        .await
+        .expect("coalesce symmetric relation");
+    assert_eq!(relation.relation_id, reverse.relation_id);
+    assert!(relation.from_page_id < relation.to_page_id);
 
     let client_a = pcp_client(
         Arc::clone(&store),
@@ -252,7 +370,7 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
         ),
     );
     let mut derived = write_request(
-        &owner_id,
+        &identity_id,
         &scope_b,
         actor.clone(),
         "Derived from Scope A.",
@@ -288,7 +406,7 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
         ),
     );
     let mut derived = write_request(
-        &owner_id,
+        &identity_id,
         &scope_b,
         actor.clone(),
         "Explicitly derived from Scope A.",
@@ -388,7 +506,7 @@ async fn aggregates_privacy_preserving_runtime_health() {
             .await
             .expect("open health store"),
     );
-    let owner_id = store.owner_id().to_owned();
+    let identity_id = store.identity_id().to_owned();
     let namespace = "project:health".to_owned();
     let admin = pcp_client(
         Arc::clone(&store),
@@ -400,12 +518,10 @@ async fn aggregates_privacy_preserving_runtime_health() {
     );
     admin
         .create_scope(CreateScopeRequest {
-            owner_id: owner_id.clone(),
             namespace: namespace.clone(),
             display_name: "Health project".to_owned(),
             description: None,
             parent_namespace: None,
-            visibility: "private".to_owned(),
         })
         .await
         .expect("create health Scope");
@@ -413,24 +529,38 @@ async fn aggregates_privacy_preserving_runtime_health() {
         actor_type: ActorType::Model,
         actor_id: "model:health".to_owned(),
     };
+    let mut first_request = write_request(
+        &identity_id,
+        &namespace,
+        actor.clone(),
+        "Alpha signal remains current.",
+        "health:first",
+    );
+    first_request.mutability = PageMutability::Sealed;
+    first_request.source_span = Some(SourceSpan {
+        stream_id: "health-stream".to_owned(),
+        start: 1,
+        end: 1,
+    });
     let first = admin
-        .write_page(write_request(
-            &owner_id,
-            &namespace,
-            actor.clone(),
-            "Alpha signal remains current.",
-            "health:first",
-        ))
+        .write_page(first_request)
         .await
         .expect("write first health Page");
+    let mut second_request = write_request(
+        &identity_id,
+        &namespace,
+        actor,
+        "Alpha signal is repeated with more words.",
+        "health:second",
+    );
+    second_request.mutability = PageMutability::Sealed;
+    second_request.source_span = Some(SourceSpan {
+        stream_id: "health-stream".to_owned(),
+        start: 2,
+        end: 2,
+    });
     let second = admin
-        .write_page(write_request(
-            &owner_id,
-            &namespace,
-            actor.clone(),
-            "Alpha signal is repeated with more words.",
-            "health:second",
-        ))
+        .write_page(second_request)
         .await
         .expect("write second health Page");
     let hit = admin
@@ -480,29 +610,21 @@ async fn aggregates_privacy_preserving_runtime_health() {
         .await
         .expect("read detail route");
     admin
-        .consolidate_pages(ConsolidatePagesRequest {
-            canonical_page_id: first.page_id.clone(),
-            expected_canonical_revision_id: first.revision_id.clone(),
-            replaced_pages: vec![ConsolidationInput {
-                page_id: second.page_id,
-                expected_revision_id: second.revision_id,
-            }],
-            created_by: actor,
-            lifecycle_status: LifecycleStatus::Active,
-            observed_at: None,
-            valid_from: None,
-            valid_to: None,
-            payload: Some(PagePayload {
-                media_type: "text/markdown".to_owned(),
-                content: "Alpha signal remains current with its useful detail.".to_owned(),
-            }),
-            source_refs: Vec::new(),
-            facets: None,
-            provenance: Vec::new(),
-            idempotency_key: Some("health:consolidate".to_owned()),
+        .pack_pages(PackPagesRequest {
+            pages: vec![
+                PageRevisionRef {
+                    page_id: first.page_id.clone(),
+                    revision_id: first.revision_id.clone(),
+                },
+                PageRevisionRef {
+                    page_id: second.page_id,
+                    revision_id: second.revision_id,
+                },
+            ],
+            idempotency_key: Some("health:pack".to_owned()),
         })
         .await
-        .expect("consolidate health Pages");
+        .expect("pack health Pages");
     let legacy_scope = namespace.clone();
     store
         .run("seed legacy health event", move |connection| {
@@ -532,19 +654,20 @@ async fn aggregates_privacy_preserving_runtime_health() {
         .await
         .expect("read PCP health snapshot");
     assert_eq!(health.storage.current_pages, 1);
-    assert_eq!(health.storage.pages, 2);
-    assert_eq!(health.storage.revisions, 3);
-    assert_eq!(health.storage.historical_revisions, 1);
-    assert_eq!(health.storage.revisioned_pages, 2);
+    assert_eq!(health.storage.pages, 1);
+    assert_eq!(health.storage.revisions, 1);
+    assert_eq!(health.storage.historical_revisions, 0);
+    assert_eq!(health.storage.sealed_pages, 0);
+    assert_eq!(health.storage.revisioned_pages, 1);
     assert_eq!(health.recall.searches, 2);
     assert_eq!(health.recall.zero_result_searches, 1);
     assert_eq!(health.recall.returned_pages, 2);
     assert_eq!(health.recall.summary_reads, 1);
     assert_eq!(health.recall.detail_reads, 1);
-    assert_eq!(health.consolidation.runs, 1);
-    assert_eq!(health.consolidation.input_pages, 2);
-    assert_eq!(health.consolidation.net_page_reduction, 1);
-    assert_eq!(health.graph.relations, 1);
+    assert_eq!(health.packing.runs, 1);
+    assert_eq!(health.packing.input_pages, 2);
+    assert_eq!(health.packing.net_page_reduction, 1);
+    assert_eq!(health.graph.relations, 0);
     assert!(health.activity.calls >= 7);
     assert_eq!(health.activity.measured_calls + 1, health.activity.calls);
 
@@ -576,16 +699,14 @@ async fn stores_searches_revises_and_links_pages() {
     ));
     let path = root.join("pcp.sqlite3");
     let store = SqlitePcpStore::open(path).await.expect("open store");
-    let owner_id = store.owner_id().to_owned();
+    let identity_id = store.identity_id().to_owned();
     let namespace = "conversation:test".to_owned();
     store
         .create_scope(CreateScopeRequest {
-            owner_id: owner_id.clone(),
             namespace: namespace.clone(),
             display_name: "Test conversation".to_owned(),
             description: None,
             parent_namespace: None,
-            visibility: "private".to_owned(),
         })
         .await
         .expect("create scope");
@@ -597,7 +718,7 @@ async fn stores_searches_revises_and_links_pages() {
     let first = store
         .write_page(
             write_request(
-                &owner_id,
+                &identity_id,
                 &namespace,
                 actor.clone(),
                 "A compactness argument using finite products.",
@@ -610,7 +731,7 @@ async fn stores_searches_revises_and_links_pages() {
     let duplicate = store
         .write_page(
             write_request(
-                &owner_id,
+                &identity_id,
                 &namespace,
                 actor.clone(),
                 "A compactness argument using finite products.",
@@ -684,10 +805,10 @@ async fn stores_searches_revises_and_links_pages() {
                     content: "The finite-product compactness argument is now verified.".to_owned(),
                 }),
                 source_refs: vec![SourceRef {
-                    source_type: "test_file".to_owned(),
-                    uri: "file:///tmp/pcp-source.md".to_owned(),
-                    locator: Some("L1-L3".to_owned()),
-                    metadata: None,
+                    provider_id: "test_file".to_owned(),
+                    locator: "file:///tmp/pcp-source.md#L1-L3".to_owned(),
+                    media_type: Some("text/markdown".to_owned()),
+                    content_digest: None,
                 }],
                 facets: None,
                 provenance: vec![ProvenanceEvent {
@@ -724,6 +845,19 @@ async fn stores_searches_revises_and_links_pages() {
         .expect("traverse provenance from source");
     assert_eq!(derived_from_source.hits.len(), 1);
     assert_eq!(derived_from_source.hits[0].revision_id, revised.revision_id);
+    assert_eq!(derived_from_source.hits[0].graph_edges.len(), 1);
+    assert_eq!(
+        derived_from_source.hits[0].graph_edges[0].edge_kind,
+        GraphEdgeKind::Provenance
+    );
+    assert_eq!(
+        derived_from_source.hits[0].graph_edges[0].direction,
+        GraphEdgeDirection::Incoming
+    );
+    assert_eq!(
+        derived_from_source.hits[0].graph_edges[0].basis_revision_ids,
+        vec![revised.revision_id.clone(), first.revision_id.clone()]
+    );
 
     let source_from_derived = store
         .search_pages(SearchPagesRequest {
@@ -743,11 +877,16 @@ async fn stores_searches_revises_and_links_pages() {
         .expect("traverse provenance from derived revision");
     assert_eq!(source_from_derived.hits.len(), 1);
     assert_eq!(source_from_derived.hits[0].revision_id, first.revision_id);
+    assert_eq!(source_from_derived.hits[0].graph_edges.len(), 1);
+    assert_eq!(
+        source_from_derived.hits[0].graph_edges[0].direction,
+        GraphEdgeDirection::Outgoing
+    );
 
     let second = store
         .write_page(
             write_request(
-                &owner_id,
+                &identity_id,
                 &namespace,
                 actor.clone(),
                 "A related open question.",
@@ -925,7 +1064,7 @@ async fn stores_searches_revises_and_links_pages() {
     assert_eq!(traced[0].revision.provenance[0].input_revision_ids.len(), 1);
 
     let mut invalid = write_request(
-        &owner_id,
+        &identity_id,
         &namespace,
         actor.clone(),
         "This Page cites a missing revision.",
@@ -948,103 +1087,6 @@ async fn stores_searches_revises_and_links_pages() {
 }
 
 #[tokio::test]
-async fn backfills_the_provenance_graph_index() {
-    let root = std::env::temp_dir().join(format!(
-        "pcp-sqlite-backfill-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos()
-    ));
-    let path = root.join("pcp.sqlite3");
-    let store = SqlitePcpStore::open(path.clone())
-        .await
-        .expect("open store");
-    let owner_id = store.owner_id().to_owned();
-    let namespace = "conversation:backfill".to_owned();
-    store
-        .create_scope(CreateScopeRequest {
-            owner_id: owner_id.clone(),
-            namespace: namespace.clone(),
-            display_name: "Backfill conversation".to_owned(),
-            description: None,
-            parent_namespace: None,
-            visibility: "private".to_owned(),
-        })
-        .await
-        .expect("create scope");
-    let actor = Actor {
-        actor_type: ActorType::Model,
-        actor_id: "model:test".to_owned(),
-    };
-    let source = store
-        .write_page(
-            write_request(
-                &owner_id,
-                &namespace,
-                actor.clone(),
-                "Source Page",
-                "backfill:source",
-            ),
-            vec![namespace.clone()],
-        )
-        .await
-        .expect("write source");
-    let mut derived_request = write_request(
-        &owner_id,
-        &namespace,
-        actor.clone(),
-        "Derived Page",
-        "backfill:derived",
-    );
-    derived_request.provenance = vec![ProvenanceEvent {
-        operation: "derive".to_owned(),
-        actor,
-        timestamp: "2026-07-29T00:00:00Z".to_owned(),
-        input_revision_ids: vec![source.revision_id.clone()],
-        tool_or_model: Some("test".to_owned()),
-    }];
-    let derived = store
-        .write_page(derived_request, vec![namespace.clone()])
-        .await
-        .expect("write derived page");
-    drop(store);
-
-    let connection = rusqlite::Connection::open(&path).expect("open raw database");
-    connection
-        .execute_batch(
-            "
-            DROP TABLE pcp_provenance_inputs;
-            DELETE FROM pcp_metadata WHERE key = 'provenance_input_index_version';
-            ",
-        )
-        .expect("remove derived index");
-    drop(connection);
-
-    let reopened = SqlitePcpStore::open(path).await.expect("reopen store");
-    let graph = reopened
-        .search_pages(SearchPagesRequest {
-            query: source.revision_id,
-            scopes: vec![namespace],
-            mode: SearchMode::Graph,
-            term_match: SearchTermMatch::All,
-            projections: pcp_core::default_search_projections(),
-            filters: SearchFilters {
-                relation_types: vec!["derived_from".to_owned()],
-                ..SearchFilters::default()
-            },
-            limit: 10,
-            cursor: None,
-        })
-        .await
-        .expect("search backfilled graph");
-    assert_eq!(graph.hits.len(), 1);
-    assert_eq!(graph.hits[0].revision_id, derived.revision_id);
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[tokio::test]
 async fn writes_searches_reads_and_revises_sparse_summaries() {
     let root = std::env::temp_dir().join(format!(
         "pcp-summary-{}",
@@ -1056,16 +1098,14 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
     let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
         .await
         .expect("open store");
-    let owner_id = store.owner_id().to_owned();
+    let identity_id = store.identity_id().to_owned();
     let namespace = "conversation:summary".to_owned();
     store
         .create_scope(CreateScopeRequest {
-            owner_id: owner_id.clone(),
             namespace: namespace.clone(),
             display_name: "Summary conversation".to_owned(),
             description: None,
             parent_namespace: None,
-            visibility: "private".to_owned(),
         })
         .await
         .expect("create scope");
@@ -1076,7 +1116,7 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
     let page = store
         .write_page(
             write_request(
-                &owner_id,
+                &identity_id,
                 &namespace,
                 actor.clone(),
                 "A long discussion whose routing value is not captured by its opening words.",
@@ -1087,7 +1127,7 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
         .await
         .expect("write page");
     let mut operational = write_request(
-        &owner_id,
+        &identity_id,
         &namespace,
         actor.clone(),
         &"rolling current map ".repeat(20),
@@ -1351,16 +1391,14 @@ async fn rejects_cycles_in_the_derivation_subgraph() {
     let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
         .await
         .expect("open store");
-    let owner_id = store.owner_id().to_owned();
+    let identity_id = store.identity_id().to_owned();
     let namespace = "project:dag".to_owned();
     store
         .create_scope(CreateScopeRequest {
-            owner_id: owner_id.clone(),
             namespace: namespace.clone(),
             display_name: "DAG project".to_owned(),
             description: None,
             parent_namespace: None,
-            visibility: "private".to_owned(),
         })
         .await
         .expect("create scope");
@@ -1371,7 +1409,7 @@ async fn rejects_cycles_in_the_derivation_subgraph() {
     let first = store
         .write_page(
             write_request(
-                &owner_id,
+                &identity_id,
                 &namespace,
                 actor.clone(),
                 "First Page",
@@ -1384,7 +1422,7 @@ async fn rejects_cycles_in_the_derivation_subgraph() {
     let second = store
         .write_page(
             write_request(
-                &owner_id,
+                &identity_id,
                 &namespace,
                 actor.clone(),
                 "Second Page",
@@ -1440,16 +1478,14 @@ async fn retracts_derived_pages_and_restores_preexisting_pages() {
     let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
         .await
         .expect("open store");
-    let owner_id = store.owner_id().to_owned();
+    let identity_id = store.identity_id().to_owned();
     let namespace = "conversation:retract".to_owned();
     store
         .create_scope(CreateScopeRequest {
-            owner_id: owner_id.clone(),
             namespace: namespace.clone(),
             display_name: "Retraction test".to_owned(),
             description: None,
             parent_namespace: None,
-            visibility: "private".to_owned(),
         })
         .await
         .expect("create scope");
@@ -1460,7 +1496,7 @@ async fn retracts_derived_pages_and_restores_preexisting_pages() {
     let source = store
         .write_page(
             write_request(
-                &owner_id,
+                &identity_id,
                 &namespace,
                 actor.clone(),
                 "Withdraw this message.",
@@ -1473,7 +1509,7 @@ async fn retracts_derived_pages_and_restores_preexisting_pages() {
     let durable = store
         .write_page(
             write_request(
-                &owner_id,
+                &identity_id,
                 &namespace,
                 actor.clone(),
                 "Stable state.",
@@ -1514,7 +1550,7 @@ async fn retracts_derived_pages_and_restores_preexisting_pages() {
         .await
         .expect("revise durable page");
     let mut derived_request = write_request(
-        &owner_id,
+        &identity_id,
         &namespace,
         actor.clone(),
         "A newly derived Page.",
@@ -1534,7 +1570,7 @@ async fn retracts_derived_pages_and_restores_preexisting_pages() {
     let unrelated = store
         .write_page(
             write_request(
-                &owner_id,
+                &identity_id,
                 &namespace,
                 actor.clone(),
                 "Independent state.",
@@ -1658,16 +1694,14 @@ async fn validity_is_revisioned_and_routes_before_detail() {
     let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
         .await
         .expect("open store");
-    let owner_id = store.owner_id().to_owned();
+    let identity_id = store.identity_id().to_owned();
     let namespace = "conversation:validity".to_owned();
     store
         .create_scope(CreateScopeRequest {
-            owner_id: owner_id.clone(),
             namespace: namespace.clone(),
             display_name: "Validity conversation".to_owned(),
             description: None,
             parent_namespace: None,
-            visibility: "private".to_owned(),
         })
         .await
         .expect("create scope");
@@ -1678,7 +1712,7 @@ async fn validity_is_revisioned_and_routes_before_detail() {
     let target = store
         .write_page(
             write_request(
-                &owner_id,
+                &identity_id,
                 &namespace,
                 actor.clone(),
                 "The runtime always restores every deferred intent.",
@@ -1691,7 +1725,7 @@ async fn validity_is_revisioned_and_routes_before_detail() {
     let evidence = store
         .write_page(
             write_request(
-                &owner_id,
+                &identity_id,
                 &namespace,
                 actor.clone(),
                 "The guarantee holds only for persisted and uncanceled intents.",
@@ -1832,21 +1866,20 @@ async fn validity_is_revisioned_and_routes_before_detail() {
 }
 
 fn write_request(
-    owner_id: &str,
+    _identity_id: &str,
     namespace: &str,
     actor: Actor,
     content: &str,
     idempotency_key: &str,
 ) -> WritePageRequest {
     WritePageRequest {
-        owner_id: owner_id.to_owned(),
         namespace: namespace.to_owned(),
-        visibility: "private".to_owned(),
         lifecycle_status: LifecycleStatus::Active,
         kind: "document".to_owned(),
         mutability: PageMutability::Revisioned,
         created_by: actor,
         observed_at: None,
+        source_span: None,
         valid_from: None,
         valid_to: None,
         payload: Some(PagePayload {
@@ -1886,16 +1919,14 @@ async fn plans_revision_retention_from_roots_without_deleting_history() {
     let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
         .await
         .expect("open store");
-    let owner_id = store.owner_id().to_owned();
+    let identity_id = store.identity_id().to_owned();
     let namespace = "project:retention".to_owned();
     store
         .create_scope(CreateScopeRequest {
-            owner_id: owner_id.clone(),
             namespace: namespace.clone(),
             display_name: "Retention planning".to_owned(),
             description: None,
             parent_namespace: None,
-            visibility: "private".to_owned(),
         })
         .await
         .expect("create Scope");
@@ -1906,7 +1937,7 @@ async fn plans_revision_retention_from_roots_without_deleting_history() {
     let first = store
         .write_page(
             write_request(
-                &owner_id,
+                &identity_id,
                 &namespace,
                 actor.clone(),
                 "Revision zero.",
@@ -1948,7 +1979,7 @@ async fn plans_revision_retention_from_roots_without_deleting_history() {
     let anchor = store
         .write_page(
             write_request(
-                &owner_id,
+                &identity_id,
                 &namespace,
                 actor.clone(),
                 "Stable relation anchor.",
@@ -2065,16 +2096,14 @@ async fn collects_only_replanned_revision_candidates_and_preserves_a_compact_led
     let store = SqlitePcpStore::open(path.clone())
         .await
         .expect("open store");
-    let owner_id = store.owner_id().to_owned();
+    let identity_id = store.identity_id().to_owned();
     let namespace = "project:retention-collection".to_owned();
     store
         .create_scope(CreateScopeRequest {
-            owner_id: owner_id.clone(),
             namespace: namespace.clone(),
             display_name: "Retention collection".to_owned(),
             description: None,
             parent_namespace: None,
-            visibility: "private".to_owned(),
         })
         .await
         .expect("create Scope");
@@ -2085,7 +2114,7 @@ async fn collects_only_replanned_revision_candidates_and_preserves_a_compact_led
     let first = store
         .write_page(
             write_request(
-                &owner_id,
+                &identity_id,
                 &namespace,
                 actor.clone(),
                 "Initial maintained state.",
@@ -2199,163 +2228,9 @@ async fn collects_only_replanned_revision_candidates_and_preserves_a_compact_led
 }
 
 #[tokio::test]
-async fn retention_plan_is_stable_after_reopening_a_migrated_store() {
+async fn packs_contiguous_unreferenced_sealed_pages_without_rewriting_content() {
     let root = std::env::temp_dir().join(format!(
-        "pcp-retention-migration-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&root).expect("create migration fixture directory");
-    let path = root.join("pcp.sqlite3");
-    {
-        let connection = Connection::open(&path).expect("open legacy fixture");
-        connection
-            .execute_batch(
-                r#"
-                PRAGMA foreign_keys = ON;
-                CREATE TABLE pcp_scopes (
-                    namespace TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
-                    scope_type TEXT NOT NULL, display_name TEXT NOT NULL,
-                    description TEXT, parent_namespace TEXT, visibility TEXT NOT NULL,
-                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-                );
-                CREATE TABLE pcp_pages (
-                    page_id TEXT PRIMARY KEY, current_revision_id TEXT, created_at TEXT NOT NULL
-                );
-                CREATE TABLE pcp_revisions (
-                    revision_id TEXT PRIMARY KEY,
-                    page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
-                    owner_id TEXT NOT NULL, namespace TEXT NOT NULL REFERENCES pcp_scopes(namespace),
-                    visibility TEXT NOT NULL, lifecycle_status TEXT NOT NULL,
-                    created_at TEXT NOT NULL, observed_at TEXT, valid_from TEXT, valid_to TEXT,
-                    actor_type TEXT NOT NULL, actor_id TEXT NOT NULL,
-                    payload_media_type TEXT, payload_content TEXT,
-                    source_refs_json TEXT NOT NULL, facets_json TEXT,
-                    provenance_json TEXT NOT NULL
-                );
-
-                INSERT INTO pcp_scopes VALUES (
-                    'project:migrated-retention', 'usr_migration', 'project', 'Migrated retention',
-                    NULL, NULL, 'private', '2025-01-01T00:00:00Z', '2025-01-03T00:00:00Z'
-                );
-                INSERT INTO pcp_pages VALUES (
-                    'pg_migrated_topic', 'rev_migrated_3', '2025-01-01T00:00:00Z'
-                );
-                INSERT INTO pcp_revisions VALUES (
-                    'rev_migrated_1', 'pg_migrated_topic', 'usr_migration',
-                    'project:migrated-retention', 'private', 'active',
-                    '2025-01-01T00:00:00Z', NULL, NULL, NULL,
-                    'model', 'model:migration', 'text/markdown', 'Initial topic state',
-                    '[]', '{"kind":"topic_projection"}', '[]'
-                );
-                INSERT INTO pcp_revisions VALUES (
-                    'rev_migrated_2', 'pg_migrated_topic', 'usr_migration',
-                    'project:migrated-retention', 'private', 'active',
-                    '2025-01-02T00:00:00Z', NULL, NULL, NULL,
-                    'model', 'model:migration', 'text/markdown', 'Intermediate topic state',
-                    '[]', '{"kind":"topic_projection"}', '[]'
-                );
-                INSERT INTO pcp_revisions VALUES (
-                    'rev_migrated_3', 'pg_migrated_topic', 'usr_migration',
-                    'project:migrated-retention', 'private', 'active',
-                    '2025-01-03T00:00:00Z', NULL, NULL, NULL,
-                    'model', 'model:migration', 'text/markdown', 'Current topic state',
-                    '[]', '{"kind":"topic_projection"}', '[]'
-                );
-                "#,
-            )
-            .expect("seed legacy Page history");
-    }
-
-    let store = SqlitePcpStore::open(path.clone())
-        .await
-        .expect("migrate legacy store");
-    drop(store);
-    let store = SqlitePcpStore::open(path)
-        .await
-        .expect("reopen migrated store idempotently");
-    let namespace = "project:migrated-retention".to_owned();
-    let policy = RetentionPolicy {
-        minimum_age_days: 0,
-        keep_recent_revisions_per_page: 1,
-        sample_limit: 20,
-    };
-    let first_plan = store
-        .plan_revision_retention(PlanRevisionRetentionRequest {
-            scopes: vec![namespace.clone()],
-            policy: policy.clone(),
-        })
-        .await
-        .expect("plan retention after migration");
-    let second_plan = store
-        .plan_revision_retention(PlanRevisionRetentionRequest {
-            scopes: vec![namespace.clone()],
-            policy,
-        })
-        .await
-        .expect("repeat retention plan");
-
-    assert_eq!(first_plan.scanned_pages, 1);
-    assert_eq!(first_plan.scanned_revisions, 3);
-    assert_eq!(first_plan.candidate_revisions, 2);
-    assert_eq!(
-        first_plan
-            .candidates
-            .iter()
-            .map(|candidate| candidate.revision_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rev_migrated_1", "rev_migrated_2"]
-    );
-    assert_eq!(
-        second_plan
-            .candidates
-            .iter()
-            .map(|candidate| candidate.revision_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["rev_migrated_1", "rev_migrated_2"]
-    );
-    assert_eq!(
-        store
-            .current_revision_id("pg_migrated_topic".to_owned(), vec![namespace.clone()])
-            .await
-            .expect("read migrated head"),
-        "rev_migrated_3"
-    );
-    let history = store
-        .read_pages(
-            ReadPagesRequest {
-                page_ids: vec!["pg_migrated_topic".to_owned()],
-                revision_ids: Vec::new(),
-                projections: vec![Projection::History, Projection::Payload],
-                max_chars: 8_000,
-            },
-            vec![namespace],
-        )
-        .await
-        .expect("read migrated Page history");
-    assert_eq!(history[0].history.len(), 3);
-    assert_eq!(
-        history[0]
-            .revision
-            .payload
-            .as_ref()
-            .map(|payload| payload.content.as_str()),
-        Some("Current topic state")
-    );
-    assert_eq!(
-        store.integrity_check().await.expect("check migrated store"),
-        "ok"
-    );
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn consolidates_current_pages_into_one_canonical_head() {
-    let root = std::env::temp_dir().join(format!(
-        "pcp-consolidation-{}",
+        "pcp-packing-{}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -2365,22 +2240,20 @@ async fn consolidates_current_pages_into_one_canonical_head() {
     let store = SqlitePcpStore::open(path.clone())
         .await
         .expect("open store");
-    let owner_id = store.owner_id().to_owned();
-    let namespace = "project:consolidation".to_owned();
+    let identity_id = store.identity_id().to_owned();
+    let namespace = "project:packing".to_owned();
     store
         .create_scope(CreateScopeRequest {
-            owner_id: owner_id.clone(),
             namespace: namespace.clone(),
-            display_name: "Consolidation project".to_owned(),
+            display_name: "Packing project".to_owned(),
             description: None,
             parent_namespace: None,
-            visibility: "private".to_owned(),
         })
         .await
         .expect("create scope");
     let actor = Actor {
         actor_type: ActorType::Model,
-        actor_id: "model:consolidation".to_owned(),
+        actor_id: "host:packing".to_owned(),
     };
     let mut pages = Vec::new();
     for (index, content) in [
@@ -2391,116 +2264,84 @@ async fn consolidates_current_pages_into_one_canonical_head() {
     .into_iter()
     .enumerate()
     {
+        let mut request = write_request(
+            &identity_id,
+            &namespace,
+            actor.clone(),
+            content,
+            &format!("packing:{index}"),
+        );
+        request.kind = "conversation_event".to_owned();
+        request.mutability = PageMutability::Sealed;
+        request.source_span = Some(SourceSpan {
+            stream_id: "conversation:main".to_owned(),
+            start: index as u64,
+            end: index as u64,
+        });
         pages.push(
             store
-                .write_page(
-                    write_request(
-                        &owner_id,
-                        &namespace,
-                        actor.clone(),
-                        content,
-                        &format!("consolidation:{index}"),
-                    ),
-                    vec![namespace.clone()],
-                )
+                .write_page(request, vec![namespace.clone()])
                 .await
-                .expect("write consolidation input"),
+                .expect("write packing input"),
         );
     }
-    let input_ids = pages
-        .iter()
-        .map(|page| page.revision_id.clone())
-        .collect::<Vec<_>>();
     let mut mismatched_request = write_request(
-        &owner_id,
+        &identity_id,
         &namespace,
         actor.clone(),
         "A source document that must remain independent evidence.",
-        "consolidation:mismatched-kind",
+        "packing:mismatched-kind",
     );
     mismatched_request.kind = "source_document".to_owned();
+    mismatched_request.mutability = PageMutability::Sealed;
+    mismatched_request.source_span = Some(SourceSpan {
+        stream_id: "conversation:main".to_owned(),
+        start: 3,
+        end: 3,
+    });
     let mismatched = store
         .write_page(mismatched_request, vec![namespace.clone()])
         .await
-        .expect("write semantically distinct consolidation input");
+        .expect("write semantically distinct packing input");
     let mismatch_error = store
-        .consolidate_pages(
-            ConsolidatePagesRequest {
-                canonical_page_id: pages[0].page_id.clone(),
-                expected_canonical_revision_id: pages[0].revision_id.clone(),
-                replaced_pages: vec![ConsolidationInput {
-                    page_id: mismatched.page_id,
-                    expected_revision_id: mismatched.revision_id,
-                }],
-                created_by: actor.clone(),
-                lifecycle_status: LifecycleStatus::Active,
-                observed_at: None,
-                valid_from: None,
-                valid_to: None,
-                payload: Some(PagePayload {
-                    media_type: "text/markdown".to_owned(),
-                    content: "This invalid merge should not be published.".to_owned(),
-                }),
-                source_refs: Vec::new(),
-                facets: None,
-                provenance: Vec::new(),
-                idempotency_key: Some("consolidation:mismatched-apply".to_owned()),
+        .pack_pages(
+            PackPagesRequest {
+                pages: vec![
+                    PageRevisionRef {
+                        page_id: pages[0].page_id.clone(),
+                        revision_id: pages[0].revision_id.clone(),
+                    },
+                    PageRevisionRef {
+                        page_id: mismatched.page_id,
+                        revision_id: mismatched.revision_id,
+                    },
+                ],
+                idempotency_key: Some("packing:mismatched-apply".to_owned()),
             },
+            actor.clone(),
             vec![namespace.clone()],
         )
         .await
-        .expect_err("reject consolidation across semantic roles");
+        .expect_err("reject packing across semantic roles");
     assert!(
-        format!("{mismatch_error:#}").contains("share kind and mutability"),
-        "unexpected consolidation error: {mismatch_error:#}"
+        format!("{mismatch_error:#}").contains("share Scope and kind"),
+        "unexpected packing error: {mismatch_error:#}"
     );
-    let request = ConsolidatePagesRequest {
-        canonical_page_id: pages[0].page_id.clone(),
-        expected_canonical_revision_id: pages[0].revision_id.clone(),
-        replaced_pages: pages
+    let request = PackPagesRequest {
+        pages: pages
             .iter()
-            .skip(1)
-            .map(|page| ConsolidationInput {
+            .map(|page| PageRevisionRef {
                 page_id: page.page_id.clone(),
-                expected_revision_id: page.revision_id.clone(),
+                revision_id: page.revision_id.clone(),
             })
             .collect(),
-        created_by: actor.clone(),
-        lifecycle_status: LifecycleStatus::Active,
-        observed_at: None,
-        valid_from: None,
-        valid_to: None,
-        payload: Some(PagePayload {
-            media_type: "text/markdown".to_owned(),
-            content: "The runtime preserves auditable durable state across task restarts."
-                .to_owned(),
-        }),
-        source_refs: Vec::new(),
-        facets: Some(json!({"kind": "memory_synthesis"})),
-        provenance: Vec::new(),
-        idempotency_key: Some("consolidation:apply".to_owned()),
+        idempotency_key: Some("packing:apply".to_owned()),
     };
-    let consolidated = store
-        .consolidate_pages(request.clone(), vec![namespace.clone()])
+    let packed = store
+        .pack_pages(request.clone(), actor.clone(), vec![namespace.clone()])
         .await
-        .expect("consolidate Pages");
-    assert_eq!(consolidated.page_id, pages[0].page_id);
-    assert_eq!(
-        store
-            .current_revision_id(pages[0].page_id.clone(), vec![namespace.clone()])
-            .await
-            .expect("read canonical head"),
-        consolidated.revision_id
-    );
-    for input in &pages[1..] {
-        assert_eq!(
-            store
-                .current_revision_id(input.page_id.clone(), vec![namespace.clone()])
-                .await
-                .expect("read absorbed Page head"),
-            input.revision_id
-        );
-    }
+        .expect("pack Pages");
+    assert!(!pages.iter().any(|page| page.page_id == packed.page_id));
     assert_eq!(
         store
             .page_count(vec![namespace.clone()])
@@ -2512,48 +2353,71 @@ async fn consolidates_current_pages_into_one_canonical_head() {
         .read_pages(
             ReadPagesRequest {
                 page_ids: Vec::new(),
-                revision_ids: vec![consolidated.revision_id.clone()],
-                projections: vec![Projection::Provenance, Projection::Relations],
+                revision_ids: vec![packed.revision_id.clone()],
+                projections: vec![Projection::Payload],
                 max_chars: 8_000,
             },
             vec![namespace.clone()],
         )
         .await
-        .expect("read consolidated Page")
+        .expect("read packed Page")
         .remove(0);
+    assert_eq!(read.page.mutability, PageMutability::Revisioned);
+    let payload = read.revision.payload.expect("packed payload");
+    assert_eq!(payload.media_type, pcp_core::PACKED_PAGE_MEDIA_TYPE);
+    let packed_json: serde_json::Value =
+        serde_json::from_str(&payload.content).expect("decode packed payload");
     assert_eq!(
-        read.relations
-            .iter()
-            .filter(|relation| relation.relation_type == "supersedes")
-            .count(),
-        2
+        packed_json
+            .as_object()
+            .map(|object| object.keys().cloned().collect::<Vec<_>>()),
+        Some(vec!["entries".to_owned()])
     );
-    assert!(read.revision.provenance.iter().any(|event| {
-        event.operation == "consolidate"
-            && input_ids
-                .iter()
-                .all(|input| event.input_revision_ids.contains(input))
-    }));
+    assert_eq!(packed_json["entries"].as_array().map(Vec::len), Some(3));
+    assert_eq!(
+        packed_json["entries"][0]["provenance"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        read.revision.source_span.as_ref().map(|span| span.start),
+        Some(0)
+    );
+    assert_eq!(
+        read.revision.source_span.as_ref().map(|span| span.end),
+        Some(2)
+    );
+    let old_read_error = store
+        .read_pages(
+            ReadPagesRequest {
+                page_ids: Vec::new(),
+                revision_ids: vec![pages[0].revision_id.clone()],
+                projections: vec![Projection::Payload],
+                max_chars: 8_000,
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect_err("old packed Revision must not remain readable");
+    assert!(format!("{old_read_error:#}").contains("was packed into Page"));
+    let old_page_error = store
+        .current_revision_id(pages[0].page_id.clone(), vec![namespace.clone()])
+        .await
+        .expect_err("old packed Page must not look like an unknown ID");
+    assert!(format!("{old_page_error:#}").contains("was packed into Page"));
 
     let replay = store
-        .consolidate_pages(request.clone(), vec![namespace.clone()])
+        .pack_pages(request.clone(), actor, vec![namespace.clone()])
         .await
-        .expect("replay idempotent consolidation");
-    assert_eq!(replay.revision_id, consolidated.revision_id);
+        .expect("replay idempotent packing");
+    assert_eq!(replay.revision_id, packed.revision_id);
     assert!(!replay.created);
-    let mut stale = request;
-    stale.idempotency_key = Some("consolidation:stale".to_owned());
-    assert!(
-        store
-            .consolidate_pages(stale, vec![namespace.clone()])
-            .await
-            .is_err()
-    );
 
     drop(store);
     let reopened = SqlitePcpStore::open(path)
         .await
-        .expect("reopen consolidated store");
+        .expect("reopen packed store");
     assert_eq!(
         reopened
             .page_count(vec![namespace])
@@ -2561,6 +2425,413 @@ async fn consolidates_current_pages_into_one_canonical_head() {
             .expect("count effective Pages after reopen"),
         2
     );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn extends_one_packed_page_as_a_flat_revision_without_changing_its_identity() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-packing-extension-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
+        .await
+        .expect("open store");
+    let identity_id = store.identity_id().to_owned();
+    let namespace = "project:packing-extension".to_owned();
+    store
+        .create_scope(CreateScopeRequest {
+            namespace: namespace.clone(),
+            display_name: "Packing extension".to_owned(),
+            description: None,
+            parent_namespace: None,
+        })
+        .await
+        .expect("create scope");
+    let actor = Actor {
+        actor_type: ActorType::Model,
+        actor_id: "host:packing-extension".to_owned(),
+    };
+    let mut leaves = Vec::new();
+    for index in 0_u64..6 {
+        let mut request = write_request(
+            &identity_id,
+            &namespace,
+            actor.clone(),
+            &format!("Continuous discussion event {index}."),
+            &format!("packing-extension:{index}"),
+        );
+        request.kind = "conversation_event".to_owned();
+        request.mutability = PageMutability::Sealed;
+        request.source_span = Some(SourceSpan {
+            stream_id: "conversation:main".to_owned(),
+            start: index,
+            end: index,
+        });
+        leaves.push(
+            store
+                .write_page(request, vec![namespace.clone()])
+                .await
+                .expect("write packing extension leaf"),
+        );
+    }
+    let first_request = PackPagesRequest {
+        pages: leaves[..2]
+            .iter()
+            .map(|page| PageRevisionRef {
+                page_id: page.page_id.clone(),
+                revision_id: page.revision_id.clone(),
+            })
+            .collect(),
+        idempotency_key: Some("packing-extension:first".to_owned()),
+    };
+    let packed = store
+        .pack_pages(
+            first_request.clone(),
+            actor.clone(),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("create initial packed Page");
+
+    let mut reference_request = write_request(
+        &identity_id,
+        &namespace,
+        actor.clone(),
+        "A stable topic referenced by the packed conversation.",
+        "packing-extension:reference",
+    );
+    reference_request.kind = "topic".to_owned();
+    let reference = store
+        .write_page(reference_request, vec![namespace.clone()])
+        .await
+        .expect("write related topic");
+    store
+        .link_pages(
+            LinkPagesRequest {
+                from_page_id: packed.page_id.clone(),
+                relation_type: "related_to".to_owned(),
+                to_page_id: reference.page_id,
+                basis_revision_ids: vec![packed.revision_id.clone(), reference.revision_id],
+                created_by: actor.clone(),
+                idempotency_key: Some("packing-extension:relation".to_owned()),
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("relate packed Page before extension");
+    store
+        .write_summary(
+            WriteSummaryRequest {
+                target_page_id: packed.page_id.clone(),
+                target_revision_id: packed.revision_id.clone(),
+                expected_summary_revision_id: None,
+                content: "A continuous discussion about one durable runtime topic.".to_owned(),
+                created_by: actor.clone(),
+                tool_or_model: Some("model:packing-test".to_owned()),
+                provenance: Vec::new(),
+                idempotency_key: Some("packing-extension:summary".to_owned()),
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("summarize packed Page before extension");
+
+    let extended = store
+        .pack_pages(
+            PackPagesRequest {
+                pages: std::iter::once(PageRevisionRef {
+                    page_id: packed.page_id.clone(),
+                    revision_id: packed.revision_id.clone(),
+                })
+                .chain(leaves[2..4].iter().map(|page| PageRevisionRef {
+                    page_id: page.page_id.clone(),
+                    revision_id: page.revision_id.clone(),
+                }))
+                .collect(),
+                idempotency_key: Some("packing-extension:second".to_owned()),
+            },
+            actor.clone(),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("extend packed Page");
+    assert_eq!(extended.page_id, packed.page_id);
+    assert_ne!(extended.revision_id, packed.revision_id);
+
+    let current = store
+        .read_pages(
+            ReadPagesRequest {
+                page_ids: vec![packed.page_id.clone()],
+                revision_ids: Vec::new(),
+                projections: vec![
+                    Projection::Payload,
+                    Projection::Relations,
+                    Projection::Summary,
+                    Projection::History,
+                ],
+                max_chars: 32_000,
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("read extended packed Page")
+        .remove(0);
+    assert_eq!(current.page.mutability, PageMutability::Revisioned);
+    assert_eq!(
+        current.revision.previous_revision_id.as_deref(),
+        Some(packed.revision_id.as_str())
+    );
+    assert!(
+        current
+            .relations
+            .iter()
+            .any(|relation| relation.relation_type == "related_to")
+    );
+    assert_eq!(
+        current
+            .summary
+            .as_ref()
+            .map(|summary| summary.target_revision_id.as_str()),
+        Some(packed.revision_id.as_str())
+    );
+    assert!(current.history.contains(&packed.revision_id));
+    assert!(current.history.contains(&extended.revision_id));
+    let current_payload = current.revision.payload.expect("extended packed payload");
+    let current_json: serde_json::Value =
+        serde_json::from_str(&current_payload.content).expect("decode extended packed payload");
+    let entries = current_json["entries"]
+        .as_array()
+        .expect("packed entries array");
+    assert_eq!(entries.len(), 4);
+    assert!(entries.iter().all(|entry| {
+        entry["payload"]["mediaType"].as_str() != Some(pcp_core::PACKED_PAGE_MEDIA_TYPE)
+    }));
+    let inventory_anchor = store
+        .durable_page_inventory(vec![namespace.clone()], Vec::new())
+        .await
+        .expect("read packing inventory")
+        .into_iter()
+        .find(|page| page.page_id == packed.page_id)
+        .expect("packed Page in inventory");
+    assert!(inventory_anchor.snippet.contains("Packed range boundary"));
+    assert!(
+        inventory_anchor
+            .snippet
+            .contains("Continuous discussion event 0")
+    );
+    assert!(
+        inventory_anchor
+            .snippet
+            .contains("Continuous discussion event 3")
+    );
+    let generic_revision_error = store
+        .revise_page(
+            RevisePageRequest {
+                page_id: packed.page_id.clone(),
+                expected_revision_id: extended.revision_id.clone(),
+                created_by: actor.clone(),
+                lifecycle_status: LifecycleStatus::Active,
+                observed_at: None,
+                valid_from: None,
+                valid_to: None,
+                payload: Some(PagePayload {
+                    media_type: "text/markdown".to_owned(),
+                    content: "This must not replace the packed container.".to_owned(),
+                }),
+                source_refs: Vec::new(),
+                facets: None,
+                provenance: Vec::new(),
+                initial_relations: Vec::new(),
+                idempotency_key: Some("packing-extension:generic-revision".to_owned()),
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect_err("reject generic packed Page revision");
+    assert!(format!("{generic_revision_error:#}").contains("only be revised by pack_pages"));
+
+    let old = store
+        .read_pages(
+            ReadPagesRequest {
+                page_ids: Vec::new(),
+                revision_ids: vec![packed.revision_id.clone()],
+                projections: vec![Projection::Payload],
+                max_chars: 16_000,
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("read previous packed Revision")
+        .remove(0);
+    let old_payload: serde_json::Value = serde_json::from_str(
+        &old.revision
+            .payload
+            .expect("previous packed payload")
+            .content,
+    )
+    .expect("decode previous packed payload");
+    assert_eq!(old_payload["entries"].as_array().map(Vec::len), Some(2));
+
+    let initial_replay = store
+        .pack_pages(first_request, actor.clone(), vec![namespace.clone()])
+        .await
+        .expect("replay initial packing after extension");
+    assert_eq!(initial_replay.page_id, packed.page_id);
+    assert_eq!(initial_replay.revision_id, packed.revision_id);
+    assert!(!initial_replay.created);
+
+    let second_packed = store
+        .pack_pages(
+            PackPagesRequest {
+                pages: leaves[4..]
+                    .iter()
+                    .map(|page| PageRevisionRef {
+                        page_id: page.page_id.clone(),
+                        revision_id: page.revision_id.clone(),
+                    })
+                    .collect(),
+                idempotency_key: Some("packing-extension:third".to_owned()),
+            },
+            actor.clone(),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("create second packed Page");
+    let two_anchor_error = store
+        .pack_pages(
+            PackPagesRequest {
+                pages: vec![
+                    PageRevisionRef {
+                        page_id: extended.page_id,
+                        revision_id: extended.revision_id,
+                    },
+                    PageRevisionRef {
+                        page_id: second_packed.page_id,
+                        revision_id: second_packed.revision_id,
+                    },
+                ],
+                idempotency_key: Some("packing-extension:two-anchors".to_owned()),
+            },
+            actor,
+            vec![namespace],
+        )
+        .await
+        .expect_err("reject two packed anchors");
+    assert!(format!("{two_anchor_error:#}").contains("at most one existing packed Page"));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn packing_rejects_source_gaps_and_referenced_pages() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-packing-guards-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
+        .await
+        .expect("open store");
+    let identity_id = store.identity_id().to_owned();
+    let namespace = "project:packing-guards".to_owned();
+    store
+        .create_scope(CreateScopeRequest {
+            namespace: namespace.clone(),
+            display_name: "Packing guards".to_owned(),
+            description: None,
+            parent_namespace: None,
+        })
+        .await
+        .expect("create scope");
+    let actor = Actor {
+        actor_type: ActorType::Model,
+        actor_id: "host:packing-guards".to_owned(),
+    };
+    let mut pages = Vec::new();
+    for (position, span) in [0_u64, 2, 1].into_iter().enumerate() {
+        let mut request = write_request(
+            &identity_id,
+            &namespace,
+            actor.clone(),
+            &format!("Source event {position}"),
+            &format!("packing-guards:{position}"),
+        );
+        request.kind = "conversation_event".to_owned();
+        request.mutability = PageMutability::Sealed;
+        request.source_span = Some(SourceSpan {
+            stream_id: "conversation:main".to_owned(),
+            start: span,
+            end: span,
+        });
+        pages.push(
+            store
+                .write_page(request, vec![namespace.clone()])
+                .await
+                .expect("write packing guard Page"),
+        );
+    }
+
+    let gap_error = store
+        .pack_pages(
+            PackPagesRequest {
+                pages: pages[..2]
+                    .iter()
+                    .map(|page| PageRevisionRef {
+                        page_id: page.page_id.clone(),
+                        revision_id: page.revision_id.clone(),
+                    })
+                    .collect(),
+                idempotency_key: Some("packing-guards:gap".to_owned()),
+            },
+            actor.clone(),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect_err("reject a source-span gap");
+    assert!(format!("{gap_error:#}").contains("contiguous and ordered"));
+
+    store
+        .link_pages(
+            LinkPagesRequest {
+                from_page_id: pages[0].page_id.clone(),
+                relation_type: "related_to".to_owned(),
+                to_page_id: pages[2].page_id.clone(),
+                basis_revision_ids: vec![
+                    pages[0].revision_id.clone(),
+                    pages[2].revision_id.clone(),
+                ],
+                created_by: actor.clone(),
+                idempotency_key: Some("packing-guards:relation".to_owned()),
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("link packing guard Pages");
+    let relation_error = store
+        .pack_pages(
+            PackPagesRequest {
+                pages: [pages[0].clone(), pages[2].clone()]
+                    .into_iter()
+                    .map(|page| PageRevisionRef {
+                        page_id: page.page_id,
+                        revision_id: page.revision_id,
+                    })
+                    .collect(),
+                idempotency_key: Some("packing-guards:referenced".to_owned()),
+            },
+            actor,
+            vec![namespace],
+        )
+        .await
+        .expect_err("reject referenced packing inputs");
+    assert!(format!("{relation_error:#}").contains("referenced or explicitly retained"));
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -2577,16 +2848,14 @@ async fn durable_inventory_uses_current_heads_and_excludes_runtime_pages() {
     let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
         .await
         .expect("open store");
-    let owner_id = store.owner_id().to_owned();
+    let identity_id = store.identity_id().to_owned();
     let namespace = "project:inventory".to_owned();
     store
         .create_scope(CreateScopeRequest {
-            owner_id: owner_id.clone(),
             namespace: namespace.clone(),
             display_name: "Inventory project".to_owned(),
             description: None,
             parent_namespace: None,
-            visibility: "private".to_owned(),
         })
         .await
         .expect("create scope");
@@ -2597,7 +2866,7 @@ async fn durable_inventory_uses_current_heads_and_excludes_runtime_pages() {
     let durable = store
         .write_page(
             write_request(
-                &owner_id,
+                &identity_id,
                 &namespace,
                 actor.clone(),
                 "A durable protocol decision with enough detail to route later.",
@@ -2624,7 +2893,7 @@ async fn durable_inventory_uses_current_heads_and_excludes_runtime_pages() {
         .await
         .expect("write summary");
     let mut conversation = write_request(
-        &owner_id,
+        &identity_id,
         &namespace,
         actor,
         "A raw chat message must not become a reconciliation candidate.",

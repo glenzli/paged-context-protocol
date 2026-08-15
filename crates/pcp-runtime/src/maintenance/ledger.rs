@@ -76,15 +76,13 @@ impl MaintenanceLedger {
         );
     }
 
-    pub(crate) fn active_compaction_sets(&self) -> Vec<Vec<String>> {
+    pub(crate) fn active_packing_sets(&self) -> Vec<Vec<String>> {
         let now = now_unix_ms();
         self.entries
             .iter()
-            .filter(|(key, entry)| {
-                key.starts_with("compaction:") && entry.retry_after_unix_ms > now
-            })
+            .filter(|(key, entry)| key.starts_with("packing:") && entry.retry_after_unix_ms > now)
             .map(|(key, _)| {
-                key.trim_start_matches("compaction:")
+                key.trim_start_matches("packing:")
                     .split(',')
                     .map(str::to_owned)
                     .collect()
@@ -97,11 +95,8 @@ pub(crate) fn summary_key(page_id: &str) -> String {
     format!("summary:{page_id}")
 }
 
-pub(crate) fn compaction_key(page_ids: &[String]) -> String {
-    let mut page_ids = page_ids.to_vec();
-    page_ids.sort();
-    page_ids.dedup();
-    format!("compaction:{}", page_ids.join(","))
+pub(crate) fn packing_key(page_ids: &[String]) -> String {
+    format!("packing:{}", page_ids.join(","))
 }
 
 pub(crate) fn selection_window_key(page_ids: &[String]) -> String {

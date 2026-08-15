@@ -9,14 +9,16 @@ use std::{
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use pcp_client::{DurablePageInventoryItem, HealthSnapshot, PcpApi, TombstoneCascadeResult};
+use pcp_client::{
+    DurablePageInventoryItem, HealthSnapshot, PcpApi, PcpTenantApi, TombstoneCascadeResult,
+};
 use pcp_core::{
     AccessAuditEvent, AccessSession, AssessPageValidityRequest, Capabilities,
-    CollectRevisionRetentionRequest, ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest,
-    PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest,
-    Relation, RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease,
-    RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult, WritePageRequest, WriteResult,
-    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    CollectRevisionRetentionRequest, CreateScopeRequest, IngestPageRequest, LinkPagesRequest,
+    PackPagesRequest, PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage,
+    ReadPagesRequest, Relation, RevisePageRequest, RevisionCollectionResult,
+    RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult,
+    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use tokio::net::UnixStream;
 
@@ -41,6 +43,10 @@ impl RemotePcpClient {
             RpcValue::Descriptor(descriptor) => descriptor,
             _ => anyhow::bail!("PCP runtime returned an unexpected describe response"),
         };
+        anyhow::ensure!(
+            !descriptor.identity_id.trim().is_empty(),
+            "PCP runtime descriptor has no identityId"
+        );
         Ok(Self {
             socket_path,
             descriptor,
@@ -101,9 +107,9 @@ fn unexpected(operation: &str) -> anyhow::Error {
 }
 
 #[async_trait]
-impl PcpApi for RemotePcpClient {
-    fn owner_id(&self) -> &str {
-        &self.descriptor.owner_id
+impl PcpTenantApi for RemotePcpClient {
+    fn identity_id(&self) -> &str {
+        &self.descriptor.identity_id
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -112,20 +118,6 @@ impl PcpApi for RemotePcpClient {
 
     fn access(&self) -> &AccessSession {
         &self.descriptor.access
-    }
-
-    async fn integrity_check(&self) -> Result<String> {
-        match self.request(RpcOperation::IntegrityCheck).await? {
-            RpcValue::Integrity(value) => Ok(value),
-            _ => Err(unexpected("integrity_check")),
-        }
-    }
-
-    async fn create_scope(&self, request: CreateScopeRequest) -> Result<()> {
-        match self.request(RpcOperation::CreateScope(request)).await? {
-            RpcValue::Unit => Ok(()),
-            _ => Err(unexpected("create_scope")),
-        }
     }
 
     async fn list_scopes(
@@ -186,6 +178,30 @@ impl PcpApi for RemotePcpClient {
         match self.request(RpcOperation::ReadPages(request)).await? {
             RpcValue::Pages(value) => Ok(value),
             _ => Err(unexpected("read_pages")),
+        }
+    }
+
+    async fn ingest_page(&self, request: IngestPageRequest) -> Result<WriteResult> {
+        match self.request(RpcOperation::IngestPage(request)).await? {
+            RpcValue::WriteResult(value) => Ok(value),
+            _ => Err(unexpected("ingest_page")),
+        }
+    }
+}
+
+#[async_trait]
+impl PcpApi for RemotePcpClient {
+    async fn integrity_check(&self) -> Result<String> {
+        match self.request(RpcOperation::IntegrityCheck).await? {
+            RpcValue::Integrity(value) => Ok(value),
+            _ => Err(unexpected("integrity_check")),
+        }
+    }
+
+    async fn create_scope(&self, request: CreateScopeRequest) -> Result<()> {
+        match self.request(RpcOperation::CreateScope(request)).await? {
+            RpcValue::Unit => Ok(()),
+            _ => Err(unexpected("create_scope")),
         }
     }
 
@@ -291,13 +307,10 @@ impl PcpApi for RemotePcpClient {
         }
     }
 
-    async fn consolidate_pages(&self, request: ConsolidatePagesRequest) -> Result<WriteResult> {
-        match self
-            .request(RpcOperation::ConsolidatePages(request))
-            .await?
-        {
+    async fn pack_pages(&self, request: PackPagesRequest) -> Result<WriteResult> {
+        match self.request(RpcOperation::PackPages(request)).await? {
             RpcValue::WriteResult(value) => Ok(value),
-            _ => Err(unexpected("consolidate_pages")),
+            _ => Err(unexpected("pack_pages")),
         }
     }
 

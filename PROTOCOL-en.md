@@ -1,20 +1,28 @@
-# Paged-Context-Protocol (PCP) - v0.7.0-draft
+# Paged-Context-Protocol (PCP) - v0.8.0-draft
 
-> Status: Draft. v0.7 restores stable Pages and immutable Revisions while separating semantic identity, version history, and physical retention.
+> Status: Draft. v0.8 defines Identity, tenant, and Runtime maintenance authority above the Page/Revision model and narrows source and relation semantics.
 
 Paged-Context-Protocol (PCP) is a model-facing, user-owned protocol for durable context. Authorized Hosts and models can discover, read, write, and trace one persistent information space without adopting a fixed retrieval, summarization, compaction, or reasoning workflow.
 
 PCP's boundary is:
 
-> **Maintain stable Pages, immutable Revisions, Page Relations, and exact provenance. Leave recall, interpretation, write admission, and active attention to the model and Host.**
+> **Accept multi-tenant input into a user-owned Identity, maintain stable Pages, immutable Revisions, sources, and cross-Scope structure, and provide authorized models with the most relevant traceable working context.**
 
 ## 1. Core objects
 
+### Identity, Principal, and Scope
+
+An Identity is PCP's durable context and maintenance boundary. Any number of tenants may contribute to one Identity. Runtime may discover and maintain cross-tenant structure inside it, but MUST NOT infer, connect, or recall across Identities. The official Runtime currently binds one Store to one Identity.
+
+Tenants act through server-injected Principals and AccessSessions. A Principal is a caller, not the owner of the information space. A Scope is an authorization slice inside an Identity. Unified maintenance does not grant every tenant global visibility. If either endpoint of a Relation is unreadable, a response MUST NOT reveal the Relation or the hidden endpoint.
+
+Clients read `identityId` from the Runtime descriptor rather than asserting ownership themselves. Information requiring an independent maintenance and association boundary belongs to a separate Identity, not a tenant-named pseudo-boundary.
+
 ### Page
 
-A Page is a stable semantic object, not a content version. It has a `pageId`, `headRevisionId`, owner, Scope namespace, open `kind`, `mutability`, lifecycle, and timestamps.
+A Page is the smallest semantic segment worth recalling independently. It is neither a source-system event nor a content version. It has a `pageId`, `headRevisionId`, Scope namespace, open `kind`, `mutability`, lifecycle, and timestamps.
 
-- `sealed` Pages represent raw messages, file snapshots, tool results, and other evidence. They cannot publish a second Revision.
+- `sealed` Pages represent raw messages, file snapshots, tool results, and other evidence. They cannot publish a second Revision. Unreferenced leaves may be atomically replaced by an equivalent packed Page under the lossless rules below.
 - `revisioned` Pages represent maintained understanding such as Summaries, Topics, profiles, and project state.
 - Mutability is a content invariant, not a retention tier.
 - Lifecycle controls default discovery and does not assert truth.
@@ -25,25 +33,40 @@ A Revision is an immutable Page snapshot with `revisionId`, `pageId`, optional `
 
 Immutable does not mean retained forever. A Store may reclaim unprotected historical Revisions. Current heads, sealed evidence, provenance inputs reachable from protected roots, Relation basis Revisions, and explicit retention roots remain protected. Default Search and full-text indexes cover Page heads only.
 
+`createdAt` records Store commit time while optional `observedAt` records source-event time. They are not interchangeable. An optional `sourceSpan` is a closed range `{streamId, start, end}` in one producer-local event stream. Runtime namespaces an ordinary ingest stream by authenticated Principal. A SourceSpan proves order and coverage; it is not a Page Relation or a semantic-similarity assertion.
+
+### SourceRef and external media
+
+A Page is the stable PCP identity of its source. When another system retains the original, a Revision may point to it with one minimal `SourceRef`:
+
+```json
+{
+  "providerId": "tenant:photos",
+  "locator": "opaque-photo-42",
+  "mediaType": "image/jpeg",
+  "contentDigest": "sha256:..."
+}
+```
+
+`providerId + locator` has meaning only to the custodian; it is not permission for Runtime to fetch an arbitrary path or URL. `mediaType` and `contentDigest` are optional. The digest verifies returned content without creating a second asset identity. SourceRef does not promise availability; resolution failure leaves the Page and existing semantic representations intact.
+
+Searchable OCR, transcript, caption, layout, event, or domain interpretation is stored as an ordinary Page/Revision with exact provenance to the media-bearing Revision. One image may have several task-specific representations. Byte custody, provider callbacks, and automatic extraction are outside the v0.8 Core.
+
 ### Relation
 
-A Relation is a maintainable semantic assertion between stable Pages. Optional `basisRevisionIds` capture the exact versions observed when the assertion was made. Navigation follows Pages; audit follows Revisions.
+A Relation is a maintainable semantic assertion between stable Pages. Optional `basisRevisionIds` capture the exact versions observed when the assertion was made. Navigation follows Pages; audit follows Revisions. `relationType` is an open string and Capabilities do not enumerate a vocabulary; the following types have Core-defined semantics.
 
-Core conventions include `summarizes`, `assesses`, cross-Page `supersedes`, and `aggregates`. Exact generation dependency belongs in Revision provenance; a `derived_from` Page Relation is added only when it also has navigation value.
+Core conventions include `summarizes`, `assesses`, cross-Page `supersedes`, `aggregates`, `about`, and `related_to`. Pages about the same subject SHOULD point to one stable Topic Page with `about`, rather than form a pairwise clique. `related_to` is the symmetric fallback for a direct conceptual association worth future joint recall when no more precise type applies. Runtime canonicalizes its endpoints by Page ID and stores one logical edge. It does not express sequence, provenance, replacement, or dependency.
 
-Relations MUST NOT be inferred from temporal adjacency, shared Scope, co-retrieval, or vector similarity. Conversation order belongs to a Host event stream. Duplicate triples should be coalesced, and incorrect Relations may be retracted without mutating either Page.
+Exact generation dependency belongs in Revision provenance; a `derived_from` Page Relation is added only when it also has navigation value.
+
+Relations MUST NOT be inferred from temporal adjacency, shared Scope, co-retrieval, or vector similarity. Conversation order belongs to a Host event stream. Duplicate active triples are coalesced. Unconfirmed candidates remain in the maintenance ledger; they are not Relations. Incorrect Relations may be retracted without mutating either Page.
 
 ### Provenance
 
 Provenance belongs to a Revision and references the exact input Revision IDs actually used. It records operation, actor, time, tool or model where useful, and external sources. Relations support navigation; provenance reconstructs what a generation depended on.
 
-### Scope and Alias
-
-Every Page belongs to one namespace. Search, Read, graph traversal, and writes obey AccessSession Scope Grants; similarity never widens authorization.
-
-An Alias is an optional human entry point or compatibility redirect from a name to a Page ID. It is not Page identity, evidence, or a derivation node. Legacy Refs may migrate to Aliases.
-
-## 2. Summary, validity, and consolidation
+## 2. Summary, validity, and lossless packing
 
 A Summary is an ordinary revisioned Page connected to its target by `summarizes`. Only long, dense, or future-useful content needs one. A better Summary publishes a new Revision of the same Summary Page instead of creating another Page.
 
@@ -58,27 +81,49 @@ Search/Browse current Summary and Page heads
 
 Validity assessments are ordinary Pages as well. Page lifecycle controls discovery; standings such as live, qualified, disputed, or retracted come from assessment content and evidence.
 
-Consolidation lossily converges Pages that genuinely represent one durable object. It publishes a new Revision on one canonical revisioned Page, records all exact input Revisions in provenance, links the canonical Page to absorbed Pages with cross-Page `supersedes`, and removes absorbed Pages from default recall. Canonical and absorbed Pages MUST share `kind` and `mutability`; a Host-declared stable domain identity conflict is a hard rejection. Similarity may discover candidates but never decides the merge.
+Lossless packing reduces the object count of fine-grained sealed Pages without asking a model to rewrite or omit source content. Runtime may ask a semantic worker to choose an ordered subset from a bounded candidate window, but Store performs the commit deterministically.
+
+`pack_pages` accepts 2-64 unique exact current Revisions in the same Scope and `kind`, ordered as a strictly contiguous range in one `sourceSpan.streamId`. Ordinary inputs MUST be active, sealed, single-Revision leaves with no Page Relation, Relation basis or retraction, cross-Revision provenance dependency, Summary, Validity record, or retention lease. At most one input may instead be an active, revisioned packed Page acting as a stable anchor. Existing Relations, Summaries, Validity records, and historical Revisions on that anchor do not block extension because its Page identity is retained.
+
+Without an anchor, Store creates a revisioned Page. With an anchor, Store CAS-publishes a new Revision on that same Page. The `entries` of `application/vnd.pcp.packed-page+json` always contain the original leaves in source order and MUST NOT contain another packed payload; extension flattens rather than nests. In one transaction, Store removes only newly absorbed sealed leaves and records them in a content-free pack ledger. Exact reads of retired leaf IDs report the stable packed Page explicitly and never redirect silently. The previous anchor Revision remains ordinary history.
+
+v0.8 does not merge two existing packed Pages or pack across a `sourceSpan` gap. Such content remains separate and may be organized with `related_to`, `about`, Topics, or another Relation. Runtime may use temporal proximity and semantic continuity to select candidates, but model judgment cannot weaken Store invariants.
+
+Deleting original detail after a Summary or other representation matures is lossy condensation. It requires separate quality, recovery, confirmation, and audit semantics and is deferred beyond v0.8. `pack_pages` MUST NOT implement it.
 
 ## 3. Interface semantics
 
-A Core surface should provide bounded Search, current or exact Read, sealed or revisioned writes, CAS revision, atomic consolidation, Summary and validity writes, Page Relations, Scope discovery, audit, a bounded `plan_revision_retention(scopes, policy)` dry run, explicit `collect_revision_retention(scopes, policy, confirmed_revision_ids)`, and finite idempotent Revision retention leases.
+### 3.1 Tenant data plane
 
-Hosts should fill mechanical actor, time, Scope, structural Relation, and provenance fields. Search returns candidates rather than truth and defaults to current heads. Historical Revisions remain exactly addressable for audit but do not re-enter default retrieval.
+The normative ordinary-tenant surface is deliberately small: `describe() -> identityId, access, capabilities`, `list_scopes(query?, limit?, cursor?)`, `ingest_page(namespace, kind, payload?, source_refs?, observed_at?, source_span?, facets?, external_event_id?)`, bounded `search_pages(query, scopes, strategy?, limit?, cursor?)`, and current or authorized exact `read_pages(page_ids, revision_ids?, view?, max_chars?)`. Implementations may additionally expose bounded `browse_index(scopes?, view?, limit?, cursor?)` as a capability.
+
+`ingest_page` is the tenant's only durable write. Identity comes from the connected Runtime and is not repeated on every Page, Revision, Scope, or request. Runtime fills Actor, active lifecycle, and sealed mutability from the authenticated session and isolates an optional `sourceSpan.streamId`. A `read` session retrieves only; a `contribute` session additionally receives a distinct `ingest` permission and does not thereby gain advanced Page or maintenance writes.
+
+Search returns bounded candidates rather than truth, is paginated, and identifies the matched projection and current Revision. Authorized Relation, Summary, Validity, provenance, and SourceRef projections are read through the same tenant surface rather than separate mutation APIs. A caller holding an exact Revision ID may read that historical evidence when its Scope grants allow it, but historical Revisions do not re-enter default Search; raw access audit and history enumeration remain audit or operator concerns. The consuming model chooses queries and assembles the active working context.
+
+### 3.2 Runtime maintenance surface
+
+Runtime maintainers and local administration tools may use the complete Core operations: advanced sealed or revisioned Page writes, CAS revision, atomic `pack_pages(pages[{page_id, revision_id}], idempotency_key?)`, Summary and validity writes, Page Relations, Scope management, audit, bounded retention planning, explicit collection, and finite idempotent Revision retention leases. These implement Identity-wide maintenance policy and are not part of the ordinary tenant contract.
+
+An implementation may carry both operation sets over one RPC transport, but it MUST enforce the boundary through session permissions and an operation allowlist. The interface split does not require another socket or deployment unit.
+
+### 3.3 Control and observation planes
+
+Runtime Discovery, enrollment, approval, and `open_session` belong to Runtime control protocols. Health, Observer snapshots, raw audit, and maintenance controls belong to read-only observation or local operator interfaces. They may ship with PCP, but are not the tenant Page data plane and are not carried as Core Page requests.
 
 ## 4. Responsibility boundaries
 
-The protocol defines Page and Revision identity, sealed/revisioned invariants, Page Relations, exact provenance, Scope authorization, CAS publication, and retention safety constraints.
+The protocol defines the Identity boundary, Page and Revision identity, sealed/revisioned invariants, Page Relations, exact provenance, SourceRef, Scope authorization, CAS publication, and retention safety constraints.
 
-The Store and Runtime own transactions, current-head indexes, authorization enforcement, relation retraction, retention, cold storage, GC roots, candidate discovery, and maintenance job lifecycle. Physical residency does not enter model context.
+Store and Runtime own transactions, current-head indexes, authorization enforcement, relation retraction, retention, GC roots, candidate discovery, and Identity-wide Summary, Validity, lossless-packing, semantic-relation, and retention policy. Runtime may invoke a separate model as an inference provider, but owns task generation, budgets, validation, commit authority, and the maintenance ledger.
 
-The Host owns event capture and order, Page kinds, revision policy, Summary/Topic/profile policy, semantic judgment, model routing, proactive exploration, attention boundaries, and active-context assembly.
+A tenant or Host captures its own source events, source-local ordering and deterministic structure including optional SourceSpans, Page kind, SourceRefs, and external-media custody. It may submit feedback or candidates but does not own the global relation graph. The consuming model chooses queries, reads authorized exact content, judges task relevance, and assembles the active working context.
 
 PCP does not define a fixed prompt, vector algorithm, summarization threshold, background-agent topology, or user-profile schema.
 
 ## 5. Retention
 
-Implementations may classify Revisions as current, protected, reclaimable, cold, or stubbed, but those are Store states rather than protocol fields. Current heads, sealed evidence, provenance inputs reachable from protected roots, Relation-basis inputs, and explicit snapshots or leases are protected. Unreferenced intermediate Revisions may be compacted or deleted after roots are recalculated. IDs are never silently reused.
+Implementations may classify Revisions as current, protected, reclaimable, cold, or stubbed, but those are Store states rather than protocol fields. Current heads, sealed evidence, provenance inputs reachable from protected roots, Relation-basis inputs, and explicit snapshots or leases are protected. Lossless packing under Section 2 is the only v0.8 exception for sealed leaves. Unreferenced intermediate Revisions may be compacted or deleted after roots are recalculated. IDs are never silently reused.
 
 An exact read of a collected Revision MUST report that it is unavailable and MUST NOT fall back to the current Page head. `previousRevisionId` records publication order rather than permanent retention, so a retained history may contain physical gaps.
 
@@ -88,12 +133,10 @@ The planner begins from current heads, sealed evidence, recent-version and minim
 
 Explicit retention uses finite, idempotently renewable Revision leases rather than Page content fields. A lease binds an exact Revision, authorized Scope, holder Principal, reason, and expiration; an expired lease is no longer a protection root. A Runtime may offer bounded routing views of actual collection candidates to a Host semantic worker, but the model selects candidates and reasons only. It does not choose global GC policy or bypass Store authorization and protection closure. Permanent retention, early revocation, and collection remain explicit operator actions rather than silent consequences of an ordinary model decision.
 
-A dry run performs no deletion. Collection requires a separately authorized caller to submit exact candidate Revision IDs. The Store MUST recalculate roots inside the write transaction and reject the entire batch if any ID is no longer eligible. A successful collection atomically removes candidate Revisions, candidate-owned compatibility projections or source edges, and only past-window idempotency records linked to those candidates. It keeps replay metadata for current heads and surviving operations, and writes a content-free collection ledger so an old Revision ID remains distinguishable from one that never existed. Implementations advertise planning and application separately through `supportsRevisionRetentionPlanning` and `supportsRevisionRetention`; planning support does not imply collection support.
+A dry run performs no deletion. Collection requires a separately authorized caller to submit exact candidate Revision IDs. The Store MUST recalculate roots inside the write transaction and reject the entire batch if any ID is no longer eligible. A successful collection atomically removes candidate Revisions, candidate-owned projection indexes or source edges, and only past-window idempotency records linked to those candidates. It keeps replay metadata for current heads and surviving operations, and writes a content-free collection ledger so an old Revision ID remains distinguishable from one that never existed. Implementations list only optional capabilities in `capabilities.features`; retention planning and application use `revision_retention_planning` and `revision_retention`, respectively. Planning support does not imply collection support. Mandatory v0.8 behavior is not repeated as always-true booleans.
 
-Retention policy is configured by Host, Page kind, storage budget, and value; models should not choose GC parameters on every write.
+Retention policy is configured by Identity, Page kind, storage budget, and value; tenants and models should not choose GC parameters on every write.
 
-## 6. Migration from v0.6
+## 6. v0.8 version boundary
 
-The v0.6 reference database already stored stable `page_id` and exact `revision_id` while its public vocabulary exposed `Ref ~= Page` and `Page ~= Revision`. A v0.7 migration restores those identities, backfills Page metadata and Revision parents, removes intra-Page `supersedes`, normalizes Relations to Page endpoints with exact basis Revisions, converges Summary and Validity updates on stable maintained Pages, rebuilds head-only indexes, and removes identity Refs. An implementation that actually exposes an Alias API may explicitly migrate non-identity Refs instead.
-
-Migration MUST be transactional, idempotent, and preceded by a recoverable backup.
+v0.8 is not wire- or Store-schema-compatible with v0.7. Upgrade creates a new v0.8 Store and imports original tenant-held content through `ingest_page`. Implementations MUST NOT open the old database directly or infer Identity, SourceRefs, or new semantic Relations from old URIs, summaries, vector hits, or historical provenance. Advanced writes remain available to Runtime maintainers and administration tools.

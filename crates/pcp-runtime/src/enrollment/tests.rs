@@ -6,8 +6,11 @@ use std::{
 };
 
 use crate::{EnrollmentConfig, ObserverConfig, ObserverService};
-use pcp_client::PcpApi;
-use pcp_core::{AccessPermission, AccessPrincipalType};
+use pcp_client::{PcpApi, PcpTenantApi};
+use pcp_core::{
+    AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
+    CreateScopeRequest, IngestPageRequest, PagePayload, WriteSummaryRequest,
+};
 use pcp_rpc::{
     BeginEnrollmentParams, EnrollmentAdminClient, EnrollmentAdminResult, EnrollmentClient,
     EnrollmentClientClaim, EnrollmentPrincipalClaim, EnrollmentResult, EnrollmentStatusParams,
@@ -25,9 +28,30 @@ async fn enrollment_approves_identity_bound_session_and_survives_generation_chan
             .await
             .expect("open enrollment test store"),
     );
-    let owner_id = store.owner_id().to_owned();
+    let identity_id = store.identity_id().to_owned();
+    let identity_scope = format!("user:{identity_id}");
     let store: Arc<dyn PcpStore> = store;
-    let mut observer_config = ObserverConfig::for_test(root.clone(), owner_id.clone());
+    store
+        .create_scope(
+            &AccessSession::full_control(
+                AccessPrincipal {
+                    principal_id: "operator:enrollment-test".to_owned(),
+                    principal_type: AccessPrincipalType::Service,
+                    display_name: None,
+                },
+                "session:enrollment-test",
+                vec![identity_scope.clone()],
+            ),
+            CreateScopeRequest {
+                namespace: identity_scope.clone(),
+                display_name: "Enrollment test identity".to_owned(),
+                description: None,
+                parent_namespace: None,
+            },
+        )
+        .await
+        .expect("create identity scope");
+    let mut observer_config = ObserverConfig::for_test(root.clone(), identity_id.clone());
     observer_config.enrollment_enabled = true;
     let enrollment_config = EnrollmentConfig::for_test(root.clone());
     let admin_socket = enrollment_config.admin_socket_path.clone();
@@ -106,13 +130,57 @@ async fn enrollment_approves_identity_bound_session_and_survives_generation_chan
     assert!(
         first_session
             .access
-            .allows(&format!("user:{owner_id}"), AccessPermission::ReadDetail)
+            .allows(&format!("user:{identity_id}"), AccessPermission::ReadDetail)
+    );
+    assert!(
+        first_session
+            .access
+            .allows(&format!("user:{identity_id}"), AccessPermission::Ingest)
+    );
+    assert!(
+        !first_session
+            .access
+            .allows(&format!("user:{identity_id}"), AccessPermission::Write)
     );
     let remote =
         RemotePcpClient::connect_expected(root.join(&first_session.endpoint), "host:symbiont-d")
             .await
             .expect("connect identity-bound session");
     assert_eq!(remote.access(), &first_session.access);
+    let ingested = remote
+        .ingest_page(IngestPageRequest {
+            namespace: identity_scope,
+            kind: "conversation_event".to_owned(),
+            observed_at: None,
+            source_span: None,
+            payload: Some(PagePayload {
+                media_type: "text/plain".to_owned(),
+                content: "A tenant can contribute a sealed source event.".to_owned(),
+            }),
+            source_refs: Vec::new(),
+            facets: None,
+            external_event_id: Some("enrollment:contribute:test".to_owned()),
+        })
+        .await
+        .expect("ingest through contribute session");
+    assert!(
+        remote
+            .write_summary(WriteSummaryRequest {
+                target_page_id: ingested.page_id,
+                target_revision_id: ingested.revision_id,
+                expected_summary_revision_id: None,
+                content: "A tenant must not publish maintained interpretation.".to_owned(),
+                created_by: Actor {
+                    actor_type: ActorType::Model,
+                    actor_id: "model:tenant-test".to_owned(),
+                },
+                tool_or_model: None,
+                provenance: Vec::new(),
+                idempotency_key: Some("enrollment:contribute:summary".to_owned()),
+            })
+            .await
+            .is_err()
+    );
     let idempotent = public
         .begin(begin_params(&credential))
         .await
@@ -181,9 +249,9 @@ async fn enrollment_requires_the_client_credential_for_status() {
             .await
             .expect("open credential test store"),
     );
-    let owner_id = store.owner_id().to_owned();
+    let identity_id = store.identity_id().to_owned();
     let store: Arc<dyn PcpStore> = store;
-    let mut observer_config = ObserverConfig::for_test(root.clone(), owner_id);
+    let mut observer_config = ObserverConfig::for_test(root.clone(), identity_id);
     observer_config.enrollment_enabled = true;
     let mut observer = ObserverService::start(
         observer_config,
@@ -244,13 +312,13 @@ fn begin_params(credential: &str) -> BeginEnrollmentParams {
             },
         },
         requested_access: RequestedAccess {
-            mode: RequestedAccessMode::Admin,
+            mode: RequestedAccessMode::Contribute,
             scopes: vec![
                 "user:self".to_owned(),
                 "project:symbiont-d".to_owned(),
                 "conversation:symbiont-d".to_owned(),
             ],
-            allow_cross_scope_derivation: true,
+            allow_cross_scope_derivation: false,
         },
         credential: credential.to_owned(),
     }

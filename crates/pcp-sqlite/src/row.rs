@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use pcp_core::{
     Actor, ActorType, LifecycleStatus, Page, PageMutability, PagePayload, PageRevision,
-    ProvenanceEvent, Relation, SourceRef,
+    ProvenanceEvent, Relation, SourceRef, SourceSpan,
 };
 use rusqlite::{Connection, Row};
 
@@ -12,31 +12,35 @@ pub(crate) fn revision_from_row(
     include_sources: bool,
     include_provenance: bool,
 ) -> Result<PageRevision> {
-    let actor_type_text: String = row.get(10)?;
-    let lifecycle_text: String = row.get(5)?;
-    let payload_media_type: Option<String> = row.get(12)?;
-    let payload_content: Option<String> = row.get(13)?;
-    let source_refs_json: String = row.get(14)?;
-    let facets_json: Option<String> = row.get(15)?;
-    let provenance_json: String = row.get(16)?;
+    let actor_type_text: String = row.get(9)?;
+    let lifecycle_text: String = row.get(3)?;
+    let source_span_json: Option<String> = row.get(6)?;
+    let payload_media_type: Option<String> = row.get(11)?;
+    let payload_content: Option<String> = row.get(12)?;
+    let source_refs_json: String = row.get(13)?;
+    let facets_json: Option<String> = row.get(14)?;
+    let provenance_json: String = row.get(15)?;
 
     Ok(PageRevision {
         page_id: row.get(0)?,
         revision_id: row.get(1)?,
-        previous_revision_id: row.get(17)?,
-        owner_id: row.get(2)?,
-        namespace: row.get(3)?,
-        visibility: row.get(4)?,
+        previous_revision_id: row.get(16)?,
+        namespace: row.get(2)?,
         lifecycle_status: LifecycleStatus::parse(&lifecycle_text)
             .with_context(|| format!("unknown lifecycle status {lifecycle_text}"))?,
-        created_at: row.get(6)?,
-        observed_at: row.get(7)?,
-        valid_from: row.get(8)?,
-        valid_to: row.get(9)?,
+        created_at: row.get(4)?,
+        observed_at: row.get(5)?,
+        source_span: source_span_json
+            .map(|value| {
+                serde_json::from_str::<SourceSpan>(&value).context("decode PCP source span")
+            })
+            .transpose()?,
+        valid_from: row.get(7)?,
+        valid_to: row.get(8)?,
         created_by: Actor {
             actor_type: ActorType::parse(&actor_type_text)
                 .with_context(|| format!("unknown actor type {actor_type_text}"))?,
-            actor_id: row.get(11)?,
+            actor_id: row.get(10)?,
         },
         payload: if include_payload {
             payload_media_type
@@ -91,26 +95,24 @@ pub(crate) fn relation_from_row(row: &Row<'_>) -> Result<Relation> {
 pub(crate) fn page_manifest(connection: &Connection, page_id: &str) -> Result<Page> {
     connection
         .query_row(
-            "SELECT page_id, current_revision_id, owner_id, namespace, visibility,
+            "SELECT page_id, current_revision_id, namespace,
                     kind, mutability, lifecycle_status, created_at, updated_at
              FROM pcp_pages WHERE page_id = ?1",
             [page_id],
             |row| {
-                let mutability: String = row.get(6)?;
-                let lifecycle: String = row.get(7)?;
+                let mutability: String = row.get(4)?;
+                let lifecycle: String = row.get(5)?;
                 Ok(Page {
                     page_id: row.get(0)?,
                     head_revision_id: row.get(1)?,
-                    owner_id: row.get(2)?,
-                    namespace: row.get(3)?,
-                    visibility: row.get(4)?,
-                    kind: row.get(5)?,
+                    namespace: row.get(2)?,
+                    kind: row.get(3)?,
                     mutability: PageMutability::parse(&mutability)
                         .unwrap_or(PageMutability::Sealed),
                     lifecycle_status: LifecycleStatus::parse(&lifecycle)
                         .unwrap_or(LifecycleStatus::Active),
-                    created_at: row.get(8)?,
-                    updated_at: row.get(9)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
                 })
             },
         )
@@ -118,8 +120,8 @@ pub(crate) fn page_manifest(connection: &Connection, page_id: &str) -> Result<Pa
 }
 
 pub(crate) const REVISION_COLUMNS: &str = "
-    r.page_id, r.revision_id, r.owner_id, r.namespace, r.visibility,
-    r.lifecycle_status, r.created_at, r.observed_at, r.valid_from, r.valid_to,
+    r.page_id, r.revision_id, r.namespace,
+    r.lifecycle_status, r.created_at, r.observed_at, r.source_span_json, r.valid_from, r.valid_to,
     r.actor_type, r.actor_id, r.payload_media_type, r.payload_content,
     r.source_refs_json, r.facets_json, r.provenance_json
     , r.previous_revision_id

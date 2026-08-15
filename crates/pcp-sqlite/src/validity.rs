@@ -80,22 +80,22 @@ impl SqlitePcpStore {
                 .map(|(_, page_id)| page_id.clone())
                 .unwrap_or(random_id(&transaction, "pg_")?);
             let assessed_at = now();
-            let (owner_id, namespace, visibility): (String, String, String) = transaction
+            let namespace: String = transaction
                 .query_row(
-                    "SELECT owner_id, namespace, visibility FROM pcp_revisions WHERE revision_id = ?1",
+                    "SELECT namespace FROM pcp_revisions WHERE revision_id = ?1",
                     [&request.target_revision_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| row.get(0),
                 )
                 .context("read PCP assessment target metadata")?;
             if current.is_none() {
                 transaction
                     .execute(
                     "INSERT INTO pcp_pages (
-                        page_id, current_revision_id, created_at, owner_id, namespace,
-                        visibility, kind, mutability, lifecycle_status, updated_at
-                     ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, 'validity_assessment',
+                        page_id, current_revision_id, created_at, namespace,
+                        kind, mutability, lifecycle_status, updated_at
+                     ) VALUES (?1, NULL, ?2, ?3, 'validity_assessment',
                                'revisioned', 'active', ?2)",
-                    params![physical_page_id, assessed_at, owner_id, namespace, visibility],
+                    params![physical_page_id, assessed_at, namespace],
                 )
                     .context("create PCP validity Page")?;
             }
@@ -125,12 +125,11 @@ impl SqlitePcpStore {
                 &transaction,
                 &physical_page_id,
                 &assessment_id,
-                &owner_id,
                 &namespace,
-                &visibility,
                 "active",
                 &assessed_at,
                 Some(&assessed_at),
+                None,
                 None,
                 None,
                 &request.created_by,

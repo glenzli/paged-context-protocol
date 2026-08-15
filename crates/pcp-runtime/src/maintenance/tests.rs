@@ -12,21 +12,93 @@ use pcp_core::{
     AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
     CreateScopeRequest, LifecycleStatus, PageMutability, PagePayload, PlanRevisionRetentionRequest,
     Projection, ReadPagesRequest, RetentionPolicy, RetentionProtectionReason, RevisePageRequest,
-    WritePageRequest,
+    SourceSpan, WritePageRequest,
 };
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 
 use super::{
-    CommandSemanticWorker, CompactionMaintenanceConfig, MaintenanceConfig, MaintenanceMode,
-    MaintenanceWorkerRequest, MaintenanceWorkerResponse, RetentionMaintenanceConfig,
-    RetentionMilestone, RuntimeMaintainer, SemanticMaintenanceWorker, SummaryMaintenanceConfig,
-    WorkerCommandConfig,
+    CommandSemanticWorker, MaintenanceConfig, MaintenanceMode, MaintenanceRunAudit,
+    MaintenanceWorkerConfig, MaintenanceWorkerRequest, MaintenanceWorkerResponse,
+    PackingMaintenanceConfig, RelationCandidatePage, RelationMaintenanceConfig,
+    RetentionMaintenanceConfig, RetentionMilestone, RuntimeMaintainer, SemanticMaintenanceWorker,
+    SummaryMaintenanceConfig, worker::PackingCandidatePage,
 };
 
 struct FakeWorker {
     responses: Mutex<VecDeque<MaintenanceWorkerResponse>>,
     requests: Mutex<Vec<MaintenanceWorkerRequest>>,
+}
+
+#[test]
+fn packing_is_opt_in_and_selection_wire_contains_only_semantic_inputs() {
+    assert!(!PackingMaintenanceConfig::default().enabled);
+    let wire = serde_json::to_value(MaintenanceWorkerRequest::SelectPacking {
+        pages: vec![PackingCandidatePage {
+            page_id: "pg_1".to_owned(),
+            created_at: "2026-08-15T08:00:00Z".to_owned(),
+            observed_at: None,
+            routing_text: "one bounded source excerpt".to_owned(),
+        }],
+        excluded_candidate_sets: Vec::new(),
+    })
+    .expect("serialize packing selection request");
+
+    assert_eq!(
+        wire,
+        serde_json::json!({
+            "operation": "select_packing",
+            "pages": [{
+                "pageId": "pg_1",
+                "createdAt": "2026-08-15T08:00:00Z",
+                "routingText": "one bounded source excerpt"
+            }],
+            "excluded_candidate_sets": []
+        })
+    );
+}
+
+#[test]
+fn relation_is_opt_in_and_selection_wire_omits_commit_authority() {
+    assert!(!RelationMaintenanceConfig::default().enabled);
+    let wire = serde_json::to_value(MaintenanceWorkerRequest::SelectRelation {
+        pages: vec![RelationCandidatePage {
+            page_id: "pg_1".to_owned(),
+            namespace: "project:one".to_owned(),
+            kind: "document".to_owned(),
+            created_at: "2026-08-15T08:00:00Z".to_owned(),
+            observed_at: None,
+            routing_text: "one bounded routing excerpt".to_owned(),
+            facets: None,
+            relation_types: vec!["summarizes".to_owned()],
+        }],
+    })
+    .expect("serialize relation selection request");
+
+    assert_eq!(
+        wire,
+        serde_json::json!({
+            "operation": "select_relation",
+            "pages": [{
+                "pageId": "pg_1",
+                "namespace": "project:one",
+                "kind": "document",
+                "createdAt": "2026-08-15T08:00:00Z",
+                "routingText": "one bounded routing excerpt",
+                "relationTypes": ["summarizes"]
+            }]
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(MaintenanceWorkerResponse::Relate {
+            page_ids: ["pg_1".to_owned(), "pg_2".to_owned()],
+        })
+        .expect("serialize relation decision"),
+        serde_json::json!({
+            "decision": "relate",
+            "page_ids": ["pg_1", "pg_2"]
+        })
+    );
 }
 
 impl FakeWorker {
@@ -77,7 +149,7 @@ async fn maintainer_writes_only_the_summary_selected_by_the_worker() {
         },
     ]));
     let mut config = fixture.config();
-    config.compaction.enabled = false;
+    config.packing.enabled = false;
     let mut maintainer =
         RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
 
@@ -127,7 +199,7 @@ async fn observe_mode_records_a_summary_proposal_without_mutating_the_page() {
     ]));
     let mut config = fixture.config();
     config.mode = MaintenanceMode::Observe;
-    config.compaction.enabled = false;
+    config.packing.enabled = false;
     let mut maintainer =
         RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
 
@@ -202,12 +274,12 @@ async fn semantic_retention_job_leases_only_worker_selected_revisions() {
     }]));
     let mut config = fixture.config();
     config.summary.enabled = false;
-    config.compaction.enabled = false;
+    config.packing.enabled = false;
     config.retention.enabled = true;
     config.retention.write_leases = true;
     config.retention.minimum_age_days = 0;
     config.retention.keep_recent_revisions_per_page = 0;
-    let access = config.access_session(&fixture.owner_id);
+    let access = config.access_session(&fixture.identity_id);
     assert!(access.allows(&fixture.namespace, AccessPermission::Audit));
     assert!(access.allows(&fixture.namespace, AccessPermission::Write));
     let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
@@ -252,7 +324,7 @@ async fn observe_mode_retention_can_plan_without_receiving_write_access() {
     config.mode = MaintenanceMode::Observe;
     config.retention.enabled = true;
 
-    let access = config.access_session(&fixture.owner_id);
+    let access = config.access_session(&fixture.identity_id);
     let client = EmbeddedPcpClient::shared(Arc::clone(&fixture.store), access.clone());
 
     assert!(access.allows(&fixture.namespace, AccessPermission::Audit));
@@ -269,102 +341,186 @@ async fn observe_mode_retention_can_plan_without_receiving_write_access() {
 }
 
 #[tokio::test]
-async fn maintainer_requires_selection_and_synthesis_before_atomic_consolidation() {
-    let fixture = Fixture::open("consolidation").await;
+async fn maintainer_packs_only_the_ordered_candidate_selected_by_the_worker() {
+    let fixture = Fixture::open("packing").await;
     let first = fixture
         .client
-        .write_page(fixture.page(
+        .write_page(fixture.sealed_event(
             "The runtime keeps one durable and auditable state.",
-            "consolidation:1",
+            "packing:1",
+            1,
         ))
         .await
-        .expect("write first consolidation Page");
+        .expect("write first packing Page");
     let second = fixture
         .client
-        .write_page(fixture.page(
+        .write_page(fixture.sealed_event(
             "The same runtime state remains durable across restarts.",
-            "consolidation:2",
+            "packing:2",
+            2,
         ))
         .await
-        .expect("write second consolidation Page");
+        .expect("write second packing Page");
     let worker = Arc::new(FakeWorker::new(vec![
         MaintenanceWorkerResponse::Candidate {
             page_ids: vec![first.page_id.clone(), second.page_id.clone()],
-            rationale: Some("Both Pages describe one durable runtime state.".to_owned()),
-        },
-        MaintenanceWorkerResponse::Consolidate {
-            canonical_page_id: first.page_id.clone(),
-            content: "The runtime preserves one durable, auditable state across restarts."
-                .to_owned(),
         },
     ]));
     let mut config = fixture.config();
     config.summary.enabled = false;
+    config.packing.enabled = true;
     let mut maintainer =
         RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
 
     let report = maintainer
         .run_once()
         .await
-        .expect("run consolidation maintenance");
+        .expect("run packing maintenance");
 
-    assert_eq!(report.worker_calls, 2);
-    assert_eq!(report.consolidations_committed, 1);
-    assert_eq!(worker.request_count(), 2);
-    let first_head = fixture
+    assert_eq!(report.worker_calls, 1);
+    assert_eq!(report.packs_committed, 1);
+    assert_eq!(worker.request_count(), 1);
+    assert!(
+        fixture
+            .client
+            .current_revision_id(first.page_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        fixture
+            .client
+            .current_revision_id(second.page_id)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fixture
+            .client
+            .page_count(Vec::new())
+            .await
+            .expect("count packed Pages"),
+        1
+    );
+    let packed = fixture
         .client
-        .current_revision_id(first.page_id)
+        .durable_page_inventory(Vec::new())
         .await
-        .expect("read canonical Page head");
-    let second_head = fixture
+        .expect("read packed inventory")
+        .into_iter()
+        .find(|page| page.media_type.as_deref() == Some(pcp_core::PACKED_PAGE_MEDIA_TYPE))
+        .expect("packed Page inventory item");
+    assert_eq!(packed.mutability, PageMutability::Revisioned);
+    let third = fixture
         .client
-        .current_revision_id(second.page_id)
+        .write_page(fixture.sealed_event(
+            "The continuous runtime discussion adds another detail.",
+            "packing:3",
+            3,
+        ))
         .await
-        .expect("read absorbed Page head");
-    assert_ne!(first_head, second_head);
-    assert_ne!(first_head, first.revision_id);
-    assert_eq!(second_head, second.revision_id);
+        .expect("write third packing Page");
+    let fourth = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "The same discussion remains continuous and auditable.",
+            "packing:4",
+            4,
+        ))
+        .await
+        .expect("write fourth packing Page");
+    let extension_worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::Candidate {
+            page_ids: vec![
+                packed.page_id.clone(),
+                third.page_id.clone(),
+                fourth.page_id.clone(),
+            ],
+        },
+    ]));
+    let mut extension_config = fixture.config();
+    extension_config.summary.enabled = false;
+    extension_config.packing.enabled = true;
+    let mut extension_maintainer = RuntimeMaintainer::for_test(
+        fixture.client.clone(),
+        extension_worker.clone(),
+        extension_config,
+    );
+    let extension_report = extension_maintainer
+        .run_once()
+        .await
+        .expect("extend packed Page through maintenance");
+
+    assert_eq!(extension_report.packs_committed, 1);
+    assert_ne!(
+        fixture
+            .client
+            .current_revision_id(packed.page_id.clone())
+            .await
+            .expect("read extended packed head"),
+        packed.revision_id
+    );
+    assert_eq!(
+        fixture
+            .client
+            .page_count(Vec::new())
+            .await
+            .expect("count extended packed Pages"),
+        1
+    );
+    {
+        let requests = extension_worker
+            .requests
+            .lock()
+            .expect("fake worker requests");
+        let MaintenanceWorkerRequest::SelectPacking { pages, .. } = &requests[0] else {
+            panic!("expected packing selection request");
+        };
+        let anchor = pages
+            .iter()
+            .find(|page| page.page_id == packed.page_id)
+            .expect("packed anchor routing page");
+        assert!(anchor.routing_text.contains("Packed range boundary"));
+        assert!(!anchor.routing_text.starts_with('{'));
+    }
     fixture.close().await;
 }
 
 #[tokio::test]
-async fn observe_mode_records_a_consolidation_proposal_without_replacing_heads() {
-    let fixture = Fixture::open("observe-consolidation").await;
+async fn observe_mode_records_a_packing_proposal_without_replacing_pages() {
+    let fixture = Fixture::open("observe-packing").await;
     let first = fixture
         .client
-        .write_page(fixture.page("One durable runtime state.", "observe-merge:1"))
+        .write_page(fixture.sealed_event("One durable runtime state.", "observe-pack:1", 1))
         .await
         .expect("write first observed Page");
     let second = fixture
         .client
-        .write_page(fixture.page(
+        .write_page(fixture.sealed_event(
             "The same durable runtime state after restart.",
-            "observe-merge:2",
+            "observe-pack:2",
+            2,
         ))
         .await
         .expect("write second observed Page");
     let worker = Arc::new(FakeWorker::new(vec![
         MaintenanceWorkerResponse::Candidate {
             page_ids: vec![first.page_id.clone(), second.page_id.clone()],
-            rationale: Some("Both Pages describe one state.".to_owned()),
-        },
-        MaintenanceWorkerResponse::Consolidate {
-            canonical_page_id: first.page_id.clone(),
-            content: "A proposed replacement that must not be committed.".to_owned(),
         },
     ]));
     let mut config = fixture.config();
     config.mode = MaintenanceMode::Observe;
     config.summary.enabled = false;
+    config.packing.enabled = true;
     let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
 
     let report = maintainer
         .run_once()
         .await
-        .expect("observe consolidation maintenance");
+        .expect("observe packing maintenance");
 
-    assert_eq!(report.consolidations_proposed, 1);
-    assert_eq!(report.consolidations_committed, 0);
+    assert_eq!(report.packs_proposed, 1);
+    assert_eq!(report.packs_committed, 0);
     assert_eq!(
         fixture
             .client
@@ -385,54 +541,146 @@ async fn observe_mode_records_a_consolidation_proposal_without_replacing_heads()
 }
 
 #[tokio::test]
-async fn maintainer_keeps_pages_current_when_the_worker_rejects_a_merge() {
-    let fixture = Fixture::open("keep-separate").await;
+async fn maintainer_links_only_an_offered_pair_with_runtime_owned_relation_semantics() {
+    let fixture = Fixture::open("relation").await;
     let first = fixture
         .client
-        .write_page(fixture.page("A design constraint.", "separate:1"))
+        .write_page(fixture.page(
+            "PCP keeps durable context outside the active model window.",
+            "relation:1",
+        ))
         .await
-        .expect("write first separate Page");
+        .expect("write first relation candidate");
     let second = fixture
         .client
-        .write_page(fixture.page("An unrelated observation.", "separate:2"))
+        .write_page(fixture.page(
+            "The runtime recalls durable context into a bounded active window.",
+            "relation:2",
+        ))
         .await
-        .expect("write second separate Page");
-    let worker = Arc::new(FakeWorker::new(vec![
-        MaintenanceWorkerResponse::Candidate {
-            page_ids: vec![first.page_id.clone(), second.page_id.clone()],
-            rationale: None,
-        },
-        MaintenanceWorkerResponse::KeepSeparate {
-            reason: Some("The Pages are only superficially similar.".to_owned()),
-        },
-    ]));
+        .expect("write second relation candidate");
+    let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
+        page_ids: [second.page_id.clone(), first.page_id.clone()],
+    }]));
     let mut config = fixture.config();
     config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = true;
+    let mut maintainer =
+        RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let report = maintainer
+        .run_once()
+        .await
+        .expect("run relation maintenance");
+
+    assert_eq!(report.worker_calls, 1);
+    assert_eq!(report.relations_committed, 1);
+    assert_eq!(report.relations_proposed, 0);
+    let pages = fixture
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![first.page_id.clone()],
+            revision_ids: Vec::new(),
+            projections: vec![Projection::Manifest, Projection::Relations],
+            max_chars: 1,
+        })
+        .await
+        .expect("read maintained relation");
+    let relation = pages[0]
+        .relations
+        .iter()
+        .find(|relation| relation.relation_type == "related_to")
+        .expect("related_to relation");
+    let mut expected_basis = vec![first.revision_id.clone(), second.revision_id.clone()];
+    expected_basis.sort();
+    assert_eq!(relation.basis_revision_ids, expected_basis);
+    assert_eq!(relation.created_by.actor_id, "model:maintenance-test");
+
+    let second_cycle = maintainer
+        .run_once()
+        .await
+        .expect("respect relation window cooldown");
+    assert_eq!(second_cycle.worker_calls, 0);
+    assert_eq!(worker.request_count(), 1);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn observe_relation_records_a_proposal_without_linking_pages() {
+    let fixture = Fixture::open("observe-relation").await;
+    let first = fixture
+        .client
+        .write_page(fixture.page("A durable protocol decision.", "observe-relation:1"))
+        .await
+        .expect("write first observed relation candidate");
+    let second = fixture
+        .client
+        .write_page(fixture.page(
+            "The implementation follows that durable protocol decision.",
+            "observe-relation:2",
+        ))
+        .await
+        .expect("write second observed relation candidate");
+    let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
+        page_ids: [first.page_id.clone(), second.page_id.clone()],
+    }]));
+    let mut config = fixture.config();
+    config.mode = MaintenanceMode::Observe;
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = true;
     let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
 
     let report = maintainer
         .run_once()
         .await
-        .expect("run rejected consolidation maintenance");
+        .expect("observe relation maintenance");
 
-    assert_eq!(report.kept_separate, 1);
-    assert_eq!(report.consolidations_committed, 0);
-    assert_eq!(
-        fixture
-            .client
-            .current_revision_id(first.page_id)
-            .await
-            .expect("read first current Page"),
-        first.revision_id
-    );
-    assert_eq!(
-        fixture
-            .client
-            .current_revision_id(second.page_id)
-            .await
-            .expect("read second current Page"),
-        second.revision_id
-    );
+    assert_eq!(report.relations_proposed, 1);
+    assert_eq!(report.relations_committed, 0);
+    let pages = fixture
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![first.page_id],
+            revision_ids: Vec::new(),
+            projections: vec![Projection::Manifest, Projection::Relations],
+            max_chars: 1,
+        })
+        .await
+        .expect("read observed relation candidate");
+    assert!(pages[0].relations.is_empty());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn maintainer_rejects_a_relation_page_outside_the_offered_window() {
+    let fixture = Fixture::open("relation-outside-window").await;
+    fixture
+        .client
+        .write_page(fixture.page("First offered Page.", "relation-window:1"))
+        .await
+        .expect("write first offered Page");
+    let second = fixture
+        .client
+        .write_page(fixture.page("Second offered Page.", "relation-window:2"))
+        .await
+        .expect("write second offered Page");
+    let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
+        page_ids: [second.page_id, "pg_not_offered".to_owned()],
+    }]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = true;
+    let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+
+    let error = maintainer
+        .run_once()
+        .await
+        .expect_err("reject relation outside offered window");
+
+    assert!(format!("{error:#}").contains("invalid relation pair"));
     fixture.close().await;
 }
 
@@ -441,21 +689,20 @@ async fn maintainer_does_not_resend_an_unchanged_empty_candidate_window() {
     let fixture = Fixture::open("empty-window").await;
     fixture
         .client
-        .write_page(fixture.page("One durable Page.", "empty:1"))
+        .write_page(fixture.sealed_event("One durable Page.", "empty:1", 1))
         .await
         .expect("write first inventory Page");
     fixture
         .client
-        .write_page(fixture.page("Another durable Page.", "empty:2"))
+        .write_page(fixture.sealed_event("Another durable Page.", "empty:2", 2))
         .await
         .expect("write second inventory Page");
     let worker = Arc::new(FakeWorker::new(vec![
-        MaintenanceWorkerResponse::NoCandidate {
-            reason: Some("Nothing should be merged.".to_owned()),
-        },
+        MaintenanceWorkerResponse::NoCandidate,
     ]));
     let mut config = fixture.config();
     config.summary.enabled = false;
+    config.packing.enabled = true;
     let mut maintainer =
         RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
 
@@ -474,9 +721,70 @@ async fn maintainer_does_not_resend_an_unchanged_empty_candidate_window() {
     fixture.close().await;
 }
 
+#[tokio::test]
+async fn operator_observe_once_runs_a_worker_without_persisting_scheduler_state() {
+    let fixture = Fixture::open("operator-observe").await;
+    fixture
+        .client
+        .write_page(fixture.sealed_event("One durable Page.", "operator-observe:1", 1))
+        .await
+        .expect("write first inventory Page");
+    fixture
+        .client
+        .write_page(fixture.sealed_event("Another durable Page.", "operator-observe:2", 2))
+        .await
+        .expect("write second inventory Page");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::NoCandidate,
+    ]));
+    let mut config = fixture.config();
+    config.mode = MaintenanceMode::Observe;
+    config.summary.enabled = false;
+    config.packing.enabled = true;
+    let state_path = config.state_path.clone();
+    let mut maintainer = RuntimeMaintainer::load_operator_observe_once(
+        fixture.client.clone(),
+        worker.clone(),
+        config,
+    )
+    .await
+    .expect("load operator observe maintenance");
+
+    let report = maintainer
+        .run_operator_observe_once()
+        .await
+        .expect("run operator observe maintenance");
+
+    assert_eq!(report.worker_calls, 1);
+    assert_eq!(worker.request_count(), 1);
+    assert!(!state_path.exists());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn operator_audit_records_only_worker_operation_and_decision() {
+    let audit = MaintenanceRunAudit::queued("integration-smoke".to_owned());
+    let worker = audit.worker(Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::NoCandidate,
+    ])));
+    worker
+        .evaluate(MaintenanceWorkerRequest::SelectPacking {
+            pages: Vec::new(),
+            excluded_candidate_sets: Vec::new(),
+        })
+        .await
+        .expect("evaluate audited worker");
+    let record = audit.complete(Default::default());
+    let serialized = serde_json::to_string(&record).expect("serialize maintenance audit");
+
+    assert!(serialized.contains("queued"));
+    assert!(serialized.contains("worker_started"));
+    assert!(serialized.contains("no_candidate"));
+}
+
 struct Fixture {
     root: PathBuf,
-    owner_id: String,
+    identity_id: String,
     namespace: String,
     store: Arc<dyn PcpStore>,
     client: Arc<dyn PcpApi>,
@@ -495,7 +803,7 @@ impl Fixture {
                 .await
                 .expect("open maintenance Store"),
         );
-        let owner_id = store.owner_id().to_owned();
+        let identity_id = store.identity_id().to_owned();
         let namespace = format!("project:maintenance-{label}");
         let store: Arc<dyn PcpStore> = store;
         let client = EmbeddedPcpClient::shared(
@@ -512,18 +820,16 @@ impl Fixture {
         );
         client
             .create_scope(CreateScopeRequest {
-                owner_id: owner_id.clone(),
                 namespace: namespace.clone(),
                 display_name: "Maintenance test".to_owned(),
                 description: None,
                 parent_namespace: None,
-                visibility: "private".to_owned(),
             })
             .await
             .expect("create maintenance Scope");
         Self {
             root,
-            owner_id,
+            identity_id,
             namespace,
             store,
             client,
@@ -532,9 +838,7 @@ impl Fixture {
 
     fn page(&self, content: &str, idempotency_key: &str) -> WritePageRequest {
         WritePageRequest {
-            owner_id: self.owner_id.clone(),
             namespace: self.namespace.clone(),
-            visibility: "private".to_owned(),
             lifecycle_status: LifecycleStatus::Active,
             kind: "document".to_owned(),
             mutability: PageMutability::Revisioned,
@@ -543,6 +847,7 @@ impl Fixture {
                 actor_id: "model:maintenance-test".to_owned(),
             },
             observed_at: None,
+            source_span: None,
             valid_from: None,
             valid_to: None,
             payload: Some(PagePayload {
@@ -557,6 +862,23 @@ impl Fixture {
         }
     }
 
+    fn sealed_event(
+        &self,
+        content: &str,
+        idempotency_key: &str,
+        sequence: u64,
+    ) -> WritePageRequest {
+        let mut page = self.page(content, idempotency_key);
+        page.kind = "conversation_event".to_owned();
+        page.mutability = PageMutability::Sealed;
+        page.source_span = Some(SourceSpan {
+            stream_id: "conversation:maintenance-test".to_owned(),
+            start: sequence,
+            end: sequence,
+        });
+        page
+    }
+
     fn config(&self) -> MaintenanceConfig {
         MaintenanceConfig {
             enabled: true,
@@ -568,7 +890,7 @@ impl Fixture {
             max_jobs_per_cycle: 2,
             principal_id: "service:maintenance-test".to_owned(),
             principal_name: "Maintenance test".to_owned(),
-            worker: WorkerCommandConfig {
+            worker: MaintenanceWorkerConfig::Command {
                 program: PathBuf::from("/bin/false"),
                 args: Vec::new(),
                 timeout_seconds: 1,
@@ -576,7 +898,8 @@ impl Fixture {
                 actor_type: "model".to_owned(),
             },
             summary: SummaryMaintenanceConfig::default(),
-            compaction: CompactionMaintenanceConfig::default(),
+            packing: PackingMaintenanceConfig::default(),
+            relation: RelationMaintenanceConfig::default(),
             retention: RetentionMaintenanceConfig::default(),
         }
     }
@@ -589,43 +912,24 @@ impl Fixture {
 
 #[test]
 fn command_worker_is_constructible_from_validated_runtime_configuration() {
-    let worker = WorkerCommandConfig {
-        program: PathBuf::from("/bin/false"),
-        args: Vec::new(),
-        timeout_seconds: 1,
-        actor_id: "model:test".to_owned(),
-        actor_type: "model".to_owned(),
-    };
-    let _ = CommandSemanticWorker::new(&worker);
-}
-
-#[test]
-fn legacy_retention_apply_config_maps_to_semantic_lease_writes() {
-    let config: RetentionMaintenanceConfig = toml::from_str(
-        r#"
-        enabled = true
-        apply = true
-        "#,
-    )
-    .expect("parse legacy retention config");
-
-    assert!(config.write_leases);
+    let _ = CommandSemanticWorker::new(
+        PathBuf::from("/bin/false"),
+        Vec::new(),
+        std::time::Duration::from_secs(1),
+    );
 }
 
 #[tokio::test]
 async fn command_worker_closes_stdin_before_waiting_for_the_child() {
-    let worker = CommandSemanticWorker::new(&WorkerCommandConfig {
-        program: PathBuf::from("/bin/cat"),
-        args: Vec::new(),
-        timeout_seconds: 1,
-        actor_id: "model:test".to_owned(),
-        actor_type: "model".to_owned(),
-    });
+    let worker = CommandSemanticWorker::new(
+        PathBuf::from("/bin/cat"),
+        Vec::new(),
+        std::time::Duration::from_secs(1),
+    );
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        worker.evaluate(MaintenanceWorkerRequest::SelectConsolidation {
+        worker.evaluate(MaintenanceWorkerRequest::SelectPacking {
             pages: Vec::new(),
-            max_pages: 2,
             excluded_candidate_sets: Vec::new(),
         }),
     )

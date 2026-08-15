@@ -3,8 +3,9 @@ use std::collections::HashSet;
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
 use pcp_core::{
-    Actor, CreateScopeRequest, LinkPagesRequest, PageMutability, PagePayload, ProvenanceEvent,
-    Relation, RevisePageRequest, SourceRef, WritePageRequest, WriteResult,
+    Actor, CreateScopeRequest, LinkPagesRequest, PACKED_PAGE_MEDIA_TYPE, PageMutability,
+    PagePayload, ProvenanceEvent, Relation, RevisePageRequest, SourceRef, SourceSpan,
+    WritePageRequest, WriteResult,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -21,24 +22,20 @@ impl SqlitePcpStore {
                 .execute(
                     "
                     INSERT INTO pcp_scopes (
-                        namespace, owner_id, display_name, description,
-                        parent_namespace, visibility, created_at, updated_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+                        namespace, display_name, description,
+                        parent_namespace, created_at, updated_at
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)
                     ON CONFLICT(namespace) DO UPDATE SET
                         display_name = excluded.display_name,
                         description = excluded.description,
                         parent_namespace = excluded.parent_namespace,
                         updated_at = excluded.updated_at
-                    WHERE pcp_scopes.owner_id = excluded.owner_id
-                      AND pcp_scopes.visibility = excluded.visibility
                     ",
                     params![
                         request.namespace,
-                        request.owner_id,
                         request.display_name,
                         request.description,
                         request.parent_namespace,
-                        request.visibility,
                         now,
                     ],
                 )
@@ -54,15 +51,11 @@ impl SqlitePcpStore {
         allowed_scopes: Vec<String>,
     ) -> Result<WriteResult> {
         validate_document(request.payload.as_ref(), &request.source_refs)?;
+        validate_source_span(request.source_span.as_ref())?;
         let allowed_scopes = scope_set(allowed_scopes);
         self.run("page write", move |mut connection| {
             let transaction = connection.transaction().context("start PCP page write")?;
-            ensure_scope_access(
-                &transaction,
-                &request.namespace,
-                &request.owner_id,
-                &allowed_scopes,
-            )?;
+            ensure_scope_access(&transaction, &request.namespace, &allowed_scopes)?;
 
             if let Some(existing) = lookup_write_idempotency(
                 &transaction,
@@ -96,16 +89,14 @@ impl SqlitePcpStore {
                 .execute(
                     "
                     INSERT INTO pcp_pages (
-                        page_id, current_revision_id, created_at, owner_id, namespace,
-                        visibility, kind, mutability, lifecycle_status, updated_at
-                    ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?2)
+                        page_id, current_revision_id, created_at, namespace,
+                        kind, mutability, lifecycle_status, updated_at
+                    ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?2)
                     ",
                     params![
                         page_id,
                         timestamp,
-                        request.owner_id,
                         request.namespace,
-                        request.visibility,
                         request.kind,
                         request.mutability.as_str(),
                         request.lifecycle_status.as_str(),
@@ -116,12 +107,11 @@ impl SqlitePcpStore {
                 &transaction,
                 &page_id,
                 &revision_id,
-                &request.owner_id,
                 &request.namespace,
-                &request.visibility,
                 request.lifecycle_status.as_str(),
                 &timestamp,
                 request.observed_at.as_deref(),
+                request.source_span.as_ref(),
                 request.valid_from.as_deref(),
                 request.valid_to.as_deref(),
                 &request.created_by,
@@ -192,29 +182,23 @@ impl SqlitePcpStore {
                 }
             }
 
-            let (owner_id, namespace, visibility, mutability, current_revision_id): (
+            let (namespace, mutability, current_revision_id, current_media_type): (
                 String,
                 String,
                 String,
-                String,
-                String,
+                Option<String>,
             ) = transaction
                 .query_row(
                     "
-                    SELECT owner_id, namespace, visibility, mutability, current_revision_id
-                    FROM pcp_pages
-                    WHERE page_id = ?1
+                    SELECT page.namespace, page.mutability, page.current_revision_id,
+                           revision.payload_media_type
+                    FROM pcp_pages page
+                    JOIN pcp_revisions revision
+                      ON revision.revision_id = page.current_revision_id
+                    WHERE page.page_id = ?1
                     ",
                     [&request.page_id],
-                    |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                        ))
-                    },
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
                 .context("find current PCP page revision")?;
             if !allowed_scopes.contains(&namespace) {
@@ -231,6 +215,10 @@ impl SqlitePcpStore {
                 PageMutability::parse(&mutability) == Some(PageMutability::Revisioned),
                 "sealed PCP Pages cannot be revised"
             );
+            anyhow::ensure!(
+                current_media_type.as_deref() != Some(PACKED_PAGE_MEDIA_TYPE),
+                "packed PCP Pages can only be revised by pack_pages"
+            );
 
             let timestamp = now();
             let revision_id = random_id(&transaction, "rev_")?;
@@ -246,12 +234,11 @@ impl SqlitePcpStore {
                 &transaction,
                 &request.page_id,
                 &revision_id,
-                &owner_id,
                 &namespace,
-                &visibility,
                 request.lifecycle_status.as_str(),
                 &timestamp,
                 request.observed_at.as_deref(),
+                None,
                 request.valid_from.as_deref(),
                 request.valid_to.as_deref(),
                 &request.created_by,
@@ -377,11 +364,22 @@ fn validate_scope(request: &CreateScopeRequest) -> Result<()> {
     if request.namespace.trim().is_empty() || request.namespace.len() > 200 {
         anyhow::bail!("scope namespace must contain 1-200 characters");
     }
-    if request.owner_id.trim().is_empty() {
-        anyhow::bail!("scope owner cannot be empty");
+    if request.display_name.trim().is_empty() {
+        anyhow::bail!("scope display name cannot be empty");
     }
-    if request.display_name.trim().is_empty() || request.visibility.trim().is_empty() {
-        anyhow::bail!("scope display name and visibility cannot be empty");
+    Ok(())
+}
+
+pub(crate) fn validate_source_span(source_span: Option<&SourceSpan>) -> Result<()> {
+    if let Some(source_span) = source_span {
+        anyhow::ensure!(
+            !source_span.stream_id.trim().is_empty(),
+            "PCP source span streamId cannot be empty"
+        );
+        anyhow::ensure!(
+            source_span.start <= source_span.end,
+            "PCP source span start must not exceed end"
+        );
     }
     Ok(())
 }
@@ -397,8 +395,17 @@ pub(crate) fn validate_document(
         if payload.media_type.trim().is_empty() {
             anyhow::bail!("PCP payload media type cannot be empty");
         }
+        anyhow::ensure!(
+            payload.media_type != PACKED_PAGE_MEDIA_TYPE,
+            "PCP packed payloads can only be published by pack_pages"
+        );
         if payload.content.chars().count() > MAX_PAGE_CHARS {
             anyhow::bail!("PCP payload exceeds {MAX_PAGE_CHARS} characters");
+        }
+    }
+    for source_ref in source_refs {
+        if source_ref.provider_id.trim().is_empty() || source_ref.locator.trim().is_empty() {
+            anyhow::bail!("PCP source reference providerId and locator cannot be empty");
         }
     }
     Ok(())
@@ -411,22 +418,18 @@ fn scope_set(scopes: Vec<String>) -> HashSet<String> {
 fn ensure_scope_access(
     transaction: &Transaction<'_>,
     namespace: &str,
-    owner_id: &str,
     allowed_scopes: &HashSet<String>,
 ) -> Result<()> {
     if !allowed_scopes.contains(namespace) {
         anyhow::bail!("scope is outside the authorized PCP scope set");
     }
-    let stored_owner: String = transaction
+    transaction
         .query_row(
-            "SELECT owner_id FROM pcp_scopes WHERE namespace = ?1",
+            "SELECT 1 FROM pcp_scopes WHERE namespace = ?1",
             [namespace],
-            |row| row.get(0),
+            |_| Ok(()),
         )
         .with_context(|| format!("find PCP scope {namespace}"))?;
-    if stored_owner != owner_id {
-        anyhow::bail!("PCP scope owner does not match the write request");
-    }
     Ok(())
 }
 
@@ -488,12 +491,11 @@ pub(crate) fn insert_revision(
     transaction: &Transaction<'_>,
     page_id: &str,
     revision_id: &str,
-    owner_id: &str,
     namespace: &str,
-    visibility: &str,
     lifecycle_status: &str,
     created_at: &str,
     observed_at: Option<&str>,
+    source_span: Option<&SourceSpan>,
     valid_from: Option<&str>,
     valid_to: Option<&str>,
     actor: &Actor,
@@ -503,6 +505,10 @@ pub(crate) fn insert_revision(
     provenance: &[ProvenanceEvent],
 ) -> Result<()> {
     let source_refs_json = serde_json::to_string(source_refs).context("encode PCP source refs")?;
+    let source_span_json = source_span
+        .map(serde_json::to_string)
+        .transpose()
+        .context("encode PCP source span")?;
     let facets_json = facets
         .map(serde_json::to_string)
         .transpose()
@@ -512,25 +518,24 @@ pub(crate) fn insert_revision(
         .execute(
             "
             INSERT INTO pcp_revisions (
-                revision_id, page_id, owner_id, namespace, visibility,
-                lifecycle_status, created_at, observed_at, valid_from, valid_to,
+                revision_id, page_id, namespace,
+                lifecycle_status, created_at, observed_at, source_span_json, valid_from, valid_to,
                 actor_type, actor_id, payload_media_type, payload_content,
                 source_refs_json, facets_json, provenance_json, previous_revision_id
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                ?13, ?14, ?15, ?16, ?17,
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                ?12, ?13, ?14, ?15, ?16,
                 (SELECT current_revision_id FROM pcp_pages WHERE page_id = ?2)
             )
             ",
             params![
                 revision_id,
                 page_id,
-                owner_id,
                 namespace,
-                visibility,
                 lifecycle_status,
                 created_at,
                 observed_at,
+                source_span_json,
                 valid_from,
                 valid_to,
                 actor.actor_type.as_str(),
@@ -642,27 +647,60 @@ fn insert_revision_relation_with_basis(
     actor: &Actor,
     created_at: &str,
 ) -> Result<Relation> {
-    if relation_type.trim().is_empty() || relation_type.len() > 80 {
+    let relation_type = relation_type.trim();
+    if relation_type.is_empty() || relation_type.len() > 80 {
         anyhow::bail!("relation type must contain 1-80 characters");
     }
-    let from_page_id: String = transaction.query_row(
+    let mut from_revision_id = from_revision_id.to_owned();
+    let mut to_revision_id = to_revision_id.to_owned();
+    let mut from_page_id: String = transaction.query_row(
         "SELECT page_id FROM pcp_revisions WHERE revision_id = ?1",
-        [from_revision_id],
+        [&from_revision_id],
         |row| row.get(0),
     )?;
-    let to_page_id: String = transaction.query_row(
+    let mut to_page_id: String = transaction.query_row(
         "SELECT page_id FROM pcp_revisions WHERE revision_id = ?1",
-        [to_revision_id],
+        [&to_revision_id],
         |row| row.get(0),
     )?;
-    ensure_acyclic_derivation_relation(
-        transaction,
-        &from_page_id,
-        relation_type.trim(),
-        &to_page_id,
-    )?;
+    if relation_type == "related_to" {
+        if from_page_id == to_page_id {
+            anyhow::bail!("related_to cannot point to the same Page");
+        }
+        if from_page_id > to_page_id {
+            std::mem::swap(&mut from_page_id, &mut to_page_id);
+            std::mem::swap(&mut from_revision_id, &mut to_revision_id);
+        }
+    }
+    ensure_acyclic_derivation_relation(transaction, &from_page_id, relation_type, &to_page_id)?;
+    if let Some(relation_id) = transaction
+        .query_row(
+            "
+            SELECT relation_id
+            FROM pcp_relations relation
+            WHERE relation.from_page_id = ?1
+              AND relation.relation_type = ?2
+              AND relation.to_page_id = ?3
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pcp_relation_retractions retraction
+                  WHERE retraction.relation_id = relation.relation_id
+              )
+            LIMIT 1
+            ",
+            params![from_page_id, relation_type, to_page_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .context("look up active PCP relation")?
+    {
+        return read_relation(transaction, &relation_id);
+    }
     let relation_id = random_id(transaction, "rel_")?;
-    let basis_json = serde_json::to_string(basis_revision_ids)?;
+    let mut basis_revision_ids = basis_revision_ids.to_vec();
+    basis_revision_ids.sort();
+    basis_revision_ids.dedup();
+    let basis_json = serde_json::to_string(&basis_revision_ids)?;
     transaction
         .execute(
             "
@@ -691,7 +729,7 @@ fn insert_revision_relation_with_basis(
         from_page_id,
         relation_type: relation_type.to_owned(),
         to_page_id,
-        basis_revision_ids: basis_revision_ids.to_vec(),
+        basis_revision_ids,
         created_by: actor.clone(),
         created_at: created_at.to_owned(),
     })

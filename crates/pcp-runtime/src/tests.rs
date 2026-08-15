@@ -1,11 +1,12 @@
 use std::{sync::Arc, time::SystemTime};
 
-use pcp_client::{EmbeddedPcpClient, PcpApi};
+use pcp_client::{EmbeddedPcpClient, PcpApi, PcpTenantApi};
 use pcp_core::{
     AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    ConsolidatePagesRequest, ConsolidationInput, CreateScopeRequest, LifecycleStatus,
-    PageMutability, PagePayload, PlanRevisionRetentionRequest, Projection, RetentionPolicy,
-    SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch, WritePageRequest,
+    CreateScopeRequest, IngestPageRequest, LifecycleStatus, PackPagesRequest, PageMutability,
+    PagePayload, PageRevisionRef, PlanRevisionRetentionRequest, Projection, ReadPagesRequest,
+    RetentionPolicy, SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch, SourceSpan,
+    WritePageRequest,
 };
 use pcp_rpc::{RemotePcpClient, RuntimeEndpoint, serve_unix, serve_unix_endpoints};
 use pcp_sqlite::SqlitePcpStore;
@@ -14,7 +15,7 @@ use pcp_store::PcpStore;
 use crate::RuntimeConfig;
 
 #[test]
-fn runtime_config_resolves_paths_and_owner_scope_placeholders() {
+fn runtime_config_resolves_paths_and_identity_scope_placeholders() {
     let nonce = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .expect("clock")
@@ -32,27 +33,29 @@ socket_path = "run/symbiont.sock"
 client_id = "host:symbiont-d"
 client_type = "host"
 access_mode = "admin"
-allowed_scopes = ["user:{owner_id}", "project:symbiont-d"]
+allowed_scopes = ["user:{identity_id}", "project:symbiont-d"]
 allow_cross_scope_derivation = true
 
 [maintenance]
 enabled = true
 mode = "apply"
 state_path = "data/maintenance.json"
-allowed_scopes = ["user:{owner_id}", "project:symbiont-d"]
+allowed_scopes = ["user:{identity_id}", "project:symbiont-d"]
 interval_seconds = 300
 initial_delay_seconds = 45
 max_jobs_per_cycle = 2
 
 [maintenance.worker]
+provider = "command"
 program = "bin/semantic-worker"
 actor_id = "model:maintenance-test"
 
 [maintenance.summary]
 minimum_chars = 6000
 
-[maintenance.compaction]
-max_pages_per_candidate = 6
+[maintenance.packing]
+enabled = true
+max_pages = 6
 "#,
     )
     .expect("write runtime config");
@@ -67,9 +70,13 @@ max_pages_per_candidate = 6
     assert_eq!(maintenance.mode, crate::MaintenanceMode::Apply);
     assert_eq!(maintenance.initial_delay_seconds, 45);
     assert_eq!(maintenance.state_path, root.join("data/maintenance.json"));
-    assert_eq!(maintenance.worker.program, root.join("bin/semantic-worker"));
+    let crate::MaintenanceWorkerConfig::Command { program, .. } = &maintenance.worker else {
+        panic!("expected command maintenance worker");
+    };
+    assert_eq!(program, &root.join("bin/semantic-worker"));
     let maintenance_access = maintenance.access_session("owner-test");
     assert!(maintenance_access.allows("user:owner-test", AccessPermission::Write));
+    assert!(maintenance_access.allows("user:owner-test", AccessPermission::Collect));
     assert!(!maintenance_access.allows("user:owner-test", AccessPermission::ManageScope));
     assert!(!maintenance_access.allows("user:owner-test", AccessPermission::Audit));
     let access = config.endpoints[0]
@@ -104,14 +111,15 @@ client_id = "host:test"
 client_type = "host"
 client_name = "test"
 access_mode = "read"
-allowed_scopes = ["user:{owner_id}"]
+allowed_scopes = ["user:{identity_id}"]
 
 [maintenance]
 enabled = true
 state_path = "data/maintenance.json"
-allowed_scopes = ["user:{owner_id}"]
+allowed_scopes = ["user:{identity_id}"]
 
 [maintenance.worker]
+provider = "command"
 program = "/bin/false"
 actor_id = "model:maintenance-test"
 "#,
@@ -124,6 +132,60 @@ actor_id = "model:maintenance-test"
     assert!(access.allows("user:owner-test", AccessPermission::ReadDetail));
     assert!(access.allows("user:owner-test", AccessPermission::Search));
     assert!(!access.allows("user:owner-test", AccessPermission::Write));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn runtime_config_resolves_infer_runtime_credential_path() {
+    let nonce = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("pcp-runtime-infer-config-{nonce}"));
+    std::fs::create_dir_all(&root).expect("create runtime config root");
+    let path = root.join("runtime.toml");
+    std::fs::write(
+        &path,
+        r#"
+store_path = "data/context.sqlite3"
+
+[[endpoints]]
+socket_path = "run/client.sock"
+client_id = "host:test"
+client_type = "host"
+access_mode = "read"
+allowed_scopes = ["user:{identity_id}"]
+
+[maintenance]
+enabled = true
+state_path = "data/maintenance.json"
+allowed_scopes = ["user:{identity_id}"]
+
+[maintenance.worker]
+provider = "infer_runtime"
+credential_file = "secrets/pcp-runtime.token"
+timeout_seconds = 90
+max_output_tokens = 1024
+actor_id = "model:infer-runtime-maintenance"
+actor_type = "model"
+"#,
+    )
+    .expect("write Infer Runtime worker config");
+
+    let config = RuntimeConfig::load(&path).expect("load Infer Runtime worker config");
+    let maintenance = config.maintenance.expect("maintenance config");
+    let crate::MaintenanceWorkerConfig::InferRuntime {
+        credential_file,
+        timeout_seconds,
+        max_output_tokens,
+        ..
+    } = maintenance.worker
+    else {
+        panic!("expected Infer Runtime maintenance worker");
+    };
+    assert_eq!(credential_file, root.join("secrets/pcp-runtime.token"));
+    assert_eq!(timeout_seconds, 90);
+    assert_eq!(max_output_tokens, 1024);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -143,7 +205,7 @@ async fn broker_isolates_multiple_principals_on_one_store() {
             .await
             .expect("open broker store"),
     );
-    let owner_id = store.owner_id().to_owned();
+    let identity_id = store.identity_id().to_owned();
     let store: Arc<dyn PcpStore> = store;
     let client_a = EmbeddedPcpClient::shared(
         Arc::clone(&store),
@@ -190,19 +252,17 @@ async fn broker_isolates_multiple_principals_on_one_store() {
     ] {
         client
             .create_scope(CreateScopeRequest {
-                owner_id: owner_id.clone(),
                 namespace: namespace.to_owned(),
                 display_name: label.to_owned(),
                 description: None,
                 parent_namespace: None,
-                visibility: "private".to_owned(),
             })
             .await
             .expect("create broker scope");
     }
     remote_a
         .write_page(test_page(
-            &owner_id,
+            &identity_id,
             "project:broker-a",
             "Only broker A can read this signal.",
             "broker:a:page",
@@ -248,7 +308,7 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
             .await
             .expect("open PCP store"),
     );
-    let owner_id = store.owner_id().to_owned();
+    let identity_id = store.identity_id().to_owned();
     let namespace = "project:runtime-test".to_owned();
     let access = AccessSession::full_control(
         AccessPrincipal {
@@ -272,45 +332,44 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
             .await
             .is_err()
     );
-    assert_eq!(remote.owner_id(), owner_id);
+    assert_eq!(remote.identity_id(), identity_id);
     assert_eq!(remote.access().principal.principal_id, "host:runtime-test");
     remote
         .create_scope(CreateScopeRequest {
-            owner_id: owner_id.clone(),
             namespace: namespace.clone(),
             display_name: "Runtime test".to_owned(),
             description: None,
             parent_namespace: None,
-            visibility: "private".to_owned(),
         })
         .await
         .expect("create authorized scope");
     assert!(
         remote
             .create_scope(CreateScopeRequest {
-                owner_id: owner_id.clone(),
                 namespace: "project:not-authorized".to_owned(),
                 display_name: "Denied".to_owned(),
                 description: None,
                 parent_namespace: None,
-                visibility: "private".to_owned(),
             })
             .await
             .is_err()
     );
     let written = remote
         .write_page(WritePageRequest {
-            owner_id: owner_id.clone(),
             namespace: namespace.clone(),
-            visibility: "private".to_owned(),
             lifecycle_status: LifecycleStatus::Active,
             kind: "document".to_owned(),
-            mutability: PageMutability::Revisioned,
+            mutability: PageMutability::Sealed,
             created_by: Actor {
                 actor_type: ActorType::Model,
                 actor_id: "model:runtime-test".to_owned(),
             },
             observed_at: None,
+            source_span: Some(SourceSpan {
+                stream_id: "runtime-test".to_owned(),
+                start: 1,
+                end: 1,
+            }),
             valid_from: None,
             valid_to: None,
             payload: Some(PagePayload {
@@ -340,65 +399,56 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
         .expect("search through remote client");
     assert_eq!(found.hits.len(), 1);
     assert_eq!(found.hits[0].revision_id, written.revision_id);
+    let mut second_request = test_page(
+        &identity_id,
+        &namespace,
+        "The same durable state is available through a second Page.",
+        "runtime:test:page:second",
+    );
+    second_request.mutability = PageMutability::Sealed;
+    second_request.source_span = Some(SourceSpan {
+        stream_id: "runtime-test".to_owned(),
+        start: 2,
+        end: 2,
+    });
     let second = remote
-        .write_page(test_page(
-            &owner_id,
-            &namespace,
-            "The same durable state is available through a second Page.",
-            "runtime:test:page:second",
-        ))
+        .write_page(second_request)
         .await
         .expect("write second remote Page");
     assert_eq!(remote.page_count(Vec::new()).await.expect("count pages"), 2);
-    let consolidated = remote
-        .consolidate_pages(ConsolidatePagesRequest {
-            canonical_page_id: written.page_id.clone(),
-            expected_canonical_revision_id: written.revision_id.clone(),
-            replaced_pages: vec![ConsolidationInput {
-                page_id: second.page_id.clone(),
-                expected_revision_id: second.revision_id.clone(),
-            }],
-            created_by: Actor {
-                actor_type: ActorType::Model,
-                actor_id: "model:runtime-test".to_owned(),
-            },
-            lifecycle_status: LifecycleStatus::Active,
-            observed_at: None,
-            valid_from: None,
-            valid_to: None,
-            payload: Some(PagePayload {
-                media_type: "text/markdown".to_owned(),
-                content: "The remote runtime preserves one auditable durable state.".to_owned(),
-            }),
-            source_refs: Vec::new(),
-            facets: None,
-            provenance: Vec::new(),
-            idempotency_key: Some("runtime:test:consolidation".to_owned()),
+    let packed = remote
+        .pack_pages(PackPagesRequest {
+            pages: vec![
+                PageRevisionRef {
+                    page_id: written.page_id.clone(),
+                    revision_id: written.revision_id.clone(),
+                },
+                PageRevisionRef {
+                    page_id: second.page_id.clone(),
+                    revision_id: second.revision_id.clone(),
+                },
+            ],
+            idempotency_key: Some("runtime:test:packing".to_owned()),
         })
         .await
-        .expect("consolidate through remote client");
+        .expect("pack through remote client");
     assert_eq!(remote.page_count(Vec::new()).await.expect("count pages"), 1);
+    assert!(remote.current_revision_id(written.page_id).await.is_err());
+    assert!(remote.current_revision_id(second.page_id).await.is_err());
     assert_eq!(
         remote
-            .current_revision_id(written.page_id)
+            .current_revision_id(packed.page_id)
             .await
-            .expect("resolve canonical Page"),
-        consolidated.revision_id
-    );
-    assert_eq!(
-        remote
-            .current_revision_id(second.page_id)
-            .await
-            .expect("resolve superseded Page"),
-        second.revision_id
+            .expect("resolve packed Page"),
+        packed.revision_id
     );
     let health = remote
         .health_snapshot(Vec::new(), 24)
         .await
         .expect("read health through remote client");
     assert_eq!(health.storage.current_pages, 1);
-    assert_eq!(health.consolidation.runs, 1);
-    assert_eq!(health.consolidation.input_pages, 2);
+    assert_eq!(health.packing.runs, 1);
+    assert_eq!(health.packing.input_pages, 2);
     assert!(health.recall.searches >= 1);
     let retention = remote
         .plan_revision_retention(PlanRevisionRetentionRequest {
@@ -411,13 +461,50 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
         })
         .await
         .expect("plan retention through remote client");
-    assert_eq!(retention.scanned_pages, 2);
-    assert_eq!(retention.scanned_revisions, 3);
+    assert_eq!(retention.scanned_pages, 1);
+    assert_eq!(retention.scanned_revisions, 1);
     let (audit, _) = remote.access_log(50, None).await.expect("read access log");
     assert!(audit.iter().all(|event| {
         event.principal.principal_id == "host:runtime-test"
             || event.principal.principal_id == "system:pcp"
     }));
+
+    let ingested = remote
+        .ingest_page(IngestPageRequest {
+            namespace: "project:runtime-test".to_owned(),
+            kind: "conversation_event".to_owned(),
+            observed_at: Some("2026-08-15T00:00:00Z".to_owned()),
+            source_span: Some(SourceSpan {
+                stream_id: "conversation-main".to_owned(),
+                start: 1,
+                end: 1,
+            }),
+            payload: Some(PagePayload {
+                media_type: "text/plain".to_owned(),
+                content: "Producer fields are supplied by the authenticated Runtime.".to_owned(),
+            }),
+            source_refs: Vec::new(),
+            facets: None,
+            external_event_id: Some("runtime:test:ingest".to_owned()),
+        })
+        .await
+        .expect("ingest through simplified API");
+    let ingested_page = remote
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![ingested.page_id],
+            revision_ids: Vec::new(),
+            projections: vec![Projection::Manifest, Projection::Payload],
+            max_chars: 1_024,
+        })
+        .await
+        .expect("read ingested Page")
+        .pop()
+        .expect("ingested Page exists");
+    assert_eq!(ingested_page.page.mutability, PageMutability::Sealed);
+    assert_eq!(
+        ingested_page.revision.created_by.actor_id,
+        "host:runtime-test"
+    );
 
     server.abort();
     let _ = server.await;
@@ -437,15 +524,13 @@ async fn connect_when_ready(socket_path: &std::path::Path) -> RemotePcpClient {
 }
 
 fn test_page(
-    owner_id: &str,
+    _identity_id: &str,
     namespace: &str,
     content: &str,
     idempotency_key: &str,
 ) -> WritePageRequest {
     WritePageRequest {
-        owner_id: owner_id.to_owned(),
         namespace: namespace.to_owned(),
-        visibility: "private".to_owned(),
         lifecycle_status: LifecycleStatus::Active,
         kind: "document".to_owned(),
         mutability: PageMutability::Revisioned,
@@ -454,6 +539,7 @@ fn test_page(
             actor_id: "model:runtime-test".to_owned(),
         },
         observed_at: None,
+        source_span: None,
         valid_from: None,
         valid_to: None,
         payload: Some(PagePayload {

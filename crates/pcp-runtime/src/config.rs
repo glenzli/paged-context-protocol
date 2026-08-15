@@ -108,12 +108,16 @@ impl RuntimeConfig {
 }
 
 impl RuntimeEndpointConfig {
-    pub fn access_session(&self, owner_id: &str, endpoint_index: usize) -> Result<AccessSession> {
+    pub fn access_session(
+        &self,
+        identity_id: &str,
+        endpoint_index: usize,
+    ) -> Result<AccessSession> {
         let mode = self.access_mode.parse::<AccessMode>()?;
         let scopes = self
             .allowed_scopes
             .iter()
-            .map(|scope| scope.replace("{owner_id}", owner_id))
+            .map(|scope| scope.replace("{identity_id}", identity_id))
             .collect();
         Ok(mode.session(
             AccessPrincipal {

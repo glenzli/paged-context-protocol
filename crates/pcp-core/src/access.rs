@@ -10,6 +10,7 @@ pub enum AccessPermission {
     Search,
     ReadSummary,
     ReadDetail,
+    Ingest,
     Write,
     Revise,
     Summarize,
@@ -24,11 +25,12 @@ pub enum AccessPermission {
 }
 
 impl AccessPermission {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::ListScopes,
         Self::Search,
         Self::ReadSummary,
         Self::ReadDetail,
+        Self::Ingest,
         Self::Write,
         Self::Revise,
         Self::Summarize,
@@ -48,6 +50,7 @@ impl AccessPermission {
             Self::Search => "search",
             Self::ReadSummary => "read_summary",
             Self::ReadDetail => "read_detail",
+            Self::Ingest => "ingest",
             Self::Write => "write",
             Self::Revise => "revise",
             Self::Summarize => "summarize",

@@ -4,35 +4,43 @@ use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
 use pcp_client::PcpApi;
 use pcp_core::{
-    ConsolidatePagesRequest, LifecycleStatus, PagePayload, PlanRevisionRetentionRequest,
-    Projection, PutRevisionRetentionLeaseRequest, ReadPagesRequest, RetentionPolicy,
-    WriteSummaryRequest,
+    LinkPagesRequest, PACKED_PAGE_MEDIA_TYPE, PackPagesRequest, PageMutability, PageRevisionRef,
+    PlanRevisionRetentionRequest, Projection, PutRevisionRetentionLeaseRequest, ReadPagesRequest,
+    RetentionPolicy, WriteSummaryRequest,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{
-    MaintenanceConfig, MaintenanceWorkerRequest, MaintenanceWorkerResponse, RetentionMilestone,
+    MaintenanceConfig, MaintenanceMode, MaintenanceWorkerRequest, MaintenanceWorkerResponse,
+    PackingMaintenanceConfig, RelationMaintenanceConfig, RetentionMilestone,
     SemanticMaintenanceWorker,
     ledger::{
-        MaintenanceLedger, compaction_key, retention_window_key, selection_window_key, summary_key,
+        MaintenanceLedger, packing_key, retention_window_key, selection_window_key, summary_key,
     },
-    worker::{MaintenanceDetailPage, MaintenanceRoutingPage},
+    worker::{
+        MaintenanceDetailPage, MaintenanceRoutingPage, PackingCandidatePage, RelationCandidatePage,
+    },
 };
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaintenanceCycleReport {
     pub inspected_pages: usize,
     pub worker_calls: u32,
     pub summaries_written: u32,
     pub summaries_proposed: u32,
-    pub consolidations_committed: u32,
-    pub consolidations_proposed: u32,
+    pub packs_committed: u32,
+    pub packs_proposed: u32,
+    pub relations_committed: u32,
+    pub relations_proposed: u32,
     pub retention_leases_written: u32,
     pub retention_leases_proposed: u32,
-    pub kept_separate: u32,
     pub deferred: u32,
 }
+
+const PACKING_CANDIDATE_WINDOW: usize = 32;
+const PACKING_ROUTING_CHARS: usize = 480;
+const PACKING_RETRY_AFTER_SECONDS: u64 = 86_400;
 
 pub struct RuntimeMaintainer {
     client: Arc<dyn PcpApi>,
@@ -54,6 +62,26 @@ impl RuntimeMaintainer {
             worker,
             config,
             ledger,
+        })
+    }
+
+    pub async fn load_operator_observe_once(
+        client: Arc<dyn PcpApi>,
+        worker: Arc<dyn SemanticMaintenanceWorker>,
+        mut config: MaintenanceConfig,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            config.enabled && config.mode == MaintenanceMode::Observe,
+            "operator maintenance run-once requires enabled observe maintenance"
+        );
+        config.max_jobs_per_cycle = 1;
+        config.validate()?;
+        Ok(Self {
+            client,
+            worker,
+            config,
+            // An operator smoke run must not be blocked by, or mutate, the normal cadence.
+            ledger: MaintenanceLedger::default(),
         })
     }
 
@@ -80,17 +108,21 @@ impl RuntimeMaintainer {
                 Ok(report)
                     if report.summaries_written > 0
                         || report.summaries_proposed > 0
-                        || report.consolidations_committed > 0
-                        || report.consolidations_proposed > 0
+                        || report.packs_committed > 0
+                        || report.packs_proposed > 0
+                        || report.relations_committed > 0
+                        || report.relations_proposed > 0
                         || report.retention_leases_written > 0
                         || report.retention_leases_proposed > 0 =>
                 {
                     eprintln!(
-                        "PCP maintenance: {} Summary proposed / {} written, {} consolidation proposed / {} committed, {} retention proposed / {} leased after {} worker calls",
+                        "PCP maintenance: {} Summary proposed / {} written, {} pack proposed / {} committed, {} relation proposed / {} committed, {} retention proposed / {} leased after {} worker calls",
                         report.summaries_proposed,
                         report.summaries_written,
-                        report.consolidations_proposed,
-                        report.consolidations_committed,
+                        report.packs_proposed,
+                        report.packs_committed,
+                        report.relations_proposed,
+                        report.relations_committed,
                         report.retention_leases_proposed,
                         report.retention_leases_written,
                         report.worker_calls
@@ -113,6 +145,18 @@ impl RuntimeMaintainer {
     }
 
     pub async fn run_once(&mut self) -> Result<MaintenanceCycleReport> {
+        self.run_once_inner(true).await
+    }
+
+    pub async fn run_operator_observe_once(&mut self) -> Result<MaintenanceCycleReport> {
+        anyhow::ensure!(
+            self.config.mode == MaintenanceMode::Observe,
+            "operator maintenance run-once only permits observe mode"
+        );
+        self.run_once_inner(false).await
+    }
+
+    async fn run_once_inner(&mut self, persist_ledger: bool) -> Result<MaintenanceCycleReport> {
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
         let mut report = MaintenanceCycleReport {
             inspected_pages: inventory.len(),
@@ -129,12 +173,21 @@ impl RuntimeMaintainer {
         {
             jobs_remaining -= 1;
         }
-        if self.config.compaction.enabled
+        if self.config.packing.enabled
             && jobs_remaining > 0
             && self
-                .run_compaction_job(&inventory, &mut report)
+                .run_packing_job(&inventory, &mut report)
                 .await
-                .context("run PCP compaction maintenance job")?
+                .context("run PCP packing maintenance job")?
+        {
+            jobs_remaining -= 1;
+        }
+        if self.config.relation.enabled
+            && jobs_remaining > 0
+            && self
+                .run_relation_job(&inventory, &mut report)
+                .await
+                .context("run PCP relation maintenance job")?
         {
             jobs_remaining -= 1;
         }
@@ -144,7 +197,9 @@ impl RuntimeMaintainer {
                 .context("run PCP semantic retention maintenance job")?;
         }
 
-        self.ledger.save(&self.config.state_path).await?;
+        if persist_ledger {
+            self.ledger.save(&self.config.state_path).await?;
+        }
         Ok(report)
     }
 
@@ -185,7 +240,7 @@ impl RuntimeMaintainer {
                             expected_summary_revision_id: None,
                             content,
                             created_by: self.config.worker_actor(),
-                            tool_or_model: Some(self.config.worker.actor_id.clone()),
+                            tool_or_model: Some(self.config.worker.actor_id().to_owned()),
                             provenance: Vec::new(),
                             idempotency_key: Some(format!("maintenance:summary:{page_id}")),
                         })
@@ -200,25 +255,24 @@ impl RuntimeMaintainer {
                     report.summaries_proposed += 1;
                 }
             }
-            MaintenanceWorkerResponse::KeepSeparate { .. } => {
+            MaintenanceWorkerResponse::NoCandidate => {
                 if self.config.applies_changes() {
                     self.client
                         .mark_summary_assessed(
                             page_id.clone(),
                             "not_worth_indexing".to_owned(),
-                            Some(self.config.worker.actor_id.clone()),
+                            Some(self.config.worker.actor_id().to_owned()),
                         )
                         .await?;
                 } else {
                     self.ledger.record(
                         summary_key(&page_id),
-                        "observed_keep_separate",
+                        "observed_no_candidate",
                         self.config.summary.retry_after_seconds,
                     );
                 }
-                report.kept_separate += 1;
             }
-            MaintenanceWorkerResponse::Defer { .. } => {
+            MaintenanceWorkerResponse::Defer => {
                 self.ledger.record(
                     summary_key(&page_id),
                     "deferred",
@@ -234,25 +288,162 @@ impl RuntimeMaintainer {
         Ok(true)
     }
 
-    async fn run_compaction_job(
+    async fn run_relation_job(
         &mut self,
         inventory: &[pcp_store::DurablePageInventoryItem],
         report: &mut MaintenanceCycleReport,
     ) -> Result<bool> {
-        let routing_pages = inventory
+        let candidates = relation_candidate_window(
+            inventory,
+            &self.config.relation,
+            self.config.packing.enabled,
+        );
+        if candidates.len() < 2 {
+            return Ok(false);
+        }
+        let offered = candidates
             .iter()
-            .filter(|page| {
-                page.content_chars > 0
-                    && !excluded_kind(&page.kind, &self.config.compaction.excluded_page_kinds)
+            .map(|page| (page.page_id.clone(), page.revision_id.clone()))
+            .collect::<HashMap<_, _>>();
+        let window_key = relation_window_key(
+            &candidates
+                .iter()
+                .map(|page| page.revision_id.clone())
+                .collect::<Vec<_>>(),
+        );
+        if !self.ledger.eligible(&window_key) {
+            return Ok(false);
+        }
+
+        report.worker_calls += 1;
+        let response = self
+            .worker
+            .evaluate(MaintenanceWorkerRequest::SelectRelation {
+                pages: candidates
+                    .iter()
+                    .map(|page| {
+                        RelationCandidatePage::from_inventory(
+                            page,
+                            self.config.relation.routing_chars_per_page,
+                        )
+                    })
+                    .collect(),
             })
-            .take(self.config.compaction.candidate_window)
-            .cloned()
-            .map(|page| {
-                MaintenanceRoutingPage::from_inventory(
-                    page,
-                    self.config.compaction.routing_chars_per_page,
-                )
-            })
+            .await?;
+        let mut page_ids = match response {
+            MaintenanceWorkerResponse::Relate { page_ids } => page_ids,
+            MaintenanceWorkerResponse::NoCandidate => {
+                self.ledger.record(
+                    window_key,
+                    "no_candidate",
+                    self.config.relation.retry_after_seconds,
+                );
+                return Ok(true);
+            }
+            MaintenanceWorkerResponse::Defer => {
+                self.ledger.record(
+                    window_key,
+                    "deferred",
+                    self.config.relation.retry_after_seconds,
+                );
+                report.deferred += 1;
+                return Ok(true);
+            }
+            other => anyhow::bail!(
+                "semantic worker returned {} for a select_relation request",
+                response_name(&other)
+            ),
+        };
+        anyhow::ensure!(
+            page_ids[0] != page_ids[1]
+                && page_ids.iter().all(|page_id| offered.contains_key(page_id)),
+            "semantic worker selected an invalid relation pair"
+        );
+        page_ids.sort();
+        let pair_key = relation_pair_key(&page_ids);
+        anyhow::ensure!(
+            self.ledger.eligible(&pair_key),
+            "semantic worker selected a relation pair still in cooldown"
+        );
+        let revision_ids = page_ids
+            .iter()
+            .map(|page_id| offered[page_id].clone())
+            .collect::<Vec<_>>();
+        for (page_id, revision_id) in page_ids.iter().zip(&revision_ids) {
+            anyhow::ensure!(
+                self.client.current_revision_id(page_id.clone()).await? == *revision_id,
+                "relation candidate changed after worker evaluation"
+            );
+        }
+        if self.related_pair_exists(&page_ids, &revision_ids).await? {
+            self.ledger.record(
+                pair_key,
+                "already_related",
+                self.config.relation.retry_after_seconds,
+            );
+            self.ledger.record(
+                window_key,
+                "already_related",
+                self.config.relation.retry_after_seconds,
+            );
+            return Ok(true);
+        }
+
+        if self.config.applies_changes() {
+            self.client
+                .link_pages(LinkPagesRequest {
+                    from_page_id: page_ids[0].clone(),
+                    relation_type: "related_to".to_owned(),
+                    to_page_id: page_ids[1].clone(),
+                    basis_revision_ids: revision_ids.clone(),
+                    created_by: self.config.worker_actor(),
+                    idempotency_key: Some(format!(
+                        "maintenance:related:{}:{}",
+                        revision_ids[0], revision_ids[1]
+                    )),
+                })
+                .await?;
+            report.relations_committed += 1;
+        } else {
+            report.relations_proposed += 1;
+        }
+        self.ledger.record(
+            pair_key,
+            if self.config.applies_changes() {
+                "related"
+            } else {
+                "observed_relation"
+            },
+            self.config.relation.retry_after_seconds,
+        );
+        self.ledger.record(
+            window_key,
+            if self.config.applies_changes() {
+                "related"
+            } else {
+                "observed_relation"
+            },
+            self.config.relation.retry_after_seconds,
+        );
+        Ok(true)
+    }
+
+    async fn run_packing_job(
+        &mut self,
+        inventory: &[pcp_store::DurablePageInventoryItem],
+        report: &mut MaintenanceCycleReport,
+    ) -> Result<bool> {
+        let Some(candidates) = packing_candidate_window(inventory, &self.config.packing) else {
+            return Ok(false);
+        };
+        let routing_by_id = candidates
+            .iter()
+            .enumerate()
+            .map(|(index, page)| (page.page_id.clone(), (index, page.revision_id.clone())))
+            .collect::<HashMap<_, _>>();
+        let routing_pages = candidates
+            .iter()
+            .map(|page| PackingCandidatePage::from_inventory(page, PACKING_ROUTING_CHARS))
             .collect::<Vec<_>>();
         if routing_pages.len() < 2 {
             return Ok(false);
@@ -268,69 +459,54 @@ impl RuntimeMaintainer {
             return Ok(false);
         }
 
-        let routing_by_id = routing_pages
-            .iter()
-            .map(|page| {
-                (
-                    page.page_id.clone(),
-                    (page.namespace.clone(), page.revision_id.clone()),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        let excluded_candidate_sets = self.ledger.active_compaction_sets();
+        let excluded_candidate_sets = self.ledger.active_packing_sets();
         report.worker_calls += 1;
         let selection = self
             .worker
-            .evaluate(MaintenanceWorkerRequest::SelectConsolidation {
+            .evaluate(MaintenanceWorkerRequest::SelectPacking {
                 pages: routing_pages,
-                max_pages: self.config.compaction.max_pages_per_candidate,
                 excluded_candidate_sets: excluded_candidate_sets.clone(),
             })
             .await?;
-        let mut page_ids = match selection {
-            MaintenanceWorkerResponse::Candidate { page_ids, .. } => page_ids,
-            MaintenanceWorkerResponse::NoCandidate { .. } => {
-                self.ledger.record(
-                    selection_key,
-                    "no_candidate",
-                    self.config.compaction.retry_after_seconds,
-                );
+        let page_ids = match selection {
+            MaintenanceWorkerResponse::Candidate { page_ids } => page_ids,
+            MaintenanceWorkerResponse::NoCandidate => {
+                self.ledger
+                    .record(selection_key, "no_candidate", PACKING_RETRY_AFTER_SECONDS);
                 return Ok(true);
             }
-            MaintenanceWorkerResponse::Defer { .. } => {
-                self.ledger.record(
-                    selection_key,
-                    "deferred",
-                    self.config.compaction.retry_after_seconds,
-                );
+            MaintenanceWorkerResponse::Defer => {
+                self.ledger
+                    .record(selection_key, "deferred", PACKING_RETRY_AFTER_SECONDS);
                 report.deferred += 1;
                 return Ok(true);
             }
             other => anyhow::bail!(
-                "semantic worker returned {} for a select_consolidation request",
+                "semantic worker returned {} for a select_packing request",
                 response_name(&other)
             ),
         };
-        page_ids.sort();
-        page_ids.dedup();
+        let unique = page_ids.iter().collect::<std::collections::HashSet<_>>();
         anyhow::ensure!(
-            (2..=self.config.compaction.max_pages_per_candidate).contains(&page_ids.len()),
-            "semantic worker selected an invalid number of consolidation Pages"
+            unique.len() == page_ids.len()
+                && (2..=self.config.packing.max_pages).contains(&page_ids.len()),
+            "semantic worker selected an invalid number of unique packing Pages"
         );
         anyhow::ensure!(
             page_ids
                 .iter()
                 .all(|page_id| routing_by_id.contains_key(page_id)),
-            "semantic worker selected a Page outside the offered candidate window"
+            "semantic worker selected a Page outside the offered packing window"
         );
-        let namespace = &routing_by_id[&page_ids[0]].0;
+        let positions = page_ids
+            .iter()
+            .map(|page_id| routing_by_id[page_id].0)
+            .collect::<Vec<_>>();
         anyhow::ensure!(
-            page_ids
-                .iter()
-                .all(|page_id| &routing_by_id[page_id].0 == namespace),
-            "semantic worker selected consolidation Pages from different Scopes"
+            positions.windows(2).all(|pair| pair[0] + 1 == pair[1]),
+            "semantic worker must return an ordered contiguous packing subset"
         );
-        let key = compaction_key(&page_ids);
+        let key = packing_key(&page_ids);
         anyhow::ensure!(
             self.ledger.eligible(&key)
                 && !excluded_candidate_sets.iter().any(|set| {
@@ -338,106 +514,29 @@ impl RuntimeMaintainer {
                     set.sort();
                     set == page_ids
                 }),
-            "semantic worker selected a consolidation candidate still in cooldown"
+            "semantic worker selected a packing candidate still in cooldown"
         );
-
-        let selected_revision_ids = page_ids
-            .iter()
-            .map(|page_id| routing_by_id[page_id].1.clone())
-            .collect();
-        let pages = self
-            .read_detail_pages(
-                selected_revision_ids,
-                self.config.compaction.max_input_chars,
-            )
-            .await?;
-        anyhow::ensure!(
-            pages.len() == page_ids.len(),
-            "one or more consolidation candidates disappeared before evaluation"
-        );
-        report.worker_calls += 1;
-        match self
-            .worker
-            .evaluate(MaintenanceWorkerRequest::ConsolidatePages {
-                pages: pages.clone(),
-            })
-            .await?
-        {
-            MaintenanceWorkerResponse::Consolidate {
-                canonical_page_id,
-                content,
-            } => {
-                ensure_nonempty_worker_content(&content)?;
-                anyhow::ensure!(
-                    page_ids.contains(&canonical_page_id),
-                    "semantic worker chose a canonical Page outside the candidate set"
-                );
-                if self.config.applies_changes() {
-                    let canonical = pages
+        if self.config.applies_changes() {
+            self.client
+                .pack_pages(PackPagesRequest {
+                    pages: page_ids
                         .iter()
-                        .find(|page| page.page_id == canonical_page_id)
-                        .context("find canonical consolidation Page")?;
-                    let observed_at = pages
-                        .iter()
-                        .filter_map(|page| page.observed_at.clone())
-                        .max();
-                    self.client
-                        .consolidate_pages(ConsolidatePagesRequest {
-                            canonical_page_id: canonical.page_id.clone(),
-                            expected_canonical_revision_id: canonical.revision_id.clone(),
-                            replaced_pages: pages
-                                .iter()
-                                .filter(|page| page.page_id != canonical.page_id)
-                                .map(|page| pcp_core::ConsolidationInput {
-                                    page_id: page.page_id.clone(),
-                                    expected_revision_id: page.revision_id.clone(),
-                                })
-                                .collect(),
-                            created_by: self.config.worker_actor(),
-                            lifecycle_status: LifecycleStatus::Active,
-                            observed_at,
-                            valid_from: None,
-                            valid_to: None,
-                            payload: Some(PagePayload {
-                                media_type: "text/markdown".to_owned(),
-                                content,
-                            }),
-                            source_refs: canonical.source_refs.clone(),
-                            facets: canonical.facets.clone(),
-                            provenance: Vec::new(),
-                            idempotency_key: Some(format!(
-                                "maintenance:{}",
-                                key.trim_start_matches("compaction:")
-                            )),
+                        .map(|page_id| PageRevisionRef {
+                            page_id: page_id.clone(),
+                            revision_id: routing_by_id[page_id].1.clone(),
                         })
-                        .await?;
-                    report.consolidations_committed += 1;
-                } else {
-                    self.ledger.record(
-                        key,
-                        "observed_consolidation",
-                        self.config.compaction.retry_after_seconds,
-                    );
-                    report.consolidations_proposed += 1;
-                }
-            }
-            MaintenanceWorkerResponse::KeepSeparate { .. } => {
-                self.ledger.record(
-                    key,
-                    "keep_separate",
-                    self.config.compaction.retry_after_seconds,
-                );
-                report.kept_separate += 1;
-            }
-            MaintenanceWorkerResponse::Defer { .. } => {
-                self.ledger
-                    .record(key, "deferred", self.config.compaction.retry_after_seconds);
-                report.deferred += 1;
-            }
-            other => anyhow::bail!(
-                "semantic worker returned {} for a consolidate_pages request",
-                response_name(&other)
-            ),
+                        .collect(),
+                    idempotency_key: Some(format!(
+                        "maintenance:{}",
+                        key.trim_start_matches("packing:")
+                    )),
+                })
+                .await?;
+            report.packs_committed += 1;
+        } else {
+            self.ledger
+                .record(key, "observed_pack", PACKING_RETRY_AFTER_SECONDS);
+            report.packs_proposed += 1;
         }
         Ok(true)
     }
@@ -468,10 +567,7 @@ impl RuntimeMaintainer {
             .candidates
             .into_iter()
             .filter(|candidate| {
-                !excluded_kind(
-                    &Some(candidate.kind.clone()),
-                    &self.config.retention.excluded_page_kinds,
-                )
+                !excluded_kind(&candidate.kind, &self.config.retention.excluded_page_kinds)
             })
             .take(self.config.retention.candidate_window)
             .collect::<Vec<_>>();
@@ -581,14 +677,14 @@ impl RuntimeMaintainer {
                     );
                 }
             }
-            MaintenanceWorkerResponse::NoCandidate { .. } => {
+            MaintenanceWorkerResponse::NoCandidate => {
                 self.ledger.record(
                     key,
                     "no_retention_candidate",
                     self.config.retention.retry_after_seconds,
                 );
             }
-            MaintenanceWorkerResponse::Defer { .. } => {
+            MaintenanceWorkerResponse::Defer => {
                 self.ledger.record(
                     key,
                     "retention_deferred",
@@ -627,6 +723,166 @@ impl RuntimeMaintainer {
             .await?;
         Ok(pages.into_iter().map(MaintenanceDetailPage::from).collect())
     }
+
+    async fn related_pair_exists(
+        &self,
+        page_ids: &[String; 2],
+        revision_ids: &[String],
+    ) -> Result<bool> {
+        let pages = self
+            .client
+            .read_pages(ReadPagesRequest {
+                page_ids: Vec::new(),
+                revision_ids: revision_ids.to_vec(),
+                projections: vec![Projection::Manifest, Projection::Relations],
+                max_chars: 1,
+            })
+            .await?;
+        anyhow::ensure!(pages.len() == 2, "relation candidates disappeared");
+        Ok(pages.iter().any(|page| {
+            page.relations.iter().any(|relation| {
+                relation.relation_type == "related_to"
+                    && ((relation.from_page_id == page_ids[0]
+                        && relation.to_page_id == page_ids[1])
+                        || (relation.from_page_id == page_ids[1]
+                            && relation.to_page_id == page_ids[0]))
+            })
+        }))
+    }
+}
+
+fn relation_candidate_window(
+    inventory: &[pcp_store::DurablePageInventoryItem],
+    config: &RelationMaintenanceConfig,
+    packing_enabled: bool,
+) -> Vec<pcp_store::DurablePageInventoryItem> {
+    inventory
+        .iter()
+        .filter(|page| {
+            let unpacked_stream_leaf = packing_enabled
+                && page.mutability == PageMutability::Sealed
+                && page.source_span.is_some()
+                && page.media_type.as_deref() != Some(PACKED_PAGE_MEDIA_TYPE);
+            let has_semantic_input = page.content_chars > 0
+                || page
+                    .summary
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                || page.facets.is_some();
+            !unpacked_stream_leaf
+                && has_semantic_input
+                && !excluded_kind(&page.kind, &config.excluded_page_kinds)
+        })
+        .take(config.candidate_window)
+        .cloned()
+        .collect()
+}
+
+fn relation_window_key(revision_ids: &[String]) -> String {
+    let mut revision_ids = revision_ids.to_vec();
+    revision_ids.sort();
+    revision_ids.dedup();
+    format!("relation_window:{}", revision_ids.join(","))
+}
+
+fn relation_pair_key(page_ids: &[String; 2]) -> String {
+    format!("relation_pair:{},{}", page_ids[0], page_ids[1])
+}
+
+fn packing_candidate_window(
+    inventory: &[pcp_store::DurablePageInventoryItem],
+    config: &PackingMaintenanceConfig,
+) -> Option<Vec<pcp_store::DurablePageInventoryItem>> {
+    let eligible = |page: &&pcp_store::DurablePageInventoryItem| {
+        let packed = page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE);
+        let valid_shape = if packed {
+            page.mutability == PageMutability::Revisioned
+        } else {
+            page.mutability == PageMutability::Sealed
+                && page.summary_revision_id.is_none()
+                && page.relation_types.is_empty()
+        };
+        valid_shape
+            && page.source_span.is_some()
+            && page.content_chars > 0
+            && !excluded_kind(&page.kind, &config.excluded_page_kinds)
+    };
+    let mut visited = std::collections::HashSet::new();
+    for seed in inventory.iter().filter(eligible) {
+        let span = seed.source_span.as_ref()?;
+        let key = (
+            seed.namespace.clone(),
+            seed.kind.clone(),
+            span.stream_id.clone(),
+        );
+        if !visited.insert(key.clone()) {
+            continue;
+        }
+        let mut group = inventory
+            .iter()
+            .filter(eligible)
+            .filter(|page| {
+                let span = page.source_span.as_ref().expect("eligible sourceSpan");
+                page.namespace == key.0 && page.kind == key.1 && span.stream_id == key.2
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        group.sort_by_key(|page| {
+            page.source_span
+                .as_ref()
+                .expect("eligible sourceSpan")
+                .start
+        });
+
+        let mut best = Vec::new();
+        let mut run = Vec::new();
+        let mut run_chars = 0_u64;
+        let mut run_anchors = 0_usize;
+        for page in group {
+            if page.content_chars > u64::from(config.max_input_chars) {
+                if run.len() >= 2 {
+                    best = std::mem::take(&mut run);
+                } else {
+                    run.clear();
+                }
+                run_chars = 0;
+                run_anchors = 0;
+                continue;
+            }
+            let page_is_anchor = page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE);
+            let contiguous =
+                run.last()
+                    .is_none_or(|previous: &pcp_store::DurablePageInventoryItem| {
+                        let previous = previous.source_span.as_ref().expect("eligible sourceSpan");
+                        let current = page.source_span.as_ref().expect("eligible sourceSpan");
+                        previous.end.checked_add(1) == Some(current.start)
+                    });
+            let fits = run.len() < config.max_pages
+                && run_chars.saturating_add(page.content_chars)
+                    <= u64::from(config.max_input_chars)
+                && run_anchors + usize::from(page_is_anchor) <= 1;
+            if !contiguous || !fits {
+                if run.len() >= 2 {
+                    best = std::mem::take(&mut run);
+                } else {
+                    run.clear();
+                }
+                run_chars = 0;
+                run_anchors = 0;
+            }
+            run_chars = run_chars.saturating_add(page.content_chars);
+            run_anchors += usize::from(page_is_anchor);
+            run.push(page);
+        }
+        if run.len() >= 2 {
+            best = run;
+        }
+        if best.len() >= 2 {
+            best.truncate(PACKING_CANDIDATE_WINDOW.min(config.max_pages));
+            return Some(best);
+        }
+    }
+    None
 }
 
 fn normalize_milestones(
@@ -655,8 +911,8 @@ fn normalize_milestones(
     Ok(())
 }
 
-fn excluded_kind(kind: &Option<String>, excluded: &[String]) -> bool {
-    kind.as_ref().is_some_and(|kind| excluded.contains(kind))
+fn excluded_kind(kind: &str, excluded: &[String]) -> bool {
+    excluded.iter().any(|excluded| excluded == kind)
 }
 
 fn ensure_nonempty_worker_content(content: &str) -> Result<()> {
@@ -671,10 +927,9 @@ fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
     match response {
         MaintenanceWorkerResponse::WriteSummary { .. } => "write_summary",
         MaintenanceWorkerResponse::Candidate { .. } => "candidate",
-        MaintenanceWorkerResponse::Consolidate { .. } => "consolidate",
+        MaintenanceWorkerResponse::Relate { .. } => "relate",
         MaintenanceWorkerResponse::Retain { .. } => "retain",
-        MaintenanceWorkerResponse::KeepSeparate { .. } => "keep_separate",
-        MaintenanceWorkerResponse::NoCandidate { .. } => "no_candidate",
-        MaintenanceWorkerResponse::Defer { .. } => "defer",
+        MaintenanceWorkerResponse::NoCandidate => "no_candidate",
+        MaintenanceWorkerResponse::Defer => "defer",
     }
 }

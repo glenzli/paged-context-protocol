@@ -10,7 +10,7 @@ identity-bound PCP RPC session. Infra Discovery advertises the public entry
 point; it does not define enrollment requests, responses, credentials, approval,
 or the PCP RPC session returned after approval.
 
-Enrollment is part of the reference Runtime control plane, not the normative PCP
+Enrollment is part of the official Runtime control plane, not the normative PCP
 Page model. Static configured endpoints remain supported and can coexist during
 migration.
 
@@ -27,7 +27,7 @@ share one generation-specific endpoint:
   "schema_version": "20260812.1",
   "service": {
     "kind": "pcp",
-    "instance_id": "owner_...",
+    "instance_id": "idn_...",
     "generation": "proc_..."
   },
   "offers": [
@@ -47,7 +47,7 @@ share one generation-specific endpoint:
 }
 ```
 
-The Store owner ID is the stable `instance_id`. Every Runtime start has a new
+The Store `identityId` is the stable `instance_id`. Every Runtime start has a new
 `generation` and public socket. A client MUST select an exact supported protocol
 version and a valid relative endpoint according to the Infra Discovery
 specification. The manifest is only a candidate declaration; connection success,
@@ -68,7 +68,8 @@ sockets are mode `0600`.
 The client generates 32 random bytes and persists them as 64 lowercase
 hexadecimal characters. The credential is sent in `begin`, `status`, and
 `open_session`; Runtime persists only its SHA-256 digest. A credential is not a
-requested PCP identity or permission. Runtime constructs the final
+requested PCP Identity or permission. Runtime binds every approved registration
+to the Identity advertised by the selected PCP service and constructs the final
 `AccessSession` exclusively from a user-approved registration.
 
 The public endpoint permits applications to create and inspect only requests
@@ -117,13 +118,13 @@ Every public request has schema `pcp.runtime.enrollment.request` and version
       }
     },
     "requested_access": {
-      "mode": "admin",
+      "mode": "contribute",
       "scopes": [
         "user:self",
         "project:symbiont-d",
         "conversation:symbiont-d"
       ],
-      "allow_cross_scope_derivation": true
+      "allow_cross_scope_derivation": false
     },
     "credential": "<64 lowercase hexadecimal characters>"
   }
@@ -131,8 +132,11 @@ Every public request has schema `pcp.runtime.enrollment.request` and version
 ```
 
 `principalType` is `host`, `model_client`, `cli`, or `service`. `mode` is
-`observe`, `read`, `audit`, `write`, or `admin`. The special Scope `user:self`
-is resolved by Runtime to the selected Store's `user:<owner_id>` Scope. Other
+`observe`, `read`, `contribute`, `audit`, `write`, or `admin`. Ordinary tenants
+use `read` or `contribute`; `contribute` adds only authenticated `ingest_page`
+and does not grant advanced Page or maintenance writes. `write` and `admin` are
+privileged maintainer and local-operator modes. The special Scope `user:self` is
+resolved by Runtime to the selected Store's `user:<identity_id>` Scope. Other
 Scope names are literal. A request contains 1-16 unique Scopes, each at most 128
 UTF-8 bytes. Runtime retains at most 16 simultaneous pending requests and 32
 active registrations per Store.
@@ -249,6 +253,9 @@ registration. Dynamic endpoints use the same canonical
 `sockets/<opaque>.sock` binding shape as discovery offers: the opaque ID is at
 most 16 filename-safe ASCII characters, and Runtime validates the final path
 before binding and retries with a new ID on collision.
+
+The PCP RPC descriptor publishes one `identityId`, which MUST equal the selected
+service `instance_id`. A client MUST reject a mismatch.
 
 ## Administration
 

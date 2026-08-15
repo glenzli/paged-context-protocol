@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use pcp_core::{
-    LifecycleStatus, PageValidity, PageValidityHint, Projection, SearchHit, SearchMode,
-    SearchPagesRequest, SearchResult, SearchTermMatch,
+    GraphSearchEdge, LifecycleStatus, PageValidity, PageValidityHint, Projection, SearchHit,
+    SearchMode, SearchPagesRequest, SearchResult, SearchTermMatch,
 };
 use rusqlite::{Connection, params_from_iter, types::Value as SqlValue};
 use serde_json::{Map, Value};
@@ -164,9 +164,9 @@ fn browse_index_once(
             break;
         }
         let revision = revision_from_row(row, false, true, false, false)?;
-        let snippet: String = row.get(18)?;
-        let matched_projection: String = row.get(19)?;
-        let summary_revision_id: Option<String> = row.get(20)?;
+        let snippet: String = row.get(17)?;
+        let matched_projection: String = row.get(18)?;
+        let summary_revision_id: Option<String> = row.get(19)?;
         let entry_chars = snippet.chars().count().saturating_add(240);
         if !hits.is_empty() && used_chars.saturating_add(entry_chars) > max_chars {
             has_more = true;
@@ -191,6 +191,7 @@ fn browse_index_once(
             summary_revision_id,
             facets: compact_search_facets(revision.facets),
             validity,
+            graph_edges: Vec::new(),
         });
     }
     Ok(SearchResult {
@@ -350,6 +351,7 @@ fn search_revision_surface(
         matched_projection,
         offset,
         limit,
+        false,
     )
 }
 
@@ -419,6 +421,7 @@ fn search_summaries(
         "summary",
         offset,
         limit,
+        false,
     )
 }
 
@@ -453,7 +456,7 @@ fn search_graph(
             FROM pcp_revisions revision
             WHERE revision.revision_id = ?
          ),
-         graph_edges (revision_id, edge_type, created_at) AS (
+         graph_edges (revision_id, edge_type, edge_kind, direction, basis_revision_ids_json, created_at) AS (
             SELECT
                 CASE
                     WHEN relation.from_page_id = origin.page_id
@@ -461,6 +464,12 @@ fn search_graph(
                     ELSE source.current_revision_id
                 END,
                 relation.relation_type,
+                'relation',
+                CASE
+                    WHEN relation.from_page_id = origin.page_id THEN 'outgoing'
+                    ELSE 'incoming'
+                END,
+                COALESCE(relation.basis_revision_ids_json, '[]'),
                 relation.created_at
             FROM pcp_relations relation
             JOIN origin
@@ -477,6 +486,12 @@ fn search_graph(
                     ELSE provenance.derived_revision_id
                 END,
                 'derived_from',
+                'provenance',
+                CASE
+                    WHEN provenance.derived_revision_id = origin.requested_revision_id THEN 'outgoing'
+                    ELSE 'incoming'
+                END,
+                json_array(provenance.derived_revision_id, provenance.input_revision_id),
                 provenance.created_at
             FROM pcp_provenance_inputs provenance
             JOIN origin
@@ -486,7 +501,13 @@ fn search_graph(
          ),
          neighbors AS (
             SELECT edge.revision_id,
-                MAX(edge.created_at) AS edge_created_at
+                MAX(edge.created_at) AS edge_created_at,
+                json_group_array(json_object(
+                    'relationType', edge.edge_type,
+                    'edgeKind', edge.edge_kind,
+                    'direction', edge.direction,
+                    'basisRevisionIds', json(edge.basis_revision_ids_json)
+                )) AS graph_edges_json
             FROM graph_edges edge
             WHERE 1 = 1",
     );
@@ -513,7 +534,8 @@ fn search_graph(
                     SELECT summary_head.current_summary_revision_id
                     FROM pcp_page_summary_heads summary_head
                     WHERE summary_head.target_page_id = r.page_id
-                )
+                ),
+                neighbors.graph_edges_json
          FROM neighbors
          JOIN pcp_revisions r ON r.revision_id = neighbors.revision_id
          JOIN pcp_pages p ON p.page_id = r.page_id
@@ -539,6 +561,7 @@ fn search_graph(
         "relations",
         offset,
         limit,
+        true,
     )
 }
 
@@ -568,6 +591,7 @@ fn collect_hits(
     matched_projection: &str,
     offset: usize,
     limit: usize,
+    include_graph_edges: bool,
 ) -> Result<SearchResult> {
     let mut statement = connection.prepare(sql).context("prepare PCP search")?;
     let mut rows = statement
@@ -576,8 +600,15 @@ fn collect_hits(
     let mut hits = Vec::new();
     while let Some(row) = rows.next().context("read PCP search row")? {
         let revision = revision_from_row(row, false, true, false, false)?;
-        let snippet: String = row.get(18)?;
-        let summary_revision_id: Option<String> = row.get(19)?;
+        let snippet: String = row.get(17)?;
+        let summary_revision_id: Option<String> = row.get(18)?;
+        let graph_edges = if include_graph_edges {
+            let encoded: String = row.get(19)?;
+            serde_json::from_str::<Vec<GraphSearchEdge>>(&encoded)
+                .context("decode PCP graph edge metadata")?
+        } else {
+            Vec::new()
+        };
         let validity =
             current_validity(connection, &revision.revision_id)?.map(compact_validity_hint);
         let page = page_manifest(connection, &revision.page_id)?;
@@ -596,6 +627,7 @@ fn collect_hits(
             summary_revision_id,
             facets: compact_search_facets(revision.facets),
             validity,
+            graph_edges,
         });
     }
     let has_more = hits.len() > limit;

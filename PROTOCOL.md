@@ -1,6 +1,6 @@
-# Paged-Context-Protocol (PCP) - v0.7.0-draft
+# Paged-Context-Protocol (PCP) - v0.8.0-draft
 
-> 状态：草案。v0.7 恢复稳定 Page 与不可变 Revision 的双层模型，并明确区分语义、版本与物理保留策略。
+> 状态：草案。v0.8 在 Page/Revision 模型之上明确 Identity、租户与 Runtime 维护权，并收敛来源与关系语义。
 
 Paged-Context-Protocol（PCP）是一套面向模型、由用户拥有的长期上下文协议。它让不同 Host
 和模型在明确 Scope 与权限下发现、读取、写入并追溯同一组持久信息，但不规定固定的召回、
@@ -8,20 +8,32 @@ Paged-Context-Protocol（PCP）是一套面向模型、由用户拥有的长期�
 
 PCP 的边界是：
 
-> **维护稳定 Page、不可变 Revision、Page 关系与精确来源；把何时召回、如何理解、是否写入
-> 和是否进入当前注意力留给模型与 Host。**
+> **在一个用户拥有的 Identity 中接收多租户输入，维护稳定 Page、不可变 Revision、来源与跨 Scope
+> 关系，并向模型提供当前任务最相关、可追溯且经过权限裁剪的有效上下文。**
 
 ## 1. Core 对象
 
-### 1.1 Page
+### 1.1 Identity、Principal 与 Scope
 
-Page 是稳定的语义对象，不等于一次内容版本：
+Identity 是 PCP 的持久上下文与维护边界。同一 Identity 可以接收任意数量租户的输入；Runtime 可以在
+Identity 内发现跨租户候选并维护关系，但不得跨 Identity 推断、连接或召回内容。官方 Runtime 当前将
+一个 Store 绑定到一个 Identity。
+
+租户通过服务端注入的 Principal 与 AccessSession 操作 PCP。Principal 表示调用者，不是内容所有者。
+Scope 是 Identity 内的授权切片。任何读取、搜索、图遍历和写入都必须经过 Scope Grant；统一的 Identity
+不表示所有租户自动看到全部内容。若关系任一端不可读，响应不得泄露该关系或隐藏端点的存在。
+
+`identityId` 由 Runtime descriptor 给出，租户不得自行声明内容归属。真正需要隔离维护与关联的内容应进入
+不同 Identity，而不是通过租户名称伪造边界。
+
+### 1.2 Page
+
+Page 是最小的、可独立召回的语义片段，不等于来源系统的一次事件，也不等于一次内容版本：
 
 ```json
 {
   "pageId": "pg_01...",
   "headRevisionId": "rev_03...",
-  "ownerId": "usr_01...",
   "namespace": "project:example",
   "kind": "document",
   "mutability": "sealed|revisioned",
@@ -31,13 +43,14 @@ Page 是稳定的语义对象，不等于一次内容版本：
 }
 ```
 
-- `sealed`：原始消息、文件快照、工具结果等事实记录。产生后不得发布第二个 Revision。
+- `sealed`：原始消息、文件快照、工具结果等事实记录。产生后不得发布第二个 Revision；满足第 2 节
+  无损 pack 约束的未引用叶节点可以被一个等价 packed Page 原子替换。
 - `revisioned`：Summary、Topic、用户画像、项目状态等系统持续维护的理解。
 - `mutability` 是内容不变量，不是历史保留级别。
 - `lifecycleStatus` 描述 Page 是否参与默认召回，不表达其内容真假。
 - `kind` 是开放字符串，用于路由和 Host 策略；它不产生新的 Core 对象类型。
 
-### 1.2 Revision
+### 1.3 Revision
 
 Revision 是 Page 的不可变内容快照：
 
@@ -47,6 +60,8 @@ Revision 是 Page 的不可变内容快照：
   "pageId": "pg_01...",
   "previousRevisionId": "rev_02...",
   "createdAt": "...",
+  "observedAt": "...",
+  "sourceSpan": { "streamId": "host:chat:main", "start": 41, "end": 41 },
   "createdBy": { "actorType": "model", "actorId": "..." },
   "payload": { "mediaType": "text/markdown", "content": "..." },
   "sourceRefs": [],
@@ -63,7 +78,32 @@ Revision 不可变不等于永久保留。Store 可以按策略回收不再受�
 当前头、sealed Page 的证据 Revision、仍受保护的 provenance 所依赖的 Revision，以及显式
 保留根不得被回收。默认 Search 和全文索引只覆盖 Page 当前头。
 
-### 1.3 Relation
+`createdAt` 是 Store 提交时间，`observedAt` 是来源事件时间，两者不能合并。可选 `sourceSpan`
+标识生产者某条来源流中的闭区间；普通 `ingest_page` 由 Runtime 用认证 Principal 隔离
+`streamId`，避免租户误占同一序列。`sourceSpan` 不产生 Page Relation，也不声称两个事件在语义上相关。
+
+### 1.4 SourceRef 与外部媒体
+
+Page 是 PCP 内稳定的来源身份。原始内容由外部系统保管时，Revision 可以用一个最小 `SourceRef` 指向它：
+
+```json
+{
+  "providerId": "tenant:photos",
+  "locator": "opaque-photo-42",
+  "mediaType": "image/jpeg",
+  "contentDigest": "sha256:..."
+}
+```
+
+- `providerId + locator` 只对保管方有解析意义；Runtime 不得把任意路径或 URL 当作受信任抓取指令。
+- `mediaType` 和 `contentDigest` 可选。digest 用于核对返回内容，不另造第二套资产身份。
+- SourceRef 不承诺原件在线，也不记录可变 availability；解析失败时保留 Page 和已有语义表示。
+
+可检索的 OCR、转写、caption、布局、事件或领域解释应写成普通 Page/Revision，并以 exact provenance
+指回承载媒体引用的 Revision。图片不得被强制收缩为唯一 caption；不同任务可以产生多个可追溯表示。
+媒体字节托管、Provider 回调与自动提取不属于 v0.8 Core。
+
+### 1.5 Relation
 
 Relation 是稳定 Page 之间可维护的语义断言：
 
@@ -77,35 +117,32 @@ Relation 是稳定 Page 之间可维护的语义断言：
 ```
 
 `basisRevisionIds` 记录断言建立时观察的精确版本；导航跟随稳定 Page，审计回到精确 Revision。
-Core 约定关系包括：
+`relationType` 是开放字符串，Capability 不枚举词表；以下类型具有 Core 约定语义：
 
 - `summarizes`：来源 Page 是目标 Page 的路由摘要；
 - `assesses`：来源 Page 判断目标 Page 当前应如何使用；
 - `supersedes`：一个 Page 在语义上替代另一个 Page；
-- `aggregates`：来源 Page 聚合多个独立 Page。
+- `aggregates`：来源 Page 聚合多个独立 Page；
+- `about`：来源 Page 讨论一个稳定 Topic Page；
+- `related_to`：两 Page 存在值得未来联合召回、但没有更准确类型的直接概念关联。
+
+同主题内容优先各自以 `about` 指向同一 Topic Page，不在所有 Page 之间两两建边。`related_to` 是对称兜底
+关系：Runtime 按 Page ID 规范化端点，并只保存一个逻辑关系；它不得用于表达顺序、来源、替代或依赖。
 
 `derived_from` 的精确信息应优先写入 Revision provenance；只有确有导航价值时才同时建立
 Page Relation。Relation 不能因为时间相邻、同属 Scope、共同命中或向量相似自动产生。
 会话顺序属于 Host event stream，不是 Page 图关系。
 
-同一三元组的 Relation 应被去重。错误 Relation 可以撤回；撤回不修改两端 Page。Relation
-不会授予另一端 Page 的读取权限。
+同一三元组的有效 Relation 必须合并。未经确认的候选只进入维护 ledger，不能直接成为 Relation。错误
+Relation 可以撤回；撤回不修改两端 Page。Relation 不会授予另一端 Page 的读取权限。
 
-### 1.4 Provenance
+### 1.6 Provenance
 
 Provenance 属于 Revision，必须引用实际参与生成的精确 `revisionId`。模型或工具生成内容时应
 记录操作、Actor、时间、输入 Revision 和必要的工具/模型标识。Page Relation 用于导航，
 provenance 用于复现“当时依据了什么”，二者不可互相替代。
 
-### 1.5 Scope 与 Alias
-
-每个 Page 必须属于一个 `namespace`。Search、Read、图遍历和写入均受 AccessSession 的
-Scope Grant 限制；语义相似不得扩大权限。
-
-Alias 是可选的人类入口或兼容重定向：`alias -> pageId`。Alias 不是 Page 身份、证据或派生图
-节点。旧版 Ref 可以迁移为 Alias，但不得继续承担稳定 Page 的语义。
-
-## 2. Summary、Validity 与 Consolidation
+## 2. Summary、Validity 与无损 Pack
 
 Summary 是普通的 `revisioned` Page，通过 `summarizes` 指向目标 Page。并非每个 Page 都值得
 Summary；只有内容足够长、密集或未来值得路由时才创建。更好的 Summary 更新同一个 Summary
@@ -125,36 +162,62 @@ assessment Page。Page 的 `lifecycleStatus` 只控制默认可见性；`live`�
 `qualified`、`disputed`、`retracted` 等认识必须由 assessment 内容、证据 Revision 与当前投影
 表达，不能混入版本链。
 
-Consolidation 用于多个 Page 实际表达同一持久对象时的有损收敛：
+无损 pack 用于降低大量细粒度 sealed Page 的对象数量，而不让模型重写或删减原始内容。Runtime
+可以让语义 worker 从一个有界窗口中选择值得放在一起的有序子序列，但提交由 Store 确定性完成。
 
-1. 选择一个 `revisioned` canonical Page；
-2. 读取并锁定所有输入 Page 的精确当前 Revision；
-3. 为 canonical Page 发布一个新 Revision；
-4. provenance 记录全部输入 Revision；
-5. canonical Page 以 `supersedes` 指向被吸收的其他 Page；
-6. 被吸收 Page 退出默认召回，但仍可精确审计。
+一次 `pack_pages` 必须满足：
 
-canonical Page 与被吸收 Page 必须具有相同的 `kind` 和 `mutability`。原始证据、维护型理解、
-Summary 与 Topic 即使文本高度相似，也不能跨语义角色 consolidation；它们应通过 provenance、
-`summarizes` 或其他 Page Relation 保持联系。
+1. 输入是 2 到 64 个互异的精确当前 Revision，属于同一 Scope、同一 `kind`，并在同一
+   `sourceSpan.streamId` 中按请求顺序严格连续；
+2. 普通输入必须是 active、sealed、单 Revision Page，且没有 Page Relation、Relation basis 或撤回、
+   跨 Revision provenance 依赖、Summary、Validity、retention lease 等外部引用；
+3. 输入中可以有至多一个 active、revisioned packed Page 作为稳定锚点；锚点已有的关系、Summary、
+   Validity 与历史 Revision 不阻止扩展，因为其 Page 身份不会被销毁；
+4. 首次 pack 创建一个新的 revisioned Page；带锚点的 pack 必须以其精确当前 Revision 做 CAS，
+   并在同一 Page 上发布一个新 Revision；
+5. `application/vnd.pcp.packed-page+json` 的 `entries` 始终是按 sourceSpan 排列的原始叶节点，
+   不得包含 packed payload；扩展必须扁平合并，不能形成 pack 嵌套；
+6. Store 只删除本次吸收的 sealed Page/Revision，并保留不含正文的 pack ledger。旧精确 ID 必须明确
+   报告已被 pack 到哪个 Page，不能静默重定向。旧的锚点 Revision 仍是普通历史 Revision。
 
-Host 若为 Page 声明了稳定领域身份（例如一个 episode/topic 的稳定键），身份冲突必须视为
-consolidation 的硬拒绝，而不能被标题、文本相似度或共同召回覆盖。该身份的具体字段由 Host 定义，
-不进入 PCP 通用协议。
+pack 销毁被吸收叶节点的 Page 身份，但不丢失其 payload、SourceRef、facets、provenance、Actor 与
+时间边界。两个已有 packed Page 不在 v0.8 中直接合并；跨越 sourceSpan 间隙的相关内容应保持独立，
+并通过 `related_to`、`about`、Topic 或其他 Relation 组织。时间邻近和主题连续性由 Runtime 的语义
+判断选择，不能削弱 Store 的机械约束。
 
-相似度、共同召回和时间邻接只能发现候选。是否合并以及如何有损生成内容必须由 Host、用户或
-模型判断，Store 只验证权限、并发、图不变量和事务原子性。
+基于成熟 Summary 或其他表示删除原始细节属于有损凝炼。它需要独立的质量、恢复、确认和审计语义，
+不属于 v0.8；`pack_pages` 不得被实现成这种操作。
 
 ## 3. 接口语义
 
-Core 能力面至少应提供：
+### 3.1 租户数据面
 
+普通租户的规范接口保持较小：
+
+- `describe() -> identity_id, access, capabilities`
+- `list_scopes(query?, limit?, cursor?)`
+- `ingest_page(namespace, kind, payload?, source_refs?, observed_at?, source_span?, facets?, external_event_id?)`
 - `search_pages(query, scopes, strategy?, limit?, cursor?)`
 - `read_pages(page_ids, revision_ids?, view?, max_chars?)`
+- 可选 `browse_index(scopes?, view?, limit?, cursor?)`
+
+`ingest_page` 是租户唯一的持久写入口。Identity 由所连接的 Runtime 决定，不在 Page、Revision、Scope 或
+写请求中重复携带。Runtime 从认证会话填充 Actor、active lifecycle 与 sealed mutability，并隔离可选
+`sourceSpan.streamId`；调用方只提供来源事件本身。普通 `read` 会话只能检索和读取；`contribute` 会话
+额外获得独立的 `ingest` 权限，但不因此获得高级 Page 写入或维护权限。
+
+Search 返回候选而不是真值，并必须有界、可分页、标明命中投影和当前 Revision。Relation、Summary、
+Validity、provenance 与 SourceRef 可以作为被授权的读取投影返回；租户不需要对应的直接写接口。持有精确
+Revision ID 的调用方可以按授权读取历史证据，但历史 Revision 不应重新进入默认搜索结果；原始访问审计与
+历史枚举仍属于 audit/operator 面。模型决定当前任务需要查询和读取什么，并把结果组装进当前工作上下文。
+
+### 3.2 Runtime 维护面
+
+Runtime maintainer 与本机管理工具可以使用完整 Core 接口：
+
 - `write_page(kind, mutability, content, scope?, based_on_revision_ids?)`
 - `revise_page(page_id, expected_revision_id, content, based_on_revision_ids?)`
-- `consolidate_pages(canonical_page_id, expected_canonical_revision_id,
-  absorbed[{page_id, expected_revision_id}], content)`
+- `pack_pages(pages[{page_id, revision_id}], idempotency_key?)`
 - `write_summary(target_page_id, target_revision_id, content)`
 - `assess_validity(target_page_id, target_revision_id, standing, evidence_revision_ids)`
 - `relate_pages(from_page_id, relation_type, to_page_id, basis_revision_ids?)`
@@ -163,20 +226,30 @@ Core 能力面至少应提供：
 - `put_revision_retention_lease(revision_id, reason, expires_at, idempotency_key)`
 - `list_active_revision_retention_leases(scopes, limit)`
 
-默认模型工具应简短。Host 自动填充身份、时间、Scope、常规 provenance 和结构性关系。Search
-返回候选而不是真值，并必须有界、可分页、标明命中投影和当前 Revision。精确 Revision 读取
-用于审计，不应重新进入默认搜索结果。
+这些操作实现 Identity 范围内的全局维护策略，不属于普通租户合同。实现可以在同一个 RPC transport 上承载
+两组操作，但必须以会话权限和操作 allowlist 执行边界；接口分层不要求增加 socket 或部署单元。
+
+### 3.3 控制面与观测面
+
+Runtime Discovery、授权注册、批准与 `open_session` 属于 Runtime 控制协议；Health、Observer snapshot、
+原始审计与维护控制属于只读观测或本机 operator 接口。它们可以与 PCP 一同实现，但不是租户 Page 数据面，
+也不应通过 Core Page 请求承载。
 
 ## 4. 分层责任
 
-协议定义：Page/Revision 身份、sealed/revisioned 不变量、Page Relation、精确 provenance、
-Scope 权限、CAS 发布与可追溯回收约束。
+协议定义：Identity 边界、Page/Revision 身份、sealed/revisioned 不变量、Page Relation、精确
+provenance、SourceRef、Scope 权限、CAS 发布与可追溯回收约束。
 
-Store/Runtime 负责：当前头索引、事务、权限执行、审计、Relation 撤回、历史保留、冷热迁移、
-GC 根、候选发现和维护任务生命周期。这些物理状态不进入模型上下文。
+Store/Runtime 负责：当前头索引、事务、权限执行、审计、Relation 撤回、历史保留、GC 根、候选发现，
+以及 Identity 范围内 Summary、Validity、无损 pack、语义关系和 retention 的全局维护策略。Runtime
+可以调用独立模型作为推理 Provider，但必须拥有任务生成、预算、验证、提交与维护 ledger；单个租户不应
+成为个人长期上下文的权威维护者。
 
-Host 负责：原始事件捕获、会话顺序、Page kind、哪些对象可修订、Summary/Topic/画像策略、语义
-关系判断、模型路由、主动探索、注意力边界和当前上下文组装。
+租户/Host 负责：捕获自己观察到的原始事件、来源内部确定知道的顺序或结构（包括可选 `sourceSpan`）、Page kind、SourceRef 与
+外部媒体保管；它可以提交反馈或候选，但不得假定自己拥有其他租户的数据或全局关系图。
+
+消费模型负责：提出查询、读取被授权的精确内容、判断当前任务相关性，并把 PCP 返回的有界结果组装进
+当前工作上下文。语义模型 Provider 只向 Runtime 提供判断能力，不直接拥有 Store 写权限或维护 cadence。
 
 PCP 不定义固定 Prompt、向量算法、总结阈值、后台 Agent 拓扑或用户画像格式。
 
@@ -186,7 +259,7 @@ PCP 不定义固定 Prompt、向量算法、总结阈值、后台 Agent 拓扑�
 Page/Revision 的协议字段。最小安全规则：
 
 - 当前头永远保留；
-- sealed Page 的唯一证据 Revision 默认保留；
+- sealed Page 的唯一证据 Revision 默认保留；唯一例外是满足第 2 节全部约束的无损 pack；
 - 受保护根可达的 provenance、Relation 的精确端点与 basis、Summary/Validity 精确记录、显式快照
   或租约引用的 Revision 保留；
 - 未被引用的普通中间 Revision 可按策略压缩或删除；
@@ -215,26 +288,17 @@ Runtime 可以把真实回收候选的有界路由内容交给 Host 的语义 wo
 
 dry-run 不产生删除。执行计划时必须要求具有独立 collection 权限的调用方提交精确候选 ID，
 在同一事务内重新计算保护根；任何 ID 已不再是候选时，整批操作必须拒绝。成功回收应原子清理
-候选 Revision、只属于候选的兼容索引或来源边，以及与这些候选精确关联且已经超过窗口的幂等记录，
+候选 Revision、只属于候选的投影索引或来源边，以及与这些候选精确关联且已经超过窗口的幂等记录，
 并保存不含正文的 collection ledger，使旧 Revision ID 可被识别为“已回收”而不是“从未存在”。
 仍可能被 Host 重放的 Page 写入、当前头和其他存活操作，其幂等记录不能仅因时间经过而全局删除。
-实现应分别声明
-`supportsRevisionRetentionPlanning` 与 `supportsRevisionRetention`；支持规划不表示已经支持执行。
+实现只在 `capabilities.features` 中列出可选能力；保留规划与执行分别使用
+`revision_retention_planning` 和 `revision_retention`，支持规划不表示已经支持执行。v0.8 必选能力不再
+以恒为 `true` 的布尔字段重复发布。
 
-保留策略按 Host、Page kind、存储预算和价值配置，不应要求模型为每次写入选择 GC 参数。
+保留策略按 Identity、Page kind、存储预算和价值配置，不应要求租户或模型为每次写入选择 GC 参数。
 
-## 6. v0.6 迁移
+## 6. v0.8 版本边界
 
-v0.6 参考实现虽然公开使用 `Ref ≈ Page`、`Page ≈ Revision`，数据库已保存稳定 `page_id` 和
-精确 `revision_id`。升级到 v0.7 时应：
-
-1. 恢复旧稳定 `page_id` 为 Page；旧 `revision_id` 为 Revision；
-2. 由 Page 当前头回填 owner、Scope、kind、mutability 与 lifecycle；
-3. 由同 Page 的时间序回填 `previousRevisionId`；
-4. 删除同 Page 内机械生成的 `supersedes`；
-5. 将 Relation 端点归一为稳定 Page，并保留精确 basis Revision；
-6. 把 Summary 与 Validity 更新分别收敛到稳定维护 Page；
-7. 重建只包含当前头的全文与 Summary 索引；
-8. 移除身份型旧 Ref；实现若确实提供 Alias API，再显式迁移非身份型 Ref。
-
-迁移必须事务化、幂等，并在升级前保留可恢复备份。
+v0.8 不兼容 v0.7 的 wire 或 Store schema。升级时创建新的 v0.8 Store，并从租户仍持有的原始内容经
+`ingest_page` 重新导入；不得直接打开旧数据库，也不得从旧 URI、摘要、向量命中或历史 provenance 猜测
+Identity、SourceRef 或新的语义 Relation。高级写接口仍用于 Runtime 维护器与管理工具。

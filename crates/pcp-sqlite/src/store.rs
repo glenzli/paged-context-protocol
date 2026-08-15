@@ -22,7 +22,7 @@ pub(crate) const MAX_PAGE_CHARS: usize = 256_000;
 #[derive(Clone)]
 pub struct SqlitePcpStore {
     pub(crate) path: PathBuf,
-    owner_id: String,
+    identity_id: String,
     pub(crate) audit_writer: Arc<AccessAuditWriter>,
 }
 
@@ -36,7 +36,7 @@ impl SqlitePcpStore {
         audit_policy: AccessAuditPolicy,
     ) -> Result<Self> {
         let path_for_open = path.clone();
-        let (owner_id, audit_writer) = task::spawn_blocking(move || -> Result<_> {
+        let (identity_id, audit_writer) = task::spawn_blocking(move || -> Result<_> {
             if let Some(parent) = path_for_open.parent() {
                 std::fs::create_dir_all(parent).with_context(|| {
                     format!("create PCP database directory {}", parent.display())
@@ -44,27 +44,27 @@ impl SqlitePcpStore {
             }
             let mut connection = open_connection(&path_for_open)?;
             schema::initialize(&mut connection)?;
-            let owner_id = schema::owner_id(&connection)?;
+            let identity_id = schema::identity_id(&connection)?;
             drop(connection);
             let audit_writer = AccessAuditWriter::start(path_for_open, audit_policy)?;
-            Ok((owner_id, Arc::new(audit_writer)))
+            Ok((identity_id, Arc::new(audit_writer)))
         })
         .await
         .context("join PCP database initialization")??;
         Ok(Self {
             path,
-            owner_id,
+            identity_id,
             audit_writer,
         })
     }
 
-    pub fn owner_id(&self) -> &str {
-        &self.owner_id
+    pub fn identity_id(&self) -> &str {
+        &self.identity_id
     }
 
     pub fn capabilities(&self) -> Capabilities {
         Capabilities {
-            protocol_version: "0.7.0-draft".to_owned(),
+            protocol_version: "0.8.0-draft".to_owned(),
             search_modes: vec![
                 SearchMode::Auto,
                 SearchMode::Exact,
@@ -86,41 +86,12 @@ impl SqlitePcpStore {
             max_search_results: MAX_SEARCH_RESULTS,
             max_read_pages: MAX_READ_PAGES,
             max_read_chars: MAX_READ_CHARS,
-            supports_event_ingest: true,
-            supports_sealed_pages: true,
-            supports_revisioned_pages: true,
-            supports_aliases: false,
-            supports_revision_retention_planning: true,
-            supports_revision_retention_leases: true,
-            supports_revision_retention: true,
-            supports_revision_conflicts: true,
-            supports_consolidation: true,
-            supports_durable_deletion: false,
-            supports_provenance_graph: true,
-            supports_access_sessions: true,
-            supports_access_audit: true,
-            relation_types: vec![
-                "contains",
-                "aggregates",
-                "derived_from",
-                "summarizes",
-                "responds_to",
-                "continues",
-                "has_attachment",
-                "about",
-                "updates",
-                "depends_on",
-                "defines",
-                "uses",
-                "supports",
-                "contradicts",
-                "assesses",
-                "supersedes",
-                "qualifies",
-                "reaffirms",
-                "outdated_by",
-                "inspired_by",
-                "related_to",
+            features: [
+                "access_audit",
+                "lossless_page_packing",
+                "revision_retention",
+                "revision_retention_leases",
+                "revision_retention_planning",
             ]
             .into_iter()
             .map(str::to_owned)

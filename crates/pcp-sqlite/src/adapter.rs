@@ -1,14 +1,15 @@
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
-    AccessAuditEvent, AccessDecision, AccessPermission, AccessSession, AssessPageValidityRequest,
-    Capabilities, CollectRevisionRetentionRequest, ConsolidatePagesRequest, CreateScopeRequest,
-    LinkPagesRequest, OperationTelemetry, PlanRevisionRetentionRequest, Projection,
-    ProvenanceEvent, PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation,
-    RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan,
-    Scope, SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
+    AccessAuditEvent, AccessDecision, AccessPermission, AccessPrincipalType, AccessSession, Actor,
+    ActorType, AssessPageValidityRequest, Capabilities, CollectRevisionRetentionRequest,
+    CreateScopeRequest, IngestPageRequest, LifecycleStatus, LinkPagesRequest, OperationTelemetry,
+    PackPagesRequest, PageMutability, PlanRevisionRetentionRequest, Projection, ProvenanceEvent,
+    PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
+    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope,
+    SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
     WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::{DurablePageInventoryItem, HealthSnapshot, PcpStore, TombstoneCascadeResult};
@@ -22,8 +23,8 @@ use crate::{
 
 #[async_trait]
 impl PcpStore for SqlitePcpStore {
-    fn owner_id(&self) -> &str {
-        SqlitePcpStore::owner_id(self)
+    fn identity_id(&self) -> &str {
+        SqlitePcpStore::identity_id(self)
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -45,19 +46,16 @@ impl PcpStore for SqlitePcpStore {
     ) -> Result<()> {
         let observation = OperationObservation::start();
         let mut scopes = vec![request.namespace.clone()];
-        let authorization = (request.owner_id == self.owner_id())
-            .then_some(())
-            .ok_or_else(|| anyhow::anyhow!("ownerId does not match this PCP Store"))
-            .and_then(|_| {
-                authorize_exact(access, &request.namespace, AccessPermission::ManageScope)
-            })
-            .and_then(|_| {
-                if let Some(parent) = request.parent_namespace.as_ref() {
-                    authorize_exact(access, parent, AccessPermission::ManageScope)?;
-                    scopes.push(parent.clone());
-                }
-                Ok(())
-            });
+        let authorization =
+            authorize_exact(access, &request.namespace, AccessPermission::ManageScope).and_then(
+                |_| {
+                    if let Some(parent) = request.parent_namespace.as_ref() {
+                        authorize_exact(access, parent, AccessPermission::ManageScope)?;
+                        scopes.push(parent.clone());
+                    }
+                    Ok(())
+                },
+            );
         if let Err(error) = authorization {
             return complete(
                 self,
@@ -510,6 +508,68 @@ impl PcpStore for SqlitePcpStore {
         .await
     }
 
+    async fn ingest_page(
+        &self,
+        access: &AccessSession,
+        request: IngestPageRequest,
+    ) -> Result<WriteResult> {
+        let observation = OperationObservation::start();
+        let target_scope = request.namespace.clone();
+        if let Err(error) = authorize_exact(access, &target_scope, AccessPermission::Ingest) {
+            return complete(
+                self,
+                access,
+                "ingest_page",
+                vec![target_scope],
+                Err(error),
+                true,
+                observation,
+            )
+            .await;
+        }
+        let actor_type = match access.principal.principal_type {
+            AccessPrincipalType::ModelClient => ActorType::Model,
+            AccessPrincipalType::Host | AccessPrincipalType::Cli | AccessPrincipalType::Service => {
+                ActorType::Tool
+            }
+        };
+        let write_request = WritePageRequest {
+            namespace: request.namespace,
+            lifecycle_status: LifecycleStatus::Active,
+            kind: request.kind,
+            mutability: PageMutability::Sealed,
+            created_by: Actor {
+                actor_type,
+                actor_id: access.principal.principal_id.clone(),
+            },
+            observed_at: request.observed_at,
+            source_span: request.source_span.map(|mut span| {
+                span.stream_id = format!("{}:{}", access.principal.principal_id, span.stream_id);
+                span
+            }),
+            valid_from: None,
+            valid_to: None,
+            payload: request.payload,
+            source_refs: request.source_refs,
+            facets: request.facets,
+            provenance: Vec::new(),
+            initial_relations: Vec::new(),
+            idempotency_key: request.external_event_id,
+        };
+        let result =
+            SqlitePcpStore::write_page(self, write_request, vec![target_scope.clone()]).await;
+        complete(
+            self,
+            access,
+            "ingest_page",
+            vec![target_scope],
+            result,
+            false,
+            observation,
+        )
+        .await
+    }
+
     async fn write_page(
         &self,
         access: &AccessSession,
@@ -526,9 +586,6 @@ impl PcpStore for SqlitePcpStore {
         let target_scope = request.namespace.clone();
         let mut audit_scopes = vec![target_scope.clone()];
         let authorization = async {
-            if request.owner_id != self.owner_id() {
-                anyhow::bail!("ownerId does not match this PCP Store");
-            }
             authorize_exact(access, &target_scope, AccessPermission::Write)?;
             let provenance_scopes =
                 authorize_provenance(self, access, &target_scope, &request.provenance).await?;
@@ -655,28 +712,24 @@ impl PcpStore for SqlitePcpStore {
         .await
     }
 
-    async fn consolidate_pages(
+    async fn pack_pages(
         &self,
         access: &AccessSession,
-        request: ConsolidatePagesRequest,
+        request: PackPagesRequest,
     ) -> Result<WriteResult> {
-        let observation = OperationObservation::start()
-            .with_input_count(request.replaced_pages.len().saturating_add(1));
-        let mut target_ids = request
-            .replaced_pages
+        let observation = OperationObservation::start().with_input_count(request.pages.len());
+        let target_ids = request
+            .pages
             .iter()
             .map(|input| input.page_id.clone())
             .collect::<Vec<_>>();
-        target_ids.push(request.canonical_page_id.clone());
-        target_ids.sort();
-        target_ids.dedup();
-        let mut scopes = match self.page_namespaces(target_ids).await {
+        let scopes = match self.page_namespaces(target_ids).await {
             Ok(scopes) => scopes,
             Err(error) => {
                 return complete(
                     self,
                     access,
-                    "consolidate_pages",
+                    "pack_pages",
                     Vec::new(),
                     Err(error),
                     false,
@@ -685,26 +738,14 @@ impl PcpStore for SqlitePcpStore {
                 .await;
             }
         };
-        let authorization = async {
-            for scope in &scopes {
-                authorize_exact(access, scope, AccessPermission::Write)?;
-                authorize_exact(access, scope, AccessPermission::Revise)?;
-            }
-            let target_scope = scopes
-                .first()
-                .cloned()
-                .context("PCP consolidation has no target Scope")?;
-            let provenance_scopes =
-                authorize_provenance(self, access, &target_scope, &request.provenance).await?;
-            extend_unique(&mut scopes, provenance_scopes);
-            Ok(())
-        }
-        .await;
+        let authorization = scopes
+            .iter()
+            .try_for_each(|scope| authorize_exact(access, scope, AccessPermission::Collect));
         if let Err(error) = authorization {
             return complete(
                 self,
                 access,
-                "consolidate_pages",
+                "pack_pages",
                 scopes,
                 Err(error),
                 true,
@@ -712,11 +753,26 @@ impl PcpStore for SqlitePcpStore {
             )
             .await;
         }
-        let result = SqlitePcpStore::consolidate_pages(self, request, scopes.clone()).await;
+        let actor_type = match access.principal.principal_type {
+            AccessPrincipalType::ModelClient => ActorType::Model,
+            AccessPrincipalType::Host | AccessPrincipalType::Cli | AccessPrincipalType::Service => {
+                ActorType::Tool
+            }
+        };
+        let result = SqlitePcpStore::pack_pages(
+            self,
+            request,
+            Actor {
+                actor_type,
+                actor_id: access.principal.principal_id.clone(),
+            },
+            scopes.clone(),
+        )
+        .await;
         complete(
             self,
             access,
-            "consolidate_pages",
+            "pack_pages",
             scopes,
             result,
             false,

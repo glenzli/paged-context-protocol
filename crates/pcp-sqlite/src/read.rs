@@ -13,20 +13,18 @@ use crate::{
 
 impl SqlitePcpStore {
     pub async fn local_scope_names(&self) -> Result<Vec<String>> {
-        let owner_id = self.owner_id().to_owned();
         self.run("local scope discovery", move |connection| {
             let mut statement = connection
                 .prepare(
                     "
                     SELECT namespace
                     FROM pcp_scopes
-                    WHERE owner_id = ?1
                     ORDER BY namespace
                     ",
                 )
                 .context("prepare local PCP scopes")?;
             statement
-                .query_map([owner_id], |row| row.get(0))
+                .query_map([], |row| row.get(0))
                 .context("query local PCP scopes")?
                 .collect::<rusqlite::Result<Vec<String>>>()
                 .context("collect local PCP scopes")
@@ -58,8 +56,8 @@ impl SqlitePcpStore {
             let mut statement = connection
                 .prepare(
                     "
-                    SELECT s.owner_id, s.namespace, s.display_name,
-                           s.description, s.parent_namespace, s.visibility,
+                    SELECT s.namespace, s.display_name,
+                           s.description, s.parent_namespace,
                            s.created_at, s.updated_at, COUNT(p.page_id)
                     FROM pcp_scopes s
                     LEFT JOIN pcp_revisions r ON r.namespace = s.namespace
@@ -72,15 +70,13 @@ impl SqlitePcpStore {
             let scopes = statement
                 .query_map([], |row| {
                     Ok(Scope {
-                        owner_id: row.get(0)?,
-                        namespace: row.get(1)?,
-                        display_name: row.get(2)?,
-                        description: row.get(3)?,
-                        parent_namespace: row.get(4)?,
-                        visibility: row.get(5)?,
-                        created_at: row.get(6)?,
-                        updated_at: row.get(7)?,
-                        page_count: row.get::<_, i64>(8)? as u64,
+                        namespace: row.get(0)?,
+                        display_name: row.get(1)?,
+                        description: row.get(2)?,
+                        parent_namespace: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                        page_count: row.get::<_, i64>(6)? as u64,
                     })
                 })
                 .context("query PCP scopes")?
@@ -167,7 +163,15 @@ impl SqlitePcpStore {
                         [&page_id],
                         |row| row.get::<_, String>(0),
                     )
+                    .optional()
                     .with_context(|| format!("resolve PCP Page {page_id}"))?;
+                let Some(head) = head else {
+                    return Err(unavailable_page_error(
+                        &connection,
+                        &page_id,
+                        &allowed_scopes,
+                    )?);
+                };
                 requested_revision_ids.push(head);
             }
             let mut seen = HashSet::new();
@@ -183,10 +187,15 @@ impl SqlitePcpStore {
                 let mut rows = statement
                     .query([&revision_id])
                     .context("query PCP revision")?;
-                let row = rows
-                    .next()
-                    .context("read PCP revision row")?
-                    .context("PCP revision is not available")?;
+                let Some(row) = rows.next().context("read PCP revision row")? else {
+                    drop(rows);
+                    drop(statement);
+                    return Err(unavailable_revision_error(
+                        &connection,
+                        &revision_id,
+                        &allowed_scopes,
+                    )?);
+                };
                 let mut revision = revision_from_row(
                     row,
                     include_payload,
@@ -324,7 +333,7 @@ impl SqlitePcpStore {
     ) -> Result<String> {
         let allowed_scopes: HashSet<String> = allowed_scopes.into_iter().collect();
         self.run("current revision read", move |connection| {
-            let (revision_id, namespace): (String, String) = connection
+            let current: Option<(String, String)> = connection
                 .query_row(
                     "
                     SELECT p.current_revision_id, p.namespace
@@ -334,7 +343,15 @@ impl SqlitePcpStore {
                     [&page_id],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
+                .optional()
                 .context("find current PCP revision")?;
+            let Some((revision_id, namespace)) = current else {
+                return Err(unavailable_page_error(
+                    &connection,
+                    &page_id,
+                    &allowed_scopes,
+                )?);
+            };
             if !allowed_scopes.contains(&namespace) {
                 anyhow::bail!("PCP page is not available");
             }
@@ -451,6 +468,60 @@ fn read_relations(
         }
     }
     Ok(relations)
+}
+
+fn unavailable_revision_error(
+    connection: &rusqlite::Connection,
+    revision_id: &str,
+    allowed_scopes: &HashSet<String>,
+) -> Result<anyhow::Error> {
+    let packed = connection
+        .query_row(
+            "
+            SELECT namespace, packed_page_id
+            FROM pcp_page_packs
+            WHERE source_revision_id = ?1
+            ",
+            [revision_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .context("look up packed PCP Revision")?;
+    if let Some((namespace, packed_page_id)) = packed
+        && allowed_scopes.contains(&namespace)
+    {
+        return Ok(anyhow::anyhow!(
+            "PCP revision {revision_id} was packed into Page {packed_page_id}"
+        ));
+    }
+    Ok(anyhow::anyhow!("PCP revision is not available"))
+}
+
+fn unavailable_page_error(
+    connection: &rusqlite::Connection,
+    page_id: &str,
+    allowed_scopes: &HashSet<String>,
+) -> Result<anyhow::Error> {
+    let packed = connection
+        .query_row(
+            "
+            SELECT namespace, packed_page_id
+            FROM pcp_page_packs
+            WHERE source_page_id = ?1
+            ",
+            [page_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .context("look up packed PCP Page")?;
+    if let Some((namespace, packed_page_id)) = packed
+        && allowed_scopes.contains(&namespace)
+    {
+        return Ok(anyhow::anyhow!(
+            "PCP Page {page_id} was packed into Page {packed_page_id}"
+        ));
+    }
+    Ok(anyhow::anyhow!("PCP page is not available"))
 }
 
 fn retain_authorized_revision_ids(

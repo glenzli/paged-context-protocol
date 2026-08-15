@@ -170,7 +170,7 @@ export function createRetentionView({ request, showError, formatNumber, formatTi
       metric("Eligible history", formatNumber(plan.candidateRevisions), hasCandidates ? "warning" : "positive", `${formatBytes(plan.candidateEstimatedBytes)} across ${formatNumber(plan.candidatePages)} Pages`),
     );
 
-    const collectionAvailable = Boolean(capabilities?.supportsRevisionRetention);
+    const collectionAvailable = Boolean(capabilities?.features?.includes("revision_retention"));
     const outcome = element(
       "div",
       `health-signal tone-${hasCandidates ? "warning" : "positive"}`,

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use pcp_core::PACKED_PAGE_MEDIA_TYPE;
 use pcp_store::DurablePageInventoryItem;
 use rusqlite::{params_from_iter, types::Value as SqlValue};
 
@@ -24,10 +25,24 @@ impl SqlitePcpStore {
             let mut sql = format!(
                 "
                 SELECT r.page_id, r.revision_id, r.namespace,
-                       page.kind,
-                       r.created_at, r.observed_at,
+                       page.kind, page.mutability,
+                       r.created_at, r.observed_at, r.source_span_json,
+                       r.payload_media_type,
                        length(COALESCE(r.payload_content, '')),
-                       substr(COALESCE(r.payload_content, ''), 1, ?),
+                       CASE
+                           WHEN r.payload_media_type = ? THEN
+                               'Packed range boundary:\nfirst: ' ||
+                               substr(COALESCE(json_extract(
+                                   r.payload_content,
+                                   '$.entries[0].payload.content'
+                               ), ''), 1, ?) ||
+                               '\nlast: ' ||
+                               substr(COALESCE(json_extract(
+                                   r.payload_content,
+                                   '$.entries[#-1].payload.content'
+                               ), ''), 1, ?)
+                           ELSE substr(COALESCE(r.payload_content, ''), 1, ?)
+                       END,
                        r.facets_json,
                        summary.summary_revision_id, summary.content,
                        COALESCE((
@@ -50,7 +65,13 @@ impl SqlitePcpStore {
                   AND r.lifecycle_status = 'active'
                 "
             );
-            let mut values = vec![SqlValue::Integer(MAX_INVENTORY_SNIPPET_CHARS as i64)];
+            let boundary_chars = MAX_INVENTORY_SNIPPET_CHARS / 2;
+            let mut values = vec![
+                SqlValue::Text(PACKED_PAGE_MEDIA_TYPE.to_owned()),
+                SqlValue::Integer(boundary_chars as i64),
+                SqlValue::Integer(boundary_chars as i64),
+                SqlValue::Integer(MAX_INVENTORY_SNIPPET_CHARS as i64),
+            ];
             values.extend(allowed_scopes.into_iter().map(SqlValue::Text));
             if !excluded_page_kinds.is_empty() {
                 let placeholders = (0..excluded_page_kinds.len())
@@ -70,22 +91,30 @@ impl SqlitePcpStore {
                 .context("prepare durable PCP inventory")?;
             let items = statement
                 .query_map(params_from_iter(values.iter()), |row| {
-                    let facets_json: Option<String> = row.get(8)?;
-                    let relation_types_json: String = row.get(11)?;
+                    let mutability: String = row.get(4)?;
+                    let source_span_json: Option<String> = row.get(7)?;
+                    let facets_json: Option<String> = row.get(11)?;
+                    let relation_types_json: String = row.get(14)?;
                     Ok(DurablePageInventoryItem {
                         page_id: row.get(0)?,
                         revision_id: row.get(1)?,
                         namespace: row.get(2)?,
                         kind: row.get(3)?,
-                        created_at: row.get(4)?,
-                        observed_at: row.get(5)?,
-                        content_chars: row.get::<_, i64>(6)? as u64,
-                        snippet: row.get(7)?,
+                        mutability: pcp_core::PageMutability::parse(&mutability)
+                            .unwrap_or_default(),
+                        created_at: row.get(5)?,
+                        observed_at: row.get(6)?,
+                        source_span: source_span_json
+                            .as_deref()
+                            .and_then(|value| serde_json::from_str(value).ok()),
+                        media_type: row.get(8)?,
+                        content_chars: row.get::<_, i64>(9)? as u64,
+                        snippet: row.get(10)?,
                         facets: facets_json
                             .as_deref()
                             .and_then(|value| serde_json::from_str(value).ok()),
-                        summary_revision_id: row.get(9)?,
-                        summary: row.get(10)?,
+                        summary_revision_id: row.get(12)?,
+                        summary: row.get(13)?,
                         relation_types: serde_json::from_str(&relation_types_json)
                             .unwrap_or_default(),
                     })

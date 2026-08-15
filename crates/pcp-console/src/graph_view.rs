@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
 use anyhow::{Context, Result};
-use pcp_client::PcpApi;
+use pcp_client::PcpTenantApi;
 use pcp_core::{
-    Projection, ReadPage, ReadPagesRequest, Relation, SearchFilters, SearchHit, SearchMode,
-    SearchPagesRequest, SearchTermMatch,
+    GraphEdgeDirection, GraphEdgeKind, Projection, ReadPage, ReadPagesRequest, Relation,
+    SearchFilters, SearchHit, SearchMode, SearchPagesRequest, SearchTermMatch,
 };
 use pcp_rpc::RemotePcpClient;
 use serde::Serialize;
@@ -14,8 +14,6 @@ pub const DEFAULT_GRAPH_NODE_LIMIT: usize = 120;
 pub const MAX_GRAPH_DEPTH: usize = 3;
 pub const MAX_GRAPH_NODE_LIMIT: usize = 240;
 
-const MAX_DIRECT_NEIGHBORS: usize = 40;
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphNode {
@@ -23,12 +21,14 @@ pub struct GraphNode {
     pub depth: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphEdge {
     pub from_page_id: String,
     pub relation_type: String,
     pub to_page_id: String,
+    pub edge_kind: GraphEdgeKind,
+    pub basis_revision_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,6 +49,13 @@ pub struct PageGraph {
     pub neighbors: Vec<ReadPage>,
     pub hits: Vec<SearchHit>,
     pub topology: GraphTopology,
+}
+
+struct GraphStep {
+    pages: Vec<ReadPage>,
+    hits: Vec<SearchHit>,
+    edges: Vec<GraphEdge>,
+    truncated: bool,
 }
 
 pub async fn load_page_graph(
@@ -78,61 +85,25 @@ pub async fn load_page_graph(
     )
     .await?;
 
-    let direct_limit = usize::try_from(client.capabilities().max_read_pages)
-        .unwrap_or(MAX_DIRECT_NEIGHBORS)
-        .min(MAX_DIRECT_NEIGHBORS);
-    let neighbor_ids = graph_neighbor_ids(&root.relations, &page_id, direct_limit);
-    let neighbors = if neighbor_ids.is_empty() {
-        Vec::new()
-    } else {
-        client
-            .read_pages(ReadPagesRequest {
-                page_ids: neighbor_ids,
-                revision_ids: Vec::new(),
-                projections: vec![
-                    Projection::Manifest,
-                    Projection::Summary,
-                    Projection::Validity,
-                    Projection::Facets,
-                    Projection::Relations,
-                ],
-                max_chars: 64_000,
-            })
-            .await?
-            .into_iter()
-            .filter(|page| !is_superseded(page))
-            .collect()
-    };
-    let graph_hits = client
-        .search_pages(SearchPagesRequest {
-            query: page_id.clone(),
-            scopes,
-            mode: SearchMode::Graph,
-            term_match: SearchTermMatch::All,
-            projections: vec![
-                Projection::Manifest,
-                Projection::Summary,
-                Projection::Payload,
-                Projection::Facets,
-            ],
-            filters: SearchFilters::default(),
-            limit: u32::try_from(direct_limit).unwrap_or(MAX_DIRECT_NEIGHBORS as u32),
-            cursor: None,
-        })
-        .await?;
-    let topology = load_topology(client, &root, depth, node_limit).await?;
+    let root_step = load_graph_step(client, &root, &scopes).await?;
+    let neighbors = root_step.pages.clone();
+    let hits = root_step.hits.clone();
+    let topology =
+        load_topology(client, root.clone(), root_step, scopes, depth, node_limit).await?;
 
     Ok(PageGraph {
         root,
         neighbors,
-        hits: graph_hits.hits,
+        hits,
         topology,
     })
 }
 
 async fn load_topology(
     client: &RemotePcpClient,
-    root: &ReadPage,
+    root: ReadPage,
+    root_step: GraphStep,
+    scopes: Vec<String>,
     depth: usize,
     node_limit: usize,
 ) -> Result<GraphTopology> {
@@ -142,82 +113,62 @@ async fn load_topology(
         depth: 0,
     }];
     let mut seen_nodes = HashSet::from([root_id.clone()]);
-    let mut seen_edges = HashSet::new();
     let mut edges = Vec::new();
-    let mut current_pages = vec![root.clone()];
+    let mut current = vec![(root, root_step)];
     let mut truncated = false;
 
     for current_depth in 0..depth {
-        let mut candidate_ids = Vec::new();
-        let mut candidate_relations = Vec::new();
-        for page in &current_pages {
-            let current_id = &page.page.page_id;
-            if page.relations.len() >= 200 {
-                truncated = true;
-            }
-            for relation in &page.relations {
-                if !is_default_graph_relation(relation) {
-                    continue;
-                }
-                let neighbor_id = match relation_neighbor(relation, current_id) {
-                    Some(page_id) => page_id,
-                    None => continue,
-                };
-                candidate_relations.push(relation.clone());
-                if !seen_nodes.contains(neighbor_id)
-                    && !candidate_ids
-                        .iter()
-                        .any(|candidate| candidate == neighbor_id)
+        let mut candidate_pages = Vec::new();
+        let mut candidate_edges = Vec::new();
+        for (_, step) in &current {
+            truncated |= step.truncated;
+            candidate_edges.extend(step.edges.iter().cloned());
+            for page in &step.pages {
+                if !candidate_pages
+                    .iter()
+                    .any(|candidate: &ReadPage| candidate.page.page_id == page.page.page_id)
                 {
-                    candidate_ids.push(neighbor_id.to_owned());
+                    candidate_pages.push(page.clone());
                 }
             }
         }
 
-        let remaining = node_limit.saturating_sub(seen_nodes.len());
-        if candidate_ids.len() > remaining {
-            candidate_ids.truncate(remaining);
-            truncated = true;
-        }
-        let loaded_candidates = read_relation_pages(client, candidate_ids).await?;
         let mut next_pages = Vec::new();
-        for page in loaded_candidates {
+        let remaining = node_limit.saturating_sub(seen_nodes.len());
+        for page in candidate_pages {
+            if seen_nodes.contains(&page.page.page_id) {
+                continue;
+            }
+            if next_pages.len() >= remaining {
+                truncated = true;
+                continue;
+            }
             if is_superseded(&page) {
                 continue;
             }
             let page_id = page.page.page_id.clone();
-            if seen_nodes.insert(page_id.clone()) {
-                nodes.push(GraphNode {
-                    page_id,
-                    depth: current_depth + 1,
-                });
-                next_pages.push(page);
-            }
+            seen_nodes.insert(page_id.clone());
+            nodes.push(GraphNode {
+                page_id,
+                depth: current_depth + 1,
+            });
+            next_pages.push(page);
         }
 
-        for relation in candidate_relations {
-            if seen_nodes.contains(&relation.from_page_id)
-                && seen_nodes.contains(&relation.to_page_id)
-            {
-                let edge_key = (
-                    relation.from_page_id.clone(),
-                    relation.relation_type.clone(),
-                    relation.to_page_id.clone(),
-                );
-                if seen_edges.insert(edge_key.clone()) {
-                    edges.push(GraphEdge {
-                        from_page_id: edge_key.0,
-                        relation_type: edge_key.1,
-                        to_page_id: edge_key.2,
-                    });
-                }
+        for edge in candidate_edges {
+            if seen_nodes.contains(&edge.from_page_id) && seen_nodes.contains(&edge.to_page_id) {
+                insert_graph_edge(&mut edges, edge);
             }
         }
 
         if current_depth + 1 >= depth || next_pages.is_empty() {
             break;
         }
-        current_pages = next_pages;
+        current = Vec::with_capacity(next_pages.len());
+        for page in next_pages {
+            let step = load_graph_step(client, &page, &scopes).await?;
+            current.push((page, step));
+        }
     }
 
     Ok(GraphTopology {
@@ -230,7 +181,127 @@ async fn load_topology(
     })
 }
 
-async fn read_relation_pages(
+async fn load_graph_step(
+    client: &RemotePcpClient,
+    page: &ReadPage,
+    scopes: &[String],
+) -> Result<GraphStep> {
+    let graph = client
+        .search_pages(SearchPagesRequest {
+            query: page.page.page_id.clone(),
+            scopes: scopes.to_vec(),
+            mode: SearchMode::Graph,
+            term_match: SearchTermMatch::All,
+            projections: vec![
+                Projection::Manifest,
+                Projection::Summary,
+                Projection::Payload,
+                Projection::Facets,
+            ],
+            filters: SearchFilters::default(),
+            limit: client.capabilities().max_search_results,
+            cursor: None,
+        })
+        .await?;
+    let mut edges = relation_edges(page);
+    let mut candidate_ids = edges
+        .iter()
+        .flat_map(|edge| [&edge.from_page_id, &edge.to_page_id])
+        .filter(|page_id| *page_id != &page.page.page_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    for hit in &graph.hits {
+        for metadata in &hit.graph_edges {
+            if !is_default_graph_edge(metadata.edge_kind.clone(), &metadata.relation_type) {
+                continue;
+            }
+            let edge = match metadata.direction {
+                GraphEdgeDirection::Outgoing => GraphEdge {
+                    from_page_id: page.page.page_id.clone(),
+                    relation_type: metadata.relation_type.clone(),
+                    to_page_id: hit.page_id.clone(),
+                    edge_kind: metadata.edge_kind.clone(),
+                    basis_revision_ids: metadata.basis_revision_ids.clone(),
+                },
+                GraphEdgeDirection::Incoming => GraphEdge {
+                    from_page_id: hit.page_id.clone(),
+                    relation_type: metadata.relation_type.clone(),
+                    to_page_id: page.page.page_id.clone(),
+                    edge_kind: metadata.edge_kind.clone(),
+                    basis_revision_ids: metadata.basis_revision_ids.clone(),
+                },
+            };
+            if edge.from_page_id != edge.to_page_id {
+                candidate_ids.push(hit.page_id.clone());
+                insert_graph_edge(&mut edges, edge);
+            }
+        }
+    }
+    candidate_ids.sort();
+    candidate_ids.dedup();
+    candidate_ids.retain(|page_id| page_id != &page.page.page_id);
+    let pages = read_graph_pages(client, candidate_ids).await?;
+    let readable = pages
+        .iter()
+        .map(|page| page.page.page_id.as_str())
+        .collect::<HashSet<_>>();
+    edges.retain(|edge| {
+        (edge.from_page_id == page.page.page_id || readable.contains(edge.from_page_id.as_str()))
+            && (edge.to_page_id == page.page.page_id || readable.contains(edge.to_page_id.as_str()))
+    });
+
+    Ok(GraphStep {
+        pages,
+        hits: graph.hits,
+        edges,
+        truncated: graph.next_cursor.is_some() || page.relations.len() >= 200,
+    })
+}
+
+fn relation_edges(page: &ReadPage) -> Vec<GraphEdge> {
+    let mut edges = Vec::new();
+    for relation in &page.relations {
+        if !is_default_graph_relation(relation)
+            || relation_neighbor(relation, &page.page.page_id).is_none()
+        {
+            continue;
+        }
+        insert_graph_edge(
+            &mut edges,
+            GraphEdge {
+                from_page_id: relation.from_page_id.clone(),
+                relation_type: relation.relation_type.clone(),
+                to_page_id: relation.to_page_id.clone(),
+                edge_kind: GraphEdgeKind::Relation,
+                basis_revision_ids: relation.basis_revision_ids.clone(),
+            },
+        );
+    }
+    edges
+}
+
+fn insert_graph_edge(edges: &mut Vec<GraphEdge>, edge: GraphEdge) {
+    if let Some(existing) = edges.iter_mut().find(|existing| {
+        existing.from_page_id == edge.from_page_id
+            && existing.relation_type == edge.relation_type
+            && existing.to_page_id == edge.to_page_id
+            && existing.edge_kind == edge.edge_kind
+    }) {
+        for revision_id in edge.basis_revision_ids {
+            if !existing.basis_revision_ids.contains(&revision_id) {
+                existing.basis_revision_ids.push(revision_id);
+            }
+        }
+        return;
+    }
+    edges.push(edge);
+}
+
+fn is_default_graph_edge(edge_kind: GraphEdgeKind, relation_type: &str) -> bool {
+    edge_kind == GraphEdgeKind::Provenance || !matches!(relation_type, "supersedes" | "follows")
+}
+
+async fn read_graph_pages(
     client: &RemotePcpClient,
     page_ids: Vec<String>,
 ) -> Result<Vec<ReadPage>> {
@@ -243,8 +314,14 @@ async fn read_relation_pages(
             .read_pages(ReadPagesRequest {
                 page_ids: batch.to_vec(),
                 revision_ids: Vec::new(),
-                projections: vec![Projection::Manifest, Projection::Relations],
-                max_chars: 8_000,
+                projections: vec![
+                    Projection::Manifest,
+                    Projection::Summary,
+                    Projection::Validity,
+                    Projection::Facets,
+                    Projection::Relations,
+                ],
+                max_chars: 64_000,
             })
             .await?;
         pages.extend(loaded);
@@ -288,53 +365,42 @@ fn is_superseded(page: &ReadPage) -> bool {
     page.page.lifecycle_status == pcp_core::LifecycleStatus::Superseded
 }
 
-fn graph_neighbor_ids(relations: &[Relation], root_page_id: &str, limit: usize) -> Vec<String> {
-    let mut seen = HashSet::new();
-    relations
-        .iter()
-        .filter(|relation| is_default_graph_relation(relation))
-        .filter_map(|relation| relation_neighbor(relation, root_page_id).map(str::to_owned))
-        .filter(|page_id| seen.insert(page_id.clone()))
-        .take(limit)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use pcp_core::{Actor, ActorType};
-
     use super::*;
 
-    fn relation(from: &str, relation_type: &str, to: &str) -> Relation {
-        Relation {
-            relation_id: format!("{from}:{relation_type}:{to}"),
-            from_page_id: from.to_owned(),
-            relation_type: relation_type.to_owned(),
-            to_page_id: to.to_owned(),
-            basis_revision_ids: Vec::new(),
-            created_by: Actor {
-                actor_type: ActorType::System,
-                actor_id: "system:test".to_owned(),
-            },
-            created_at: "2026-08-03T00:00:00Z".to_owned(),
-        }
-    }
-
     #[test]
-    fn graph_neighbors_are_bidirectional_deduplicated_and_bounded() {
-        let relations = vec![
-            relation("rev_root", "aggregates", "rev_a"),
-            relation("rev_root", "derived_from", "rev_a"),
-            relation("rev_b", "summarizes", "rev_root"),
-            relation("rev_root", "follows", "rev_temporal"),
-            relation("rev_root", "supersedes", "rev_old"),
-            relation("rev_other", "related", "rev_unrelated"),
-        ];
-
-        assert_eq!(
-            graph_neighbor_ids(&relations, "rev_root", 10),
-            vec!["rev_a", "rev_b"]
+    fn graph_keeps_asserted_relations_and_provenance_distinct() {
+        let mut edges = Vec::new();
+        for edge_kind in [GraphEdgeKind::Relation, GraphEdgeKind::Provenance] {
+            insert_graph_edge(
+                &mut edges,
+                GraphEdge {
+                    from_page_id: "pg_derived".to_owned(),
+                    relation_type: "derived_from".to_owned(),
+                    to_page_id: "pg_source".to_owned(),
+                    edge_kind,
+                    basis_revision_ids: vec!["rev_source_a".to_owned()],
+                },
+            );
+        }
+        insert_graph_edge(
+            &mut edges,
+            GraphEdge {
+                from_page_id: "pg_derived".to_owned(),
+                relation_type: "derived_from".to_owned(),
+                to_page_id: "pg_source".to_owned(),
+                edge_kind: GraphEdgeKind::Provenance,
+                basis_revision_ids: vec!["rev_source_b".to_owned()],
+            },
         );
-        assert_eq!(graph_neighbor_ids(&relations, "rev_root", 1), vec!["rev_a"]);
+
+        assert_eq!(edges.len(), 2);
+        assert_eq!(edges[1].basis_revision_ids.len(), 2);
+        assert!(is_default_graph_edge(
+            GraphEdgeKind::Provenance,
+            "derived_from"
+        ));
+        assert!(!is_default_graph_edge(GraphEdgeKind::Relation, "follows"));
     }
 }

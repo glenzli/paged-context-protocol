@@ -4,18 +4,19 @@ use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessSession, AssessPageValidityRequest, Capabilities,
-    CollectRevisionRetentionRequest, ConsolidatePagesRequest, CreateScopeRequest, LinkPagesRequest,
-    PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest,
-    Relation, RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease,
-    RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult, WritePageRequest, WriteResult,
+    CollectRevisionRetentionRequest, CreateScopeRequest, IngestPageRequest, LinkPagesRequest,
+    PackPagesRequest, PageMutability, PlanRevisionRetentionRequest,
+    PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
+    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope,
+    SearchPagesRequest, SearchResult, SourceSpan, WritePageRequest, WriteResult,
     WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use health::{
-    ActivityHealth, ConsolidationHealth, GraphHealth, HealthSnapshot, HealthTimelineBucket,
-    NamedCount, OperationHealth, RecallHealth, ScopeHealth, StorageHealth,
+    ActivityHealth, GraphHealth, HealthSnapshot, HealthTimelineBucket, NamedCount, OperationHealth,
+    PackingHealth, RecallHealth, ScopeHealth, StorageHealth,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -24,9 +25,12 @@ pub struct DurablePageInventoryItem {
     pub page_id: String,
     pub revision_id: String,
     pub namespace: String,
-    pub kind: Option<String>,
+    pub kind: String,
+    pub mutability: PageMutability,
     pub created_at: String,
     pub observed_at: Option<String>,
+    pub source_span: Option<SourceSpan>,
+    pub media_type: Option<String>,
     pub content_chars: u64,
     pub snippet: String,
     pub facets: Option<Value>,
@@ -44,7 +48,7 @@ pub struct TombstoneCascadeResult {
 
 #[async_trait]
 pub trait PcpStore: Send + Sync {
-    fn owner_id(&self) -> &str;
+    fn identity_id(&self) -> &str;
     fn capabilities(&self) -> Capabilities;
 
     async fn integrity_check(&self) -> Result<String>;
@@ -110,6 +114,11 @@ pub trait PcpStore: Send + Sync {
         requested_scopes: Vec<String>,
         limit: u32,
     ) -> Result<Vec<RevisionRetentionLease>>;
+    async fn ingest_page(
+        &self,
+        access: &AccessSession,
+        request: IngestPageRequest,
+    ) -> Result<WriteResult>;
     async fn write_page(
         &self,
         access: &AccessSession,
@@ -120,10 +129,10 @@ pub trait PcpStore: Send + Sync {
         access: &AccessSession,
         request: RevisePageRequest,
     ) -> Result<WriteResult>;
-    async fn consolidate_pages(
+    async fn pack_pages(
         &self,
         access: &AccessSession,
-        request: ConsolidatePagesRequest,
+        request: PackPagesRequest,
     ) -> Result<WriteResult>;
     async fn link_pages(
         &self,

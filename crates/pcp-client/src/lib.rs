@@ -5,12 +5,12 @@ use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessPermission, AccessPrincipal, AccessSession, AssessPageValidityRequest,
-    Capabilities, CollectRevisionRetentionRequest, ConsolidatePagesRequest, CreateScopeRequest,
-    LinkPagesRequest, PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage,
-    ReadPagesRequest, Relation, RevisePageRequest, RevisionCollectionResult,
-    RevisionRetentionLease, RevisionRetentionPlan, Scope, ScopeGrant, SearchPagesRequest,
-    SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult,
-    WriteValidityResult,
+    Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest, IngestPageRequest,
+    LinkPagesRequest, PackPagesRequest, PlanRevisionRetentionRequest,
+    PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
+    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope, ScopeGrant,
+    SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
+    WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::PcpStore;
 pub use pcp_store::{DurablePageInventoryItem, HealthSnapshot, TombstoneCascadeResult};
@@ -20,6 +20,7 @@ pub enum AccessMode {
     Observe,
     Read,
     Audit,
+    Contribute,
     Write,
     Admin,
 }
@@ -52,6 +53,9 @@ impl AccessMode {
             AccessPermission::ReadSummary,
             AccessPermission::ReadDetail,
         ];
+        if matches!(self, Self::Contribute | Self::Write | Self::Admin) {
+            permissions.push(AccessPermission::Ingest);
+        }
         if matches!(self, Self::Write | Self::Admin) {
             permissions.extend([
                 AccessPermission::Write,
@@ -86,6 +90,7 @@ impl FromStr for AccessMode {
             "observe" => Ok(Self::Observe),
             "read" => Ok(Self::Read),
             "audit" => Ok(Self::Audit),
+            "contribute" => Ok(Self::Contribute),
             "write" => Ok(Self::Write),
             "admin" => Ok(Self::Admin),
             other => anyhow::bail!("unsupported PCP access mode: {other}"),
@@ -93,18 +98,16 @@ impl FromStr for AccessMode {
     }
 }
 
-/// Transport-independent capabilities exposed to a PCP consumer.
+/// Minimal transport-independent surface exposed to an ordinary tenant.
 ///
 /// Implementations may bind an in-process Store or a server-attested remote
 /// session. Callers must not depend on the deployment form.
 #[async_trait]
-pub trait PcpApi: Send + Sync {
-    fn owner_id(&self) -> &str;
+pub trait PcpTenantApi: Send + Sync {
+    fn identity_id(&self) -> &str;
     fn capabilities(&self) -> Capabilities;
     fn access(&self) -> &AccessSession;
 
-    async fn integrity_check(&self) -> Result<String>;
-    async fn create_scope(&self, request: CreateScopeRequest) -> Result<()>;
     async fn list_scopes(
         &self,
         requested_scopes: Vec<String>,
@@ -122,6 +125,18 @@ pub trait PcpApi: Send + Sync {
         max_chars: u32,
     ) -> Result<SearchResult>;
     async fn read_pages(&self, request: ReadPagesRequest) -> Result<Vec<ReadPage>>;
+    async fn ingest_page(&self, request: IngestPageRequest) -> Result<WriteResult>;
+}
+
+/// Privileged Runtime, maintainer, and operator surface.
+///
+/// Ordinary tenants should be typed against [`PcpTenantApi`]. This superset
+/// retains maintenance operations needed by Runtime-owned policy and local
+/// administrative tools.
+#[async_trait]
+pub trait PcpApi: PcpTenantApi {
+    async fn integrity_check(&self) -> Result<String>;
+    async fn create_scope(&self, request: CreateScopeRequest) -> Result<()>;
     async fn current_revision_id(&self, page_id: String) -> Result<String>;
     async fn page_count(&self, requested_scopes: Vec<String>) -> Result<u64>;
     async fn content_char_count(&self, requested_scopes: Vec<String>) -> Result<usize>;
@@ -144,7 +159,7 @@ pub trait PcpApi: Send + Sync {
     ) -> Result<Vec<RevisionRetentionLease>>;
     async fn write_page(&self, request: WritePageRequest) -> Result<WriteResult>;
     async fn revise_page(&self, request: RevisePageRequest) -> Result<WriteResult>;
-    async fn consolidate_pages(&self, request: ConsolidatePagesRequest) -> Result<WriteResult>;
+    async fn pack_pages(&self, request: PackPagesRequest) -> Result<WriteResult>;
     async fn link_pages(&self, request: LinkPagesRequest) -> Result<Relation>;
     async fn write_summary(&self, request: WriteSummaryRequest) -> Result<WriteSummaryResult>;
     async fn next_summary_candidate(
@@ -197,12 +212,16 @@ impl EmbeddedPcpClient {
     pub fn shared(store: Arc<dyn PcpStore>, access: AccessSession) -> Arc<dyn PcpApi> {
         Arc::new(Self::new(store, access))
     }
+
+    pub fn tenant_shared(store: Arc<dyn PcpStore>, access: AccessSession) -> Arc<dyn PcpTenantApi> {
+        Arc::new(Self::new(store, access))
+    }
 }
 
 #[async_trait]
-impl PcpApi for EmbeddedPcpClient {
-    fn owner_id(&self) -> &str {
-        self.store.owner_id()
+impl PcpTenantApi for EmbeddedPcpClient {
+    fn identity_id(&self) -> &str {
+        self.store.identity_id()
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -211,14 +230,6 @@ impl PcpApi for EmbeddedPcpClient {
 
     fn access(&self) -> &AccessSession {
         &self.access
-    }
-
-    async fn integrity_check(&self) -> Result<String> {
-        self.store.integrity_check().await
-    }
-
-    async fn create_scope(&self, request: CreateScopeRequest) -> Result<()> {
-        self.store.create_scope(&self.access, request).await
     }
 
     async fn list_scopes(
@@ -259,6 +270,21 @@ impl PcpApi for EmbeddedPcpClient {
 
     async fn read_pages(&self, request: ReadPagesRequest) -> Result<Vec<ReadPage>> {
         self.store.read_pages(&self.access, request).await
+    }
+
+    async fn ingest_page(&self, request: IngestPageRequest) -> Result<WriteResult> {
+        self.store.ingest_page(&self.access, request).await
+    }
+}
+
+#[async_trait]
+impl PcpApi for EmbeddedPcpClient {
+    async fn integrity_check(&self) -> Result<String> {
+        self.store.integrity_check().await
+    }
+
+    async fn create_scope(&self, request: CreateScopeRequest) -> Result<()> {
+        self.store.create_scope(&self.access, request).await
     }
 
     async fn current_revision_id(&self, page_id: String) -> Result<String> {
@@ -320,8 +346,8 @@ impl PcpApi for EmbeddedPcpClient {
         self.store.revise_page(&self.access, request).await
     }
 
-    async fn consolidate_pages(&self, request: ConsolidatePagesRequest) -> Result<WriteResult> {
-        self.store.consolidate_pages(&self.access, request).await
+    async fn pack_pages(&self, request: PackPagesRequest) -> Result<WriteResult> {
+        self.store.pack_pages(&self.access, request).await
     }
 
     async fn link_pages(&self, request: LinkPagesRequest) -> Result<Relation> {
@@ -424,6 +450,29 @@ mod tests {
     }
 
     #[test]
+    fn contribute_mode_can_ingest_without_maintenance_authority() {
+        let session = AccessMode::Contribute.session(
+            AccessPrincipal {
+                principal_id: "host:tenant-test".to_owned(),
+                principal_type: AccessPrincipalType::Host,
+                display_name: None,
+            },
+            "session:tenant-test",
+            vec!["project:test".to_owned()],
+            false,
+        );
+
+        assert!(session.allows("project:test", AccessPermission::ReadDetail));
+        assert!(session.allows("project:test", AccessPermission::Ingest));
+        assert!(!session.allows("project:test", AccessPermission::Write));
+        assert!(!session.allows("project:test", AccessPermission::Revise));
+        assert!(!session.allows("project:test", AccessPermission::Summarize));
+        assert!(!session.allows("project:test", AccessPermission::Link));
+        assert!(!session.allows("project:test", AccessPermission::Assess));
+        assert!(!session.allows("project:test", AccessPermission::Audit));
+    }
+
+    #[test]
     fn observe_mode_exposes_only_aggregate_observation() {
         let session = AccessMode::Observe.session(
             AccessPrincipal {
@@ -441,6 +490,7 @@ mod tests {
         assert!(!session.allows("project:test", AccessPermission::Search));
         assert!(!session.allows("project:test", AccessPermission::ReadSummary));
         assert!(!session.allows("project:test", AccessPermission::ReadDetail));
+        assert!(!session.allows("project:test", AccessPermission::Ingest));
         assert!(!session.allows("project:test", AccessPermission::Audit));
         assert!(!session.allows("project:test", AccessPermission::Write));
         assert!(!session.allows("project:test", AccessPermission::Collect));

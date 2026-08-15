@@ -1,6 +1,7 @@
 const SVG_NS = "http://www.w3.org/2000/svg";
 
-export function relationFamily(relationType) {
+export function relationFamily(relationType, edgeKind = "relation") {
+  if (edgeKind === "provenance") return "provenance";
   if (["aggregates", "derived_from", "summarizes"].includes(relationType)) return "derivation";
   if (["follows", "responds_to", "continues"].includes(relationType)) return "conversation";
   if (["supports", "contradicts", "supersedes", "qualifies", "reaffirms", "outdated_by"].includes(relationType)) return "evidence";
@@ -59,7 +60,7 @@ export function createTopologyMap({ topology, relationFilter, onNavigate }) {
     Object.assign(document.createElement("strong"), { textContent: "Local topology" }),
     Object.assign(document.createElement("span"), {
       className: "muted",
-      textContent: `${topology.directNeighborCount} direct · ${count} Pages loaded · ${topology.edges.length} relations · ${topology.depth} hops${topology.truncated ? " · partial" : ""}`,
+      textContent: `${topology.directNeighborCount} direct · ${count} Pages loaded · ${topology.edges.length} edges · ${topology.depth} hops${topology.truncated ? " · partial" : ""}`,
     }),
   );
   const zoomControls = document.createElement("div");
@@ -68,7 +69,7 @@ export function createTopologyMap({ topology, relationFilter, onNavigate }) {
 
   const visibleEdges = relationFilter === "all"
     ? topology.edges
-    : topology.edges.filter((edge) => relationFamily(edge.relationType) === relationFilter);
+    : topology.edges.filter((edge) => relationFamily(edge.relationType, edge.edgeKind) === relationFilter);
   const visibleIds = new Set(visibleEdges.flatMap((edge) => [edge.fromPageId, edge.toPageId]));
   const root = topology.nodes.find((node) => node.depth === 0);
   if (root) visibleIds.add(root.pageId);
@@ -94,10 +95,12 @@ export function createTopologyMap({ topology, relationFilter, onNavigate }) {
       y1: from.y,
       x2: to.x,
       y2: to.y,
-      class: `topology-edge relation-${relationFamily(edge.relationType)}`,
+      class: `topology-edge relation-${relationFamily(edge.relationType, edge.edgeKind)}`,
     });
     line.append(svgElement("title"));
-    line.firstChild.textContent = edge.relationType;
+    line.firstChild.textContent = edge.edgeKind === "provenance"
+      ? `Evidence dependency · ${edge.relationType}`
+      : edge.relationType;
     edgesGroup.append(line);
   }
   svg.append(edgesGroup);

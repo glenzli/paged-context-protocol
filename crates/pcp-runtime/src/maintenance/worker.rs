@@ -8,24 +8,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
 
-use super::WorkerCommandConfig;
-
 const MAX_WORKER_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_WORKER_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "operation", rename_all = "snake_case")]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MaintenanceWorkerRequest {
     SummarizePage {
         page: Box<MaintenanceDetailPage>,
     },
-    SelectConsolidation {
-        pages: Vec<MaintenanceRoutingPage>,
-        max_pages: usize,
+    SelectPacking {
+        pages: Vec<PackingCandidatePage>,
         excluded_candidate_sets: Vec<Vec<String>>,
     },
-    ConsolidatePages {
-        pages: Vec<MaintenanceDetailPage>,
+    SelectRelation {
+        pages: Vec<RelationCandidatePage>,
     },
     SelectRetentionMilestones {
         pages: Vec<MaintenanceRoutingPage>,
@@ -35,35 +32,80 @@ pub enum MaintenanceWorkerRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "decision", rename_all = "snake_case")]
+#[serde(rename_all = "camelCase")]
+pub struct PackingCandidatePage {
+    pub page_id: String,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<String>,
+    pub routing_text: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelationCandidatePage {
+    pub page_id: String,
+    pub namespace: String,
+    pub kind: String,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<String>,
+    pub routing_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facets: Option<Value>,
+    #[serde(default)]
+    pub relation_types: Vec<String>,
+}
+
+impl PackingCandidatePage {
+    pub(crate) fn from_inventory(item: &DurablePageInventoryItem, routing_chars: usize) -> Self {
+        let semantic_text = if item.media_type.as_deref() == Some(pcp_core::PACKED_PAGE_MEDIA_TYPE)
+        {
+            item.snippet.as_str()
+        } else {
+            item.summary.as_deref().unwrap_or(&item.snippet)
+        };
+        let routing_text = semantic_text.chars().take(routing_chars).collect();
+        Self {
+            page_id: item.page_id.clone(),
+            created_at: item.created_at.clone(),
+            observed_at: item.observed_at.clone(),
+            routing_text,
+        }
+    }
+}
+
+impl RelationCandidatePage {
+    pub(crate) fn from_inventory(item: &DurablePageInventoryItem, routing_chars: usize) -> Self {
+        let routing_text = item
+            .summary
+            .as_deref()
+            .unwrap_or(&item.snippet)
+            .chars()
+            .take(routing_chars)
+            .collect();
+        Self {
+            page_id: item.page_id.clone(),
+            namespace: item.namespace.clone(),
+            kind: item.kind.clone(),
+            created_at: item.created_at.clone(),
+            observed_at: item.observed_at.clone(),
+            routing_text,
+            facets: item.facets.clone(),
+            relation_types: item.relation_types.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MaintenanceWorkerResponse {
-    WriteSummary {
-        content: String,
-    },
-    Candidate {
-        page_ids: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        rationale: Option<String>,
-    },
-    Consolidate {
-        canonical_page_id: String,
-        content: String,
-    },
-    Retain {
-        milestones: Vec<RetentionMilestone>,
-    },
-    KeepSeparate {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reason: Option<String>,
-    },
-    NoCandidate {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reason: Option<String>,
-    },
-    Defer {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reason: Option<String>,
-    },
+    WriteSummary { content: String },
+    Candidate { page_ids: Vec<String> },
+    Relate { page_ids: [String; 2] },
+    Retain { milestones: Vec<RetentionMilestone> },
+    NoCandidate,
+    Defer,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -79,11 +121,12 @@ pub struct MaintenanceRoutingPage {
     pub page_id: String,
     pub revision_id: String,
     pub namespace: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
+    pub kind: String,
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
     pub content_chars: u64,
     pub routing_text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,28 +167,6 @@ pub struct MaintenanceRelation {
 }
 
 impl MaintenanceRoutingPage {
-    pub(crate) fn from_inventory(item: DurablePageInventoryItem, routing_chars: usize) -> Self {
-        let routing_text = item
-            .summary
-            .as_deref()
-            .unwrap_or(&item.snippet)
-            .chars()
-            .take(routing_chars)
-            .collect();
-        Self {
-            page_id: item.page_id,
-            revision_id: item.revision_id,
-            namespace: item.namespace,
-            kind: item.kind,
-            created_at: item.created_at,
-            observed_at: item.observed_at,
-            content_chars: item.content_chars,
-            routing_text,
-            facets: item.facets,
-            relation_types: item.relation_types,
-        }
-    }
-
     pub(crate) fn from_detail(
         item: MaintenanceDetailPage,
         kind: String,
@@ -175,9 +196,10 @@ impl MaintenanceRoutingPage {
             page_id: item.page_id,
             revision_id: item.revision_id,
             namespace: item.namespace,
-            kind: Some(kind),
+            kind,
             created_at: item.created_at,
             observed_at: item.observed_at,
+            media_type: item.media_type,
             content_chars,
             routing_text,
             facets: item.facets,
@@ -232,11 +254,11 @@ pub struct CommandSemanticWorker {
 }
 
 impl CommandSemanticWorker {
-    pub fn new(config: &WorkerCommandConfig) -> Self {
+    pub fn new(program: PathBuf, args: Vec<String>, timeout: Duration) -> Self {
         Self {
-            program: config.program.clone(),
-            args: config.args.clone(),
-            timeout: Duration::from_secs(config.timeout_seconds),
+            program,
+            args,
+            timeout,
         }
     }
 }

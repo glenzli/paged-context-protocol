@@ -1,4 +1,4 @@
-# Paged-Context-Protocol (PCP) - v0.7.0-draft
+# Paged-Context-Protocol (PCP) - v0.8.0-draft
 
 **中文** | [English](README-en.md)
 
@@ -13,12 +13,13 @@
 连续性仍然通常依赖粗粒度压缩或封闭的产品 Memory。对于长期、高密度内容，问题不只是“能否存下”，
 而是能否在需要时准确找到、验证来源，并只将当前任务真正需要的部分放入有限注意力。
 
-**PCP 定义一个用户拥有、模型无关的信息空间，以及它与模型注意力之间的分页边界。**它不是某个
+**PCP 定义一个用户拥有的 Identity，以及这个持续信息空间与模型注意力之间的分页边界。**它不是某个
 特定的 context manager、Memory 产品或 Storage 格式，也不要求把所有历史塞进同一个提示词。
 在 PCP 中，Context 是跨时间存在的信息连续体；模型当前窗口只是一个临时 working set。
 
 ```text
-来源 / 事件
+多租户来源 / 事件
+  -> Identity + Scope                    （关联边界与授权）
   -> 稳定 Page + 不可变 Revision       （身份与存储）
   -> Relation / Provenance / Summary   （组织与依据）
   -> Search / Read / Projection        （选择与物化）
@@ -27,8 +28,10 @@
 
 ## 协议核心
 
-- **Page 与 Revision**：Page 是稳定语义对象；Revision 是不可变内容快照。原始 Page 通常为
-  `sealed`，维护型 Page 可以是 `revisioned`。
+- **Page 与 Revision**：Page 是值得独立召回的最小语义片段；Revision 是不可变内容快照。原始 Page
+  通常为 `sealed`，维护型 Page 可以是 `revisioned`。
+- **Identity、Tenant 与 Scope**：一个 Store/Runtime 服务一个持久 Identity；多个租户可以贡献并共享
+  关联空间，但只能读取各自获授权的 Scope。
 - **Scope 与 Access**：统一地址空间不等于全局注入。搜索、读取、派生和写入都受 Scope 与服务端
   注入的访问身份约束。
 - **Relation 与 Provenance**：Relation 连接稳定 Page；关系依据和来源链引用精确 Revision。
@@ -37,17 +40,20 @@
   Validity 记录内容当前是否仍适用。
 - **Search、Read 与 Projection**：检索先返回可识别候选，再按需读取 Summary、Payload、Sources、
   Relations、History 等投影；模型或 Host 决定查询路径和进入注意力的时机。
-- **Consolidation 与 Retention**：多个当前语义 Page 可以经显式整合收缩为 canonical Page；历史
-  Revision 只在依赖、租约和保留规则允许时回收。
+- **Pack 与 Retention**：来源连续、尚未被引用的细粒度 sealed Page 可以无损 pack 为一个 Page；历史
+  Revision 只在依赖、租约和保留规则允许时回收。有损凝炼原始内容不属于 v0.8。
+- **外部媒体**：图片、音频与视频可由租户保管，PCP 保存最小、可校验的 SourceRef 及其
+  可检索语义表示；原件不可用时必须显式降级，不能静默丢失上下文。
 
-PCP 不规定固定 Router、Intent Focus、四级变焦、Chain-of-Thought、XML 流程或模型状态机。模型如何
-决定写入、搜索、总结、整合和物化，属于 Model Client 或 Host 策略；协议只提供可互操作、可追溯、
-受约束的对象与接口。
+PCP 不规定固定 Router、Intent Focus、四级变焦、Chain-of-Thought、XML 流程或模型状态机。消费模型
+决定当前任务查询、读取和物化什么；Runtime 负责 Identity 范围内的长期 Summary、Validity、Relation、
+无损 pack 与 retention 维护，并可调用可替换的模型作为语义判断 Provider。
 
 ## 当前状态
 
-`v0.7.0-draft` 是当前协议草案。它在不可变 Revision 之上恢复稳定 Page 身份，并加入显式 Scope、
-Provenance、Relation、稀疏 Summary、Validity、consolidation 与 Revision retention 语义。
+`v0.8.0-draft` 是当前协议草案。它明确区分 Identity、租户 Principal 和 Scope，把全局维护权归入
+Runtime，并以最小 SourceRef 与简化 ingest 接口接收文本和外部媒体来源。v0.8 不兼容 v0.7 Store；
+正式迁移将从租户保留的原始内容重新导入。
 
 ### 官方实现
 
@@ -66,33 +72,36 @@ PCP 仍是开放协议，允许独立实现。“官方”表示该实现由 PCP
 | --- | --- |
 | `pcp-core` | 核心对象、请求、投影与 capability 类型 |
 | `pcp-store` | 携带 `AccessSession` 的数据库无关 Store 契约 |
-| `pcp-client` | 面向 Host 的传输无关 `PcpApi` 与 embedded client |
+| `pcp-client` | 面向租户的 `PcpTenantApi`、Runtime 维护用 `PcpApi` 与 embedded client |
 | `pcp-rpc` | 本地 Unix socket 协议、remote client 与 server transport |
-| `pcp-sqlite` | SQLite Page/Revision Store、迁移、检索、审计与回收 |
-| `pcp-runtime` | 身份绑定端点、客户端授权注册与可选维护协调器 |
-| `pcp-cli` | 检查、检索、读取、导出、整合与保留操作 |
+| `pcp-sqlite` | SQLite Page/Revision Store、检索、审计与回收 |
+| `pcp-runtime` | Identity 绑定端点、客户端授权注册与全局维护协调器 |
+| `pcp-cli` | 检查、检索、读取、导出与保留操作 |
 | `pcp-mcp` | 基于官方 Rust MCP SDK 的本地 stdio 工具服务器 |
 | `pcp-console` | 独立、只读的本地 Web Inspector |
 
 ### 已实现
 
-- 稳定 Page、不可变 Revision、`sealed`/`revisioned`、CAS 修订与 v0.6 数据幂等迁移。
+- 稳定 Page、不可变 Revision、`sealed`/`revisioned` 与 CAS 修订。
 - head-only 默认检索，`auto`、`exact`、`text`、`graph`、`temporal` 模式，以及有界 Projection 读取。
-- Summary、Validity、Relation、Provenance、consolidation 与访问审计。
+- Summary、Validity、Relation、Provenance、无损 sealed-Page packing 与访问审计。
 - allowed 访问事件以最多 512 条或 1 秒的有界批次写入，自动提交至少间隔 500 ms；队列过载时
   反压而不静默丢弃。denied/failed 进入 writer 后使用最多 100 ms 的安全合并窗口，并在调用返回前
   持久化。原始 allowed 日志保留 30 天、每批最多清理 5,000 条；安全相关事件不会被该策略自动清理。
 - 身份绑定的 embedded/RPC client、可发现且经用户批准的 Runtime 注册、CLI、MCP 与 Console。
+- 由 Runtime 注入 Identity/Actor 的简化 sealed `ingest_page`、支持连续来源区间的 `sourceSpan`，以及
+  仅包含 provider、locator、可选 media type 和 digest 的 SourceRef。
 - 确定性 Revision 保留规划、有限租约、受保护的显式回收，以及多维 Health 诊断。
 
 ### 尚未实现
 
-Alias 与 durable Page deletion 当前会通过 Capabilities 报告为不可用，cold storage 也尚未实现。
+Durable Page deletion 当前不会出现在 Capabilities 的 `features` 中；cold storage、媒体字节托管、
+外部 Provider 解析、自动 OCR/转写，以及 Identity 全局 Validity 维护任务也尚未实现。
 
 ### 实现边界
 
-官方实现有意不内置语义模型或 Router。部署方可以在协议接口之上选择本地模型、远端模型、全文检索
-或组合策略，而不改变 PCP 的对象、权限与可追溯性语义。
+官方实现有意不内置固定语义模型或 Router。Runtime 拥有维护任务、预算、校验和提交权，部署方可以为
+它配置本地或远端推理 Provider，而不把长期维护权交给某个租户。
 
 ## 快速开始
 
@@ -114,14 +123,16 @@ Revision ID。
 
 ## 部署
 
-`PcpApi` 是消费侧边界。同一个 Host 可以直接嵌入 Store，也可以通过可选的 Runtime 使用独立生命周期
-和固定服务端身份；CLI 与 MCP 均可连接这两种形态。
+`PcpTenantApi` 是普通租户边界，只提供 descriptor、授权 Scope、`ingest_page`、Search、Read 与可选
+browse。`PcpApi` 是 Runtime maintainer 和本机管理工具使用的特权超集，包含高级写入、Relation、Summary、
+Validity、pack、retention 与审计。Host 可以嵌入 Store，也可以通过 Runtime 使用独立生命周期和服务端注入
+身份；两种部署形态不改变租户接口。
 
 ```text
-Host --------> PcpApi --> EmbeddedPcpClient --> PcpStore
-                    `----> RemotePcpClient ----> pcp-runtime --> PcpStore
-Codex -------> MCP -----> PcpApi
-Operator ----> CLI -----> PcpApi
+Tenant Host --> PcpTenantApi --> EmbeddedPcpClient --> PcpStore
+                         `-----> RemotePcpClient ----> pcp-runtime --> PcpStore
+Codex --------> MCP -----------> PcpTenantApi
+Runtime/CLI -------------------> PcpApi
 ```
 
 多 client 部署可以从 [`examples/runtime.toml`](examples/runtime.toml) 启动 broker；这些静态端点也可在
@@ -144,11 +155,38 @@ Runtime 还会通过 [Infra Discovery](https://github.com/glenzli/infra-protocol
 [Symbiont](https://github.com/glenzli/symbiont-d) 迁移顺序与完整合同见
 [`crates/pcp-runtime/ENROLLMENT.md`](crates/pcp-runtime/ENROLLMENT.md)。
 
+### PCP 自托管本机服务
+
+在 macOS 上，PCP 通过自己的受管 Console 服务托管 `pcp-runtime`。Console 拥有 Runtime 子进程、
+Runtime 配置、Store、socket、enrollment state、maintenance ledger 及 Console 深链；默认根目录是
+`~/Library/Application Support/PCP`。租户只能发现并注册，不拥有 Runtime 的启动、重启或配置权。
+
+```bash
+sh scripts/install-macos.sh
+```
+
+安装后的 LaunchAgent 为 `com.glenzli.pcp-console`，执行 `pcp-console --managed`。Console 只对自己
+启动的 Runtime 显示重启控制，并在稳定 operator socket 就绪后才报告成功。生成的
+`config/runtime.toml` 默认关闭 maintenance；显式配置 worker 后，worker 即使属于某个租户，cadence 与
+ledger state 仍由 PCP Runtime 维护。
+
+首次启动前可通过 PCP 的一致性 SQLite backup 导入已有 Store；同时传入 enrollment state 可保留已经批准的
+注册：
+
+```bash
+sh scripts/import-store.sh \
+  --source /absolute/path/to/context.sqlite3 \
+  --enrollment-state /absolute/path/to/pcp-enrollments.json
+```
+
 ### Runtime 维护
 
-维护协调器是可选能力，默认只观察，不应用变更。配置的 semantic worker 只能在有界候选与 Detail 上
-返回 `write_summary`、`consolidate`、`keep_separate` 或 `defer` 决策，不能直接写 Store；Runtime 补齐
-机械元数据，Store 再验证权限、当前 head、lineage 与原子性。维护器不会自动执行 Revision 回收。
+维护协调器是可选能力，默认只观察，不应用变更。配置的 semantic worker 只能返回 Summary 内容、
+有序 pack 候选、两个 Page 的 `related_to` 候选、retention milestone、`no_candidate` 或 `defer`，不能直接
+写 Store。Runtime 控制候选、预算、关系类型、basis Revision 和提交，Store 再验证权限、精确当前
+Revision、来源连续性、外部引用与事务原子性。pack 与 Relation 维护默认关闭，必须单独启用；维护器也
+不会自动执行 Revision 回收。官方 Runtime 可使用独立授权的
+[Infer Runtime](https://github.com/glenzli/infer-runtime) consumer，也保留本地 command worker。
 
 详见 [`crates/pcp-runtime/README.md`](crates/pcp-runtime/README.md)。
 
@@ -186,16 +224,18 @@ codex mcp add pcp \
   -- /absolute/path/to/paged-context-protocol/target/release/pcp-mcp
 ```
 
-`PCP_ACCESS_MODE` 可为 `observe`、`read`、`audit`、`write` 或 `admin`。`observe` 只允许读取聚合
-Health，不能列出或读取 Page、搜索、读取原始审计或执行维护动作。即使在 `admin` 模式，跨 Scope 派生
-仍需单独启用。`pcp_whoami` 用于检查服务端注入的 Principal 与授权范围；读工具不产生内容写入，
-Page、Summary、Relation、Scope 与 Validity 工具会被 MCP 标记为写操作。
+`PCP_ACCESS_MODE` 可为 `observe`、`read`、`contribute`、`audit`、`write` 或 `admin`。普通可写租户应使用
+`contribute`：它在 Read 基础上只增加 `ingest_page`，不会授予 revise、Summary、Relation、Validity 或
+pack。`write` 与 `admin` 是 Runtime 维护器和本机管理工具的特权模式。`observe` 只允许读取聚合 Health，
+不能列出或读取 Page、搜索、读取原始审计或执行维护动作。跨 Scope 派生始终需要单独启用。
+`pcp_whoami` 用于检查服务端注入的 Principal 与授权范围。
 
 ### Console
 
 Console 应连接一个独立的 `audit` 端点。其 Store Inspector 只读，提供 Page、Relation、访问时间线、
-Retention 和 Health 视图；唯一的控制面动作是批准、拒绝或撤销本机客户端注册。Health 将存储形态、
-活动、召回、整合、关系与运行状况分开呈现，不合成为不透明总分；操作遥测不保存查询文本或 Page 内容。
+Retention 和 Health 视图；控制面动作为批准、拒绝或撤销本机客户端注册，以及在 Console 自己托管 Runtime
+时重启该 Runtime。Health 将存储形态、
+活动、召回、pack、关系与运行状况分开呈现，不合成为不透明总分；操作遥测不保存查询文本或 Page 内容。
 
 ```bash
 cargo build --release -p pcp-console

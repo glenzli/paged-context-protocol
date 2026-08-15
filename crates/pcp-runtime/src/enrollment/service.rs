@@ -56,7 +56,7 @@ impl EnrollmentManager {
         let handler = EnrollmentHandler {
             inner: Arc::new(EnrollmentInner {
                 store,
-                owner_id: instance_id.clone(),
+                identity_id: instance_id.clone(),
                 service: EnrollmentServiceIdentity {
                     kind: "pcp".to_owned(),
                     instance_id,
@@ -99,7 +99,7 @@ pub(crate) struct EnrollmentHandler {
 
 struct EnrollmentInner {
     store: Arc<dyn PcpStore>,
-    owner_id: String,
+    identity_id: String,
     service: EnrollmentServiceIdentity,
     runtime_root: PathBuf,
     request_ttl: Duration,
@@ -314,7 +314,7 @@ impl EnrollmentHandler {
 
         let access = access_session(
             &registration,
-            &self.inner.owner_id,
+            &self.inner.identity_id,
             &self.inner.service.generation,
         )?;
         let bound = BoundInfraSocket::bind(&self.inner.runtime_root)
@@ -597,13 +597,14 @@ fn result_for_request(
 
 fn access_session(
     registration: &StoredRegistration,
-    owner_id: &str,
+    identity_id: &str,
     generation: &str,
 ) -> std::result::Result<AccessSession, ProtocolError> {
     let mode = match registration.approved_access.mode {
         RequestedAccessMode::Observe => AccessMode::Observe,
         RequestedAccessMode::Read => AccessMode::Read,
         RequestedAccessMode::Audit => AccessMode::Audit,
+        RequestedAccessMode::Contribute => AccessMode::Contribute,
         RequestedAccessMode::Write => AccessMode::Write,
         RequestedAccessMode::Admin => AccessMode::Admin,
     };
@@ -613,7 +614,7 @@ fn access_session(
         .iter()
         .map(|scope| {
             if scope == "user:self" {
-                format!("user:{owner_id}")
+                format!("user:{identity_id}")
             } else {
                 scope.clone()
             }

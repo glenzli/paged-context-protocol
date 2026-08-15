@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Timelike, Utc};
 use pcp_core::{AccessDecision, AccessPrincipal, OperationTelemetry};
 use pcp_store::{
-    ActivityHealth, ConsolidationHealth, GraphHealth, HealthSnapshot, HealthTimelineBucket,
-    NamedCount, OperationHealth, RecallHealth, ScopeHealth, StorageHealth,
+    ActivityHealth, GraphHealth, HealthSnapshot, HealthTimelineBucket, NamedCount, OperationHealth,
+    PackingHealth, RecallHealth, ScopeHealth, StorageHealth,
 };
 use rusqlite::{params_from_iter, types::Value as SqlValue};
 
@@ -65,7 +65,7 @@ impl SqlitePcpStore {
                 storage: StorageHealth::default(),
                 activity: ActivityHealth::default(),
                 recall: RecallHealth::default(),
-                consolidation: ConsolidationHealth::default(),
+                packing: PackingHealth::default(),
                 graph: GraphHealth::default(),
                 operations: Vec::new(),
                 scopes: Vec::new(),
@@ -97,7 +97,7 @@ impl SqlitePcpStore {
 
             let mut activity = ActivityHealth::default();
             let mut recall = RecallHealth::default();
-            let mut consolidation = ConsolidationHealth::default();
+            let mut packing = PackingHealth::default();
             let mut operations = BTreeMap::<String, OperationAccumulator>::new();
             let mut principals = HashSet::new();
             let mut activity_durations = Vec::new();
@@ -151,14 +151,14 @@ impl SqlitePcpStore {
                         recall.summary_reads += 1;
                     }
                 }
-                if event.operation == "consolidate_pages"
+                if event.operation == "pack_pages"
                     && event.decision == AccessDecision::Allowed
                     && telemetry.is_some()
                 {
                     let inputs = telemetry.and_then(|value| value.input_count).unwrap_or(0);
-                    consolidation.runs += 1;
-                    consolidation.input_pages += inputs;
-                    consolidation.net_page_reduction += inputs.saturating_sub(1);
+                    packing.runs += 1;
+                    packing.input_pages += inputs;
+                    packing.net_page_reduction += inputs.saturating_sub(1);
                 }
 
                 for namespace in &event.scopes {
@@ -172,8 +172,8 @@ impl SqlitePcpStore {
                         "search_pages" | "browse_index"
                     ));
                     scope.writes += u64::from(is_write_operation(&event.operation));
-                    scope.consolidations += u64::from(
-                        event.operation == "consolidate_pages"
+                    scope.packs += u64::from(
+                        event.operation == "pack_pages"
                             && event.decision == AccessDecision::Allowed,
                     );
                 }
@@ -225,7 +225,7 @@ impl SqlitePcpStore {
                 storage,
                 activity,
                 recall,
-                consolidation,
+                packing,
                 graph: GraphHealth {
                     relations,
                     isolated_current_pages,
@@ -526,7 +526,7 @@ fn is_write_operation(operation: &str) -> bool {
     matches!(
         operation,
         "assess_validity"
-            | "consolidate_pages"
+            | "pack_pages"
             | "create_scope"
             | "link_pages"
             | "mark_summary_assessed"

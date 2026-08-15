@@ -2,6 +2,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const PACKED_PAGE_MEDIA_TYPE: &str = "application/vnd.pcp.packed-page+json";
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActorType {
@@ -209,13 +211,24 @@ pub struct PagePayload {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceRef {
-    #[serde(alias = "source_type")]
-    pub source_type: String,
-    pub uri: String,
+    pub provider_id: String,
+    pub locator: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub locator: Option<String>,
+    pub media_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<Value>,
+    pub content_digest: Option<String>,
+}
+
+/// A producer-local, contiguous range in one source event stream.
+///
+/// Runtime namespaces `stream_id` by the authenticated Principal on ordinary
+/// ingest, so tenants cannot accidentally claim each other's event sequence.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceSpan {
+    pub stream_id: String,
+    pub start: u64,
+    pub end: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -230,15 +243,16 @@ pub struct ProvenanceEvent {
     pub tool_or_model: Option<String>,
 }
 
-/// Stable semantic identity. Content is carried by immutable `PageRevision`s.
+/// Independently recallable semantic identity.
+///
+/// Content is carried by immutable `PageRevision`s. Lossless packing may
+/// explicitly retire an unreferenced sealed Page under the Core pack rules.
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Page {
     pub page_id: String,
     pub head_revision_id: String,
-    pub owner_id: String,
     pub namespace: String,
-    pub visibility: String,
     pub kind: String,
     pub mutability: PageMutability,
     pub lifecycle_status: LifecycleStatus,
@@ -253,13 +267,13 @@ pub struct PageRevision {
     pub revision_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_revision_id: Option<String>,
-    pub owner_id: String,
     pub namespace: String,
-    pub visibility: String,
     pub lifecycle_status: LifecycleStatus,
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_span: Option<SourceSpan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -280,14 +294,12 @@ pub type Revision = PageRevision;
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Scope {
-    pub owner_id: String,
     pub namespace: String,
     pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_namespace: Option<String>,
-    pub visibility: String,
     pub created_at: String,
     pub updated_at: String,
     pub page_count: u64,
@@ -370,7 +382,6 @@ pub struct ReadPage {
     #[serde(default)]
     pub relations: Vec<Relation>,
     #[serde(default)]
-    #[serde(rename = "lineage", alias = "history")]
     pub history: Vec<String>,
 }
 
@@ -383,23 +394,8 @@ pub struct Capabilities {
     pub max_search_results: u32,
     pub max_read_pages: u32,
     pub max_read_chars: u32,
-    pub supports_event_ingest: bool,
-    pub supports_sealed_pages: bool,
-    pub supports_revisioned_pages: bool,
-    pub supports_aliases: bool,
-    #[serde(default)]
-    pub supports_revision_retention_planning: bool,
-    #[serde(default)]
-    pub supports_revision_retention_leases: bool,
-    pub supports_revision_retention: bool,
-    pub supports_revision_conflicts: bool,
-    #[serde(default)]
-    pub supports_consolidation: bool,
-    pub supports_durable_deletion: bool,
-    pub supports_provenance_graph: bool,
-    pub supports_access_sessions: bool,
-    pub supports_access_audit: bool,
-    pub relation_types: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -423,6 +419,38 @@ pub struct SearchHit {
     pub facets: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validity: Option<PageValidityHint>,
+    /// Graph traversal metadata is present only for `SearchMode::Graph`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub graph_edges: Vec<GraphSearchEdge>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphEdgeKind {
+    Relation,
+    Provenance,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphEdgeDirection {
+    Incoming,
+    Outgoing,
+}
+
+/// One exact edge between the graph-search origin and this hit.
+///
+/// `Relation` records an asserted Page relation. `Provenance` records an
+/// immutable Revision dependency and must not be interpreted as a semantic
+/// assertion by itself.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphSearchEdge {
+    pub relation_type: String,
+    pub edge_kind: GraphEdgeKind,
+    pub direction: GraphEdgeDirection,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub basis_revision_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]

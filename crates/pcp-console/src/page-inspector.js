@@ -24,6 +24,7 @@ export function createPageInspector({ request, showError, formatTime }) {
   const relationFamilies = [
     ["all", "All relations"],
     ["derivation", "Derivation"],
+    ["provenance", "Evidence dependencies"],
     ["conversation", "Conversation"],
     ["evidence", "Evidence"],
     ["semantic", "Semantic"],
@@ -92,7 +93,7 @@ export function createPageInspector({ request, showError, formatTime }) {
       ["Observed", formatTime(page.revision.observedAt || page.revision.createdAt)],
       ["Created by", actorLabel(page.revision.createdBy)],
       ["Relations", page.relations.length],
-      ["Lineage", page.lineage.length],
+      ["History", page.history.length],
     ];
     facts.append(...rows.flatMap(([label, value]) => [
       element("dt", "", label),
@@ -111,8 +112,10 @@ export function createPageInspector({ request, showError, formatTime }) {
     const button = element("button", "graph-node");
     button.type = "button";
     button.title = `Open ${page.page.pageId}`;
-    const relationTypes = [...new Set(relations.map((relation) => relation.relationType))];
-    const family = relationFamily(relationTypes[0]);
+    const relationTypes = [...new Set(relations.map((relation) => relation.edgeKind === "provenance"
+      ? `evidence dependency · ${relation.relationType}`
+      : relation.relationType))];
+    const family = relationFamily(relations[0].relationType, relations[0].edgeKind);
     button.append(
       element("span", `graph-relation relation-${family}`, `${direction} · ${relationTypes.join(" / ")}`),
       element("strong", "", pageLabel(page)),
@@ -133,7 +136,7 @@ export function createPageInspector({ request, showError, formatTime }) {
     for (const [value, label] of relationFamilies) {
       const count = value === "all"
         ? relations.length
-        : relations.filter((relation) => relationFamily(relation.relationType) === value).length;
+        : relations.filter((relation) => relationFamily(relation.relationType, relation.edgeKind) === value).length;
       const button = element("button", `graph-filter${currentGraphFilter === value ? " active" : ""}`, `${label} ${count}`);
       button.type = "button";
       button.dataset.relationFamily = value;
@@ -186,9 +189,10 @@ export function createPageInspector({ request, showError, formatTime }) {
     const snippets = new Map(graph.hits.map((hit) => [hit.pageId, hit.snippet]));
     const incoming = new Map();
     const outgoing = new Map();
+    const directEdges = graph.topology.edges.filter((edge) => edge.fromPageId === rootId || edge.toPageId === rootId);
     const visibleRelations = currentGraphFilter === "all"
-      ? root.relations
-      : root.relations.filter((relation) => relationFamily(relation.relationType) === currentGraphFilter);
+      ? directEdges
+      : directEdges.filter((edge) => relationFamily(edge.relationType, edge.edgeKind) === currentGraphFilter);
     for (const relation of visibleRelations) {
       const incomingEdge = relation.toPageId === rootId;
       const neighborId = incomingEdge ? relation.fromPageId : relation.toPageId;

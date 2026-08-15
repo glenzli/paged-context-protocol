@@ -7,11 +7,13 @@ mod observer;
 pub use config::{RuntimeConfig, RuntimeEndpointConfig};
 pub use enrollment::{EnrollmentConfig, EnrollmentManager};
 pub use maintenance::{
-    CommandSemanticWorker, CompactionMaintenanceConfig, MaintenanceConfig, MaintenanceCycleReport,
+    CommandSemanticWorker, InferRuntimeSemanticWorker, MaintenanceConfig, MaintenanceCycleReport,
     MaintenanceDetailPage, MaintenanceMode, MaintenanceRelation, MaintenanceRoutingPage,
-    MaintenanceWorkerRequest, MaintenanceWorkerResponse, RetentionMaintenanceConfig,
+    MaintenanceRunAudit, MaintenanceRunAuditRecord, MaintenanceWorkerConfig,
+    MaintenanceWorkerRequest, MaintenanceWorkerResponse, PackingMaintenanceConfig,
+    RelationCandidatePage, RelationMaintenanceConfig, RetentionMaintenanceConfig,
     RetentionMilestone, RuntimeMaintainer, SemanticMaintenanceWorker, SummaryMaintenanceConfig,
-    WorkerCommandConfig,
+    build_semantic_worker, persist_audit,
 };
 pub use observer::{ObserverConfig, ObserverService};
 

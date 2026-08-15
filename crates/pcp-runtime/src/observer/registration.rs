@@ -26,7 +26,7 @@ pub struct ObserverConfig {
 }
 
 impl ObserverConfig {
-    pub fn from_env(owner_id: &str) -> Result<Self> {
+    pub fn from_env(identity_id: &str) -> Result<Self> {
         let observer_enabled = env::var("PCP_OBSERVER_ENABLED")
             .map(|value| !matches!(value.as_str(), "0" | "false" | "no"))
             .unwrap_or(true);
@@ -40,7 +40,7 @@ impl ObserverConfig {
                 observer_enabled,
                 enrollment_enabled,
                 runtime_root: PathBuf::new(),
-                instance_id: owner_id.to_owned(),
+                instance_id: identity_id.to_owned(),
                 console_url: None,
             });
         }
@@ -52,13 +52,13 @@ impl ObserverConfig {
             runtime_root.is_absolute(),
             "INFRA_PROTOCOL_RUNTIME_DIR must be an absolute final runtime root"
         );
-        validate_file_token(owner_id, "observer instance_id")?;
+        validate_file_token(identity_id, "observer instance_id")?;
         Ok(Self {
             enabled,
             observer_enabled,
             enrollment_enabled,
             runtime_root,
-            instance_id: owner_id.to_owned(),
+            instance_id: identity_id.to_owned(),
             console_url: env::var("PCP_OBSERVER_CONSOLE_URL").ok(),
         })
     }

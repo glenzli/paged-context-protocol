@@ -8,6 +8,7 @@ license.workspace = true
 anyhow = "1.0"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+infer-runtime-client = { git = "https://github.com/glenzli/infer-runtime.git", rev = "b490a61b2532c482bdf8774f71097df2a744146d" }
 libc = "0.2"
 pcp-client = { path = "../pcp-client" }
 pcp-core = { path = "../pcp-core" }

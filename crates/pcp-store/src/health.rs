@@ -9,7 +9,7 @@ pub struct HealthSnapshot {
     pub storage: StorageHealth,
     pub activity: ActivityHealth,
     pub recall: RecallHealth,
-    pub consolidation: ConsolidationHealth,
+    pub packing: PackingHealth,
     pub graph: GraphHealth,
     pub operations: Vec<OperationHealth>,
     pub scopes: Vec<ScopeHealth>,
@@ -57,7 +57,7 @@ pub struct RecallHealth {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConsolidationHealth {
+pub struct PackingHealth {
     pub runs: u64,
     pub input_pages: u64,
     pub net_page_reduction: u64,
@@ -98,7 +98,7 @@ pub struct ScopeHealth {
     pub failures: u64,
     pub searches: u64,
     pub writes: u64,
-    pub consolidations: u64,
+    pub packs: u64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

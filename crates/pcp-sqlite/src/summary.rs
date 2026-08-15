@@ -74,22 +74,22 @@ impl SqlitePcpStore {
                 .as_ref()
                 .map(|(_, page_id)| page_id.clone())
                 .unwrap_or(random_id(&transaction, "pg_")?);
-            let (owner_id, namespace, visibility): (String, String, String) = transaction
+            let namespace: String = transaction
                 .query_row(
-                    "SELECT owner_id, namespace, visibility FROM pcp_revisions WHERE revision_id = ?1",
+                    "SELECT namespace FROM pcp_revisions WHERE revision_id = ?1",
                     [&request.target_revision_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| row.get(0),
                 )
                 .context("read PCP Summary target metadata")?;
             if current.is_none() {
                 transaction
                     .execute(
                         "INSERT INTO pcp_pages (
-                            page_id, current_revision_id, created_at, owner_id, namespace,
-                            visibility, kind, mutability, lifecycle_status, updated_at
-                         ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, 'summary_projection',
+                            page_id, current_revision_id, created_at, namespace,
+                            kind, mutability, lifecycle_status, updated_at
+                         ) VALUES (?1, NULL, ?2, ?3, 'summary_projection',
                                    'revisioned', 'active', ?2)",
-                        params![summary_page_id, timestamp, owner_id, namespace, visibility],
+                        params![summary_page_id, timestamp, namespace],
                     )
                     .context("create revisioned PCP Summary Page")?;
             }
@@ -116,11 +116,10 @@ impl SqlitePcpStore {
                 &transaction,
                 &summary_page_id,
                 &summary_revision_id,
-                &owner_id,
                 &namespace,
-                &visibility,
                 "active",
                 &timestamp,
+                None,
                 None,
                 None,
                 None,

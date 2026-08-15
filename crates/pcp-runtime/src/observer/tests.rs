@@ -7,7 +7,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use pcp_client::{AccessMode, EmbeddedPcpClient, PcpApi};
+use pcp_client::{AccessMode, EmbeddedPcpClient, PcpApi, PcpTenantApi};
 use pcp_core::{
     AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType, CreateScopeRequest,
     LifecycleStatus, PageMutability, PagePayload, PlanRevisionRetentionRequest, Projection,
@@ -79,7 +79,7 @@ fn discovery_runtime_root_must_not_be_a_symlink() {
 #[tokio::test]
 async fn observe_access_reads_only_aggregate_health() {
     let root = test_root("permissions");
-    let (store, owner_id, namespace, page_id, _) = fixture(&root).await;
+    let (store, identity_id, namespace, page_id, _) = fixture(&root).await;
     let access = AccessMode::Observe.session(
         AccessPrincipal {
             principal_id: "service:pcp-runtime-observer".to_owned(),
@@ -142,7 +142,7 @@ async fn observe_access_reads_only_aggregate_health() {
             .await
             .is_err()
     );
-    assert_eq!(client.owner_id(), owner_id);
+    assert_eq!(client.identity_id(), identity_id);
     let _ = tokio::fs::remove_dir_all(root).await;
 }
 
@@ -489,7 +489,7 @@ async fn fixture(root: &Path) -> (Arc<SqlitePcpStore>, String, String, String, S
             .await
             .expect("open observer test store"),
     );
-    let owner_id = store.owner_id().to_owned();
+    let identity_id = store.identity_id().to_owned();
     let namespace = "project:pcp-observer-test".to_owned();
     let access = AccessSession::full_control(
         AccessPrincipal {
@@ -504,12 +504,10 @@ async fn fixture(root: &Path) -> (Arc<SqlitePcpStore>, String, String, String, S
         store.as_ref(),
         &access,
         CreateScopeRequest {
-            owner_id: owner_id.clone(),
             namespace: namespace.clone(),
             display_name: "Observer test".to_owned(),
             description: None,
             parent_namespace: None,
-            visibility: "private".to_owned(),
         },
     )
     .await
@@ -519,9 +517,7 @@ async fn fixture(root: &Path) -> (Arc<SqlitePcpStore>, String, String, String, S
         store.as_ref(),
         &access,
         WritePageRequest {
-            owner_id: owner_id.clone(),
             namespace: namespace.clone(),
-            visibility: "private".to_owned(),
             lifecycle_status: LifecycleStatus::Active,
             kind: "document".to_owned(),
             mutability: PageMutability::Revisioned,
@@ -530,6 +526,7 @@ async fn fixture(root: &Path) -> (Arc<SqlitePcpStore>, String, String, String, S
                 actor_id: "host:observer-test".to_owned(),
             },
             observed_at: None,
+            source_span: None,
             valid_from: None,
             valid_to: None,
             payload: Some(PagePayload {
@@ -545,7 +542,7 @@ async fn fixture(root: &Path) -> (Arc<SqlitePcpStore>, String, String, String, S
     )
     .await
     .expect("write observer test Page");
-    (store, owner_id, namespace, written.page_id, secret)
+    (store, identity_id, namespace, written.page_id, secret)
 }
 
 fn test_root(label: &str) -> std::path::PathBuf {

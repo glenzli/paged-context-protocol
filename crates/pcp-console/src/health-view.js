@@ -81,8 +81,8 @@ export function createHealthView({ request, showError, formatNumber }) {
         `${percentage(data.storage.summarizedLongPages, data.storage.longPages)} of all long active Pages have a Summary route.`,
       ]);
     }
-    if (data.consolidation.runs) {
-      signals.push(["info", `Consolidation absorbed ${formatNumber(data.consolidation.netPageReduction)} current Page${data.consolidation.netPageReduction === 1 ? "" : "s"} in this window; semantic correctness is not inferred from the count.`]);
+    if (data.packing.runs) {
+      signals.push(["info", `Lossless packing replaced ${formatNumber(data.packing.netPageReduction)} sealed Page${data.packing.netPageReduction === 1 ? "" : "s"} in this window.`]);
     }
     if (data.activity.failed || data.activity.denied) {
       signals.push(["danger", `${formatNumber(data.activity.failed)} failed and ${formatNumber(data.activity.denied)} denied calls need inspection.`]);
@@ -180,10 +180,10 @@ export function createHealthView({ request, showError, formatNumber }) {
         ["Pages returned", `${formatNumber(data.recall.returnedPages)} · ${decimalRatio(data.recall.returnedPages, data.recall.searches)}/search`],
         ["Summary / detail reads", `${formatNumber(data.recall.summaryReads)} / ${formatNumber(data.recall.detailReads)} · ${decimalRatio(data.recall.summaryReads + data.recall.detailReads, data.recall.searches)}/search`],
       ]),
-      panel("History contraction", "Page convergence during the selected window.", [
-        ["Runs", formatNumber(data.consolidation.runs)],
-        ["Pages examined", formatNumber(data.consolidation.inputPages)],
-        ["Pages absorbed", formatNumber(data.consolidation.netPageReduction), data.consolidation.netPageReduction ? "positive" : ""],
+      panel("Lossless packing", "Sealed leaf Pages replaced without rewriting their source events.", [
+        ["Runs", formatNumber(data.packing.runs)],
+        ["Pages packed", formatNumber(data.packing.inputPages)],
+        ["Net Page reduction", formatNumber(data.packing.netPageReduction), data.packing.netPageReduction ? "positive" : ""],
         ["Historical Revisions", formatNumber(data.storage.historicalRevisions)],
       ]),
       panel("Stored shape", "Current structure and retained history; no target density is assumed.", [
