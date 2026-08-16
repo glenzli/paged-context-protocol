@@ -52,13 +52,14 @@ async fn run_maintenance_command(mut arguments: impl Iterator<Item = String>) ->
         return Ok(());
     }
     anyhow::ensure!(
-        action == "run-once",
+        matches!(action.as_str(), "run-once" | "run-batch"),
         "unsupported PCP maintenance action: {action}"
     );
     let mut config_path = None;
     let mut mode = None;
     let mut max_jobs = None;
     let mut reason = None;
+    let mut confirm_identity = None;
     while let Some(argument) = arguments.next() {
         let value = arguments
             .next()
@@ -74,24 +75,45 @@ async fn run_maintenance_command(mut arguments: impl Iterator<Item = String>) ->
                 "--max-jobs",
             )?,
             "--reason" => set_option(&mut reason, value, "--reason")?,
+            "--confirm-identity" => set_option(&mut confirm_identity, value, "--confirm-identity")?,
             other => anyhow::bail!("unknown PCP maintenance run-once option: {other}"),
         }
     }
     let config_path = config_path.context("maintenance run-once requires --config")?;
-    anyhow::ensure!(
-        mode.as_deref() == Some("observe"),
-        "maintenance run-once requires --mode observe"
-    );
-    anyhow::ensure!(
-        max_jobs == Some(1),
-        "maintenance run-once requires --max-jobs 1"
-    );
-    let reason = reason.context("maintenance run-once requires --reason")?;
+    let reason = reason.with_context(|| format!("maintenance {action} requires --reason"))?;
     anyhow::ensure!(
         !reason.trim().is_empty() && reason.len() <= 120 && !reason.contains(['\n', '\r']),
         "maintenance run-once reason must contain 1-120 non-line-break characters"
     );
-    run_operator_maintenance_once(config_path, reason).await
+    if action == "run-once" {
+        anyhow::ensure!(
+            mode.as_deref() == Some("observe"),
+            "maintenance run-once requires --mode observe"
+        );
+        anyhow::ensure!(
+            max_jobs == Some(1),
+            "maintenance run-once requires --max-jobs 1"
+        );
+        anyhow::ensure!(
+            confirm_identity.is_none(),
+            "maintenance run-once does not accept --confirm-identity"
+        );
+        return run_operator_maintenance_once(config_path, reason).await;
+    }
+
+    let mode = match mode.as_deref() {
+        Some("observe") => MaintenanceMode::Observe,
+        Some("apply") => MaintenanceMode::Apply,
+        _ => anyhow::bail!("maintenance run-batch requires --mode observe or apply"),
+    };
+    let max_jobs = max_jobs.context("maintenance run-batch requires --max-jobs")?;
+    anyhow::ensure!(
+        (1..=1_000).contains(&max_jobs),
+        "maintenance run-batch --max-jobs must be between 1 and 1000"
+    );
+    let confirm_identity =
+        confirm_identity.context("maintenance run-batch requires --confirm-identity")?;
+    run_operator_maintenance_batch(config_path, reason, mode, max_jobs, confirm_identity).await
 }
 
 async fn run_operator_maintenance_once(config_path: PathBuf, reason: String) -> Result<()> {
@@ -140,6 +162,109 @@ async fn run_operator_maintenance_once(config_path: PathBuf, reason: String) -> 
             Err(error).context("run PCP operator maintenance once")
         }
     }
+}
+
+async fn run_operator_maintenance_batch(
+    config_path: PathBuf,
+    reason: String,
+    mode: MaintenanceMode,
+    max_jobs: u32,
+    confirm_identity: String,
+) -> Result<()> {
+    let mut config = RuntimeConfig::load(&config_path)?;
+    let mut maintenance = config
+        .maintenance
+        .take()
+        .context("PCP runtime config has no maintenance section")?;
+    maintenance.enabled = true;
+    maintenance.mode = mode;
+    maintenance.validate()?;
+    let audit_path = maintenance
+        .state_path
+        .with_file_name("maintenance-audit.json");
+    let store = Arc::new(
+        SqlitePcpStore::open(config.store_path.clone())
+            .await
+            .with_context(|| format!("open PCP Store {}", config.store_path.display()))?,
+    );
+    let identity_id = store.identity_id().to_owned();
+    anyhow::ensure!(
+        confirm_identity == identity_id,
+        "maintenance run-batch identity confirmation does not match the Store"
+    );
+    let store: Arc<dyn PcpStore> = store;
+    let client =
+        EmbeddedPcpClient::shared(Arc::clone(&store), maintenance.access_session(&identity_id));
+    let mode_name = match mode {
+        MaintenanceMode::Observe => "observe",
+        MaintenanceMode::Apply => "apply",
+    };
+    let audit = MaintenanceRunAudit::queued_with_limits(mode_name, max_jobs, reason);
+    let worker = audit.worker(build_semantic_worker(&maintenance.worker)?);
+    let mut maintainer = RuntimeMaintainer::load(client, worker, maintenance).await?;
+    let mut aggregate = pcp_runtime::MaintenanceCycleReport::default();
+
+    while aggregate.worker_calls < max_jobs {
+        let remaining = max_jobs.saturating_sub(aggregate.worker_calls);
+        let report = match maintainer.run_once_with_job_limit(remaining).await {
+            Ok(report) => report,
+            Err(error) => {
+                let record = audit.fail("batch");
+                persist_audit(&audit_path, record.clone()).await?;
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&record).context("encode maintenance result")?
+                );
+                return Err(error).context("run PCP operator maintenance batch");
+            }
+        };
+        let worker_calls = report.worker_calls;
+        merge_maintenance_report(&mut aggregate, report);
+        if worker_calls == 0 || aggregate.worker_calls >= max_jobs {
+            break;
+        }
+    }
+
+    let record = audit.complete(aggregate);
+    persist_audit(&audit_path, record.clone()).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&record).context("encode maintenance result")?
+    );
+    Ok(())
+}
+
+fn merge_maintenance_report(
+    aggregate: &mut pcp_runtime::MaintenanceCycleReport,
+    report: pcp_runtime::MaintenanceCycleReport,
+) {
+    aggregate.inspected_pages = aggregate.inspected_pages.max(report.inspected_pages);
+    aggregate.worker_calls = aggregate.worker_calls.saturating_add(report.worker_calls);
+    aggregate.summaries_written = aggregate
+        .summaries_written
+        .saturating_add(report.summaries_written);
+    aggregate.summaries_proposed = aggregate
+        .summaries_proposed
+        .saturating_add(report.summaries_proposed);
+    aggregate.packs_committed = aggregate
+        .packs_committed
+        .saturating_add(report.packs_committed);
+    aggregate.packs_proposed = aggregate
+        .packs_proposed
+        .saturating_add(report.packs_proposed);
+    aggregate.relations_committed = aggregate
+        .relations_committed
+        .saturating_add(report.relations_committed);
+    aggregate.relations_proposed = aggregate
+        .relations_proposed
+        .saturating_add(report.relations_proposed);
+    aggregate.retention_leases_written = aggregate
+        .retention_leases_written
+        .saturating_add(report.retention_leases_written);
+    aggregate.retention_leases_proposed = aggregate
+        .retention_leases_proposed
+        .saturating_add(report.retention_leases_proposed);
+    aggregate.deferred = aggregate.deferred.saturating_add(report.deferred);
 }
 
 fn set_option<T>(slot: &mut Option<T>, value: T, name: &str) -> Result<()> {
@@ -329,12 +454,12 @@ fn parse_principal_type(value: &str) -> Result<AccessPrincipalType> {
 
 fn print_help() {
     println!(
-        "pcp-runtime [--config <runtime.toml>]\npcp-runtime maintenance run-once --config <runtime.toml> --mode observe --max-jobs 1 --reason <reason>\n\nUse --config or PCP_RUNTIME_CONFIG for a multi-endpoint broker. The maintenance command is a same-user local operator control: it permits only one observe-mode job, writes a redacted audit record, and does not alter normal scheduler cadence. Without a config, one identity-bound endpoint is read from PCP_STORE_PATH, PCP_RUNTIME_SOCKET, PCP_CLIENT_ID, PCP_CLIENT_TYPE, PCP_ACCESS_MODE, and PCP_ALLOWED_SCOPES. PCP observer and enrollment discovery use the platform Infra Protocol runtime root or the final INFRA_PROTOCOL_RUNTIME_DIR override. PCP_OBSERVER_ENABLED and PCP_ENROLLMENT_ENABLED disable their respective offers."
+        "pcp-runtime [--config <runtime.toml>]\npcp-runtime maintenance run-once --config <runtime.toml> --mode observe --max-jobs 1 --reason <reason>\npcp-runtime maintenance run-batch --config <runtime.toml> --mode <observe|apply> --max-jobs <1..1000> --confirm-identity <idn_...> --reason <reason>\n\nUse --config or PCP_RUNTIME_CONFIG for a multi-endpoint broker. Maintenance commands are same-user local operator controls and write a redacted audit record. run-once permits only one observe-mode job and does not alter normal scheduler cadence. run-batch persists the maintenance ledger, stops at its worker-call budget or when no eligible work remains, and requires an exact Store identity confirmation. Without a config, one identity-bound endpoint is read from PCP_STORE_PATH, PCP_RUNTIME_SOCKET, PCP_CLIENT_ID, PCP_CLIENT_TYPE, PCP_ACCESS_MODE, and PCP_ALLOWED_SCOPES. PCP observer and enrollment discovery use the platform Infra Protocol runtime root or the final INFRA_PROTOCOL_RUNTIME_DIR override. PCP_OBSERVER_ENABLED and PCP_ENROLLMENT_ENABLED disable their respective offers."
     );
 }
 
 fn print_maintenance_help() {
     println!(
-        "pcp-runtime maintenance run-once --config <runtime.toml> --mode observe --max-jobs 1 --reason <reason>"
+        "pcp-runtime maintenance run-once --config <runtime.toml> --mode observe --max-jobs 1 --reason <reason>\npcp-runtime maintenance run-batch --config <runtime.toml> --mode <observe|apply> --max-jobs <1..1000> --confirm-identity <idn_...> --reason <reason>"
     );
 }

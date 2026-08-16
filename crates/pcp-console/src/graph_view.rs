@@ -1,7 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
-use pcp_client::PcpTenantApi;
+use pcp_client::{DurablePageInventoryItem, PcpApi, PcpTenantApi};
 use pcp_core::{
     GraphEdgeDirection, GraphEdgeKind, Projection, ReadPage, ReadPagesRequest, Relation,
     SearchFilters, SearchHit, SearchMode, SearchPagesRequest, SearchTermMatch,
@@ -27,8 +27,16 @@ pub struct GraphEdge {
     pub from_page_id: String,
     pub relation_type: String,
     pub to_page_id: String,
-    pub edge_kind: GraphEdgeKind,
+    pub edge_kind: ConsoleGraphEdgeKind,
     pub basis_revision_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsoleGraphEdgeKind {
+    Relation,
+    Provenance,
+    SourceStream,
 }
 
 #[derive(Debug, Serialize)]
@@ -58,6 +66,63 @@ struct GraphStep {
     truncated: bool,
 }
 
+#[derive(Default)]
+struct SourceStreamIndex {
+    edges_by_page: HashMap<String, Vec<GraphEdge>>,
+}
+
+impl SourceStreamIndex {
+    fn from_inventory(items: Vec<DurablePageInventoryItem>, scopes: &[String]) -> Self {
+        let mut spanned = items
+            .into_iter()
+            .filter(|item| scopes.is_empty() || scopes.contains(&item.namespace))
+            .filter_map(|item| item.source_span.map(|span| (item.page_id, span)))
+            .collect::<Vec<_>>();
+        spanned.sort_by(|left, right| {
+            left.1
+                .stream_id
+                .cmp(&right.1.stream_id)
+                .then_with(|| left.1.start.cmp(&right.1.start))
+                .then_with(|| left.1.end.cmp(&right.1.end))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+
+        let mut index = Self::default();
+        for pair in spanned.windows(2) {
+            let [(left_page_id, left_span), (right_page_id, right_span)] = pair else {
+                continue;
+            };
+            if left_span.stream_id != right_span.stream_id
+                || left_span.end.checked_add(1) != Some(right_span.start)
+            {
+                continue;
+            }
+            let edge = GraphEdge {
+                from_page_id: left_page_id.clone(),
+                relation_type: "source_precedes".to_owned(),
+                to_page_id: right_page_id.clone(),
+                edge_kind: ConsoleGraphEdgeKind::SourceStream,
+                basis_revision_ids: Vec::new(),
+            };
+            index
+                .edges_by_page
+                .entry(left_page_id.clone())
+                .or_default()
+                .push(edge.clone());
+            index
+                .edges_by_page
+                .entry(right_page_id.clone())
+                .or_default()
+                .push(edge);
+        }
+        index
+    }
+
+    fn edges_for(&self, page_id: &str) -> Vec<GraphEdge> {
+        self.edges_by_page.get(page_id).cloned().unwrap_or_default()
+    }
+}
+
 pub async fn load_page_graph(
     client: &RemotePcpClient,
     page_id: String,
@@ -84,12 +149,24 @@ pub async fn load_page_graph(
         24_000,
     )
     .await?;
+    let source_streams = SourceStreamIndex::from_inventory(
+        client.durable_page_inventory(Vec::new()).await?,
+        &scopes,
+    );
 
-    let root_step = load_graph_step(client, &root, &scopes).await?;
+    let root_step = load_graph_step(client, &root, &scopes, &source_streams).await?;
     let neighbors = root_step.pages.clone();
     let hits = root_step.hits.clone();
-    let topology =
-        load_topology(client, root.clone(), root_step, scopes, depth, node_limit).await?;
+    let topology = load_topology(
+        client,
+        root.clone(),
+        root_step,
+        scopes,
+        &source_streams,
+        depth,
+        node_limit,
+    )
+    .await?;
 
     Ok(PageGraph {
         root,
@@ -104,6 +181,7 @@ async fn load_topology(
     root: ReadPage,
     root_step: GraphStep,
     scopes: Vec<String>,
+    source_streams: &SourceStreamIndex,
     depth: usize,
     node_limit: usize,
 ) -> Result<GraphTopology> {
@@ -166,7 +244,7 @@ async fn load_topology(
         }
         current = Vec::with_capacity(next_pages.len());
         for page in next_pages {
-            let step = load_graph_step(client, &page, &scopes).await?;
+            let step = load_graph_step(client, &page, &scopes, source_streams).await?;
             current.push((page, step));
         }
     }
@@ -185,6 +263,7 @@ async fn load_graph_step(
     client: &RemotePcpClient,
     page: &ReadPage,
     scopes: &[String],
+    source_streams: &SourceStreamIndex,
 ) -> Result<GraphStep> {
     let graph = client
         .search_pages(SearchPagesRequest {
@@ -204,6 +283,9 @@ async fn load_graph_step(
         })
         .await?;
     let mut edges = relation_edges(page);
+    for edge in source_streams.edges_for(&page.page.page_id) {
+        insert_graph_edge(&mut edges, edge);
+    }
     let mut candidate_ids = edges
         .iter()
         .flat_map(|edge| [&edge.from_page_id, &edge.to_page_id])
@@ -220,14 +302,14 @@ async fn load_graph_step(
                     from_page_id: page.page.page_id.clone(),
                     relation_type: metadata.relation_type.clone(),
                     to_page_id: hit.page_id.clone(),
-                    edge_kind: metadata.edge_kind.clone(),
+                    edge_kind: console_edge_kind(&metadata.edge_kind),
                     basis_revision_ids: metadata.basis_revision_ids.clone(),
                 },
                 GraphEdgeDirection::Incoming => GraphEdge {
                     from_page_id: hit.page_id.clone(),
                     relation_type: metadata.relation_type.clone(),
                     to_page_id: page.page.page_id.clone(),
-                    edge_kind: metadata.edge_kind.clone(),
+                    edge_kind: console_edge_kind(&metadata.edge_kind),
                     basis_revision_ids: metadata.basis_revision_ids.clone(),
                 },
             };
@@ -272,7 +354,7 @@ fn relation_edges(page: &ReadPage) -> Vec<GraphEdge> {
                 from_page_id: relation.from_page_id.clone(),
                 relation_type: relation.relation_type.clone(),
                 to_page_id: relation.to_page_id.clone(),
-                edge_kind: GraphEdgeKind::Relation,
+                edge_kind: ConsoleGraphEdgeKind::Relation,
                 basis_revision_ids: relation.basis_revision_ids.clone(),
             },
         );
@@ -301,6 +383,13 @@ fn is_default_graph_edge(edge_kind: GraphEdgeKind, relation_type: &str) -> bool 
     edge_kind == GraphEdgeKind::Provenance || !matches!(relation_type, "supersedes" | "follows")
 }
 
+fn console_edge_kind(edge_kind: &GraphEdgeKind) -> ConsoleGraphEdgeKind {
+    match edge_kind {
+        GraphEdgeKind::Relation => ConsoleGraphEdgeKind::Relation,
+        GraphEdgeKind::Provenance => ConsoleGraphEdgeKind::Provenance,
+    }
+}
+
 async fn read_graph_pages(
     client: &RemotePcpClient,
     page_ids: Vec<String>,
@@ -320,6 +409,7 @@ async fn read_graph_pages(
                     Projection::Validity,
                     Projection::Facets,
                     Projection::Relations,
+                    Projection::Payload,
                 ],
                 max_chars: 64_000,
             })
@@ -372,7 +462,10 @@ mod tests {
     #[test]
     fn graph_keeps_asserted_relations_and_provenance_distinct() {
         let mut edges = Vec::new();
-        for edge_kind in [GraphEdgeKind::Relation, GraphEdgeKind::Provenance] {
+        for edge_kind in [
+            ConsoleGraphEdgeKind::Relation,
+            ConsoleGraphEdgeKind::Provenance,
+        ] {
             insert_graph_edge(
                 &mut edges,
                 GraphEdge {
@@ -390,7 +483,7 @@ mod tests {
                 from_page_id: "pg_derived".to_owned(),
                 relation_type: "derived_from".to_owned(),
                 to_page_id: "pg_source".to_owned(),
-                edge_kind: GraphEdgeKind::Provenance,
+                edge_kind: ConsoleGraphEdgeKind::Provenance,
                 basis_revision_ids: vec!["rev_source_b".to_owned()],
             },
         );
@@ -402,5 +495,45 @@ mod tests {
             "derived_from"
         ));
         assert!(!is_default_graph_edge(GraphEdgeKind::Relation, "follows"));
+    }
+
+    #[test]
+    fn source_stream_index_connects_only_contiguous_spans() {
+        fn item(page_id: &str, start: u64, end: u64) -> DurablePageInventoryItem {
+            DurablePageInventoryItem {
+                page_id: page_id.to_owned(),
+                revision_id: format!("rev_{page_id}"),
+                namespace: "conversation:test".to_owned(),
+                kind: "conversation_event".to_owned(),
+                mutability: pcp_core::PageMutability::Sealed,
+                created_at: "2026-08-16T00:00:00Z".to_owned(),
+                observed_at: None,
+                source_span: Some(pcp_core::SourceSpan {
+                    stream_id: "host:test:main".to_owned(),
+                    start,
+                    end,
+                }),
+                media_type: Some("text/markdown".to_owned()),
+                content_chars: 1,
+                snippet: page_id.to_owned(),
+                facets: None,
+                summary_revision_id: None,
+                summary_target_revision_id: None,
+                summary: None,
+                relation_types: Vec::new(),
+                packing_protected: false,
+            }
+        }
+
+        let index = SourceStreamIndex::from_inventory(
+            vec![item("pg_b", 2, 4), item("pg_gap", 8, 8), item("pg_a", 0, 1)],
+            &["conversation:test".to_owned()],
+        );
+        let first = index.edges_for("pg_a");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].from_page_id, "pg_a");
+        assert_eq!(first[0].to_page_id, "pg_b");
+        assert_eq!(first[0].edge_kind, ConsoleGraphEdgeKind::SourceStream);
+        assert!(index.edges_for("pg_gap").is_empty());
     }
 }

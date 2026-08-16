@@ -14,14 +14,18 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 pub struct InferRuntimeSemanticWorker {
     client: Client,
     timeout: Duration,
-    max_output_tokens: u32,
+    summary_deployment_id: String,
+    reasoning_deployment_id: String,
+    relation_deployment_id: Option<String>,
 }
 
 impl InferRuntimeSemanticWorker {
     pub fn new(
         credential_file: PathBuf,
         timeout: Duration,
-        max_output_tokens: u32,
+        summary_deployment_id: String,
+        reasoning_deployment_id: String,
+        relation_deployment_id: Option<String>,
     ) -> Result<Self> {
         let client = Client::builder()
             .credential_file(credential_file)
@@ -30,7 +34,9 @@ impl InferRuntimeSemanticWorker {
         Ok(Self {
             client,
             timeout,
-            max_output_tokens,
+            summary_deployment_id,
+            reasoning_deployment_id,
+            relation_deployment_id,
         })
     }
 
@@ -38,7 +44,13 @@ impl InferRuntimeSemanticWorker {
         &self,
         request: &MaintenanceWorkerRequest,
     ) -> Result<MaintenanceWorkerResponse> {
-        let infer_request = infer_request(request, self.timeout, self.max_output_tokens)?;
+        let infer_request = infer_request(
+            request,
+            self.timeout,
+            &self.summary_deployment_id,
+            &self.reasoning_deployment_id,
+            self.relation_deployment_id.as_deref(),
+        )?;
         let started = Instant::now();
         let mut response = timeout(self.timeout, self.client.create_response(&infer_request))
             .await
@@ -103,37 +115,70 @@ impl SemanticMaintenanceWorker for InferRuntimeSemanticWorker {
 fn infer_request(
     request: &MaintenanceWorkerRequest,
     timeout: Duration,
-    max_output_tokens: u32,
+    summary_deployment_id: &str,
+    reasoning_deployment_id: &str,
+    relation_deployment_id: Option<&str>,
 ) -> Result<ResponsesRequest> {
     let payload =
         serde_json::to_string(request).context("encode PCP maintenance inference input")?;
     let deadline_ms = timeout.as_millis().clamp(1, u128::from(u64::MAX));
-    let metadata = BTreeMap::from([
+    let mut metadata = BTreeMap::from([
         ("infer.priority".to_owned(), "background".to_owned()),
-        ("infer.placement".to_owned(), "local_only".to_owned()),
-        ("infer.prefer".to_owned(), "local".to_owned()),
-        ("infer.offline_required".to_owned(), "true".to_owned()),
         ("infer.max_cost_usd".to_owned(), "0".to_owned()),
         ("infer.fallback".to_owned(), "none".to_owned()),
         ("infer.deadline_ms".to_owned(), deadline_ms.to_string()),
     ]);
+    let reasoning = match request {
+        MaintenanceWorkerRequest::SummarizePage { .. } => {
+            metadata.insert(
+                "infer.deployment_ids".to_owned(),
+                summary_deployment_id.to_owned(),
+            );
+            metadata.insert(
+                "infer.capability_floor".to_owned(),
+                "foundational".to_owned(),
+            );
+            None
+        }
+        MaintenanceWorkerRequest::SelectPacking { .. }
+        | MaintenanceWorkerRequest::AnalyzePacking { .. }
+        | MaintenanceWorkerRequest::SelectRelation { .. }
+        | MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => {
+            let deployment_id = match request {
+                MaintenanceWorkerRequest::SelectRelation { .. } => {
+                    relation_deployment_id.unwrap_or(reasoning_deployment_id)
+                }
+                _ => reasoning_deployment_id,
+            };
+            metadata.insert("infer.deployment_ids".to_owned(), deployment_id.to_owned());
+            metadata.insert("infer.placement".to_owned(), "cloud_only".to_owned());
+            metadata.insert("infer.prefer".to_owned(), "cloud".to_owned());
+            metadata.insert(
+                "infer.provider_access_class".to_owned(),
+                "subscription".to_owned(),
+            );
+            metadata.insert("infer.capability_floor".to_owned(), "advanced".to_owned());
+            Some(serde_json::json!({"effort": "medium"}))
+        }
+    };
     Ok(ResponsesRequest {
         model: intent_for(request).to_owned(),
         input: Value::String(payload),
         instructions: Some(Value::String(instructions_for(request).to_owned())),
         stream: false,
-        background: true,
+        background: false,
         metadata,
         tools: Vec::new(),
-        reasoning: None,
-        max_output_tokens: Some(max_output_tokens),
+        reasoning,
+        max_output_tokens: None,
     })
 }
 
 fn intent_for(request: &MaintenanceWorkerRequest) -> &'static str {
     match request {
-        MaintenanceWorkerRequest::SummarizePage { .. } => "text.summarize",
+        MaintenanceWorkerRequest::SummarizePage { .. } => "language.respond",
         MaintenanceWorkerRequest::SelectPacking { .. }
+        | MaintenanceWorkerRequest::AnalyzePacking { .. }
         | MaintenanceWorkerRequest::SelectRelation { .. }
         | MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => "reasoning.solve",
     }
@@ -142,13 +187,16 @@ fn intent_for(request: &MaintenanceWorkerRequest) -> &'static str {
 fn instructions_for(request: &MaintenanceWorkerRequest) -> &'static str {
     match request {
         MaintenanceWorkerRequest::SummarizePage { .. } => {
-            "Return exactly one JSON object and no markdown. Use either {\"decision\":\"write_summary\",\"content\":\"...\"}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Preserve qualified claims and do not invent facts."
+            "Return exactly one JSON object and no markdown. Use either {\"decision\":\"write_summary\",\"content\":\"...\"}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Write a concise routing summary of 1-800 Unicode characters. Preserve qualified claims and do not invent facts."
         }
         MaintenanceWorkerRequest::SelectPacking { .. } => {
             "Return exactly one JSON object and no markdown. Use either {\"decision\":\"candidate\",\"page_ids\":[\"pg_...\",\"pg_...\"]}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Select only an ordered contiguous subset supplied in the request when it is one semantically continuous topic."
         }
+        MaintenanceWorkerRequest::AnalyzePacking { .. } => {
+            "Return exactly one JSON object and no markdown. Use either {\"decision\":\"packing_candidates\",\"candidates\":[[\"pg_...\",\"pg_...\"]]}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Analyze every supplied group. Return every useful ordered, contiguous, non-overlapping subset that is one semantically continuous topic, with at least two Pages and no more than max_pages_per_candidate. Never combine Pages from different groups. Split topic changes rather than treating temporal adjacency or shared scope as semantic continuity."
+        }
         MaintenanceWorkerRequest::SelectRelation { .. } => {
-            "Return exactly one JSON object and no markdown. Use either {\"decision\":\"relate\",\"page_ids\":[\"pg_...\",\"pg_...\"]}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Select exactly two supplied Pages only for a substantive semantic connection. Temporal adjacency, shared Scope, co-retrieval, or lexical similarity alone are insufficient."
+            "Return exactly one JSON object and no markdown. Use either {\"decision\":\"relate\",\"page_ids\":[\"pg_...\",\"pg_...\"]}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Select exactly two supplied Pages only when each directly helps understand, verify, or act on the same stable subject or evidence chain, and never select a pair listed in excluded_page_pairs. Temporal adjacency, shared Scope, co-retrieval, lexical similarity, broad analogy, or merely both discussing AI, tools, infrastructure, harnesses, runtimes, or workspaces are insufficient. Return no_candidate when no pair meets this bar."
         }
         MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => {
             "Return exactly one JSON object and no markdown. Use either {\"decision\":\"retain\",\"milestones\":[{\"revisionId\":\"rev_...\",\"reason\":\"...\"}]}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Select only supplied Revisions with durable semantic importance and stay within max_revisions."
@@ -192,7 +240,7 @@ fn extract_output_text(response: &ResponsesResult) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::maintenance::{RelationCandidatePage, RetentionMilestone};
+    use crate::maintenance::{MaintenanceDetailPage, RelationCandidatePage, RetentionMilestone};
 
     fn result(text: &str) -> ResponsesResult {
         ResponsesResult {
@@ -210,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn infer_request_is_fixed_to_local_background_execution() {
+    fn reasoning_request_is_fixed_to_named_luna_without_fallback() {
         let request = MaintenanceWorkerRequest::SelectRelation {
             pages: vec![RelationCandidatePage {
                 page_id: "pg_1".to_owned(),
@@ -222,19 +270,110 @@ mod tests {
                 facets: None,
                 relation_types: Vec::new(),
             }],
+            excluded_page_pairs: Vec::new(),
         };
-        let infer = infer_request(&request, Duration::from_secs(12), 512)
-            .expect("build Infer maintenance request");
+        let infer = infer_request(
+            &request,
+            Duration::from_secs(12),
+            "ollama_qwen3_5_4b",
+            "codex_gpt_5_6_luna",
+            None,
+        )
+        .expect("build Infer maintenance request");
 
         assert_eq!(infer.model, "reasoning.solve");
-        assert!(infer.background);
+        assert!(!infer.background);
         assert!(!infer.stream);
         assert!(infer.tools.is_empty());
-        assert_eq!(infer.metadata["infer.placement"], "local_only");
-        assert_eq!(infer.metadata["infer.offline_required"], "true");
+        assert_eq!(infer.metadata["infer.deployment_ids"], "codex_gpt_5_6_luna");
+        assert_eq!(infer.metadata["infer.placement"], "cloud_only");
+        assert_eq!(infer.metadata["infer.prefer"], "cloud");
+        assert_eq!(
+            infer.metadata["infer.provider_access_class"],
+            "subscription"
+        );
+        assert_eq!(infer.metadata["infer.capability_floor"], "advanced");
+        assert!(!infer.metadata.contains_key("infer.offline_required"));
         assert_eq!(infer.metadata["infer.fallback"], "none");
         assert_eq!(infer.metadata["infer.max_cost_usd"], "0");
         assert_eq!(infer.metadata["infer.deadline_ms"], "12000");
+        assert_eq!(
+            infer.reasoning,
+            Some(serde_json::json!({"effort": "medium"}))
+        );
+        assert_eq!(infer.max_output_tokens, None);
+    }
+
+    #[test]
+    fn summary_request_uses_prompt_bound_without_provider_token_constraint() {
+        let request = MaintenanceWorkerRequest::SummarizePage {
+            page: Box::new(MaintenanceDetailPage {
+                page_id: "pg_1".to_owned(),
+                revision_id: "rev_1".to_owned(),
+                namespace: "project:one".to_owned(),
+                created_at: "2026-08-15T00:00:00Z".to_owned(),
+                observed_at: None,
+                media_type: Some("text/markdown".to_owned()),
+                content: Some("bounded text".to_owned()),
+                summary: None,
+                facets: None,
+                source_refs: Vec::new(),
+                relations: Vec::new(),
+            }),
+        };
+        let infer = infer_request(
+            &request,
+            Duration::from_secs(12),
+            "ollama_qwen3_5_4b",
+            "codex_gpt_5_6_luna",
+            None,
+        )
+        .expect("build Infer summary request");
+
+        assert_eq!(infer.model, "language.respond");
+        assert_eq!(infer.metadata["infer.deployment_ids"], "ollama_qwen3_5_4b");
+        assert!(!infer.metadata.contains_key("infer.placement"));
+        assert!(!infer.metadata.contains_key("infer.prefer"));
+        assert!(!infer.metadata.contains_key("infer.offline_required"));
+        assert!(!infer.metadata.contains_key("infer.provider_access_class"));
+        assert_eq!(infer.metadata["infer.capability_floor"], "foundational");
+        assert_eq!(infer.metadata["infer.fallback"], "none");
+        assert_eq!(infer.reasoning, None);
+        assert_eq!(infer.max_output_tokens, None);
+        assert!(
+            infer
+                .instructions
+                .as_ref()
+                .and_then(Value::as_str)
+                .is_some_and(|instructions| instructions.contains("1-800 Unicode characters"))
+        );
+    }
+
+    #[test]
+    fn relation_request_can_use_an_explicit_terra_escalation() {
+        let request = MaintenanceWorkerRequest::SelectRelation {
+            pages: Vec::new(),
+            excluded_page_pairs: Vec::new(),
+        };
+        let infer = infer_request(
+            &request,
+            Duration::from_secs(12),
+            "ollama_qwen3_5_4b",
+            "codex_gpt_5_6_luna",
+            Some("codex_gpt_5_6_terra"),
+        )
+        .expect("build Infer relation escalation request");
+
+        assert_eq!(
+            infer.metadata["infer.deployment_ids"],
+            "codex_gpt_5_6_terra"
+        );
+        assert_eq!(infer.metadata["infer.fallback"], "none");
+        assert_eq!(
+            infer.reasoning,
+            Some(serde_json::json!({"effort": "medium"}))
+        );
+        assert_eq!(infer.max_output_tokens, None);
     }
 
     #[test]

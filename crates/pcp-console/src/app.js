@@ -1,4 +1,5 @@
 import { createPageInspector } from "/page-inspector.js";
+import { describePagePayload, pagePayloadPreviewText } from "/page-content.js";
 import { createQualityView } from "/quality-view.js";
 import { createHealthView } from "/health-view.js";
 import { createRetentionView } from "/retention-view.js";
@@ -9,6 +10,7 @@ const state = {
   overview: null,
   activeView: "overview",
   pages: { loaded: false, busy: false, cursor: null, count: 0 },
+  maintenance: { loaded: false, busy: false, status: null, scan: null, analysis: null, selected: new Set() },
   access: { loaded: false, busy: false, cursor: null, count: 0, events: [] },
   enrollment: { available: false, seenPending: new Set() },
 };
@@ -31,19 +33,15 @@ function formatSize(chars) {
   return `${(chars / 1_000_000).toFixed(2)}M chars`;
 }
 
+function formatCandidateGroups(value) {
+  const count = Number(value) || 0;
+  return `${formatNumber(count)} candidate group${count === 1 ? "" : "s"}`;
+}
+
 function formatTime(value) {
   if (!value) return "-";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
-}
-
-function projectionLabel(value) {
-  return ({
-    summary: "Summary",
-    payload: "Content",
-    facets: "Metadata",
-    relations: "Relations",
-  })[value] || value || "-";
 }
 
 async function api(path, options = {}) {
@@ -63,6 +61,14 @@ async function enrollmentMutation(path) {
   return api(path, {
     method: "POST",
     headers: { "X-PCP-Console": "1" },
+  });
+}
+
+async function maintenanceMutation(path, body) {
+  return api(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-PCP-Console": "1" },
+    body: JSON.stringify(body),
   });
 }
 
@@ -351,18 +357,94 @@ function pageRow(hit) {
   const open = element("button", "page-link");
   open.type = "button";
   open.append(
-    element("span", "mono", hit.pageId),
-    element("span", "snippet", hit.snippet || "No preview"),
+    element("strong", "page-title", pageSnippet(hit)),
+    element("span", "mono muted", hit.pageId),
   );
   open.addEventListener("click", () => pageInspector.open(hit.pageId));
   pageCell.append(open);
   row.append(
     pageCell,
-    element("td", "mono", hit.namespace),
-    element("td", "", projectionLabel(hit.matchedProjection)),
+    element("td", "page-type", pageTypeLabel(hit)),
+    pageOriginCell(hit),
+    pageConnectionsCell(hit),
     element("td", "", formatTime(hit.observedAt || hit.createdAt)),
   );
   return row;
+}
+
+function pageSnippet(hit) {
+  if (hit.matchedProjection === "summary" || hit.matchedProjection === "facets") {
+    return hit.snippet || "No preview";
+  }
+  const payload = hit.previewPayload;
+  const presentation = describePagePayload(payload?.content, payload?.mediaType);
+  if (presentation.type === "external_signal") {
+    return presentation.title || presentation.summary || presentation.content || "Signal";
+  }
+  if (presentation.type === "image_asset") return presentation.filename || "Image";
+  if (presentation.type === "packed_page" && presentation.entries.length) {
+    return presentation.entries.find((entry) => entry.role === "user")?.content
+      || presentation.entries[0].content
+      || "Conversation pack";
+  }
+  const preview = pagePayloadPreviewText(payload?.content, payload?.mediaType);
+  if (payload?.mediaType === "application/vnd.pcp.packed-page+json" && preview.trimStart().startsWith("{")) {
+    return hit.sourceSpan
+      ? `Conversation source positions ${hit.sourceSpan.start}–${hit.sourceSpan.end}`
+      : "Conversation pack";
+  }
+  return preview || hit.snippet || "No preview";
+}
+
+function pageTypeLabel(hit) {
+  if (hit.previewPayload?.mediaType === "application/vnd.pcp.packed-page+json") {
+    const count = hit.sourceSpan ? hit.sourceSpan.end - hit.sourceSpan.start + 1 : null;
+    return count ? `Conversation · ${count}` : "Conversation pack";
+  }
+  const presentation = describePagePayload(
+    hit.previewPayload?.content,
+    hit.previewPayload?.mediaType,
+  );
+  if (presentation.type === "packed_page") return `Conversation · ${presentation.entries.length}`;
+  if (presentation.type === "image_asset") return "Image";
+  if (presentation.type === "external_signal") return "Signal";
+  if (hit.kind === "conversation_event") return "Conversation";
+  if (hit.kind === "conversation_checkpoint") return "Checkpoint";
+  return hit.kind.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
+}
+
+function pageOriginCell(hit) {
+  const cell = element("td", "origin-cell");
+  cell.append(element("span", "mono", hit.namespace));
+  if (hit.sourceSpan) {
+    cell.append(element("span", "muted", `Stream ${hit.sourceSpan.start}–${hit.sourceSpan.end}`));
+  }
+  return cell;
+}
+
+function pageConnectionsCell(hit) {
+  const stats = hit.relationStats;
+  const cell = element("td", "relation-cell");
+  if (!stats) {
+    cell.append(element("span", "muted", "Unavailable"));
+    return cell;
+  }
+  const signals = [];
+  if (stats.total > 0) signals.push(`${formatNumber(stats.total)} explicit`);
+  if (hit.sourceSpan) signals.push("Source stream");
+  if (hit.summaryRevisionId) signals.push("Summarized");
+  if (!signals.length) {
+    cell.append(element("strong", "connection-isolated", "Isolated"));
+    return cell;
+  }
+  cell.append(
+    element("strong", "", signals[0]),
+    ...signals.slice(1).map((signal) => element("span", "muted", signal)),
+  );
+  if (stats.total > 0) {
+    cell.append(element("span", "muted", `${formatNumber(stats.incoming)} in · ${formatNumber(stats.outgoing)} out`));
+  }
+  return cell;
 }
 
 function renderPages(data, append) {
@@ -381,7 +463,7 @@ function renderPages(data, append) {
   if (state.pages.count === 0) {
     const row = document.createElement("tr");
     const cell = element("td", "empty", "No pages");
-    cell.colSpan = 4;
+    cell.colSpan = 5;
     row.append(cell);
     rows.replaceChildren(row);
   }
@@ -430,6 +512,7 @@ async function loadPages({ append = false } = {}) {
       params.set("mode", byId("search-mode").value);
     }
     if (scope) params.set("scope", scope);
+    if (byId("technical-pages").checked) params.set("technical", "true");
     if (append && state.pages.cursor) params.set("cursor", state.pages.cursor);
     renderPages(await api(`/api/pages?${params}`), append);
   } catch (error) {
@@ -459,11 +542,270 @@ async function loadAccess({ append = false } = {}) {
   }
 }
 
+function renderMaintenanceStatus(status) {
+  state.maintenance.status = status;
+  state.maintenance.loaded = true;
+  const available = maintenanceAvailable();
+  byId("maintenance-status").textContent = available
+    ? `${status.mode} · ${formatNumber(status.maxJobsPerCycle)} jobs per cycle`
+    : "Unavailable";
+  byId("maintenance-metrics").replaceChildren(
+    metric("Runtime", status.enabled ? "Scheduled" : "Manual", status.enabled ? "positive" : "info"),
+    metric("Mode", status.mode || "-"),
+    metric("Pack limit", status.packing ? `${formatNumber(status.packing.maxPages)} pages` : "-"),
+    metric("Input limit", status.packing ? formatSize(status.packing.maxInputChars) : "-"),
+  );
+  updateMaintenanceActions();
+}
+
+function maintenanceAvailable() {
+  return Boolean(state.maintenance.status?.available && state.maintenance.status?.packing?.enabled);
+}
+
+function maintenanceCandidateRow(candidate) {
+  const row = document.createElement("tr");
+  const selectCell = element("td", "maintenance-select");
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = state.maintenance.selected.has(candidate.candidateId);
+  checkbox.setAttribute("aria-label", `Select ${candidate.candidateId}`);
+  checkbox.addEventListener("change", () => {
+    if (checkbox.checked) state.maintenance.selected.add(candidate.candidateId);
+    else state.maintenance.selected.delete(candidate.candidateId);
+    updateMaintenanceActions();
+  });
+  selectCell.append(checkbox);
+
+  const source = element("td", "maintenance-source");
+  source.append(
+    element("strong", "", candidate.namespace),
+    element("span", "mono muted", `stream ${candidate.sourceSpan.start}–${candidate.sourceSpan.end}`),
+  );
+
+  const change = element("td");
+  change.append(
+    element("strong", "", candidate.extendsExistingPack ? "Extend Pack" : "New Pack"),
+    element("span", "muted", `${formatNumber(candidate.inputPageCount)} Pages → ${formatNumber(candidate.resultingEntryCount)} entries`),
+  );
+
+  const inputs = element("td", "maintenance-inputs");
+  for (const page of candidate.pages) {
+    const item = element("div", "maintenance-input");
+    item.append(
+      element("span", "mono muted", `${page.sourceSpan.start}–${page.sourceSpan.end}`),
+      element("span", "maintenance-preview", page.preview || page.pageId),
+    );
+    inputs.append(item);
+  }
+
+  const content = element("td");
+  content.append(element("strong", "", formatSize(candidate.contentChars)));
+  row.append(selectCell, source, change, inputs, content);
+  return row;
+}
+
+function updateMaintenanceActions() {
+  const selectedCount = state.maintenance.selected.size;
+  const candidateCount = state.maintenance.analysis?.candidates?.length || 0;
+  const allSelected = candidateCount > 0 && selectedCount === candidateCount;
+  const available = maintenanceAvailable();
+  const busy = state.maintenance.busy;
+  byId("maintenance-scan").disabled = !available || busy;
+  byId("maintenance-analyze").disabled = !available || busy || !state.maintenance.scan?.candidateGroupCount;
+  byId("maintenance-select-all").disabled = busy || candidateCount === 0;
+  byId("maintenance-select-all").textContent = allSelected ? "Clear selection" : "Select all";
+  byId("maintenance-optimize").disabled = busy || selectedCount === 0;
+  byId("maintenance-optimize").textContent = selectedCount > 0
+    ? `Optimize selected (${selectedCount})`
+    : "Optimize selected";
+  byId("maintenance-optimize-all").disabled = busy || candidateCount === 0;
+  byId("maintenance-optimize-all").textContent = candidateCount > 0
+    ? `Optimize all (${candidateCount})`
+    : "Optimize all";
+}
+
+function renderMaintenanceScan(scan) {
+  state.maintenance.scan = scan;
+  state.maintenance.analysis = null;
+  state.maintenance.selected.clear();
+  byId("maintenance-scan-metrics").hidden = false;
+  byId("maintenance-scan-metrics").replaceChildren(
+    metric("Current Pages", formatNumber(scan.inspectedPages)),
+    metric("Eligible Pages", formatNumber(scan.eligiblePages)),
+    metric("Candidate groups", formatNumber(scan.candidateGroupCount)),
+    metric("Estimated calls", formatNumber(scan.estimatedModelCalls), scan.estimatedModelCalls ? "info" : "positive"),
+  );
+  const rows = byId("maintenance-rows");
+  const row = document.createElement("tr");
+  const cell = element(
+    "td",
+    "empty",
+    scan.candidateGroupCount > 0 ? "Analysis not run" : "No eligible candidate groups",
+  );
+  cell.colSpan = 5;
+  row.append(cell);
+  rows.replaceChildren(row);
+  byId("maintenance-candidate-status").textContent = `${formatCandidateGroups(scan.candidateGroupCount)} · ${formatNumber(scan.estimatedModelCalls)} estimated model calls`;
+  byId("maintenance-status").textContent = `Scanned ${formatTime(scan.capturedAt)}`;
+  updateMaintenanceActions();
+}
+
+function renderMaintenanceAnalysis(analysis, { complete = true } = {}) {
+  state.maintenance.analysis = analysis;
+  state.maintenance.selected.clear();
+  const rows = byId("maintenance-rows");
+  rows.replaceChildren(...analysis.candidates.map(maintenanceCandidateRow));
+  if (analysis.candidates.length === 0) {
+    const row = document.createElement("tr");
+    const cell = element("td", "empty", "No Pack candidates");
+    cell.colSpan = 5;
+    row.append(cell);
+    rows.append(row);
+  }
+  const issueCount = analysis.issues?.length || 0;
+  const issueText = issueCount
+    ? ` · ${formatNumber(issueCount)} batch issue${issueCount === 1 ? "" : "s"}`
+    : "";
+  byId("maintenance-candidate-status").textContent = `${formatNumber(analysis.candidates.length)} candidates · ${formatNumber(analysis.workerCalls)} model calls · ${formatNumber(analysis.noCandidateGroups)} groups rejected · ${formatNumber(analysis.deferredGroups)} deferred${issueText}`;
+  if (!complete) {
+    byId("maintenance-status").textContent = `Analyzed ${formatNumber(analysis.batchesCompleted)} of ${formatNumber(analysis.batchCount)} batches`;
+  } else if (issueCount) {
+    const lastIssue = analysis.issues[issueCount - 1];
+    byId("maintenance-status").textContent = `Completed with ${formatNumber(issueCount)} batch issue${issueCount === 1 ? "" : "s"}. Batch ${lastIssue.batchIndex + 1}: ${lastIssue.message}`;
+  } else {
+    byId("maintenance-status").textContent = `Analyzed ${formatTime(analysis.analyzedAt)}`;
+  }
+  updateMaintenanceActions();
+}
+
+function emptyMaintenanceAnalysis(scan) {
+  return {
+    analyzedAt: null,
+    scanId: scan.scanId,
+    batchCount: scan.estimatedModelCalls,
+    batchesCompleted: 0,
+    candidateGroupCount: scan.candidateGroupCount,
+    analyzedGroupCount: 0,
+    workerCalls: 0,
+    noCandidateGroups: 0,
+    deferredGroups: 0,
+    candidates: [],
+    issues: [],
+  };
+}
+
+function appendMaintenanceAnalysisBatch(analysis, batch) {
+  analysis.analyzedAt = batch.analyzedAt;
+  analysis.batchCount = batch.batchCount;
+  analysis.batchesCompleted += 1;
+  analysis.analyzedGroupCount += batch.analyzedGroupCount;
+  analysis.workerCalls += batch.workerCalls;
+  analysis.noCandidateGroups += batch.noCandidateGroups;
+  analysis.deferredGroups += batch.deferredGroups;
+  analysis.candidates.push(...batch.candidates);
+  if (batch.issue) analysis.issues.push({ ...batch.issue, batchIndex: batch.batchIndex });
+}
+
+async function loadMaintenance({ reload = false } = {}) {
+  if (state.maintenance.loaded && !reload) return;
+  renderMaintenanceStatus(await api("/api/maintenance"));
+}
+
+async function scanMaintenance() {
+  if (state.maintenance.busy) return;
+  state.maintenance.busy = true;
+  byId("maintenance-status").textContent = "Scanning all Pages";
+  updateMaintenanceActions();
+  try {
+    renderMaintenanceScan(await maintenanceMutation("/api/maintenance/scan", {}));
+  } catch (error) {
+    byId("maintenance-status").textContent = "Scan failed";
+    showError(error);
+  } finally {
+    state.maintenance.busy = false;
+    updateMaintenanceActions();
+  }
+}
+
+async function analyzeMaintenance() {
+  if (state.maintenance.busy || !state.maintenance.scan?.candidateGroupCount) return;
+  state.maintenance.busy = true;
+  const scan = state.maintenance.scan;
+  const analysis = emptyMaintenanceAnalysis(scan);
+  byId("maintenance-status").textContent = `Preparing ${formatNumber(analysis.batchCount)} analysis batches`;
+  updateMaintenanceActions();
+  try {
+    for (let batchIndex = 0; batchIndex < analysis.batchCount; batchIndex += 1) {
+      byId("maintenance-status").textContent = `Analyzing batch ${formatNumber(batchIndex + 1)} of ${formatNumber(analysis.batchCount)}`;
+      const batch = await maintenanceMutation("/api/maintenance/analyze", {
+        scanId: scan.scanId,
+        batchIndex,
+      });
+      appendMaintenanceAnalysisBatch(analysis, batch);
+      renderMaintenanceAnalysis(analysis, { complete: false });
+    }
+    renderMaintenanceAnalysis(analysis);
+  } catch (error) {
+    state.maintenance.analysis = analysis;
+    if (analysis.batchesCompleted > 0) renderMaintenanceAnalysis(analysis, { complete: false });
+    byId("maintenance-status").textContent = `Analysis stopped after ${formatNumber(analysis.batchesCompleted)} of ${formatNumber(analysis.batchCount)} batches: ${error.message}`;
+    showError(error);
+  } finally {
+    state.maintenance.busy = false;
+    updateMaintenanceActions();
+  }
+}
+
+async function optimizeMaintenanceSelection(all = false) {
+  if (state.maintenance.busy || !state.maintenance.analysis) return;
+  const candidates = all
+    ? state.maintenance.analysis.candidates
+    : state.maintenance.analysis.candidates.filter((candidate) => state.maintenance.selected.has(candidate.candidateId));
+  if (candidates.length === 0) return;
+  if (!window.confirm(`Optimize ${candidates.length} Pack candidate${candidates.length === 1 ? "" : "s"}?`)) return;
+
+  state.maintenance.busy = true;
+  byId("maintenance-status").textContent = "Optimizing";
+  updateMaintenanceActions();
+  try {
+    for (const candidate of candidates) {
+      await maintenanceMutation("/api/maintenance/packs/apply", {
+        candidateId: candidate.candidateId,
+        pages: candidate.pages.map((page) => ({ pageId: page.pageId, revisionId: page.revisionId })),
+      });
+    }
+    state.maintenance.busy = false;
+    await Promise.all([loadOverview(), scanMaintenance()]);
+  } catch (error) {
+    byId("maintenance-status").textContent = "Optimization stopped";
+    showError(error);
+  } finally {
+    state.maintenance.busy = false;
+    updateMaintenanceActions();
+  }
+}
+
+function toggleMaintenanceSelection() {
+  const candidates = state.maintenance.analysis?.candidates || [];
+  const allSelected = candidates.length > 0
+    && candidates.every((candidate) => state.maintenance.selected.has(candidate.candidateId));
+  state.maintenance.selected.clear();
+  if (!allSelected) {
+    for (const candidate of candidates) state.maintenance.selected.add(candidate.candidateId);
+  }
+  const rows = byId("maintenance-rows");
+  for (const checkbox of rows.querySelectorAll('input[type="checkbox"]')) {
+    checkbox.checked = !allSelected;
+  }
+  updateMaintenanceActions();
+}
+
 async function activateView(name, { reload = false } = {}) {
   state.activeView = name;
   document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === name));
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === `view-${name}`));
   if (name === "pages" && (reload || !state.pages.loaded)) await loadPages();
+  if (name === "maintenance") await loadMaintenance({ reload });
   if (name === "health") {
     await Promise.all([healthView.load({ reload }), qualityView.load({ reload })]);
   }
@@ -484,6 +826,7 @@ async function refresh() {
     await loadRuntimeControl();
     await loadOverview();
     if (state.activeView === "pages") await loadPages();
+    if (state.activeView === "maintenance") await loadMaintenance({ reload: true });
     if (state.activeView === "health") {
       await Promise.all([
         healthView.load({ reload: true }),
@@ -541,7 +884,17 @@ byId("scope-filter").addEventListener("change", () => {
   state.pages.count = 0;
   loadPages().catch(showError);
 });
+byId("technical-pages").addEventListener("change", () => {
+  state.pages.cursor = null;
+  state.pages.count = 0;
+  loadPages().catch(showError);
+});
 byId("pages-more").addEventListener("click", () => loadPages({ append: true }).catch(showError));
+byId("maintenance-scan").addEventListener("click", () => scanMaintenance().catch(showError));
+byId("maintenance-analyze").addEventListener("click", () => analyzeMaintenance().catch(showError));
+byId("maintenance-select-all").addEventListener("click", toggleMaintenanceSelection);
+byId("maintenance-optimize").addEventListener("click", () => optimizeMaintenanceSelection().catch(showError));
+byId("maintenance-optimize-all").addEventListener("click", () => optimizeMaintenanceSelection(true).catch(showError));
 byId("access-more").addEventListener("click", () => loadAccess({ append: true }).catch(showError));
 byId("health-window").addEventListener("change", () => healthView.load({ reload: true }).catch(showError));
 

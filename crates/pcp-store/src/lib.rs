@@ -35,8 +35,12 @@ pub struct DurablePageInventoryItem {
     pub snippet: String,
     pub facets: Option<Value>,
     pub summary_revision_id: Option<String>,
+    #[serde(default)]
+    pub summary_target_revision_id: Option<String>,
     pub summary: Option<String>,
     pub relation_types: Vec<String>,
+    #[serde(default)]
+    pub packing_protected: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

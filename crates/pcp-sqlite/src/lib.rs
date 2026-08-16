@@ -3,6 +3,7 @@ mod adapter;
 mod audit_writer;
 mod health;
 mod inventory;
+mod migration;
 mod pack;
 mod read;
 mod retention;

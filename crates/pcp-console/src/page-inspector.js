@@ -1,5 +1,5 @@
 import { createTopologyMap, relationFamily } from "./page-graph.js";
-import { renderPageContent } from "./page-content.js";
+import { pagePayloadPreviewText, renderPageContent, renderPagePreview } from "./page-content.js";
 
 export function createPageInspector({ request, showError, formatTime }) {
   const dialog = document.getElementById("page-dialog");
@@ -22,9 +22,10 @@ export function createPageInspector({ request, showError, formatTime }) {
   let currentGraphLimit = 120;
 
   const relationFamilies = [
-    ["all", "All relations"],
+    ["all", "All connections"],
+    ["source_stream", "Source stream"],
     ["derivation", "Derivation"],
-    ["provenance", "Evidence dependencies"],
+    ["provenance", "Provenance inputs"],
     ["conversation", "Conversation"],
     ["evidence", "Evidence"],
     ["semantic", "Semantic"],
@@ -50,6 +51,12 @@ export function createPageInspector({ request, showError, formatTime }) {
   function contentBlock(content, mediaType = "text/markdown") {
     const block = element("div", "page-content");
     renderPageContent(block, content, mediaType);
+    return block;
+  }
+
+  function previewBlock(content, mediaType, options = {}) {
+    const block = element("div", "page-content");
+    renderPagePreview(block, content, mediaType, options);
     return block;
   }
 
@@ -79,10 +86,13 @@ export function createPageInspector({ request, showError, formatTime }) {
   }
 
   function renderSummary(page) {
-    const preview = page.summary?.content || page.revision.payload?.content || "No summary projection";
-    const previewMediaType = page.summary
-      ? "text/markdown"
-      : page.revision.payload?.mediaType || "text/plain";
+    const payload = page.revision.payload;
+    const mediaUrl = page.revision.sourceRefs?.length
+      ? `/api/pages/${encodeURIComponent(page.page.pageId)}/media/0`
+      : null;
+    const summaryTarget = page.relations.find((relation) => (
+      relation.relationType === "summarizes" && relation.fromPageId === page.page.pageId
+    ))?.toPageId;
     const facts = element("dl", "details-grid compact-details");
     const rows = [
       ["Scope", page.page.namespace],
@@ -92,7 +102,13 @@ export function createPageInspector({ request, showError, formatTime }) {
       ["Revision", page.revision.revisionId],
       ["Observed", formatTime(page.revision.observedAt || page.revision.createdAt)],
       ["Created by", actorLabel(page.revision.createdBy)],
-      ["Relations", page.relations.length],
+      ...(page.revision.sourceSpan ? [[
+        "Source stream",
+        `${page.revision.sourceSpan.streamId} · ${page.revision.sourceSpan.start}–${page.revision.sourceSpan.end}`,
+      ]] : []),
+      ...(page.summary ? [["Summary page", page.summary.summaryPageId]] : []),
+      ...(summaryTarget ? [["Summarizes", summaryTarget]] : []),
+      ["Explicit relations", page.relations.length],
       ["History", page.history.length],
     ];
     facts.append(...rows.flatMap(([label, value]) => [
@@ -100,10 +116,22 @@ export function createPageInspector({ request, showError, formatTime }) {
       element("dd", label === "Scope" || label === "Created by" ? "mono" : "", value),
     ]));
 
-    const sections = [
-      detailSection(page.summary ? "Summary" : "Preview", contentBlock(preview, previewMediaType)),
-      detailSection("Page", facts),
-    ];
+    const sections = [];
+    if (page.summary) {
+      sections.push(detailSection(
+        "Summary",
+        contentBlock(page.summary.content, "text/markdown"),
+      ));
+    }
+    sections.push(detailSection(
+      page.page.kind === "summary_projection" ? "Summary content" : "Content",
+      previewBlock(
+        payload?.content || "No content projection",
+        payload?.mediaType || "text/plain",
+        { mediaUrl },
+      ),
+    ));
+    sections.push(detailSection("Page", facts));
     if (page.validity) sections.push(detailSection("Validity", jsonBlock(page.validity, "No validity assessment")));
     summaryPane.replaceChildren(...sections);
   }
@@ -112,9 +140,11 @@ export function createPageInspector({ request, showError, formatTime }) {
     const button = element("button", "graph-node");
     button.type = "button";
     button.title = `Open ${page.page.pageId}`;
-    const relationTypes = [...new Set(relations.map((relation) => relation.edgeKind === "provenance"
-      ? `evidence dependency · ${relation.relationType}`
-      : relation.relationType))];
+    const relationTypes = [...new Set(relations.map((relation) => relation.edgeKind === "source_stream"
+      ? "contiguous source span"
+      : relation.edgeKind === "provenance"
+        ? `provenance input · ${relation.relationType}`
+        : relation.relationType))];
     const family = relationFamily(relations[0].relationType, relations[0].edgeKind);
     button.append(
       element("span", `graph-relation relation-${family}`, `${direction} · ${relationTypes.join(" / ")}`),
@@ -153,10 +183,12 @@ export function createPageInspector({ request, showError, formatTime }) {
   function graphQueryControls() {
     const controls = element("div", "graph-query-controls");
     const depthControl = element("div", "graph-depth-control");
-    depthControl.append(element("span", "muted", "Depth"));
+    depthControl.append(element("span", "muted", "Traversal depth"));
     for (const depth of [1, 2, 3]) {
       const button = element("button", `graph-depth-button${currentGraphDepth === depth ? " active" : ""}`, `${depth} hop${depth > 1 ? "s" : ""}`);
       button.type = "button";
+      button.title = `Show Pages within ${depth} graph edge${depth > 1 ? "s" : ""} of the current Page`;
+      button.setAttribute("aria-label", button.title);
       button.addEventListener("click", () => {
         if (currentGraphDepth === depth) return;
         currentGraphDepth = depth;
@@ -216,15 +248,19 @@ export function createPageInspector({ request, showError, formatTime }) {
         entry.page,
         entry.relations,
         label.toLowerCase(),
-        snippets.get(entry.page.page.pageId),
+        snippets.get(entry.page.page.pageId)
+          || pagePayloadPreviewText(
+            entry.page.revision.payload?.content,
+            entry.page.revision.payload?.mediaType,
+          ),
       ));
       const lane = element("section", "graph-lane");
       lane.append(element("h3", "", `${label} · ${nodes.length}`));
       if (nodes.length) lane.append(...nodes);
-      else lane.append(element("div", "empty graph-empty", "No relations"));
+      else lane.append(element("div", "empty graph-empty", "No connections"));
       lanes.append(lane);
     }
-    const relationHeading = element("h3", "graph-section-title", "Direct relations");
+    const relationHeading = element("h3", "graph-section-title", "Direct connections");
     graphPane.replaceChildren(
       graphQueryControls(),
       graphFilters(graph.topology.edges, graph),
@@ -255,7 +291,15 @@ export function createPageInspector({ request, showError, formatTime }) {
       button.append(
         heading,
         element("span", "muted", `${page.page.lifecycleStatus} · ${page.page.mutability}${standing}`),
-        element("span", "history-preview", truncate(page.summary?.content || page.revision.payload?.content, 360) || "No content projection"),
+        element(
+          "span",
+          "history-preview",
+          truncate(
+            page.summary?.content
+              || pagePayloadPreviewText(page.revision.payload?.content, page.revision.payload?.mediaType),
+            360,
+          ) || "No content projection",
+        ),
       );
       button.addEventListener("click", () => {
         if (page.revision.revisionId !== currentPageId) navigate(page.revision.revisionId);
@@ -287,7 +331,7 @@ export function createPageInspector({ request, showError, formatTime }) {
     };
     rawPane.replaceChildren(
       detailSection(
-        payload?.mediaType ? `Detail · ${payload.mediaType}` : "Detail",
+        payload?.mediaType ? `Raw content · ${payload.mediaType}` : "Raw content",
         contentBlock(payload?.content || "No payload projection", payload?.mediaType || "text/plain"),
       ),
       detailSection("Manifest", jsonBlock(manifest, "No manifest")),
@@ -325,7 +369,7 @@ export function createPageInspector({ request, showError, formatTime }) {
       if (currentPageId === pageId) renderRaw(page);
     } catch (error) {
       showError(error);
-      rawPane.replaceChildren(element("div", "empty", "Detail unavailable"));
+      rawPane.replaceChildren(element("div", "empty", "Raw content unavailable"));
     }
   }
 
@@ -340,7 +384,7 @@ export function createPageInspector({ request, showError, formatTime }) {
       if (currentPageId === pageId) renderHistory(lineage);
     } catch (error) {
       showError(error);
-      historyPane.replaceChildren(element("div", "empty", "Lineage unavailable"));
+      historyPane.replaceChildren(element("div", "empty", "History unavailable"));
     }
   }
 

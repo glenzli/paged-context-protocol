@@ -6,7 +6,7 @@ use pcp_core::{
     AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
     CollectRevisionRetentionRequest, LifecycleStatus, PagePayload, PlanRevisionRetentionRequest,
     Projection, ReadPage, ReadPagesRequest, RetentionPolicy, RevisePageRequest, SearchFilters,
-    SearchMode, SearchPagesRequest,
+    SearchMode, SearchPagesRequest, WriteSummaryRequest,
 };
 use pcp_rpc::RemotePcpClient;
 use pcp_sqlite::SqlitePcpStore;
@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
             let session_id = format!("pcp-cli:{}", std::process::id());
             let access = match command.as_str() {
                 "retention-plan" => AccessMode::Audit.session(principal, session_id, scopes, false),
-                "retention-collect" | "revise" => {
+                "retention-collect" | "revise" | "summary-revise" | "tombstone" => {
                     AccessMode::Admin.session(principal, session_id, scopes, false)
                 }
                 _ => AccessSession::read_only(principal, session_id, scopes),
@@ -286,6 +286,67 @@ async fn main() -> Result<()> {
                 .await?;
             print_json(&result)?;
         }
+        "summary-revise" => {
+            anyhow::ensure!(
+                arguments.next().as_deref() == Some("--confirm"),
+                "pcp summary-revise requires --confirm"
+            );
+            let target_page_id = arguments
+                .next()
+                .context("pcp summary-revise requires a target Page ID")?;
+            let target = client
+                .read_pages(ReadPagesRequest {
+                    page_ids: vec![target_page_id],
+                    revision_ids: Vec::new(),
+                    projections: vec![Projection::Manifest, Projection::Summary],
+                    max_chars: 64_000,
+                })
+                .await?
+                .into_iter()
+                .next()
+                .context("Summary target Page could not be read")?;
+            let current_summary_revision_id = target
+                .summary
+                .as_ref()
+                .map(|summary| summary.summary_revision_id.clone())
+                .context("Summary target Page has no current Summary to revise")?;
+            let mut content = String::new();
+            std::io::stdin()
+                .read_to_string(&mut content)
+                .context("read revised Summary from stdin")?;
+            anyhow::ensure!(
+                !content.trim().is_empty(),
+                "pcp summary-revise requires the new Summary on stdin"
+            );
+            let result = client
+                .write_summary(WriteSummaryRequest {
+                    target_page_id: target.page.page_id,
+                    target_revision_id: target.revision.revision_id,
+                    expected_summary_revision_id: Some(current_summary_revision_id.clone()),
+                    content,
+                    created_by: operator_actor()?,
+                    tool_or_model: operator_tool_or_model(),
+                    provenance: Vec::new(),
+                    idempotency_key: Some(format!(
+                        "cli:summary-revise:{current_summary_revision_id}"
+                    )),
+                })
+                .await?;
+            print_json(&result)?;
+        }
+        "tombstone" => {
+            anyhow::ensure!(
+                arguments.next().as_deref() == Some("--confirm"),
+                "pcp tombstone requires --confirm"
+            );
+            let revision_id = arguments
+                .next()
+                .context("pcp tombstone requires a current Revision ID")?;
+            let result = client
+                .tombstone_derivation_cascade(revision_id, operator_actor()?)
+                .await?;
+            print_json(&result)?;
+        }
         other => anyhow::bail!("unknown pcp command: {other}"),
     }
     Ok(())
@@ -366,8 +427,30 @@ fn parse_optional_u32(value: Option<String>, name: &str, default: u32) -> Result
         .map(|value| value.unwrap_or(default))
 }
 
+fn operator_actor() -> Result<Actor> {
+    let actor_type = env::var("PCP_OPERATOR_ACTOR_TYPE").unwrap_or_else(|_| "tool".to_owned());
+    let actor_type = ActorType::parse(&actor_type)
+        .with_context(|| format!("invalid PCP_OPERATOR_ACTOR_TYPE: {actor_type}"))?;
+    let actor_id = env::var("PCP_OPERATOR_ACTOR_ID").unwrap_or_else(|_| "cli:pcp".to_owned());
+    anyhow::ensure!(
+        !actor_id.trim().is_empty(),
+        "PCP_OPERATOR_ACTOR_ID must not be empty"
+    );
+    Ok(Actor {
+        actor_type,
+        actor_id,
+    })
+}
+
+fn operator_tool_or_model() -> Option<String> {
+    env::var("PCP_OPERATOR_TOOL_OR_MODEL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| Some("pcp-cli".to_owned()))
+}
+
 fn print_help() {
     println!(
-        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <page-id>\n  export\n  doctor\n  retention-plan [minimum-age-days] [keep-recent-per-page] [sample-limit]\n  retention-collect --confirm [minimum-age-days] [keep-recent-per-page] [sample-limit]\n  revise --confirm <page-id> < revised.md\n\nSet PCP_RUNTIME_SOCKET to use a running local runtime, or PCP_STORE_PATH for embedded SQLite."
+        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <page-id>\n  export\n  doctor\n  retention-plan [minimum-age-days] [keep-recent-per-page] [sample-limit]\n  retention-collect --confirm [minimum-age-days] [keep-recent-per-page] [sample-limit]\n  revise --confirm <page-id> < revised.md\n  summary-revise --confirm <target-page-id> < summary.md\n  tombstone --confirm <current-revision-id>\n\nSet PCP_RUNTIME_SOCKET to use a running local runtime, or PCP_STORE_PATH for embedded SQLite. PCP_OPERATOR_ACTOR_TYPE, PCP_OPERATOR_ACTOR_ID, and PCP_OPERATOR_TOOL_OR_MODEL can attribute operator writes."
     );
 }

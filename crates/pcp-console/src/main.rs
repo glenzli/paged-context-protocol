@@ -1,22 +1,38 @@
-use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    env,
+    fs::{self, File},
+    io::Read,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
 use pcp_client::{PcpApi, PcpTenantApi};
 use pcp_core::{
-    PlanRevisionRetentionRequest, Projection, ReadPage, ReadPagesRequest, RetentionPolicy,
-    SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch,
+    PagePayload, PlanRevisionRetentionRequest, Projection, ReadPage, ReadPagesRequest, Relation,
+    RetentionPolicy, SearchFilters, SearchHit, SearchMode, SearchPagesRequest, SearchResult,
+    SearchTermMatch, SourceRef, SourceSpan,
 };
 use pcp_rpc::{EnrollmentAdminClient, EnrollmentAdminResponse, RemotePcpClient};
-use serde::Deserialize;
+use pcp_runtime::{
+    AnalyzeMaintenancePacksRequest, ApplyMaintenancePackRequest, MaintenanceOperator, RuntimeConfig,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::{net::TcpListener, time::Instant};
+use url::Url;
 
 const DEFAULT_BIND: &str = "127.0.0.1:4318";
 const DEFAULT_PRINCIPAL_ID: &str = "operator:local";
@@ -26,6 +42,9 @@ const DEFAULT_PAGE_LIMIT: u32 = 20;
 const MAX_PAGE_LIMIT: u32 = 50;
 const MAX_HISTORY_REVISIONS: usize = 20;
 const MAX_RETENTION_SAMPLE_LIMIT: u32 = 100;
+const MAX_LOCAL_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
+const LOCAL_MEDIA_ROOTS_ENV: &str = "PCP_CONSOLE_LOCAL_MEDIA_ROOTS";
+const TECHNICAL_PAGE_KINDS: [&str; 1] = ["summary_projection"];
 
 mod graph_view;
 mod managed;
@@ -35,6 +54,8 @@ struct AppState {
     client: Arc<RemotePcpClient>,
     enrollment: EnrollmentAdminClient,
     runtime: Option<Arc<managed::ManagedRuntime>>,
+    runtime_config: Option<PathBuf>,
+    local_media_roots: Arc<Vec<PathBuf>>,
 }
 
 #[derive(Debug)]
@@ -51,9 +72,11 @@ where
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let error = format!("{:#}", self.0);
+        eprintln!("PCP Console request failed: {error}");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{:#}", self.0)})),
+            Json(json!({"error": error})),
         )
             .into_response()
     }
@@ -66,6 +89,70 @@ struct PageQuery {
     mode: Option<String>,
     cursor: Option<String>,
     limit: Option<u32>,
+    technical: Option<bool>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConsolePageResult {
+    hits: Vec<ConsolePageHit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConsolePageHit {
+    #[serde(flatten)]
+    hit: SearchHit,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview_payload: Option<PagePayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relation_stats: Option<PageListRelationStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_span: Option<SourceSpan>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PageListRelationStats {
+    total: usize,
+    incoming: usize,
+    outgoing: usize,
+}
+
+impl PageListRelationStats {
+    fn from_relations(page_id: &str, relations: &[Relation]) -> Self {
+        let incoming = relations
+            .iter()
+            .filter(|relation| relation.to_page_id == page_id)
+            .count();
+        let outgoing = relations
+            .iter()
+            .filter(|relation| relation.from_page_id == page_id)
+            .count();
+        Self {
+            total: relations
+                .iter()
+                .filter(|relation| {
+                    relation.from_page_id == page_id || relation.to_page_id == page_id
+                })
+                .count(),
+            incoming,
+            outgoing,
+        }
+    }
+}
+
+struct PageListMetadata {
+    preview_payload: Option<PagePayload>,
+    relation_stats: PageListRelationStats,
+    source_span: Option<SourceSpan>,
+}
+
+#[derive(Deserialize)]
+struct LocalSourceLocator {
+    uri: String,
 }
 
 #[derive(Default, Deserialize)]
@@ -95,6 +182,10 @@ struct RetentionQuery {
     sample_limit: Option<u32>,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MaintenanceScanRequest {}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let runtime = match managed::ManagedOptions::parse(env::args_os().skip(1))? {
@@ -108,6 +199,10 @@ async fn main() -> Result<()> {
         .context(
             "PCP_RUNTIME_SOCKET must point to the operator endpoint unless --managed is used",
         )?;
+    let runtime_config = runtime
+        .as_ref()
+        .map(|runtime| runtime.runtime_config().to_path_buf())
+        .or_else(|| env::var_os("PCP_RUNTIME_CONFIG").map(PathBuf::from));
     let principal_id =
         env::var("PCP_CLIENT_ID").unwrap_or_else(|_| DEFAULT_PRINCIPAL_ID.to_owned());
     let client = connect_runtime(&socket_path, &principal_id).await?;
@@ -123,6 +218,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| DEFAULT_BIND.to_owned())
         .parse::<SocketAddr>()
         .context("parse PCP_CONSOLE_BIND")?;
+    let local_media_roots = local_media_roots()?;
     let listener = TcpListener::bind(bind)
         .await
         .with_context(|| format!("bind PCP Console at {bind}"))?;
@@ -133,6 +229,8 @@ async fn main() -> Result<()> {
             client: Arc::new(client),
             enrollment: EnrollmentAdminClient::new(enrollment_socket),
             runtime: runtime.clone(),
+            runtime_config,
+            local_media_roots: Arc::new(local_media_roots),
         }),
     )
     .with_graceful_shutdown(shutdown_signal())
@@ -163,11 +261,16 @@ fn router(state: AppState) -> Router {
         .route("/api/pages", get(pages))
         .route("/api/pages/{page_id}", get(page_detail))
         .route("/api/pages/{page_id}/raw", get(page_raw))
+        .route("/api/pages/{page_id}/media/{source_index}", get(page_media))
         .route("/api/pages/{page_id}/graph", get(page_graph))
         .route("/api/pages/{page_id}/lineage", get(page_lineage))
         .route("/api/quality", get(quality))
         .route("/api/metrics", get(health_metrics))
         .route("/api/retention", get(retention_plan))
+        .route("/api/maintenance", get(maintenance_status))
+        .route("/api/maintenance/scan", post(maintenance_scan))
+        .route("/api/maintenance/analyze", post(maintenance_analyze))
+        .route("/api/maintenance/packs/apply", post(maintenance_apply_pack))
         .route("/api/access", get(access_log))
         .route("/api/enrollment", get(enrollment_snapshot))
         .route(
@@ -345,7 +448,8 @@ async fn pages(
         .unwrap_or(DEFAULT_PAGE_LIMIT)
         .clamp(1, MAX_PAGE_LIMIT);
     let scopes = selected_scopes(state.client.as_ref(), query.scope.as_deref());
-    let result = match query
+    let include_technical = query.technical.unwrap_or(false);
+    let mut result = match query
         .q
         .as_deref()
         .map(str::trim)
@@ -374,17 +478,99 @@ async fn pages(
         None => {
             state
                 .client
-                .browse_index(scopes, Vec::new(), limit, query.cursor, 40_000)
+                .browse_index(
+                    scopes,
+                    if include_technical {
+                        Vec::new()
+                    } else {
+                        TECHNICAL_PAGE_KINDS
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect()
+                    },
+                    limit,
+                    query.cursor,
+                    40_000,
+                )
                 .await?
         }
     };
-    Ok(Json(json!(result)))
+    if !include_technical {
+        result
+            .hits
+            .retain(|hit| !TECHNICAL_PAGE_KINDS.contains(&hit.kind.as_str()));
+    }
+    Ok(Json(json!(
+        console_page_result(state.client.as_ref(), result).await?
+    )))
+}
+
+async fn console_page_result(
+    client: &RemotePcpClient,
+    result: SearchResult,
+) -> Result<ConsolePageResult> {
+    let capabilities = client.capabilities();
+    let chunk_size = usize::try_from(capabilities.max_read_pages)
+        .unwrap_or(1)
+        .max(1);
+    let page_ids = result
+        .hits
+        .iter()
+        .map(|hit| hit.page_id.clone())
+        .collect::<Vec<_>>();
+    let mut metadata = HashMap::with_capacity(page_ids.len());
+    for chunk in page_ids.chunks(chunk_size) {
+        let pages = client
+            .read_pages(ReadPagesRequest {
+                page_ids: chunk.to_vec(),
+                revision_ids: Vec::new(),
+                projections: vec![Projection::Payload, Projection::Relations],
+                max_chars: capabilities.max_read_chars,
+            })
+            .await?;
+        for page in pages {
+            metadata.insert(
+                page.page.page_id.clone(),
+                PageListMetadata {
+                    preview_payload: page.revision.payload,
+                    relation_stats: PageListRelationStats::from_relations(
+                        &page.page.page_id,
+                        &page.relations,
+                    ),
+                    source_span: page.revision.source_span,
+                },
+            );
+        }
+    }
+
+    Ok(ConsolePageResult {
+        hits: result
+            .hits
+            .into_iter()
+            .map(|hit| {
+                let page_metadata = metadata.remove(&hit.page_id);
+                let source_span = page_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.source_span.clone());
+                ConsolePageHit {
+                    preview_payload: page_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.preview_payload.clone()),
+                    relation_stats: page_metadata.map(|metadata| metadata.relation_stats),
+                    source_span,
+                    hit,
+                }
+            })
+            .collect(),
+        next_cursor: result.next_cursor,
+    })
 }
 
 async fn page_detail(
     State(state): State<AppState>,
     Path(page_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    let max_chars = state.client.capabilities().max_read_chars;
     let page = read_one_page(
         state.client.as_ref(),
         page_id,
@@ -393,11 +579,12 @@ async fn page_detail(
             Projection::Summary,
             Projection::Validity,
             Projection::Payload,
+            Projection::Sources,
             Projection::Facets,
             Projection::Relations,
             Projection::History,
         ],
-        8_000,
+        max_chars,
     )
     .await?;
     Ok(Json(json!(page)))
@@ -420,6 +607,53 @@ async fn page_raw(
     )
     .await?;
     Ok(Json(json!(page)))
+}
+
+async fn page_media(
+    State(state): State<AppState>,
+    Path((page_id, source_index)): Path<(String, usize)>,
+) -> Result<Response, ApiError> {
+    let page = read_one_page(
+        state.client.as_ref(),
+        page_id,
+        vec![Projection::Manifest, Projection::Sources],
+        1_000,
+    )
+    .await?;
+    let source_ref = page
+        .revision
+        .source_refs
+        .get(source_index)
+        .cloned()
+        .context("PCP media SourceRef was not found")?;
+    let roots = state.local_media_roots.clone();
+    let (bytes, media_type, digest) =
+        tokio::task::spawn_blocking(move || read_local_media(&source_ref, roots.as_slice()))
+            .await
+            .context("join PCP local media read")??;
+
+    let mut response = Response::new(Body::from(bytes));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&media_type).context("encode PCP media content type")?,
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=300"),
+    );
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; sandbox"),
+    );
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"sha256-{digest}\"")).context("encode PCP media ETag")?,
+    );
+    Ok(response)
 }
 
 async fn page_graph(
@@ -509,6 +743,94 @@ async fn retention_plan(
     Ok(Json(json!({"plan": plan, "leases": leases})))
 }
 
+async fn maintenance_status(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let Some(config_path) = state.runtime_config.as_ref() else {
+        return Ok(Json(json!({"available": false})));
+    };
+    let config = RuntimeConfig::load(config_path)?;
+    let Some(maintenance) = config.maintenance else {
+        return Ok(Json(json!({
+            "available": false,
+            "configPath": config_path,
+        })));
+    };
+    Ok(Json(json!({
+        "available": true,
+        "enabled": maintenance.enabled,
+        "mode": maintenance.mode,
+        "intervalSeconds": maintenance.interval_seconds,
+        "maxJobsPerCycle": maintenance.max_jobs_per_cycle,
+        "packing": {
+            "enabled": maintenance.packing.enabled,
+            "maxPages": maintenance.packing.max_pages,
+            "maxInputChars": maintenance.packing.max_input_chars,
+        },
+    })))
+}
+
+async fn maintenance_scan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(_request): Json<MaintenanceScanRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let config_path = state
+        .runtime_config
+        .as_ref()
+        .context("PCP Console has no Runtime configuration path")?;
+    let operator = MaintenanceOperator::load(config_path).await?;
+    if operator.identity_id() != state.client.identity_id() {
+        return Err(anyhow::anyhow!(
+            "PCP maintenance configuration points to a different Store identity"
+        )
+        .into());
+    }
+    let scan = operator.scan_packing().await?;
+    Ok(Json(json!(scan)))
+}
+
+async fn maintenance_analyze(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<AnalyzeMaintenancePacksRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let config_path = state
+        .runtime_config
+        .as_ref()
+        .context("PCP Console has no Runtime configuration path")?;
+    let operator = MaintenanceOperator::load(config_path).await?;
+    if operator.identity_id() != state.client.identity_id() {
+        return Err(anyhow::anyhow!(
+            "PCP maintenance configuration points to a different Store identity"
+        )
+        .into());
+    }
+    let analysis = operator.analyze_packing(request).await?;
+    Ok(Json(json!(analysis)))
+}
+
+async fn maintenance_apply_pack(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ApplyMaintenancePackRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let config_path = state
+        .runtime_config
+        .as_ref()
+        .context("PCP Console has no Runtime configuration path")?;
+    let operator = MaintenanceOperator::load(config_path).await?;
+    if operator.identity_id() != state.client.identity_id() {
+        return Err(anyhow::anyhow!(
+            "PCP maintenance configuration points to a different Store identity"
+        )
+        .into());
+    }
+    let result = operator.apply_pack(request).await?;
+    Ok(Json(json!({"optimized": true, "result": result})))
+}
+
 async fn access_log(
     State(state): State<AppState>,
     Query(query): Query<AccessQuery>,
@@ -592,6 +914,117 @@ fn selected_scopes(client: &RemotePcpClient, selected: Option<&str>) -> Vec<Stri
     scopes
 }
 
+fn local_media_roots() -> Result<Vec<PathBuf>> {
+    let Some(configured) = env::var_os(LOCAL_MEDIA_ROOTS_ENV) else {
+        return Ok(Vec::new());
+    };
+    let mut roots = env::split_paths(&configured)
+        .map(|path| {
+            fs::canonicalize(&path)
+                .with_context(|| format!("resolve PCP Console local media root {}", path.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
+}
+
+fn read_local_media(
+    source_ref: &SourceRef,
+    allowed_roots: &[PathBuf],
+) -> Result<(Vec<u8>, String, String)> {
+    anyhow::ensure!(
+        !allowed_roots.is_empty(),
+        "PCP Console local media preview is disabled; configure {LOCAL_MEDIA_ROOTS_ENV}"
+    );
+    let media_type = source_ref
+        .media_type
+        .as_deref()
+        .context("PCP local media SourceRef has no mediaType")?;
+    anyhow::ensure!(
+        matches!(
+            media_type,
+            "image/png" | "image/jpeg" | "image/webp" | "image/gif" | "image/avif"
+        ),
+        "PCP Console does not render this local media type"
+    );
+    let expected_digest = source_ref
+        .content_digest
+        .as_deref()
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .context("PCP local media SourceRef requires a sha256 contentDigest")?;
+    anyhow::ensure!(
+        expected_digest.len() == 64 && expected_digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "PCP local media SourceRef has an invalid sha256 contentDigest"
+    );
+    let locator: LocalSourceLocator =
+        serde_json::from_str(&source_ref.locator).context("decode PCP local media locator")?;
+    let url = Url::parse(&locator.uri).context("parse PCP local media URI")?;
+    anyhow::ensure!(
+        url.scheme() == "file",
+        "PCP Console does not fetch remote media"
+    );
+    let original_path = url
+        .to_file_path()
+        .map_err(|_| anyhow::anyhow!("PCP local media URI is not a valid file path"))?;
+    let link_metadata = fs::symlink_metadata(&original_path)
+        .with_context(|| format!("inspect PCP local media {}", original_path.display()))?;
+    anyhow::ensure!(
+        !link_metadata.file_type().is_symlink(),
+        "PCP local media file cannot be a symlink"
+    );
+    let canonical_path = fs::canonicalize(&original_path)
+        .with_context(|| format!("resolve PCP local media {}", original_path.display()))?;
+    anyhow::ensure!(
+        allowed_roots
+            .iter()
+            .any(|root| canonical_path.starts_with(root)),
+        "PCP local media file is outside configured roots"
+    );
+
+    let mut file = File::open(&canonical_path)
+        .with_context(|| format!("open PCP local media {}", canonical_path.display()))?;
+    let metadata = file.metadata().context("read PCP local media metadata")?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "PCP local media source is not a regular file"
+    );
+    anyhow::ensure!(
+        metadata.len() <= MAX_LOCAL_MEDIA_BYTES,
+        "PCP local media exceeds the preview size limit"
+    );
+    ensure_current_user_owned(&metadata)?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut bytes)
+        .context("read PCP local media bytes")?;
+    anyhow::ensure!(
+        bytes.len() as u64 == metadata.len(),
+        "PCP local media changed while being read"
+    );
+    let actual_digest = format!("{:x}", Sha256::digest(&bytes));
+    anyhow::ensure!(
+        actual_digest.eq_ignore_ascii_case(expected_digest),
+        "PCP local media contentDigest does not match"
+    );
+    Ok((bytes, media_type.to_owned(), actual_digest))
+}
+
+#[cfg(unix)]
+fn ensure_current_user_owned(metadata: &fs::Metadata) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    anyhow::ensure!(
+        metadata.uid() == unsafe { libc::geteuid() },
+        "PCP local media file is not owned by the Console user"
+    );
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_current_user_owned(_metadata: &fs::Metadata) -> Result<()> {
+    anyhow::bail!("PCP local media preview requires owner-aware filesystem metadata")
+}
+
 async fn read_one_page(
     client: &RemotePcpClient,
     page_id: String,
@@ -649,6 +1082,33 @@ fn retention_policy(query: &RetentionQuery) -> RetentionPolicy {
 mod tests {
     use super::*;
 
+    fn local_source_ref(path: &std::path::Path, digest: &str) -> SourceRef {
+        SourceRef {
+            provider_id: "test-local-media".to_owned(),
+            locator: json!({
+                "uri": Url::from_file_path(path).expect("test file URL").to_string()
+            })
+            .to_string(),
+            media_type: Some("image/png".to_owned()),
+            content_digest: Some(format!("sha256:{digest}")),
+        }
+    }
+
+    fn relation(relation_id: &str, from_page_id: &str, to_page_id: &str) -> Relation {
+        Relation {
+            relation_id: relation_id.to_owned(),
+            from_page_id: from_page_id.to_owned(),
+            relation_type: "related_to".to_owned(),
+            to_page_id: to_page_id.to_owned(),
+            basis_revision_ids: Vec::new(),
+            created_by: pcp_core::Actor {
+                actor_type: pcp_core::ActorType::System,
+                actor_id: "console-test".to_owned(),
+            },
+            created_at: "2026-08-16T00:00:00Z".to_owned(),
+        }
+    }
+
     #[test]
     fn console_search_modes_are_explicitly_bounded() {
         assert_eq!(parse_search_mode(None).unwrap(), SearchMode::Auto);
@@ -673,5 +1133,59 @@ mod tests {
         assert_eq!(bounded.minimum_age_days, 36_500);
         assert_eq!(bounded.keep_recent_revisions_per_page, 1_000);
         assert_eq!(bounded.sample_limit, 1);
+    }
+
+    #[test]
+    fn console_relation_stats_distinguish_incoming_and_outgoing_edges() {
+        let relations = vec![
+            relation("rel-in", "pg-source", "pg-current"),
+            relation("rel-out", "pg-current", "pg-target"),
+            relation("rel-other", "pg-left", "pg-right"),
+        ];
+
+        assert_eq!(
+            PageListRelationStats::from_relations("pg-current", &relations),
+            PageListRelationStats {
+                total: 2,
+                incoming: 1,
+                outgoing: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn local_media_requires_allowed_path_and_matching_digest() {
+        let unique = format!(
+            "pcp-console-media-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("test clock")
+                .as_nanos()
+        );
+        let root = env::temp_dir().join(unique);
+        let outside = root.join("outside");
+        let allowed = root.join("allowed");
+        fs::create_dir_all(&outside).expect("create outside test directory");
+        fs::create_dir_all(&allowed).expect("create allowed test directory");
+        let image = allowed.join("sample.png");
+        let bytes = b"bounded image bytes";
+        fs::write(&image, bytes).expect("write test image");
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        let source_ref = local_source_ref(&image, &digest);
+        let allowed = fs::canonicalize(&allowed).expect("canonical allowed root");
+
+        let (loaded, media_type, loaded_digest) =
+            read_local_media(&source_ref, std::slice::from_ref(&allowed))
+                .expect("read allowed local media");
+        assert_eq!(loaded, bytes);
+        assert_eq!(media_type, "image/png");
+        assert_eq!(loaded_digest, digest);
+
+        let outside = fs::canonicalize(&outside).expect("canonical outside root");
+        assert!(read_local_media(&source_ref, &[outside]).is_err());
+        let mismatched = local_source_ref(&image, &"0".repeat(64));
+        assert!(read_local_media(&mismatched, &[allowed]).is_err());
+        fs::remove_dir_all(&root).expect("remove local media test directory");
     }
 }

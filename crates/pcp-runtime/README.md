@@ -45,12 +45,12 @@ and to let dependent services become healthy. Later cycles use
 
 One cycle is bounded by `max_jobs_per_cycle`:
 
-1. Runtime reads a bounded current-Page inventory.
+1. Runtime reads the complete authorized current-Page inventory with a bounded routing excerpt per Page.
 2. A long unsummarized Page may be sent to the worker as `summarize_page`.
 3. Runtime deterministically forms a bounded window of sealed leaves and at most one packed anchor that share Scope, kind, and a contiguous SourceSpan, then sends it as `select_packing`.
 4. The worker may select one ordered subset from that exact window. It does not generate packed content.
 5. Runtime validates the selected IDs and, in apply mode, calls `pack_pages`; Store rechecks exact heads, source continuity, leaf references, anchor count, retention, and transaction invariants.
-6. Runtime may send a bounded current-Page routing window as `select_relation`. The worker can return only two offered Page IDs; Runtime fixes the relation to symmetric `related_to`, binds the exact current Revisions as basis, rejects stale or existing pairs, and owns the commit.
+6. Runtime may send overlapping bounded current-Page routing windows as `select_relation`. The request lists already related or previously proposed pairs; the worker can return only two other offered Page IDs. Runtime fixes the relation to symmetric `related_to`, binds the exact current Revisions as basis, rejects stale or excluded pairs, and owns the commit. A window remains active until the worker returns `no_candidate`.
 7. Runtime obtains a bounded dry-run retention plan and may ask the worker whether any actual old candidate Revision is a semantic milestone.
 8. In apply mode only, Summary writes, packing, Relations, or finite retention leases cross into the PCP commit API. Leases additionally require `maintenance.retention.write_leases = true`. Lease selection and physical collection remain separate operations; the current maintainer does not collect Revision payloads automatically.
 
@@ -63,16 +63,44 @@ A `no_candidate` response also cools down
 the exact routing-window Page ID set, so an unchanged Store does not repeatedly
 consume semantic-worker tokens.
 
+For a bounded migration or operator-reviewed rebuild, use `maintenance run-batch`.
+It persists the normal cooldown ledger, stops when its worker-call budget is
+exhausted or no eligible work remains, records one redacted audit entry, and
+requires the exact Store identity even in observe mode:
+
+```text
+pcp-runtime maintenance run-batch \
+  --config /path/to/runtime.toml \
+  --mode observe \
+  --max-jobs 20 \
+  --confirm-identity idn_... \
+  --reason "v0.8 semantic migration review"
+```
+
+Change `--mode` to `apply` only after reviewing observe results. The batch runner
+does not alter the long-running scheduler configuration.
+
 ## Worker Contract
 
 `maintenance.worker.provider = "infer_runtime"` uses the official Infer Runtime
 Consumer SDK and an independent `pcp-runtime` managed credential. Runtime
-discovers Infer locally, submits only `text.summarize` or `reasoning.solve`, and
-fixes every request to background, local-only, offline, no-fallback, and zero
-cost. It polls the durable response to a terminal state and accepts only strict
-JSON from `output_text`; missing text, markdown fences, unknown fields, terminal
-failure, timeout, or invalid PCP decisions fail closed. A known background
-response is cancelled best-effort on timeout.
+discovers Infer locally and submits only `text.summarize` or `reasoning.solve`.
+Summary requests are fixed to the configured local deployment with local-only,
+offline execution. Packing and Retention judgments use the configured reasoning
+deployment; Relation uses it too unless `relation_deployment_id` explicitly
+names a higher review deployment. Advanced judgments use a subscription
+deployment with an advanced capability floor and medium reasoning effort. Both
+paths use unary Responses with background scheduling
+priority, a named deployment, zero estimated cost, and no fallback: an
+unavailable deployment fails instead of silently selecting a different model.
+The defaults are local Qwen 3.5 4B and Luna. Terra can be configured only as an
+explicit Relation escalation; it is not an automatic fallback, and Sol has no
+maintenance path. The configured output-token limit is sent to the
+local Summary deployment. Subscription reasoning omits that unsupported hard
+constraint and remains bounded by the strict decision schema and 1 MiB wire
+limit. Runtime accepts only strict JSON from `output_text`; missing text,
+markdown fences, unknown fields, terminal failure, timeout, or invalid PCP
+decisions fail closed.
 
 `maintenance.worker.provider = "command"` executes `program` directly without
 a shell. Runtime writes one JSON request to stdin and expects one JSON response
@@ -132,7 +160,9 @@ authority than the Core relation API. A positive decision is exactly:
 ```
 
 The worker cannot choose a relation vocabulary, basis Revision, actor, Scope, or
-write mode. It should select a pair only for a substantive semantic connection;
-temporal adjacency, shared Scope, co-retrieval, or lexical similarity alone are
-not sufficient. When packing is enabled, unpacked sealed stream leaves are kept
-out of the relation window so a premature Relation cannot block lossless packing.
+write mode. It should select a pair only when both Pages directly help understand,
+verify, or act on the same stable subject or evidence chain. Temporal adjacency,
+shared Scope, co-retrieval, lexical similarity, and broad analogies such as both
+discussing AI infrastructure or workspaces are not sufficient. When packing is
+enabled, unpacked sealed stream leaves are kept out of the relation window so a
+premature Relation cannot block lossless packing.

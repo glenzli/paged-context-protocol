@@ -80,7 +80,9 @@ Revision 不可变不等于永久保留。Store 可以按策略回收不再受�
 
 `createdAt` 是 Store 提交时间，`observedAt` 是来源事件时间，两者不能合并。可选 `sourceSpan`
 标识生产者某条来源流中的闭区间；普通 `ingest_page` 由 Runtime 用认证 Principal 隔离
-`streamId`，避免租户误占同一序列。`sourceSpan` 不产生 Page Relation，也不声称两个事件在语义上相关。
+`streamId`，避免租户误占同一序列。带有 `sourceSpan` 的 Page 即使没有 Relation，仍属于该来源流；
+观察工具可以把首尾相接的 span 显示为虚拟邻接，但必须明确区别于持久 Relation 和 provenance。
+`sourceSpan` 本身不声称两个事件在语义上相关。
 
 ### 1.4 SourceRef 与外部媒体
 
@@ -142,6 +144,9 @@ Provenance 属于 Revision，必须引用实际参与生成的精确 `revisionId
 记录操作、Actor、时间、输入 Revision 和必要的工具/模型标识。Page Relation 用于导航，
 provenance 用于复现“当时依据了什么”，二者不可互相替代。
 
+仅被检索到、出现在提示上下文或工具结果中、与输出共享 Scope，均不等于实际生成输入，不能写入
+provenance。此类可见性若需要保留，应进入访问审计或维护 trace，而不是 Page 图。
+
 ## 2. Summary、Validity 与无损 Pack
 
 Summary 是普通的 `revisioned` Page，通过 `summarizes` 指向目标 Page。并非每个 Page 都值得
@@ -169,8 +174,9 @@ assessment Page。Page 的 `lifecycleStatus` 只控制默认可见性；`live`�
 
 1. 输入是 2 到 64 个互异的精确当前 Revision，属于同一 Scope、同一 `kind`，并在同一
    `sourceSpan.streamId` 中按请求顺序严格连续；
-2. 普通输入必须是 active、sealed、单 Revision Page，且没有 Page Relation、Relation basis 或撤回、
-   跨 Revision provenance 依赖、Summary、Validity、retention lease 等外部引用；
+2. 普通输入必须是 active、sealed、单 Revision Page，且不被 Summary、Validity 或 retention lease
+   作为需要保持精确身份的目标；Page Relation、Relation basis 与跨 Revision provenance 不阻止 pack，
+   Store 必须在同一事务中把外部连接折叠到 packed Page/Revision，并消解输入之间的内部连接；
 3. 输入中可以有至多一个 active、revisioned packed Page 作为稳定锚点；锚点已有的关系、Summary、
    Validity 与历史 Revision 不阻止扩展，因为其 Page 身份不会被销毁；
 4. 首次 pack 创建一个新的 revisioned Page；带锚点的 pack 必须以其精确当前 Revision 做 CAS，
@@ -181,9 +187,10 @@ assessment Page。Page 的 `lifecycleStatus` 只控制默认可见性；`live`�
    报告已被 pack 到哪个 Page，不能静默重定向。旧的锚点 Revision 仍是普通历史 Revision。
 
 pack 销毁被吸收叶节点的 Page 身份，但不丢失其 payload、SourceRef、facets、provenance、Actor 与
-时间边界。两个已有 packed Page 不在 v0.8 中直接合并；跨越 sourceSpan 间隙的相关内容应保持独立，
-并通过 `related_to`、`about`、Topic 或其他 Relation 组织。时间邻近和主题连续性由 Runtime 的语义
-判断选择，不能削弱 Store 的机械约束。
+时间边界。被吸收节点之间的 Relation/provenance 已由 packed entries 内部表达；连接到输入集合之外的
+Relation 端点及 basis、provenance 输入则改指 packed Page/Revision。两个已有 packed Page 不在 v0.8
+中直接合并；跨越 sourceSpan 间隙的相关内容应保持独立，并通过 `related_to`、`about`、Topic 或其他
+Relation 组织。时间邻近和主题连续性由 Runtime 的语义判断选择，不能削弱 Store 的机械约束。
 
 基于成熟 Summary 或其他表示删除原始细节属于有损凝炼。它需要独立的质量、恢复、确认和审计语义，
 不属于 v0.8；`pack_pages` 不得被实现成这种操作。

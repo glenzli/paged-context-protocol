@@ -108,15 +108,19 @@ fn browse_index_once(
         .collect::<Vec<_>>();
     let mut sql = format!(
         "SELECT {REVISION_COLUMNS},
-                substr(COALESCE(summary.content, r.payload_content, ''), 1, 700),
+                substr(COALESCE(summary_revision.payload_content, r.payload_content, ''), 1, 700),
                 CASE WHEN summary.summary_revision_id IS NULL THEN 'payload' ELSE 'summary' END,
                 summary.summary_revision_id
          FROM pcp_pages p
          JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
          LEFT JOIN pcp_page_summary_heads summary_head
            ON summary_head.target_page_id = p.page_id
+         LEFT JOIN pcp_pages summary_page
+           ON summary_page.page_id = summary_head.summary_page_id
          LEFT JOIN pcp_summaries summary
-           ON summary.summary_revision_id = summary_head.current_summary_revision_id
+           ON summary.summary_revision_id = summary_page.current_revision_id
+         LEFT JOIN pcp_revisions summary_revision
+           ON summary_revision.revision_id = summary.summary_revision_id
          WHERE r.namespace IN ("
     );
     push_placeholders(&mut sql, scopes.len());
@@ -126,6 +130,10 @@ fn browse_index_once(
                SELECT 1 FROM pcp_relations newer
                WHERE newer.relation_type = 'supersedes'
                  AND newer.to_page_id = p.page_id
+                 AND NOT EXISTS (
+                     SELECT 1 FROM pcp_relation_retractions retraction
+                     WHERE retraction.relation_id = newer.relation_id
+                 )
            )",
     );
     if !excluded_page_kinds.is_empty() {
@@ -280,8 +288,10 @@ fn search_revision_surface(
         "SELECT {REVISION_COLUMNS},
                 substr(COALESCE({content_column}, ''), 1, 600),
                 (
-                    SELECT summary_head.current_summary_revision_id
+                    SELECT summary_page.current_revision_id
                     FROM pcp_page_summary_heads summary_head
+                    JOIN pcp_pages summary_page
+                      ON summary_page.page_id = summary_head.summary_page_id
                     WHERE summary_head.target_page_id = p.page_id
                 )
          FROM pcp_pages p
@@ -371,14 +381,18 @@ fn search_summaries(
     let mut values = Vec::<SqlValue>::new();
     let mut sql = format!(
         "SELECT {REVISION_COLUMNS},
-                substr(summary.content, 1, 600),
+                substr(summary_revision.payload_content, 1, 600),
                 summary.summary_revision_id
          FROM pcp_pages p
          JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
          JOIN pcp_page_summary_heads summary_head
            ON summary_head.target_page_id = p.page_id
+         JOIN pcp_pages summary_page
+           ON summary_page.page_id = summary_head.summary_page_id
          JOIN pcp_summaries summary
-           ON summary.summary_revision_id = summary_head.current_summary_revision_id"
+           ON summary.summary_revision_id = summary_page.current_revision_id
+         JOIN pcp_revisions summary_revision
+           ON summary_revision.revision_id = summary.summary_revision_id"
     );
     if fts.is_some() {
         sql.push_str(
@@ -405,7 +419,7 @@ fn search_summaries(
         values.push(SqlValue::Text(fts));
     } else {
         if !request.query.trim().is_empty() {
-            sql.push_str(" AND instr(lower(summary.content), lower(?)) > 0");
+            sql.push_str(" AND instr(lower(summary_revision.payload_content), lower(?)) > 0");
             values.push(SqlValue::Text(request.query.trim().to_owned()));
         }
         sql.push_str(" ORDER BY COALESCE(r.observed_at, r.created_at) DESC, r.revision_id DESC");
@@ -478,6 +492,10 @@ fn search_graph(
             WHERE (relation.from_page_id = origin.page_id
                    OR relation.to_page_id = origin.page_id)
               AND relation.from_page_id <> relation.to_page_id
+              AND NOT EXISTS (
+                  SELECT 1 FROM pcp_relation_retractions retraction
+                  WHERE retraction.relation_id = relation.relation_id
+              )
             UNION ALL
             SELECT
                 CASE
@@ -531,8 +549,10 @@ fn search_graph(
          SELECT {REVISION_COLUMNS},
                 substr(COALESCE(r.payload_content, r.facets_json, ''), 1, 600),
                 (
-                    SELECT summary_head.current_summary_revision_id
+                    SELECT summary_page.current_revision_id
                     FROM pcp_page_summary_heads summary_head
+                    JOIN pcp_pages summary_page
+                      ON summary_page.page_id = summary_head.summary_page_id
                     WHERE summary_head.target_page_id = r.page_id
                 ),
                 neighbors.graph_edges_json
@@ -719,6 +739,10 @@ fn append_effective_page_filter(sql: &mut String) {
             SELECT 1 FROM pcp_relations newer
             WHERE newer.relation_type = 'supersedes'
               AND newer.to_page_id = p.page_id
+              AND NOT EXISTS (
+                  SELECT 1 FROM pcp_relation_retractions retraction
+                  WHERE retraction.relation_id = newer.relation_id
+              )
         )",
     );
 }
@@ -748,6 +772,9 @@ fn append_relation_filter(
             WHERE (
                 relation_filter.from_page_id = p.page_id
                 OR relation_filter.to_page_id = p.page_id
+            ) AND NOT EXISTS (
+                SELECT 1 FROM pcp_relation_retractions retraction
+                WHERE retraction.relation_id = relation_filter.relation_id
             ) AND relation_filter.relation_type IN (",
     );
     push_placeholders(sql, request.filters.relation_types.len());

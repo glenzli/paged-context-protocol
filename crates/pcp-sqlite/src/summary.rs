@@ -6,7 +6,6 @@ use pcp_core::{
     ActorType, PagePayload, PageSummary, ProvenanceEvent, WriteSummaryRequest, WriteSummaryResult,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use serde_json::json;
 
 use crate::{
     store::SqlitePcpStore,
@@ -101,17 +100,11 @@ impl SqlitePcpStore {
                 &timestamp,
             );
             ensure_provenance_access(&transaction, &provenance, &allowed_scopes)?;
-            let provenance_json =
-                serde_json::to_string(&provenance).context("encode PCP Summary provenance")?;
             let content = request.content.trim().to_owned();
             let payload = PagePayload {
                 media_type: "text/markdown".to_owned(),
                 content: content.clone(),
             };
-            let facets = json!({
-                "kind": "summary_projection",
-                "targetRevisionId": request.target_revision_id,
-            });
             insert_revision(
                 &transaction,
                 &summary_page_id,
@@ -126,7 +119,7 @@ impl SqlitePcpStore {
                 &request.created_by,
                 Some(&payload),
                 &[],
-                Some(&facets),
+                None,
                 &provenance,
             )?;
             if current.is_none() {
@@ -143,46 +136,22 @@ impl SqlitePcpStore {
                 .execute(
                     "
                     INSERT INTO pcp_summaries (
-                        summary_revision_id, target_revision_id, target_page_id, summary_page_id,
-                        previous_summary_revision_id, content, actor_type, actor_id,
-                        created_at, tool_or_model, provenance_json
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                        summary_revision_id, target_revision_id
+                    ) VALUES (?1, ?2)
                     ",
-                    params![
-                        summary_revision_id,
-                        request.target_revision_id,
-                        request.target_page_id,
-                        summary_page_id,
-                        current_revision_id,
-                        content,
-                        request.created_by.actor_type.as_str(),
-                        request.created_by.actor_id,
-                        timestamp,
-                        request.tool_or_model,
-                        provenance_json,
-                    ],
+                    params![summary_revision_id, request.target_revision_id],
                 )
                 .context("insert PCP Summary Revision")?;
             transaction
                 .execute(
                     "
                     INSERT INTO pcp_page_summary_heads (
-                        target_page_id, target_revision_id, summary_page_id,
-                        current_summary_revision_id, updated_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5)
+                        target_page_id, summary_page_id
+                    ) VALUES (?1, ?2)
                     ON CONFLICT(target_page_id) DO UPDATE SET
-                        target_revision_id = excluded.target_revision_id,
-                        summary_page_id = excluded.summary_page_id,
-                        current_summary_revision_id = excluded.current_summary_revision_id,
-                        updated_at = excluded.updated_at
+                        summary_page_id = excluded.summary_page_id
                     ",
-                    params![
-                        request.target_page_id,
-                        request.target_revision_id,
-                        summary_page_id,
-                        summary_revision_id,
-                        timestamp,
-                    ],
+                    params![request.target_page_id, summary_page_id],
                 )
                 .context("publish PCP Page Summary head")?;
             transaction
@@ -197,10 +166,10 @@ impl SqlitePcpStore {
                 .execute(
                     "DELETE FROM pcp_summary_fts
                      WHERE summary_revision_id IN (
-                         SELECT summary_revision_id FROM pcp_summaries
-                         WHERE target_page_id = ?1
+                         SELECT revision_id FROM pcp_revisions
+                         WHERE page_id = ?1
                      )",
-                    [&request.target_page_id],
+                    [&summary_page_id],
                 )
                 .context("replace PCP Summary head index")?;
             transaction
@@ -366,13 +335,19 @@ pub(crate) fn current_summary(
     connection
         .query_row(
             "
-            SELECT s.summary_page_id, s.summary_revision_id, s.target_revision_id, s.content,
-                   s.actor_type, s.actor_id, s.created_at, s.tool_or_model,
-                   s.provenance_json, target.page_id
+            SELECT h.summary_page_id, s.summary_revision_id, s.target_revision_id,
+                   summary_revision.payload_content,
+                   summary_revision.actor_type, summary_revision.actor_id,
+                   summary_revision.created_at,
+                   json_extract(summary_revision.provenance_json, '$[#-1].toolOrModel'),
+                   summary_revision.provenance_json, target.page_id
             FROM pcp_revisions requested
             JOIN pcp_page_summary_heads h ON h.target_page_id = requested.page_id
+            JOIN pcp_pages summary_page ON summary_page.page_id = h.summary_page_id
             JOIN pcp_summaries s
-              ON s.summary_revision_id = h.current_summary_revision_id
+              ON s.summary_revision_id = summary_page.current_revision_id
+            JOIN pcp_revisions summary_revision
+              ON summary_revision.revision_id = s.summary_revision_id
             JOIN pcp_revisions target ON target.revision_id = s.target_revision_id
             WHERE requested.revision_id = ?1
             ",
@@ -401,8 +376,9 @@ fn current_summary_identity(
     transaction
         .query_row(
             "
-            SELECT current_summary_revision_id, summary_page_id
-            FROM pcp_page_summary_heads
+            SELECT summary_page.current_revision_id, head.summary_page_id
+            FROM pcp_page_summary_heads head
+            JOIN pcp_pages summary_page ON summary_page.page_id = head.summary_page_id
             WHERE target_page_id = ?1
             ",
             [target_page_id],
@@ -423,11 +399,11 @@ fn lookup_idempotency(
     transaction
         .query_row(
             "
-            SELECT i.target_revision_id, s.summary_page_id, i.result_summary_revision_id,
+            SELECT i.target_revision_id, summary.page_id, i.result_summary_revision_id,
                    target.page_id
             FROM pcp_summary_idempotency i
-            JOIN pcp_summaries s
-              ON s.summary_revision_id = i.result_summary_revision_id
+            JOIN pcp_revisions summary
+              ON summary.revision_id = i.result_summary_revision_id
             JOIN pcp_revisions target ON target.revision_id = i.target_revision_id
             WHERE i.actor_id = ?1 AND i.idempotency_key = ?2
             ",

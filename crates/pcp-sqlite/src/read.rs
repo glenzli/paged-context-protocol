@@ -374,7 +374,11 @@ impl SqlitePcpStore {
                         SELECT 1 FROM pcp_relations newer
                         WHERE newer.relation_type = 'supersedes'
                           AND newer.to_page_id = p.page_id
-                    )
+                          AND NOT EXISTS (
+                            SELECT 1 FROM pcp_relation_retractions retraction
+                            WHERE retraction.relation_id = newer.relation_id
+                          )
+                      )
                     ",
                 )
                 .context("prepare PCP page count")?;
@@ -449,7 +453,11 @@ fn read_relations(
             FROM pcp_relations rel
             JOIN pcp_pages source ON source.page_id = rel.from_page_id
             JOIN pcp_pages target ON target.page_id = rel.to_page_id
-            WHERE rel.from_page_id = ?1 OR rel.to_page_id = ?1
+            WHERE (rel.from_page_id = ?1 OR rel.to_page_id = ?1)
+              AND NOT EXISTS (
+                  SELECT 1 FROM pcp_relation_retractions retraction
+                  WHERE retraction.relation_id = rel.relation_id
+              )
             ORDER BY rel.created_at DESC
             LIMIT 200
             ",

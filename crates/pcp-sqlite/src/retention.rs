@@ -108,8 +108,6 @@ pub(crate) fn plan_retention(
     }
 
     protect_relation_basis(connection, &record_indexes, &mut protections)?;
-    protect_relation_endpoints(connection, &record_indexes, &mut protections)?;
-    protect_projection_heads(connection, &record_indexes, &mut protections)?;
     protect_summary_records(connection, &record_indexes, &mut protections)?;
     protect_validity_records(connection, &record_indexes, &mut protections)?;
     let active_retention_leases =
@@ -311,20 +309,6 @@ fn protect_relation_basis(
     Ok(())
 }
 
-fn protect_relation_endpoints(
-    connection: &Connection,
-    records: &HashMap<String, usize>,
-    protections: &mut BTreeMap<String, BTreeSet<RetentionProtectionReason>>,
-) -> Result<()> {
-    protect_query_columns(
-        connection,
-        "SELECT from_revision_id, to_revision_id FROM pcp_relations",
-        records,
-        protections,
-        RetentionProtectionReason::RelationEndpoint,
-    )
-}
-
 fn protect_summary_records(
     connection: &Connection,
     records: &HashMap<String, usize>,
@@ -346,33 +330,11 @@ fn protect_validity_records(
 ) -> Result<()> {
     protect_query_columns(
         connection,
-        "SELECT assessment_id, target_revision_id FROM pcp_validity_assessments",
+        "SELECT assessment_revision_id, target_revision_id FROM pcp_validity_assessments",
         records,
         protections,
         RetentionProtectionReason::ValidityRecord,
-    )?;
-    let mut statement = connection
-        .prepare("SELECT basis_revision_ids_json FROM pcp_validity_assessments")
-        .context("prepare PCP validity basis retention scan")?;
-    let encoded = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .context("query PCP validity basis retention scan")?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .context("collect PCP validity basis retention scan")?;
-    for value in encoded {
-        for revision_id in serde_json::from_str::<Vec<String>>(&value)
-            .context("decode PCP validity basis during retention planning")?
-        {
-            if records.contains_key(&revision_id) {
-                protect(
-                    protections,
-                    &revision_id,
-                    RetentionProtectionReason::ValidityRecord,
-                );
-            }
-        }
-    }
-    Ok(())
+    )
 }
 
 fn protect_query_columns(
@@ -396,40 +358,6 @@ fn protect_query_columns(
         for revision_id in [first, second] {
             if records.contains_key(&revision_id) {
                 protect(protections, &revision_id, reason);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn protect_projection_heads(
-    connection: &Connection,
-    records: &HashMap<String, usize>,
-    protections: &mut BTreeMap<String, BTreeSet<RetentionProtectionReason>>,
-) -> Result<()> {
-    for sql in [
-        "SELECT target_revision_id, current_summary_revision_id FROM pcp_page_summary_heads",
-        "SELECT target_revision_id, current_assessment_id FROM pcp_validity_heads",
-    ] {
-        let mut statement = connection
-            .prepare(sql)
-            .context("prepare PCP projection-head retention scan")?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .context("query PCP projection-head retention scan")?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .context("collect PCP projection-head retention scan")?;
-        for (target_revision_id, projection_revision_id) in rows {
-            for revision_id in [target_revision_id, projection_revision_id] {
-                if records.contains_key(&revision_id) {
-                    protect(
-                        protections,
-                        &revision_id,
-                        RetentionProtectionReason::ProjectionHead,
-                    );
-                }
             }
         }
     }

@@ -89,6 +89,22 @@ impl MaintenanceLedger {
             })
             .collect()
     }
+
+    pub(crate) fn active_relation_pairs(&self) -> Vec<[String; 2]> {
+        let now = now_unix_ms();
+        self.entries
+            .iter()
+            .filter(|(key, entry)| {
+                key.starts_with("relation_pair:") && entry.retry_after_unix_ms > now
+            })
+            .filter_map(|(key, _)| {
+                let mut page_ids = key.trim_start_matches("relation_pair:").split(',');
+                let first = page_ids.next()?.to_owned();
+                let second = page_ids.next()?.to_owned();
+                page_ids.next().is_none().then_some([first, second])
+            })
+            .collect()
+    }
 }
 
 pub(crate) fn summary_key(page_id: &str) -> String {

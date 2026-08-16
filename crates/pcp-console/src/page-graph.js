@@ -1,6 +1,7 @@
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 export function relationFamily(relationType, edgeKind = "relation") {
+  if (edgeKind === "source_stream") return "source_stream";
   if (edgeKind === "provenance") return "provenance";
   if (["aggregates", "derived_from", "summarizes"].includes(relationType)) return "derivation";
   if (["follows", "responds_to", "continues"].includes(relationType)) return "conversation";
@@ -60,7 +61,7 @@ export function createTopologyMap({ topology, relationFilter, onNavigate }) {
     Object.assign(document.createElement("strong"), { textContent: "Local topology" }),
     Object.assign(document.createElement("span"), {
       className: "muted",
-      textContent: `${topology.directNeighborCount} direct · ${count} Pages loaded · ${topology.edges.length} edges · ${topology.depth} hops${topology.truncated ? " · partial" : ""}`,
+      textContent: `${topology.directNeighborCount} direct · ${count} Pages loaded · ${topology.edges.length} edges · ${topology.depth} hop${topology.depth === 1 ? "" : "s"}${topology.truncated ? " · partial" : ""}`,
     }),
   );
   const zoomControls = document.createElement("div");
@@ -78,7 +79,7 @@ export function createTopologyMap({ topology, relationFilter, onNavigate }) {
   const svg = svgElement("svg", {
     class: "topology-map",
     role: "img",
-    "aria-label": `Page graph with ${visibleNodes.length} visible Pages and ${visibleEdges.length} visible relations`,
+    "aria-label": `Page graph with ${visibleNodes.length} visible Pages and ${visibleEdges.length} visible connections`,
   });
   const initialViewBox = { x: -extent, y: -extent, width: extent * 2, height: extent * 2 };
   const viewBox = { ...initialViewBox };
@@ -98,9 +99,11 @@ export function createTopologyMap({ topology, relationFilter, onNavigate }) {
       class: `topology-edge relation-${relationFamily(edge.relationType, edge.edgeKind)}`,
     });
     line.append(svgElement("title"));
-    line.firstChild.textContent = edge.edgeKind === "provenance"
-      ? `Evidence dependency · ${edge.relationType}`
-      : edge.relationType;
+    line.firstChild.textContent = edge.edgeKind === "source_stream"
+      ? "Source stream · contiguous source span"
+      : edge.edgeKind === "provenance"
+        ? `Provenance input · ${edge.relationType}`
+        : edge.relationType;
     edgesGroup.append(line);
   }
   svg.append(edgesGroup);

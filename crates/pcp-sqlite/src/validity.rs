@@ -115,11 +115,8 @@ impl SqlitePcpStore {
                 content: request.rationale.trim().to_owned(),
             };
             let facets = json!({
-                "kind": "validity_assessment",
                 "standing": request.standing.as_str(),
                 "scope": request.scope.clone(),
-                "targetPageId": request.target_page_id.clone(),
-                "targetRevisionId": request.target_revision_id.clone(),
             });
             insert_revision(
                 &transaction,
@@ -158,43 +155,26 @@ impl SqlitePcpStore {
                 )
                 .context("publish PCP validity Revision")?;
             anyhow::ensure!(published == 1, "validity Page changed during publication");
-            let basis_revision_ids_json = serde_json::to_string(&request.basis_revision_ids)
-                .context("encode PCP validity basis")?;
             transaction
                 .execute(
                     "
                     INSERT INTO pcp_validity_assessments (
-                        assessment_id, previous_assessment_id, target_revision_id,
-                        standing, rationale, scope, assessed_at, actor_type, actor_id,
-                        tool_or_model, basis_revision_ids_json
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                        assessment_revision_id, target_revision_id
+                    ) VALUES (?1, ?2)
                     ",
-                    params![
-                        assessment_id,
-                        current_revision_id,
-                        request.target_revision_id,
-                        request.standing.as_str(),
-                        request.rationale.trim(),
-                        request.scope.as_deref().map(str::trim),
-                        assessed_at,
-                        request.created_by.actor_type.as_str(),
-                        request.created_by.actor_id,
-                        request.tool_or_model,
-                        basis_revision_ids_json,
-                    ],
+                    params![assessment_id, request.target_revision_id],
                 )
                 .context("insert PCP validity assessment")?;
             transaction
                 .execute(
                     "
                     INSERT INTO pcp_validity_heads (
-                        target_page_id, target_revision_id, current_assessment_id
-                    ) VALUES (?1, ?2, ?3)
+                        target_page_id, assessment_page_id
+                    ) VALUES (?1, ?2)
                     ON CONFLICT(target_page_id) DO UPDATE SET
-                        target_revision_id = excluded.target_revision_id,
-                        current_assessment_id = excluded.current_assessment_id
+                        assessment_page_id = excluded.assessment_page_id
                     ",
-                    params![request.target_page_id, request.target_revision_id, assessment_id],
+                    params![request.target_page_id, physical_page_id],
                 )
                 .context("publish PCP validity assessment")?;
             if let Some(key) = request.idempotency_key.as_deref() {
@@ -238,17 +218,24 @@ pub(crate) fn current_validity(
     connection
         .query_row(
             "
-            SELECT assessment.assessment_id, assessment.previous_assessment_id,
-                   assessment.target_revision_id, assessment.standing,
-                   assessment.rationale, assessment.scope, assessment.assessed_at,
-                   assessment.actor_type, assessment.actor_id,
-                   assessment.tool_or_model, assessment.basis_revision_ids_json,
+            SELECT assessment.assessment_revision_id,
+                   assessment_revision.previous_revision_id,
+                   assessment.target_revision_id,
+                   json_extract(assessment_revision.facets_json, '$.standing'),
+                   assessment_revision.payload_content,
+                   json_extract(assessment_revision.facets_json, '$.scope'),
+                   assessment_revision.created_at,
+                   assessment_revision.actor_type, assessment_revision.actor_id,
+                   json_extract(assessment_revision.provenance_json, '$[#-1].toolOrModel'),
+                   assessment_revision.provenance_json,
                    assessment_revision.page_id, target_revision.page_id
             FROM pcp_validity_heads head
+            JOIN pcp_pages assessment_page
+              ON assessment_page.page_id = head.assessment_page_id
             JOIN pcp_validity_assessments assessment
-              ON assessment.assessment_id = head.current_assessment_id
+              ON assessment.assessment_revision_id = assessment_page.current_revision_id
             JOIN pcp_revisions assessment_revision
-              ON assessment_revision.revision_id = assessment.assessment_id
+              ON assessment_revision.revision_id = assessment.assessment_revision_id
             JOIN pcp_revisions target_revision
               ON target_revision.revision_id = assessment.target_revision_id
             WHERE head.target_page_id = (
@@ -269,34 +256,32 @@ pub(crate) fn validity_history(
     let mut statement = connection
         .prepare(
             "
-            WITH RECURSIVE chain(assessment_id, depth) AS (
-                SELECT current_assessment_id, 0
-                FROM pcp_validity_heads
-                WHERE target_page_id = (
-                    SELECT page_id FROM pcp_revisions WHERE revision_id = ?1
-                )
-                UNION ALL
-                SELECT assessment.previous_assessment_id, chain.depth + 1
-                FROM chain
-                JOIN pcp_validity_assessments assessment
-                  ON assessment.assessment_id = chain.assessment_id
-                WHERE assessment.previous_assessment_id IS NOT NULL
-            )
-            SELECT assessment.assessment_id, assessment.previous_assessment_id,
-                   assessment.target_revision_id, assessment.standing,
-                   assessment.rationale, assessment.scope, assessment.assessed_at,
-                   assessment.actor_type, assessment.actor_id,
-                   assessment.tool_or_model, assessment.basis_revision_ids_json,
+            SELECT assessment.assessment_revision_id,
+                   assessment_revision.previous_revision_id,
+                   assessment.target_revision_id,
+                   json_extract(assessment_revision.facets_json, '$.standing'),
+                   assessment_revision.payload_content,
+                   json_extract(assessment_revision.facets_json, '$.scope'),
+                   assessment_revision.created_at,
+                   assessment_revision.actor_type, assessment_revision.actor_id,
+                   json_extract(assessment_revision.provenance_json, '$[#-1].toolOrModel'),
+                   assessment_revision.provenance_json,
                    assessment_revision.page_id, target_revision.page_id
-            FROM chain
-            JOIN pcp_validity_assessments assessment
-              ON assessment.assessment_id = chain.assessment_id
+            FROM pcp_validity_heads head
+            JOIN pcp_revisions current_target
+              ON current_target.page_id = head.target_page_id
+             AND current_target.revision_id = ?1
             JOIN pcp_revisions assessment_revision
-              ON assessment_revision.revision_id = assessment.assessment_id
+              ON assessment_revision.page_id = head.assessment_page_id
+            JOIN pcp_validity_assessments assessment
+              ON assessment.assessment_revision_id = assessment_revision.revision_id
             JOIN pcp_revisions target_revision
               ON target_revision.revision_id = assessment.target_revision_id
-            WHERE chain.depth > 0
-            ORDER BY chain.depth
+            JOIN pcp_pages assessment_page
+              ON assessment_page.page_id = head.assessment_page_id
+            WHERE assessment_revision.revision_id <> assessment_page.current_revision_id
+            ORDER BY assessment_revision.created_at DESC,
+                     assessment_revision.revision_id DESC
             LIMIT 20
             ",
         )
@@ -339,10 +324,10 @@ fn current_assessment(
     transaction
         .query_row(
             "
-            SELECT head.current_assessment_id, revision.page_id
+            SELECT assessment_page.current_revision_id, head.assessment_page_id
             FROM pcp_validity_heads head
-            JOIN pcp_revisions revision
-              ON revision.revision_id = head.current_assessment_id
+            JOIN pcp_pages assessment_page
+              ON assessment_page.page_id = head.assessment_page_id
             WHERE head.target_page_id = ?1
             ",
             [target_page_id],
@@ -412,16 +397,29 @@ fn validity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PageValidity> 
     let actor_type = ActorType::parse(&actor_type_text).ok_or_else(|| {
         rusqlite::Error::InvalidColumnType(7, "actor_type".to_owned(), rusqlite::types::Type::Text)
     })?;
-    let basis_json: String = row.get(10)?;
-    let basis_revision_ids = serde_json::from_str(&basis_json).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, Box::new(error))
-    })?;
+    let provenance_json: String = row.get(10)?;
+    let provenance =
+        serde_json::from_str::<Vec<ProvenanceEvent>>(&provenance_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                10,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+    let target_revision_id: String = row.get(2)?;
+    let mut basis_revision_ids = provenance
+        .into_iter()
+        .flat_map(|event| event.input_revision_ids)
+        .filter(|revision_id| revision_id != &target_revision_id)
+        .collect::<Vec<_>>();
+    basis_revision_ids.sort();
+    basis_revision_ids.dedup();
     Ok(PageValidity {
         assessment_page_id: row.get(11)?,
         assessment_revision_id: row.get(0)?,
         previous_assessment_revision_id: row.get(1)?,
         target_page_id: row.get(12)?,
-        target_revision_id: row.get(2)?,
+        target_revision_id,
         standing,
         rationale: row.get(4)?,
         scope: row.get(5)?,

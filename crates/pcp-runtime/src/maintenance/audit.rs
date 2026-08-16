@@ -61,13 +61,17 @@ pub struct MaintenanceRunAudit {
 
 impl MaintenanceRunAudit {
     pub fn queued(reason: String) -> Self {
+        Self::queued_with_limits("observe", 1, reason)
+    }
+
+    pub fn queued_with_limits(mode: &str, max_jobs: u32, reason: String) -> Self {
         let started_at = now();
         let events = Arc::new(Mutex::new(vec![event("queued", None, None, None)]));
         Self {
             record: MaintenanceRunAuditRecord {
                 job_id: format!("mrun_{}", Uuid::new_v4().simple()),
-                mode: "observe".to_owned(),
-                max_jobs: 1,
+                mode: mode.to_owned(),
+                max_jobs,
                 reason,
                 started_at,
                 duration_ms: 0,
@@ -221,6 +225,7 @@ fn operation_name(request: &MaintenanceWorkerRequest) -> &'static str {
     match request {
         MaintenanceWorkerRequest::SummarizePage { .. } => "summarize_page",
         MaintenanceWorkerRequest::SelectPacking { .. } => "select_packing",
+        MaintenanceWorkerRequest::AnalyzePacking { .. } => "analyze_packing",
         MaintenanceWorkerRequest::SelectRelation { .. } => "select_relation",
         MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => "select_retention_milestones",
     }
@@ -230,6 +235,7 @@ fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
     match response {
         MaintenanceWorkerResponse::WriteSummary { .. } => "write_summary",
         MaintenanceWorkerResponse::Candidate { .. } => "candidate",
+        MaintenanceWorkerResponse::PackingCandidates { .. } => "packing_candidates",
         MaintenanceWorkerResponse::Relate { .. } => "relate",
         MaintenanceWorkerResponse::Retain { .. } => "retain",
         MaintenanceWorkerResponse::NoCandidate => "no_candidate",
@@ -243,4 +249,43 @@ fn now() -> String {
 
 fn audit_temporary_path(path: &Path) -> PathBuf {
     path.with_extension(format!("tmp-{}", Uuid::new_v4().simple()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MaintenanceAuditLog;
+
+    #[test]
+    fn legacy_reports_default_new_semantic_counters() {
+        let log: MaintenanceAuditLog = serde_json::from_str(
+            r#"{
+                "records": [{
+                    "jobId": "mrun_legacy",
+                    "mode": "observe",
+                    "maxJobs": 1,
+                    "reason": "legacy",
+                    "startedAt": "2026-08-15T00:00:00.000Z",
+                    "durationMs": 1,
+                    "status": "completed",
+                    "events": [],
+                    "report": {
+                        "inspectedPages": 874,
+                        "workerCalls": 1,
+                        "summariesWritten": 0,
+                        "summariesProposed": 0,
+                        "retentionLeasesWritten": 0,
+                        "retentionLeasesProposed": 0,
+                        "deferred": 0
+                    }
+                }]
+            }"#,
+        )
+        .expect("decode a legacy maintenance audit");
+
+        let report = log.records[0].report.as_ref().expect("legacy audit report");
+        assert_eq!(report.packs_committed, 0);
+        assert_eq!(report.packs_proposed, 0);
+        assert_eq!(report.relations_committed, 0);
+        assert_eq!(report.relations_proposed, 0);
+    }
 }

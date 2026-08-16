@@ -65,8 +65,12 @@ pub enum MaintenanceWorkerConfig {
         credential_file: PathBuf,
         #[serde(default = "default_worker_timeout_seconds")]
         timeout_seconds: u64,
-        #[serde(default = "default_infer_max_output_tokens")]
-        max_output_tokens: u32,
+        #[serde(default = "default_infer_summary_deployment_id")]
+        summary_deployment_id: String,
+        #[serde(default = "default_infer_reasoning_deployment_id")]
+        reasoning_deployment_id: String,
+        #[serde(default)]
+        relation_deployment_id: Option<String>,
         actor_id: String,
         #[serde(default = "default_worker_actor_type")]
         actor_type: String,
@@ -121,7 +125,9 @@ impl MaintenanceWorkerConfig {
             ),
             Self::InferRuntime {
                 credential_file,
-                max_output_tokens,
+                summary_deployment_id,
+                reasoning_deployment_id,
+                relation_deployment_id,
                 ..
             } => {
                 anyhow::ensure!(
@@ -129,8 +135,18 @@ impl MaintenanceWorkerConfig {
                     "PCP Infer Runtime credential_file must not be empty"
                 );
                 anyhow::ensure!(
-                    (64..=16_384).contains(max_output_tokens),
-                    "PCP Infer Runtime max_output_tokens must be between 64 and 16384"
+                    !summary_deployment_id.trim().is_empty(),
+                    "PCP Infer Runtime summary_deployment_id must not be empty"
+                );
+                anyhow::ensure!(
+                    !reasoning_deployment_id.trim().is_empty(),
+                    "PCP Infer Runtime reasoning_deployment_id must not be empty"
+                );
+                anyhow::ensure!(
+                    relation_deployment_id
+                        .as_ref()
+                        .is_none_or(|deployment_id| !deployment_id.trim().is_empty()),
+                    "PCP Infer Runtime relation_deployment_id must not be empty"
                 );
             }
         }
@@ -360,9 +376,7 @@ impl MaintenanceConfig {
             .iter()
             .map(|scope| scope.replace("{identity_id}", identity_id))
             .collect();
-        let access_mode = if self.mode == MaintenanceMode::Apply
-            || (self.retention.enabled && self.retention.write_leases)
-        {
+        let access_mode = if self.mode == MaintenanceMode::Apply {
             AccessMode::Write
         } else {
             AccessMode::Read
@@ -395,7 +409,7 @@ impl MaintenanceConfig {
     }
 
     pub fn writes_retention_leases(&self) -> bool {
-        self.retention.enabled && self.retention.write_leases
+        self.applies_changes() && self.retention.enabled && self.retention.write_leases
     }
 
     pub fn worker_actor(&self) -> Actor {
@@ -431,6 +445,10 @@ fn default_worker_actor_type() -> String {
     "model".to_owned()
 }
 
-fn default_infer_max_output_tokens() -> u32 {
-    2_048
+fn default_infer_summary_deployment_id() -> String {
+    "ollama_qwen3_5_4b".to_owned()
+}
+
+fn default_infer_reasoning_deployment_id() -> String {
+    "codex_gpt_5_6_luna".to_owned()
 }

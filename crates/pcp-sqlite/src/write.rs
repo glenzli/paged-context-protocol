@@ -705,16 +705,13 @@ fn insert_revision_relation_with_basis(
         .execute(
             "
             INSERT INTO pcp_relations (
-                relation_id, from_revision_id, relation_type, to_revision_id,
-                actor_type, actor_id, created_at, from_page_id, to_page_id,
-                basis_revision_ids_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                relation_id, relation_type, actor_type, actor_id, created_at,
+                from_page_id, to_page_id, basis_revision_ids_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             ",
             params![
                 relation_id,
-                from_revision_id,
                 relation_type,
-                to_revision_id,
                 actor.actor_type.as_str(),
                 actor.actor_id,
                 created_at,
@@ -752,8 +749,12 @@ fn ensure_acyclic_derivation_relation(
             "
             WITH RECURSIVE derivation_edges (from_page_id, to_page_id) AS (
                 SELECT from_page_id, to_page_id
-                FROM pcp_relations
+                FROM pcp_relations relation
                 WHERE relation_type IN ('aggregates', 'derived_from', 'summarizes')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM pcp_relation_retractions retraction
+                      WHERE retraction.relation_id = relation.relation_id
+                  )
                 UNION
                 SELECT derived.page_id, input.page_id
                 FROM pcp_provenance_inputs provenance

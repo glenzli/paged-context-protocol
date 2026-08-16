@@ -10,16 +10,18 @@ use async_trait::async_trait;
 use pcp_client::{EmbeddedPcpClient, PcpApi};
 use pcp_core::{
     AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    CreateScopeRequest, LifecycleStatus, PageMutability, PagePayload, PlanRevisionRetentionRequest,
-    Projection, ReadPagesRequest, RetentionPolicy, RetentionProtectionReason, RevisePageRequest,
-    SourceSpan, WritePageRequest,
+    CreateScopeRequest, LifecycleStatus, LinkPagesRequest, PackPagesRequest, PageMutability,
+    PagePayload, PageRevisionRef, PlanRevisionRetentionRequest, Projection, ProvenanceEvent,
+    ReadPagesRequest, RetentionPolicy, RetentionProtectionReason, RevisePageRequest, SourceSpan,
+    WritePageRequest,
 };
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 
 use super::{
-    CommandSemanticWorker, MaintenanceConfig, MaintenanceMode, MaintenanceRunAudit,
-    MaintenanceWorkerConfig, MaintenanceWorkerRequest, MaintenanceWorkerResponse,
+    AnalyzeMaintenancePacksRequest, ApplyMaintenancePackRequest, CommandSemanticWorker,
+    MaintenanceConfig, MaintenanceMode, MaintenanceRunAudit, MaintenanceWorkerConfig,
+    MaintenanceWorkerRequest, MaintenanceWorkerResponse, PackingCandidateGroup,
     PackingMaintenanceConfig, RelationCandidatePage, RelationMaintenanceConfig,
     RetentionMaintenanceConfig, RetentionMilestone, RuntimeMaintainer, SemanticMaintenanceWorker,
     SummaryMaintenanceConfig, worker::PackingCandidatePage,
@@ -59,6 +61,39 @@ fn packing_is_opt_in_and_selection_wire_contains_only_semantic_inputs() {
 }
 
 #[test]
+fn packing_analysis_wire_batches_mechanical_groups_without_commit_authority() {
+    let wire = serde_json::to_value(MaintenanceWorkerRequest::AnalyzePacking {
+        groups: vec![PackingCandidateGroup {
+            group_id: "mpg_one".to_owned(),
+            pages: vec![PackingCandidatePage {
+                page_id: "pg_1".to_owned(),
+                created_at: "2026-08-16T08:00:00Z".to_owned(),
+                observed_at: None,
+                routing_text: "bounded semantic input".to_owned(),
+            }],
+        }],
+        max_pages_per_candidate: 8,
+    })
+    .expect("serialize packing analysis request");
+
+    assert_eq!(
+        wire,
+        serde_json::json!({
+            "operation": "analyze_packing",
+            "groups": [{
+                "groupId": "mpg_one",
+                "pages": [{
+                    "pageId": "pg_1",
+                    "createdAt": "2026-08-16T08:00:00Z",
+                    "routingText": "bounded semantic input"
+                }]
+            }],
+            "max_pages_per_candidate": 8
+        })
+    );
+}
+
+#[test]
 fn relation_is_opt_in_and_selection_wire_omits_commit_authority() {
     assert!(!RelationMaintenanceConfig::default().enabled);
     let wire = serde_json::to_value(MaintenanceWorkerRequest::SelectRelation {
@@ -72,6 +107,7 @@ fn relation_is_opt_in_and_selection_wire_omits_commit_authority() {
             facets: None,
             relation_types: vec!["summarizes".to_owned()],
         }],
+        excluded_page_pairs: vec![["pg_1".to_owned(), "pg_2".to_owned()]],
     })
     .expect("serialize relation selection request");
 
@@ -86,7 +122,8 @@ fn relation_is_opt_in_and_selection_wire_omits_commit_authority() {
                 "createdAt": "2026-08-15T08:00:00Z",
                 "routingText": "one bounded routing excerpt",
                 "relationTypes": ["summarizes"]
-            }]
+            }],
+            "excluded_page_pairs": [["pg_1", "pg_2"]]
         })
     );
     assert_eq!(
@@ -182,6 +219,135 @@ async fn maintainer_writes_only_the_summary_selected_by_the_worker() {
 }
 
 #[tokio::test]
+async fn maintainer_refreshes_a_summary_after_its_target_page_is_revised() {
+    let fixture = Fixture::open("summary-refresh").await;
+    let written = fixture
+        .client
+        .write_page(fixture.page(
+            &"A durable observation with initial detail. ".repeat(180),
+            "summary-refresh:1",
+        ))
+        .await
+        .expect("write initial Summary candidate");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::WriteSummary {
+            content: "Summary of the initial Page Revision.".to_owned(),
+        },
+        MaintenanceWorkerResponse::WriteSummary {
+            content: "Summary refreshed for the current Page Revision.".to_owned(),
+        },
+    ]));
+    let mut config = fixture.config();
+    config.packing.enabled = false;
+    config.relation.enabled = false;
+    let mut maintainer =
+        RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let initial_report = maintainer.run_once().await.expect("write initial Summary");
+    assert_eq!(initial_report.summaries_written, 1);
+
+    let revised = fixture
+        .client
+        .revise_page(RevisePageRequest {
+            page_id: written.page_id.clone(),
+            expected_revision_id: written.revision_id,
+            created_by: Actor {
+                actor_type: ActorType::Model,
+                actor_id: "model:maintenance-test".to_owned(),
+            },
+            lifecycle_status: LifecycleStatus::Active,
+            observed_at: None,
+            valid_from: None,
+            valid_to: None,
+            payload: Some(PagePayload {
+                media_type: "text/markdown".to_owned(),
+                content: "The durable observation now has materially revised detail. ".repeat(180),
+            }),
+            source_refs: Vec::new(),
+            facets: None,
+            provenance: Vec::new(),
+            initial_relations: Vec::new(),
+            idempotency_key: Some("summary-refresh:2".to_owned()),
+        })
+        .await
+        .expect("revise summarized Page");
+    fixture
+        .client
+        .write_page(fixture.page(
+            &"A newer unsummarized Page that must wait behind stale Summary repair. ".repeat(180),
+            "summary-refresh:newer-unsummarized",
+        ))
+        .await
+        .expect("write newer unsummarized Page");
+
+    let refresh_report = maintainer.run_once().await.expect("refresh stale Summary");
+    assert_eq!(refresh_report.summaries_written, 1);
+    assert_eq!(worker.request_count(), 2);
+
+    let current = fixture
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: Vec::new(),
+            revision_ids: vec![revised.revision_id],
+            projections: vec![Projection::Manifest, Projection::Summary],
+            max_chars: 2_000,
+        })
+        .await
+        .expect("read refreshed Summary");
+    assert_eq!(
+        current[0]
+            .summary
+            .as_ref()
+            .map(|summary| summary.content.as_str()),
+        Some("Summary refreshed for the current Page Revision.")
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn maintainer_defers_an_oversized_worker_summary_without_writing_it() {
+    let fixture = Fixture::open("oversized-summary").await;
+    let written = fixture
+        .client
+        .write_page(fixture.page(
+            &"A durable observation with detail. ".repeat(180),
+            "oversized-summary:1",
+        ))
+        .await
+        .expect("write oversized Summary candidate");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::WriteSummary {
+            content: "x".repeat(1_201),
+        },
+    ]));
+    let mut config = fixture.config();
+    config.packing.enabled = false;
+    let mut maintainer =
+        RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let report = maintainer
+        .run_once()
+        .await
+        .expect("defer oversized worker Summary");
+
+    assert_eq!(report.worker_calls, 1);
+    assert_eq!(report.summaries_written, 0);
+    assert_eq!(report.deferred, 1);
+    let read = fixture
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: Vec::new(),
+            revision_ids: vec![written.revision_id],
+            projections: vec![Projection::Manifest, Projection::Summary],
+            max_chars: 2_000,
+        })
+        .await
+        .expect("read Page after oversized worker Summary");
+    assert!(read[0].summary.is_none());
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn observe_mode_records_a_summary_proposal_without_mutating_the_page() {
     let fixture = Fixture::open("observe-summary").await;
     let written = fixture
@@ -227,6 +393,80 @@ async fn observe_mode_records_a_summary_proposal_without_mutating_the_page() {
         .await
         .expect("read observed Page");
     assert!(read[0].summary.is_none());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn packed_conversation_page_can_receive_a_summary() {
+    let fixture = Fixture::open("packed-summary").await;
+    let first = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            &"A continuous high-density discussion segment. ".repeat(100),
+            "packed-summary:1",
+            1,
+        ))
+        .await
+        .expect("write first packed Summary source");
+    let second = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            &"The same discussion continues with durable detail. ".repeat(100),
+            "packed-summary:2",
+            2,
+        ))
+        .await
+        .expect("write second packed Summary source");
+    let packed = fixture
+        .client
+        .pack_pages(PackPagesRequest {
+            pages: vec![
+                PageRevisionRef {
+                    page_id: first.page_id,
+                    revision_id: first.revision_id,
+                },
+                PageRevisionRef {
+                    page_id: second.page_id,
+                    revision_id: second.revision_id,
+                },
+            ],
+            idempotency_key: Some("packed-summary:pack".to_owned()),
+        })
+        .await
+        .expect("pack conversation Summary source");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::WriteSummary {
+            content: "A summary of the packed continuous discussion.".to_owned(),
+        },
+    ]));
+    let mut config = fixture.config();
+    config.packing.enabled = false;
+    config.relation.enabled = false;
+    let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+
+    let report = maintainer
+        .run_once()
+        .await
+        .expect("summarize packed conversation Page");
+
+    assert_eq!(report.summaries_written, 1);
+    let page = fixture
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![packed.page_id],
+            revision_ids: Vec::new(),
+            projections: vec![Projection::Summary],
+            max_chars: 2_000,
+        })
+        .await
+        .expect("read packed Summary Page");
+    assert_eq!(
+        page[0]
+            .summary
+            .as_ref()
+            .map(|summary| summary.content.as_str()),
+        Some("A summary of the packed continuous discussion.")
+    );
     fixture.close().await;
 }
 
@@ -323,12 +563,14 @@ async fn observe_mode_retention_can_plan_without_receiving_write_access() {
     let mut config = fixture.config();
     config.mode = MaintenanceMode::Observe;
     config.retention.enabled = true;
+    config.retention.write_leases = true;
 
     let access = config.access_session(&fixture.identity_id);
     let client = EmbeddedPcpClient::shared(Arc::clone(&fixture.store), access.clone());
 
     assert!(access.allows(&fixture.namespace, AccessPermission::Audit));
     assert!(!access.allows(&fixture.namespace, AccessPermission::Write));
+    assert!(!config.writes_retention_leases());
     let plan = client
         .plan_revision_retention(PlanRevisionRetentionRequest {
             scopes: vec![fixture.namespace.clone()],
@@ -487,6 +729,325 @@ async fn maintainer_packs_only_the_ordered_candidate_selected_by_the_worker() {
 }
 
 #[tokio::test]
+async fn packing_scan_is_read_only_and_selected_apply_revalidates_exact_revisions() {
+    let fixture = Fixture::open("packing-scan").await;
+    let first = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "The same bounded topic starts here.",
+            "packing-scan:1",
+            1,
+        ))
+        .await
+        .expect("write first scan Page");
+    let second = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "The bounded topic continues without a semantic break.",
+            "packing-scan:2",
+            2,
+        ))
+        .await
+        .expect("write second scan Page");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::PackingCandidates {
+            candidates: vec![vec![first.page_id.clone(), second.page_id.clone()]],
+        },
+    ]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = true;
+    config.relation.enabled = false;
+    config.retention.enabled = false;
+    let maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let scan = maintainer
+        .scan_packing_candidates()
+        .await
+        .expect("scan packing candidates");
+
+    assert_eq!(scan.inspected_pages, 2);
+    assert_eq!(scan.eligible_pages, 2);
+    assert_eq!(scan.candidate_group_count, 1);
+    assert_eq!(scan.estimated_model_calls, 1);
+    assert_eq!(worker.request_count(), 0);
+    assert_eq!(
+        fixture
+            .client
+            .page_count(Vec::new())
+            .await
+            .expect("count Pages after scan"),
+        2
+    );
+    let analysis = maintainer
+        .analyze_packing_candidates(AnalyzeMaintenancePacksRequest {
+            scan_id: scan.scan_id,
+            batch_index: 0,
+        })
+        .await
+        .expect("analyze packing candidates");
+    assert_eq!(analysis.worker_calls, 1);
+    assert_eq!(analysis.batch_index, 0);
+    assert_eq!(analysis.batch_count, 1);
+    assert_eq!(analysis.analyzed_group_count, 1);
+    assert!(analysis.issue.is_none());
+    assert_eq!(worker.request_count(), 1);
+    assert_eq!(analysis.candidates.len(), 1);
+    let candidate = &analysis.candidates[0];
+    assert_eq!(candidate.source_span.start, 1);
+    assert_eq!(candidate.source_span.end, 2);
+    assert_eq!(candidate.resulting_entry_count, 2);
+    assert!(!candidate.extends_existing_pack);
+
+    maintainer
+        .apply_pack_candidate(ApplyMaintenancePackRequest {
+            candidate_id: candidate.candidate_id.clone(),
+            pages: candidate
+                .pages
+                .iter()
+                .map(|page| PageRevisionRef {
+                    page_id: page.page_id.clone(),
+                    revision_id: page.revision_id.clone(),
+                })
+                .collect(),
+        })
+        .await
+        .expect("apply selected packing candidate");
+    assert_eq!(
+        fixture
+            .client
+            .page_count(Vec::new())
+            .await
+            .expect("count Pages after apply"),
+        1
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn packing_analysis_batches_multiple_groups_into_one_worker_call() {
+    let fixture = Fixture::open("packing-analysis-batch").await;
+    let mut a1 = fixture.sealed_event("Topic A starts.", "packing-analysis:a1", 1);
+    let mut a2 = fixture.sealed_event("Topic A continues.", "packing-analysis:a2", 2);
+    a1.source_span.as_mut().expect("source span").stream_id = "conversation:a".to_owned();
+    a2.source_span.as_mut().expect("source span").stream_id = "conversation:a".to_owned();
+    let a1 = fixture.client.write_page(a1).await.expect("write A1");
+    let a2 = fixture.client.write_page(a2).await.expect("write A2");
+    let mut b1 = fixture.sealed_event("Topic B starts.", "packing-analysis:b1", 1);
+    let mut b2 = fixture.sealed_event("Topic B continues.", "packing-analysis:b2", 2);
+    b1.source_span.as_mut().expect("source span").stream_id = "conversation:b".to_owned();
+    b2.source_span.as_mut().expect("source span").stream_id = "conversation:b".to_owned();
+    let b1 = fixture.client.write_page(b1).await.expect("write B1");
+    let b2 = fixture.client.write_page(b2).await.expect("write B2");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::PackingCandidates {
+            candidates: vec![vec![a1.page_id, a2.page_id], vec![b1.page_id, b2.page_id]],
+        },
+    ]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = true;
+    config.relation.enabled = false;
+    config.retention.enabled = false;
+    let maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let scan = maintainer
+        .scan_packing_candidates()
+        .await
+        .expect("scan all packing groups");
+    assert_eq!(scan.candidate_group_count, 2);
+    assert_eq!(scan.estimated_model_calls, 1);
+    assert_eq!(worker.request_count(), 0);
+
+    let analysis = maintainer
+        .analyze_packing_candidates(AnalyzeMaintenancePacksRequest {
+            scan_id: scan.scan_id,
+            batch_index: 0,
+        })
+        .await
+        .expect("analyze packing groups in one batch");
+    assert_eq!(analysis.worker_calls, 1);
+    assert_eq!(analysis.batch_count, 1);
+    assert_eq!(analysis.analyzed_group_count, 2);
+    assert!(analysis.issue.is_none());
+    assert_eq!(analysis.candidates.len(), 2);
+    let requests = worker.requests.lock().expect("fake worker requests");
+    let MaintenanceWorkerRequest::AnalyzePacking { groups, .. } = &requests[0] else {
+        panic!("expected batched packing analysis request");
+    };
+    assert_eq!(groups.len(), 2);
+    drop(requests);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn packing_analysis_defers_an_invalid_model_selection_without_failing_the_batch() {
+    let fixture = Fixture::open("packing-analysis-invalid-selection").await;
+    fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "A bounded topic starts here.",
+            "packing-analysis-invalid:1",
+            1,
+        ))
+        .await
+        .expect("write first Page");
+    fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "The same bounded topic continues.",
+            "packing-analysis-invalid:2",
+            2,
+        ))
+        .await
+        .expect("write second Page");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::PackingCandidates {
+            candidates: vec![vec![
+                "pg_not_supplied".to_owned(),
+                "pg_also_missing".to_owned(),
+            ]],
+        },
+    ]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = true;
+    config.relation.enabled = false;
+    config.retention.enabled = false;
+    let maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+    let scan = maintainer
+        .scan_packing_candidates()
+        .await
+        .expect("scan packing candidates");
+
+    let analysis = maintainer
+        .analyze_packing_candidates(AnalyzeMaintenancePacksRequest {
+            scan_id: scan.scan_id,
+            batch_index: 0,
+        })
+        .await
+        .expect("invalid model output becomes a batch issue");
+
+    assert!(analysis.candidates.is_empty());
+    assert_eq!(analysis.deferred_groups, 1);
+    assert_eq!(analysis.no_candidate_groups, 0);
+    let issue = analysis.issue.expect("invalid selection issue");
+    assert_eq!(issue.code, "invalid_model_selection");
+    assert!(issue.message.contains("outside one supplied group"));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn packing_scan_keeps_pages_connected_by_provenance_eligible() {
+    let fixture = Fixture::open("packing-provenance-protection").await;
+    let first = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "A source event that remains independently referenced.",
+            "packing-provenance-protection:1",
+            1,
+        ))
+        .await
+        .expect("write provenance source");
+    let mut derived = fixture.sealed_event(
+        "A derived event with explicit provenance.",
+        "packing-provenance-protection:2",
+        2,
+    );
+    derived.provenance = vec![ProvenanceEvent {
+        operation: "derive".to_owned(),
+        actor: Actor {
+            actor_type: ActorType::Model,
+            actor_id: "model:maintenance-test".to_owned(),
+        },
+        timestamp: "2026-08-16T00:00:00Z".to_owned(),
+        input_revision_ids: vec![first.revision_id],
+        tool_or_model: Some("test-model".to_owned()),
+    }];
+    fixture
+        .client
+        .write_page(derived)
+        .await
+        .expect("write provenance-derived Page");
+    fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "A trailing unreferenced event cannot form a Pack alone.",
+            "packing-provenance-protection:3",
+            3,
+        ))
+        .await
+        .expect("write trailing Page");
+    let worker = Arc::new(FakeWorker::new(Vec::new()));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = true;
+    config.relation.enabled = false;
+    config.retention.enabled = false;
+    let maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let scan = maintainer
+        .scan_packing_candidates()
+        .await
+        .expect("scan with provenance protection");
+
+    assert_eq!(scan.inspected_pages, 3);
+    assert_eq!(scan.candidate_group_count, 1);
+    assert_eq!(scan.eligible_pages, 3);
+    assert_eq!(worker.request_count(), 0);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn bounded_cycle_reloads_inventory_and_commits_multiple_pack_windows() {
+    let fixture = Fixture::open("packing-converge").await;
+    let mut a1 = fixture.sealed_event("Topic A starts.", "packing-converge:a1", 1);
+    let mut a2 = fixture.sealed_event("Topic A continues.", "packing-converge:a2", 2);
+    a1.source_span.as_mut().expect("source span").stream_id = "conversation:a".to_owned();
+    a2.source_span.as_mut().expect("source span").stream_id = "conversation:a".to_owned();
+    let a1 = fixture.client.write_page(a1).await.expect("write A1");
+    let a2 = fixture.client.write_page(a2).await.expect("write A2");
+    let mut b1 = fixture.sealed_event("Topic B starts.", "packing-converge:b1", 1);
+    let mut b2 = fixture.sealed_event("Topic B continues.", "packing-converge:b2", 2);
+    b1.source_span.as_mut().expect("source span").stream_id = "conversation:b".to_owned();
+    b2.source_span.as_mut().expect("source span").stream_id = "conversation:b".to_owned();
+    let b1 = fixture.client.write_page(b1).await.expect("write B1");
+    let b2 = fixture.client.write_page(b2).await.expect("write B2");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::Candidate {
+            page_ids: vec![b1.page_id, b2.page_id],
+        },
+        MaintenanceWorkerResponse::Candidate {
+            page_ids: vec![a1.page_id, a2.page_id],
+        },
+    ]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = true;
+    config.relation.enabled = false;
+    config.retention.enabled = false;
+    config.max_jobs_per_cycle = 2;
+    let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+
+    let report = maintainer
+        .run_bounded_cycle()
+        .await
+        .expect("run bounded maintenance convergence");
+
+    assert_eq!(report.worker_calls, 2);
+    assert_eq!(report.packs_committed, 2);
+    assert_eq!(
+        fixture
+            .client
+            .page_count(Vec::new())
+            .await
+            .expect("count converged packed Pages"),
+        2
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn observe_mode_records_a_packing_proposal_without_replacing_pages() {
     let fixture = Fixture::open("observe-packing").await;
     let first = fixture
@@ -537,6 +1098,134 @@ async fn observe_mode_records_a_packing_proposal_without_replacing_pages() {
             .expect("read second observed head"),
         second.revision_id
     );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn invalid_packing_selection_defers_and_cools_down_the_window() {
+    let fixture = Fixture::open("invalid-packing-selection").await;
+    let first = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "First contiguous packing candidate.",
+            "invalid-pack:1",
+            1,
+        ))
+        .await
+        .expect("write first packing candidate");
+    fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "Second contiguous packing candidate.",
+            "invalid-pack:2",
+            2,
+        ))
+        .await
+        .expect("write second packing candidate");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::Candidate {
+            page_ids: vec![first.page_id.clone(), "pg_not_offered".to_owned()],
+        },
+    ]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = true;
+    let mut maintainer =
+        RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let report = maintainer
+        .run_once()
+        .await
+        .expect("defer invalid packing selection");
+    assert_eq!(report.worker_calls, 1);
+    assert_eq!(report.packs_committed, 0);
+    assert_eq!(report.deferred, 1);
+
+    let second_cycle = maintainer
+        .run_once()
+        .await
+        .expect("skip cooled down packing window");
+    assert_eq!(second_cycle.worker_calls, 0);
+    assert_eq!(worker.request_count(), 1);
+    assert_eq!(
+        fixture
+            .client
+            .current_revision_id(first.page_id)
+            .await
+            .expect("read unchanged packing candidate"),
+        first.revision_id
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn relation_waits_until_packing_has_no_eligible_window() {
+    let fixture = Fixture::open("pack-before-relation").await;
+    let first = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "First contiguous stream Page.",
+            "pack-before-relation:1",
+            1,
+        ))
+        .await
+        .expect("write first stream Page");
+    let second = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "Second contiguous stream Page.",
+            "pack-before-relation:2",
+            2,
+        ))
+        .await
+        .expect("write second stream Page");
+    let document_a = fixture
+        .client
+        .write_page(fixture.page(
+            "First durable relation document.",
+            "pack-before-relation:document-a",
+        ))
+        .await
+        .expect("write first relation document");
+    let document_b = fixture
+        .client
+        .write_page(fixture.page(
+            "Second durable relation document.",
+            "pack-before-relation:document-b",
+        ))
+        .await
+        .expect("write second relation document");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::Candidate {
+            page_ids: vec![first.page_id, second.page_id],
+        },
+        MaintenanceWorkerResponse::Relate {
+            page_ids: [document_a.page_id, document_b.page_id],
+        },
+    ]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = true;
+    config.relation.enabled = true;
+    let mut maintainer =
+        RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let packing_report = maintainer
+        .run_once()
+        .await
+        .expect("pack before relation selection");
+    assert_eq!(packing_report.worker_calls, 1);
+    assert_eq!(packing_report.packs_committed, 1);
+    assert_eq!(packing_report.relations_committed, 0);
+
+    let relation_report = maintainer
+        .run_once()
+        .await
+        .expect("run relation after packing converges");
+    assert_eq!(relation_report.worker_calls, 1);
+    assert_eq!(relation_report.packs_committed, 0);
+    assert_eq!(relation_report.relations_committed, 1);
+    assert_eq!(worker.request_count(), 2);
     fixture.close().await;
 }
 
@@ -600,8 +1289,10 @@ async fn maintainer_links_only_an_offered_pair_with_runtime_owned_relation_seman
     let second_cycle = maintainer
         .run_once()
         .await
-        .expect("respect relation window cooldown");
+        .expect("skip the relation window after selecting one durable edge");
     assert_eq!(second_cycle.worker_calls, 0);
+    assert_eq!(second_cycle.relations_committed, 0);
+    assert_eq!(second_cycle.deferred, 0);
     assert_eq!(worker.request_count(), 1);
     fixture.close().await;
 }
@@ -650,6 +1341,109 @@ async fn observe_relation_records_a_proposal_without_linking_pages() {
         .await
         .expect("read observed relation candidate");
     assert!(pages[0].relations.is_empty());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn relation_selection_excludes_pairs_already_connected_by_a_path() {
+    let fixture = Fixture::open("relation-path-exclusion").await;
+    let first = fixture
+        .client
+        .write_page(fixture.page("First durable topic Page.", "relation-path:1"))
+        .await
+        .expect("write first relation Page");
+    let second = fixture
+        .client
+        .write_page(fixture.page("Second durable topic Page.", "relation-path:2"))
+        .await
+        .expect("write second relation Page");
+    let third = fixture
+        .client
+        .write_page(fixture.page("Third durable topic Page.", "relation-path:3"))
+        .await
+        .expect("write third relation Page");
+    for (index, (from, to)) in [(&first, &second), (&second, &third)]
+        .into_iter()
+        .enumerate()
+    {
+        fixture
+            .client
+            .link_pages(LinkPagesRequest {
+                from_page_id: from.page_id.clone(),
+                relation_type: "related_to".to_owned(),
+                to_page_id: to.page_id.clone(),
+                basis_revision_ids: vec![from.revision_id.clone(), to.revision_id.clone()],
+                created_by: Actor {
+                    actor_type: ActorType::Tool,
+                    actor_id: "tool:relation-path-test".to_owned(),
+                },
+                idempotency_key: Some(format!("relation-path:{index}")),
+            })
+            .await
+            .expect("link relation path");
+    }
+    let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
+        page_ids: [first.page_id.clone(), third.page_id.clone()],
+    }]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = true;
+    let mut maintainer =
+        RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let report = maintainer
+        .run_once()
+        .await
+        .expect("defer transitively connected relation pair");
+    assert_eq!(report.worker_calls, 1);
+    assert_eq!(report.relations_committed, 0);
+    assert_eq!(report.deferred, 1);
+
+    let requests = worker.requests.lock().expect("fake worker requests");
+    let MaintenanceWorkerRequest::SelectRelation {
+        excluded_page_pairs,
+        ..
+    } = &requests[0]
+    else {
+        panic!("expected relation selection request");
+    };
+    let mut expected_pair = [first.page_id, third.page_id];
+    expected_pair.sort();
+    assert!(excluded_page_pairs.contains(&expected_pair));
+    drop(requests);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn relation_window_reads_existing_pairs_in_store_sized_batches() {
+    let fixture = Fixture::open("relation-read-batches").await;
+    for index in 0..24 {
+        fixture
+            .client
+            .write_page(fixture.page(
+                &format!("Durable relation candidate {index}."),
+                &format!("relation-read-batches:{index}"),
+            ))
+            .await
+            .expect("write relation batch candidate");
+    }
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::NoCandidate,
+    ]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = true;
+    config.relation.candidate_window = 24;
+    let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+
+    let report = maintainer
+        .run_once()
+        .await
+        .expect("read relation window in bounded Store batches");
+
+    assert_eq!(report.worker_calls, 1);
     fixture.close().await;
 }
 
@@ -763,7 +1557,7 @@ async fn operator_observe_once_runs_a_worker_without_persisting_scheduler_state(
 
 #[tokio::test]
 async fn operator_audit_records_only_worker_operation_and_decision() {
-    let audit = MaintenanceRunAudit::queued("integration-smoke".to_owned());
+    let audit = MaintenanceRunAudit::queued_with_limits("apply", 7, "integration-smoke".to_owned());
     let worker = audit.worker(Arc::new(FakeWorker::new(vec![
         MaintenanceWorkerResponse::NoCandidate,
     ])));
@@ -780,6 +1574,8 @@ async fn operator_audit_records_only_worker_operation_and_decision() {
     assert!(serialized.contains("queued"));
     assert!(serialized.contains("worker_started"));
     assert!(serialized.contains("no_candidate"));
+    assert_eq!(record.mode, "apply");
+    assert_eq!(record.max_jobs, 7);
 }
 
 struct Fixture {

@@ -44,7 +44,9 @@ allowed_scopes = [
 # provider = "infer_runtime"
 # credential_file = "/absolute/path/to/pcp-runtime.token"
 # timeout_seconds = 120
-# max_output_tokens = 2048
+# summary_deployment_id = "ollama_qwen3_5_4b"
+# reasoning_deployment_id = "codex_gpt_5_6_luna"
+# relation_deployment_id = "codex_gpt_5_6_terra" # optional explicit escalation
 # actor_id = "model:infer-runtime-maintenance"
 # actor_type = "model"
 #

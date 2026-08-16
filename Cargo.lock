@@ -900,9 +900,12 @@ dependencies = [
  "pcp-client",
  "pcp-core",
  "pcp-rpc",
+ "pcp-runtime",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
+ "url",
 ]
 
 [[package]]

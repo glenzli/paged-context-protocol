@@ -21,8 +21,14 @@ pub enum MaintenanceWorkerRequest {
         pages: Vec<PackingCandidatePage>,
         excluded_candidate_sets: Vec<Vec<String>>,
     },
+    AnalyzePacking {
+        groups: Vec<PackingCandidateGroup>,
+        max_pages_per_candidate: usize,
+    },
     SelectRelation {
         pages: Vec<RelationCandidatePage>,
+        #[serde(default)]
+        excluded_page_pairs: Vec<[String; 2]>,
     },
     SelectRetentionMilestones {
         pages: Vec<MaintenanceRoutingPage>,
@@ -39,6 +45,13 @@ pub struct PackingCandidatePage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<String>,
     pub routing_text: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackingCandidateGroup {
+    pub group_id: String,
+    pub pages: Vec<PackingCandidatePage>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -102,6 +115,7 @@ impl RelationCandidatePage {
 pub enum MaintenanceWorkerResponse {
     WriteSummary { content: String },
     Candidate { page_ids: Vec<String> },
+    PackingCandidates { candidates: Vec<Vec<String>> },
     Relate { page_ids: [String; 2] },
     Retain { milestones: Vec<RetentionMilestone> },
     NoCandidate,

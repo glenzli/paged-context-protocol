@@ -101,6 +101,10 @@ impl ManagedRuntime {
         &self.paths.operator_socket
     }
 
+    pub(super) fn runtime_config(&self) -> &Path {
+        &self.paths.runtime_config
+    }
+
     pub(super) async fn restart(&self) -> Result<ManagedRuntimeStatus> {
         let mut child = self.child.lock().await;
         let previous = child

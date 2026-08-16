@@ -165,7 +165,6 @@ allowed_scopes = ["user:{identity_id}"]
 provider = "infer_runtime"
 credential_file = "secrets/pcp-runtime.token"
 timeout_seconds = 90
-max_output_tokens = 1024
 actor_id = "model:infer-runtime-maintenance"
 actor_type = "model"
 "#,
@@ -177,7 +176,9 @@ actor_type = "model"
     let crate::MaintenanceWorkerConfig::InferRuntime {
         credential_file,
         timeout_seconds,
-        max_output_tokens,
+        summary_deployment_id,
+        reasoning_deployment_id,
+        relation_deployment_id,
         ..
     } = maintenance.worker
     else {
@@ -185,7 +186,9 @@ actor_type = "model"
     };
     assert_eq!(credential_file, root.join("secrets/pcp-runtime.token"));
     assert_eq!(timeout_seconds, 90);
-    assert_eq!(max_output_tokens, 1024);
+    assert_eq!(summary_deployment_id, "ollama_qwen3_5_4b");
+    assert_eq!(reasoning_deployment_id, "codex_gpt_5_6_luna");
+    assert_eq!(relation_deployment_id, None);
     let _ = std::fs::remove_dir_all(root);
 }
 

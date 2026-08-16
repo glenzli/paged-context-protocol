@@ -3,6 +3,7 @@ mod config;
 mod coordinator;
 mod infer_worker;
 mod ledger;
+mod operator;
 mod worker;
 
 use std::{sync::Arc, time::Duration};
@@ -14,12 +15,17 @@ pub use config::{
     MaintenanceConfig, MaintenanceMode, MaintenanceWorkerConfig, PackingMaintenanceConfig,
     RelationMaintenanceConfig, RetentionMaintenanceConfig, SummaryMaintenanceConfig,
 };
-pub use coordinator::{MaintenanceCycleReport, RuntimeMaintainer};
+pub use coordinator::{
+    AnalyzeMaintenancePacksRequest, ApplyMaintenancePackRequest, MaintenanceCycleReport,
+    MaintenancePackAnalysis, MaintenancePackAnalysisIssue, MaintenancePackCandidate,
+    MaintenancePackInput, MaintenancePackScan, MaintenancePackScanGroup, RuntimeMaintainer,
+};
 pub use infer_worker::InferRuntimeSemanticWorker;
+pub use operator::MaintenanceOperator;
 pub use worker::{
     CommandSemanticWorker, MaintenanceDetailPage, MaintenanceRelation, MaintenanceRoutingPage,
-    MaintenanceWorkerRequest, MaintenanceWorkerResponse, RelationCandidatePage, RetentionMilestone,
-    SemanticMaintenanceWorker,
+    MaintenanceWorkerRequest, MaintenanceWorkerResponse, PackingCandidateGroup,
+    RelationCandidatePage, RetentionMilestone, SemanticMaintenanceWorker,
 };
 
 pub fn build_semantic_worker(
@@ -39,12 +45,16 @@ pub fn build_semantic_worker(
         MaintenanceWorkerConfig::InferRuntime {
             credential_file,
             timeout_seconds,
-            max_output_tokens,
+            summary_deployment_id,
+            reasoning_deployment_id,
+            relation_deployment_id,
             ..
         } => Ok(Arc::new(InferRuntimeSemanticWorker::new(
             credential_file.clone(),
             Duration::from_secs(*timeout_seconds),
-            *max_output_tokens,
+            summary_deployment_id.clone(),
+            reasoning_deployment_id.clone(),
+            relation_deployment_id.clone(),
         )?)),
     }
 }

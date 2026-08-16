@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
@@ -6,9 +10,10 @@ use pcp_client::PcpApi;
 use pcp_core::{
     LinkPagesRequest, PACKED_PAGE_MEDIA_TYPE, PackPagesRequest, PageMutability, PageRevisionRef,
     PlanRevisionRetentionRequest, Projection, PutRevisionRetentionLeaseRequest, ReadPagesRequest,
-    RetentionPolicy, WriteSummaryRequest,
+    RetentionPolicy, SourceSpan, WriteResult, WriteSummaryRequest,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::{
     MaintenanceConfig, MaintenanceMode, MaintenanceWorkerRequest, MaintenanceWorkerResponse,
@@ -18,12 +23,13 @@ use super::{
         MaintenanceLedger, packing_key, retention_window_key, selection_window_key, summary_key,
     },
     worker::{
-        MaintenanceDetailPage, MaintenanceRoutingPage, PackingCandidatePage, RelationCandidatePage,
+        MaintenanceDetailPage, MaintenanceRoutingPage, PackingCandidateGroup, PackingCandidatePage,
+        RelationCandidatePage,
     },
 };
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct MaintenanceCycleReport {
     pub inspected_pages: usize,
     pub worker_calls: u32,
@@ -38,9 +44,128 @@ pub struct MaintenanceCycleReport {
     pub deferred: u32,
 }
 
+impl MaintenanceCycleReport {
+    fn merge(&mut self, report: Self) {
+        self.inspected_pages = self.inspected_pages.max(report.inspected_pages);
+        self.worker_calls = self.worker_calls.saturating_add(report.worker_calls);
+        self.summaries_written = self
+            .summaries_written
+            .saturating_add(report.summaries_written);
+        self.summaries_proposed = self
+            .summaries_proposed
+            .saturating_add(report.summaries_proposed);
+        self.packs_committed = self.packs_committed.saturating_add(report.packs_committed);
+        self.packs_proposed = self.packs_proposed.saturating_add(report.packs_proposed);
+        self.relations_committed = self
+            .relations_committed
+            .saturating_add(report.relations_committed);
+        self.relations_proposed = self
+            .relations_proposed
+            .saturating_add(report.relations_proposed);
+        self.retention_leases_written = self
+            .retention_leases_written
+            .saturating_add(report.retention_leases_written);
+        self.retention_leases_proposed = self
+            .retention_leases_proposed
+            .saturating_add(report.retention_leases_proposed);
+        self.deferred = self.deferred.saturating_add(report.deferred);
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenancePackScan {
+    pub captured_at: String,
+    pub scan_id: String,
+    pub inspected_pages: usize,
+    pub eligible_pages: usize,
+    pub excluded_pages: usize,
+    pub candidate_group_count: usize,
+    pub estimated_model_calls: usize,
+    pub groups: Vec<MaintenancePackScanGroup>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenancePackScanGroup {
+    pub group_id: String,
+    pub namespace: String,
+    pub kind: String,
+    pub source_span: SourceSpan,
+    pub page_count: usize,
+    pub content_chars: u64,
+    pub extends_existing_pack: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenancePackAnalysis {
+    pub analyzed_at: String,
+    pub scan_id: String,
+    pub batch_index: usize,
+    pub batch_count: usize,
+    pub candidate_group_count: usize,
+    pub analyzed_group_count: usize,
+    pub worker_calls: u32,
+    pub no_candidate_groups: u32,
+    pub deferred_groups: u32,
+    pub candidates: Vec<MaintenancePackCandidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<MaintenancePackAnalysisIssue>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenancePackAnalysisIssue {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnalyzeMaintenancePacksRequest {
+    pub scan_id: String,
+    pub batch_index: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenancePackCandidate {
+    pub candidate_id: String,
+    pub namespace: String,
+    pub kind: String,
+    pub source_span: SourceSpan,
+    pub input_page_count: usize,
+    pub resulting_entry_count: u64,
+    pub content_chars: u64,
+    pub extends_existing_pack: bool,
+    pub pages: Vec<MaintenancePackInput>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenancePackInput {
+    pub page_id: String,
+    pub revision_id: String,
+    pub source_span: SourceSpan,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    pub preview: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplyMaintenancePackRequest {
+    pub candidate_id: String,
+    pub pages: Vec<PageRevisionRef>,
+}
+
 const PACKING_CANDIDATE_WINDOW: usize = 32;
 const PACKING_ROUTING_CHARS: usize = 480;
+const PACKING_GROUPS_PER_MODEL_CALL: usize = 8;
 const PACKING_RETRY_AFTER_SECONDS: u64 = 86_400;
+const MAINTENANCE_READ_BATCH_PAGES: usize = 20;
+const MAX_MAINTENANCE_SUMMARY_CHARS: usize = 1_200;
 
 pub struct RuntimeMaintainer {
     client: Arc<dyn PcpApi>,
@@ -104,7 +229,7 @@ impl RuntimeMaintainer {
             tokio::time::sleep(Duration::from_secs(self.config.initial_delay_seconds)).await;
         }
         loop {
-            let retry_soon = match self.run_once().await {
+            let retry_soon = match self.run_bounded_cycle().await {
                 Ok(report)
                     if report.summaries_written > 0
                         || report.summaries_proposed > 0
@@ -127,7 +252,7 @@ impl RuntimeMaintainer {
                         report.retention_leases_written,
                         report.worker_calls
                     );
-                    false
+                    report.worker_calls >= self.config.max_jobs_per_cycle
                 }
                 Ok(_) => false,
                 Err(error) => {
@@ -145,7 +270,199 @@ impl RuntimeMaintainer {
     }
 
     pub async fn run_once(&mut self) -> Result<MaintenanceCycleReport> {
-        self.run_once_inner(true).await
+        self.run_once_inner(true, self.config.max_jobs_per_cycle)
+            .await
+    }
+
+    pub async fn run_bounded_cycle(&mut self) -> Result<MaintenanceCycleReport> {
+        let mut aggregate = MaintenanceCycleReport::default();
+        while aggregate.worker_calls < self.config.max_jobs_per_cycle {
+            let report = self.run_once_inner(true, 1).await?;
+            let worker_calls = report.worker_calls;
+            aggregate.merge(report);
+            if worker_calls == 0 {
+                break;
+            }
+        }
+        Ok(aggregate)
+    }
+
+    pub async fn scan_packing_candidates(&self) -> Result<MaintenancePackScan> {
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        let windows = packing_candidate_windows(&inventory, &self.config.packing);
+        let eligible_pages = windows.iter().map(Vec::len).sum::<usize>();
+        let scan_id = packing_scan_id(&windows, &self.config.packing);
+        let groups = windows
+            .iter()
+            .map(|window| packing_scan_group(window))
+            .collect();
+        Ok(MaintenancePackScan {
+            captured_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            scan_id,
+            inspected_pages: inventory.len(),
+            eligible_pages,
+            excluded_pages: inventory.len().saturating_sub(eligible_pages),
+            candidate_group_count: windows.len(),
+            estimated_model_calls: windows.len().div_ceil(PACKING_GROUPS_PER_MODEL_CALL),
+            groups,
+        })
+    }
+
+    pub async fn analyze_packing_candidates(
+        &self,
+        request: AnalyzeMaintenancePacksRequest,
+    ) -> Result<MaintenancePackAnalysis> {
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        let windows = packing_candidate_windows(&inventory, &self.config.packing);
+        let scan_id = packing_scan_id(&windows, &self.config.packing);
+        anyhow::ensure!(
+            request.scan_id == scan_id,
+            "maintenance packing scan is stale; scan the Store again"
+        );
+
+        let batch_count = windows.len().div_ceil(PACKING_GROUPS_PER_MODEL_CALL);
+        anyhow::ensure!(
+            request.batch_index < batch_count,
+            "maintenance packing analysis batch {} is outside 0..{}",
+            request.batch_index,
+            batch_count
+        );
+        let batch_start = request.batch_index * PACKING_GROUPS_PER_MODEL_CALL;
+        let batch_end = (batch_start + PACKING_GROUPS_PER_MODEL_CALL).min(windows.len());
+        let batch = &windows[batch_start..batch_end];
+        let groups = batch
+            .iter()
+            .map(|window| PackingCandidateGroup {
+                group_id: packing_scan_group_id(window),
+                pages: window
+                    .iter()
+                    .map(|page| PackingCandidatePage::from_inventory(page, PACKING_ROUTING_CHARS))
+                    .collect(),
+            })
+            .collect();
+
+        let mut candidates = Vec::new();
+        let worker_calls = 1_u32;
+        let mut no_candidate_groups = 0_u32;
+        let mut deferred_groups = 0_u32;
+        let mut issue = None;
+        match self
+            .worker
+            .evaluate(MaintenanceWorkerRequest::AnalyzePacking {
+                groups,
+                max_pages_per_candidate: self.config.packing.max_pages,
+            })
+            .await
+        {
+            Ok(MaintenanceWorkerResponse::PackingCandidates {
+                candidates: selected_sets,
+            }) => match validate_packing_analysis_batch(
+                batch,
+                selected_sets,
+                self.config.packing.max_pages,
+            ) {
+                Ok((mut selected, represented_groups)) => {
+                    candidates.append(&mut selected);
+                    no_candidate_groups = batch.len().saturating_sub(represented_groups) as u32;
+                }
+                Err(error) => {
+                    deferred_groups = batch.len() as u32;
+                    issue = Some(MaintenancePackAnalysisIssue {
+                        code: "invalid_model_selection".to_owned(),
+                        message: error.to_string(),
+                    });
+                }
+            },
+            Ok(MaintenanceWorkerResponse::NoCandidate) => {
+                no_candidate_groups = batch.len() as u32;
+            }
+            Ok(MaintenanceWorkerResponse::Defer) => {
+                deferred_groups = batch.len() as u32;
+            }
+            Ok(other) => {
+                deferred_groups = batch.len() as u32;
+                issue = Some(MaintenancePackAnalysisIssue {
+                    code: "unexpected_worker_response".to_owned(),
+                    message: format!(
+                        "semantic worker returned {} for an analyze_packing request",
+                        response_name(&other)
+                    ),
+                });
+            }
+            Err(error) => {
+                deferred_groups = batch.len() as u32;
+                issue = Some(MaintenancePackAnalysisIssue {
+                    code: "worker_failure".to_owned(),
+                    message: format!("{error:#}"),
+                });
+            }
+        }
+
+        Ok(MaintenancePackAnalysis {
+            analyzed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            scan_id,
+            batch_index: request.batch_index,
+            batch_count,
+            candidate_group_count: windows.len(),
+            analyzed_group_count: batch.len(),
+            worker_calls,
+            no_candidate_groups,
+            deferred_groups,
+            candidates,
+            issue,
+        })
+    }
+
+    pub async fn apply_pack_candidate(
+        &self,
+        request: ApplyMaintenancePackRequest,
+    ) -> Result<WriteResult> {
+        anyhow::ensure!(
+            self.config.mode == MaintenanceMode::Apply,
+            "maintenance Pack optimization requires apply mode"
+        );
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        let requested_ids = request
+            .pages
+            .iter()
+            .map(|page| page.page_id.clone())
+            .collect::<Vec<_>>();
+        let candidate = packing_candidate_windows(&inventory, &self.config.packing)
+            .into_iter()
+            .find_map(|window| {
+                let selected =
+                    select_packing_items(&window, &requested_ids, self.config.packing.max_pages)?;
+                let candidate = build_pack_candidate(&selected);
+                (candidate.candidate_id == request.candidate_id).then_some(candidate)
+            })
+            .context("maintenance Pack candidate is stale or no longer eligible")?;
+        anyhow::ensure!(
+            candidate
+                .pages
+                .iter()
+                .zip(&request.pages)
+                .all(|(candidate, requested)| {
+                    candidate.page_id == requested.page_id
+                        && candidate.revision_id == requested.revision_id
+                }),
+            "maintenance Pack candidate revisions changed after scanning"
+        );
+
+        self.client
+            .pack_pages(PackPagesRequest {
+                pages: request.pages,
+                idempotency_key: Some(format!("maintenance:{}", candidate.candidate_id)),
+            })
+            .await
+    }
+
+    pub async fn run_once_with_job_limit(
+        &mut self,
+        max_jobs: u32,
+    ) -> Result<MaintenanceCycleReport> {
+        anyhow::ensure!(max_jobs > 0, "maintenance job limit must be positive");
+        self.run_once_inner(true, max_jobs.min(self.config.max_jobs_per_cycle))
+            .await
     }
 
     pub async fn run_operator_observe_once(&mut self) -> Result<MaintenanceCycleReport> {
@@ -153,16 +470,20 @@ impl RuntimeMaintainer {
             self.config.mode == MaintenanceMode::Observe,
             "operator maintenance run-once only permits observe mode"
         );
-        self.run_once_inner(false).await
+        self.run_once_inner(false, 1).await
     }
 
-    async fn run_once_inner(&mut self, persist_ledger: bool) -> Result<MaintenanceCycleReport> {
+    async fn run_once_inner(
+        &mut self,
+        persist_ledger: bool,
+        max_jobs: u32,
+    ) -> Result<MaintenanceCycleReport> {
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
         let mut report = MaintenanceCycleReport {
             inspected_pages: inventory.len(),
             ..MaintenanceCycleReport::default()
         };
-        let mut jobs_remaining = self.config.max_jobs_per_cycle;
+        let mut jobs_remaining = max_jobs;
 
         if self.config.summary.enabled
             && jobs_remaining > 0
@@ -173,16 +494,17 @@ impl RuntimeMaintainer {
         {
             jobs_remaining -= 1;
         }
-        if self.config.packing.enabled
+        let packing_ran = self.config.packing.enabled
             && jobs_remaining > 0
             && self
                 .run_packing_job(&inventory, &mut report)
                 .await
-                .context("run PCP packing maintenance job")?
-        {
+                .context("run PCP packing maintenance job")?;
+        if packing_ran {
             jobs_remaining -= 1;
         }
         if self.config.relation.enabled
+            && !packing_ran
             && jobs_remaining > 0
             && self
                 .run_relation_job(&inventory, &mut report)
@@ -208,12 +530,25 @@ impl RuntimeMaintainer {
         inventory: &[pcp_store::DurablePageInventoryItem],
         report: &mut MaintenanceCycleReport,
     ) -> Result<bool> {
-        let candidate = inventory.iter().find(|page| {
-            page.summary_revision_id.is_none()
-                && page.content_chars >= self.config.summary.minimum_chars as u64
-                && !excluded_kind(&page.kind, &self.config.summary.excluded_page_kinds)
+        let eligible = |page: &&pcp_store::DurablePageInventoryItem| {
+            page.content_chars >= self.config.summary.minimum_chars as u64
+                && (page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE)
+                    || !excluded_kind(&page.kind, &self.config.summary.excluded_page_kinds))
                 && self.ledger.eligible(&summary_key(&page.revision_id))
-        });
+        };
+        let candidate = inventory
+            .iter()
+            .filter(eligible)
+            .find(|page| {
+                page.summary_revision_id.is_some()
+                    && page.summary_target_revision_id.as_deref() != Some(page.revision_id.as_str())
+            })
+            .or_else(|| {
+                inventory
+                    .iter()
+                    .filter(eligible)
+                    .find(|page| page.summary_revision_id.is_none())
+            });
         let Some(candidate) = candidate else {
             return Ok(false);
         };
@@ -231,13 +566,24 @@ impl RuntimeMaintainer {
             .await?
         {
             MaintenanceWorkerResponse::WriteSummary { content } => {
-                ensure_nonempty_worker_content(&content)?;
+                let content = match normalize_worker_summary(content) {
+                    Ok(content) => content,
+                    Err(_) => {
+                        self.ledger.record(
+                            summary_key(&page_id),
+                            "invalid_worker_summary",
+                            self.config.summary.retry_after_seconds,
+                        );
+                        report.deferred += 1;
+                        return Ok(true);
+                    }
+                };
                 if self.config.applies_changes() {
                     self.client
                         .write_summary(WriteSummaryRequest {
                             target_page_id: candidate.page_id.clone(),
                             target_revision_id: page_id.clone(),
-                            expected_summary_revision_id: None,
+                            expected_summary_revision_id: candidate.summary_revision_id.clone(),
                             content,
                             created_by: self.config.worker_actor(),
                             tool_or_model: Some(self.config.worker.actor_id().to_owned()),
@@ -293,14 +639,22 @@ impl RuntimeMaintainer {
         inventory: &[pcp_store::DurablePageInventoryItem],
         report: &mut MaintenanceCycleReport,
     ) -> Result<bool> {
-        let candidates = relation_candidate_window(
+        let Some(candidates) = relation_candidate_windows(
             inventory,
             &self.config.relation,
             self.config.packing.enabled,
-        );
-        if candidates.len() < 2 {
+        )
+        .into_iter()
+        .find(|pages| {
+            self.ledger.eligible(&relation_window_key(
+                &pages
+                    .iter()
+                    .map(|page| page.revision_id.clone())
+                    .collect::<Vec<_>>(),
+            ))
+        }) else {
             return Ok(false);
-        }
+        };
         let offered = candidates
             .iter()
             .map(|page| (page.page_id.clone(), page.revision_id.clone()))
@@ -311,9 +665,20 @@ impl RuntimeMaintainer {
                 .map(|page| page.revision_id.clone())
                 .collect::<Vec<_>>(),
         );
-        if !self.ledger.eligible(&window_key) {
-            return Ok(false);
-        }
+        let offered_page_ids = offered.keys().cloned().collect::<BTreeSet<_>>();
+        let mut relation_edges = self.existing_related_pairs(&candidates).await?;
+        relation_edges.extend(
+            self.ledger
+                .active_relation_pairs()
+                .into_iter()
+                .filter(|pair| {
+                    pair.iter()
+                        .all(|page_id| offered_page_ids.contains(page_id))
+                }),
+        );
+        relation_edges.sort();
+        relation_edges.dedup();
+        let excluded_page_pairs = connected_relation_pairs(&offered_page_ids, &relation_edges);
 
         report.worker_calls += 1;
         let response = self
@@ -328,6 +693,7 @@ impl RuntimeMaintainer {
                         )
                     })
                     .collect(),
+                excluded_page_pairs: excluded_page_pairs.clone(),
             })
             .await?;
         let mut page_ids = match response {
@@ -360,6 +726,15 @@ impl RuntimeMaintainer {
             "semantic worker selected an invalid relation pair"
         );
         page_ids.sort();
+        if excluded_page_pairs.iter().any(|pair| pair == &page_ids) {
+            self.ledger.record(
+                window_key,
+                "reselected_excluded_pair",
+                self.config.relation.retry_after_seconds,
+            );
+            report.deferred += 1;
+            return Ok(true);
+        }
         let pair_key = relation_pair_key(&page_ids);
         anyhow::ensure!(
             self.ledger.eligible(&pair_key),
@@ -378,11 +753,6 @@ impl RuntimeMaintainer {
         if self.related_pair_exists(&page_ids, &revision_ids).await? {
             self.ledger.record(
                 pair_key,
-                "already_related",
-                self.config.relation.retry_after_seconds,
-            );
-            self.ledger.record(
-                window_key,
                 "already_related",
                 self.config.relation.retry_after_seconds,
             );
@@ -407,22 +777,16 @@ impl RuntimeMaintainer {
         } else {
             report.relations_proposed += 1;
         }
-        self.ledger.record(
-            pair_key,
-            if self.config.applies_changes() {
-                "related"
-            } else {
-                "observed_relation"
-            },
-            self.config.relation.retry_after_seconds,
-        );
+        let outcome = if self.config.applies_changes() {
+            "related"
+        } else {
+            "observed_relation"
+        };
+        self.ledger
+            .record(pair_key, outcome, self.config.relation.retry_after_seconds);
         self.ledger.record(
             window_key,
-            if self.config.applies_changes() {
-                "related"
-            } else {
-                "observed_relation"
-            },
+            outcome,
             self.config.relation.retry_after_seconds,
         );
         Ok(true)
@@ -433,7 +797,17 @@ impl RuntimeMaintainer {
         inventory: &[pcp_store::DurablePageInventoryItem],
         report: &mut MaintenanceCycleReport,
     ) -> Result<bool> {
-        let Some(candidates) = packing_candidate_window(inventory, &self.config.packing) else {
+        let Some(candidates) = packing_candidate_windows(inventory, &self.config.packing)
+            .into_iter()
+            .find(|pages| {
+                self.ledger.eligible(&selection_window_key(
+                    &pages
+                        .iter()
+                        .map(|page| page.page_id.clone())
+                        .collect::<Vec<_>>(),
+                ))
+            })
+        else {
             return Ok(false);
         };
         let routing_by_id = candidates
@@ -487,35 +861,51 @@ impl RuntimeMaintainer {
             ),
         };
         let unique = page_ids.iter().collect::<std::collections::HashSet<_>>();
-        anyhow::ensure!(
-            unique.len() == page_ids.len()
-                && (2..=self.config.packing.max_pages).contains(&page_ids.len()),
-            "semantic worker selected an invalid number of unique packing Pages"
-        );
-        anyhow::ensure!(
-            page_ids
+        if unique.len() != page_ids.len()
+            || !(2..=self.config.packing.max_pages).contains(&page_ids.len())
+            || !page_ids
                 .iter()
-                .all(|page_id| routing_by_id.contains_key(page_id)),
-            "semantic worker selected a Page outside the offered packing window"
-        );
+                .all(|page_id| routing_by_id.contains_key(page_id))
+        {
+            self.ledger.record(
+                selection_key,
+                "invalid_worker_selection",
+                PACKING_RETRY_AFTER_SECONDS,
+            );
+            report.deferred += 1;
+            return Ok(true);
+        }
         let positions = page_ids
             .iter()
             .map(|page_id| routing_by_id[page_id].0)
             .collect::<Vec<_>>();
-        anyhow::ensure!(
-            positions.windows(2).all(|pair| pair[0] + 1 == pair[1]),
-            "semantic worker must return an ordered contiguous packing subset"
-        );
+        if !positions.windows(2).all(|pair| pair[0] + 1 == pair[1]) {
+            self.ledger.record(
+                selection_key,
+                "invalid_worker_selection",
+                PACKING_RETRY_AFTER_SECONDS,
+            );
+            report.deferred += 1;
+            return Ok(true);
+        }
         let key = packing_key(&page_ids);
-        anyhow::ensure!(
-            self.ledger.eligible(&key)
-                && !excluded_candidate_sets.iter().any(|set| {
-                    let mut set = set.clone();
-                    set.sort();
-                    set == page_ids
-                }),
-            "semantic worker selected a packing candidate still in cooldown"
-        );
+        let mut normalized_page_ids = page_ids.clone();
+        normalized_page_ids.sort();
+        if !self.ledger.eligible(&key)
+            || excluded_candidate_sets.iter().any(|set| {
+                let mut set = set.clone();
+                set.sort();
+                set == normalized_page_ids
+            })
+        {
+            self.ledger.record(
+                selection_key,
+                "reselected_excluded_pack",
+                PACKING_RETRY_AFTER_SECONDS,
+            );
+            report.deferred += 1;
+            return Ok(true);
+        }
         if self.config.applies_changes() {
             self.client
                 .pack_pages(PackPagesRequest {
@@ -749,14 +1139,54 @@ impl RuntimeMaintainer {
             })
         }))
     }
+
+    async fn existing_related_pairs(
+        &self,
+        candidates: &[pcp_store::DurablePageInventoryItem],
+    ) -> Result<Vec<[String; 2]>> {
+        let offered = candidates
+            .iter()
+            .map(|page| page.page_id.clone())
+            .collect::<BTreeSet<_>>();
+        let revision_ids = candidates
+            .iter()
+            .map(|page| page.revision_id.clone())
+            .collect::<Vec<_>>();
+        let mut pages = Vec::with_capacity(revision_ids.len());
+        for chunk in revision_ids.chunks(MAINTENANCE_READ_BATCH_PAGES) {
+            pages.extend(
+                self.client
+                    .read_pages(ReadPagesRequest {
+                        page_ids: Vec::new(),
+                        revision_ids: chunk.to_vec(),
+                        projections: vec![Projection::Manifest, Projection::Relations],
+                        max_chars: 1,
+                    })
+                    .await?,
+            );
+        }
+        let mut pairs = BTreeSet::new();
+        for relation in pages.iter().flat_map(|page| &page.relations) {
+            if relation.relation_type != "related_to"
+                || !offered.contains(&relation.from_page_id)
+                || !offered.contains(&relation.to_page_id)
+            {
+                continue;
+            }
+            let mut pair = [relation.from_page_id.clone(), relation.to_page_id.clone()];
+            pair.sort();
+            pairs.insert(pair);
+        }
+        Ok(pairs.into_iter().collect())
+    }
 }
 
-fn relation_candidate_window(
+fn relation_candidate_windows(
     inventory: &[pcp_store::DurablePageInventoryItem],
     config: &RelationMaintenanceConfig,
     packing_enabled: bool,
-) -> Vec<pcp_store::DurablePageInventoryItem> {
-    inventory
+) -> Vec<Vec<pcp_store::DurablePageInventoryItem>> {
+    let eligible = inventory
         .iter()
         .filter(|page| {
             let unpacked_stream_leaf = packing_enabled
@@ -773,9 +1203,23 @@ fn relation_candidate_window(
                 && has_semantic_input
                 && !excluded_kind(&page.kind, &config.excluded_page_kinds)
         })
-        .take(config.candidate_window)
         .cloned()
-        .collect()
+        .collect::<Vec<_>>();
+    let window_size = config.candidate_window.max(2);
+    let stride = (window_size / 2).max(1);
+    let mut windows = Vec::new();
+    let mut start = 0;
+    while start < eligible.len() {
+        let end = start.saturating_add(window_size).min(eligible.len());
+        if end.saturating_sub(start) >= 2 {
+            windows.push(eligible[start..end].to_vec());
+        }
+        if end == eligible.len() {
+            break;
+        }
+        start = start.saturating_add(stride);
+    }
+    windows
 }
 
 fn relation_window_key(revision_ids: &[String]) -> String {
@@ -789,18 +1233,236 @@ fn relation_pair_key(page_ids: &[String; 2]) -> String {
     format!("relation_pair:{},{}", page_ids[0], page_ids[1])
 }
 
-fn packing_candidate_window(
+fn connected_relation_pairs(
+    offered_page_ids: &BTreeSet<String>,
+    relation_edges: &[[String; 2]],
+) -> Vec<[String; 2]> {
+    let mut components = offered_page_ids
+        .iter()
+        .map(|page_id| (page_id.clone(), page_id.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for edge in relation_edges {
+        if !offered_page_ids.contains(&edge[0]) || !offered_page_ids.contains(&edge[1]) {
+            continue;
+        }
+        let left = components[&edge[0]].clone();
+        let right = components[&edge[1]].clone();
+        if left == right {
+            continue;
+        }
+        let (keep, replace) = if left < right {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        for component in components.values_mut() {
+            if *component == replace {
+                *component = keep.clone();
+            }
+        }
+    }
+
+    let page_ids = offered_page_ids.iter().collect::<Vec<_>>();
+    let mut connected = Vec::new();
+    for (index, first) in page_ids.iter().enumerate() {
+        for second in &page_ids[index + 1..] {
+            if components[*first] == components[*second] {
+                connected.push([(*first).clone(), (*second).clone()]);
+            }
+        }
+    }
+    connected
+}
+
+fn packing_scan_id(
+    windows: &[Vec<pcp_store::DurablePageInventoryItem>],
+    config: &PackingMaintenanceConfig,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(config.max_pages.to_le_bytes());
+    digest.update(config.max_input_chars.to_le_bytes());
+    for window in windows {
+        digest.update(packing_scan_group_id(window).as_bytes());
+        digest.update([0]);
+    }
+    let encoded = format!("{:x}", digest.finalize());
+    format!("mps_{}", &encoded[..24])
+}
+
+fn packing_scan_group_id(window: &[pcp_store::DurablePageInventoryItem]) -> String {
+    let mut digest = Sha256::new();
+    for page in window {
+        digest.update(page.page_id.as_bytes());
+        digest.update([0]);
+        digest.update(page.revision_id.as_bytes());
+        digest.update([0]);
+    }
+    let encoded = format!("{:x}", digest.finalize());
+    format!("mpg_{}", &encoded[..24])
+}
+
+fn packing_scan_group(window: &[pcp_store::DurablePageInventoryItem]) -> MaintenancePackScanGroup {
+    let first = window.first().expect("packing group is non-empty");
+    let last = window.last().expect("packing group is non-empty");
+    let first_span = first
+        .source_span
+        .as_ref()
+        .expect("packing group has sourceSpan");
+    let last_span = last
+        .source_span
+        .as_ref()
+        .expect("packing group has sourceSpan");
+    MaintenancePackScanGroup {
+        group_id: packing_scan_group_id(window),
+        namespace: first.namespace.clone(),
+        kind: first.kind.clone(),
+        source_span: SourceSpan {
+            stream_id: first_span.stream_id.clone(),
+            start: first_span.start,
+            end: last_span.end,
+        },
+        page_count: window.len(),
+        content_chars: window.iter().map(|page| page.content_chars).sum(),
+        extends_existing_pack: window
+            .iter()
+            .any(|page| page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE)),
+    }
+}
+
+fn validate_packing_analysis_batch(
+    windows: &[Vec<pcp_store::DurablePageInventoryItem>],
+    selected_sets: Vec<Vec<String>>,
+    max_pages: usize,
+) -> Result<(Vec<MaintenancePackCandidate>, usize)> {
+    anyhow::ensure!(
+        !selected_sets.is_empty(),
+        "semantic worker returned an empty packing candidate list"
+    );
+    let mut used_page_ids = BTreeSet::new();
+    let mut represented_groups = BTreeSet::new();
+    let mut candidates = Vec::with_capacity(selected_sets.len());
+
+    for page_ids in selected_sets {
+        anyhow::ensure!(
+            page_ids
+                .iter()
+                .all(|page_id| used_page_ids.insert(page_id.clone())),
+            "semantic worker returned overlapping packing candidates"
+        );
+        let matches = windows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, window)| {
+                select_packing_items(window, &page_ids, max_pages).map(|pages| (index, pages))
+            })
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            matches.len() == 1,
+            "semantic worker returned a packing candidate outside one supplied group"
+        );
+        let (group_index, pages) = matches.into_iter().next().expect("one matching group");
+        represented_groups.insert(group_index);
+        candidates.push(build_pack_candidate(&pages));
+    }
+    Ok((candidates, represented_groups.len()))
+}
+
+fn select_packing_items<'a>(
+    candidates: &'a [pcp_store::DurablePageInventoryItem],
+    page_ids: &[String],
+    max_pages: usize,
+) -> Option<Vec<&'a pcp_store::DurablePageInventoryItem>> {
+    if !(2..=max_pages).contains(&page_ids.len()) {
+        return None;
+    }
+    let positions = page_ids
+        .iter()
+        .map(|page_id| {
+            candidates
+                .iter()
+                .position(|candidate| candidate.page_id == *page_id)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if !positions.windows(2).all(|pair| pair[0] + 1 == pair[1]) {
+        return None;
+    }
+    Some(
+        positions
+            .into_iter()
+            .map(|position| &candidates[position])
+            .collect(),
+    )
+}
+
+fn build_pack_candidate(
+    pages: &[&pcp_store::DurablePageInventoryItem],
+) -> MaintenancePackCandidate {
+    let first = pages.first().expect("packing selection is non-empty");
+    let last = pages.last().expect("packing selection is non-empty");
+    let first_span = first
+        .source_span
+        .as_ref()
+        .expect("packing candidate has sourceSpan");
+    let last_span = last
+        .source_span
+        .as_ref()
+        .expect("packing candidate has sourceSpan");
+    let source_span = SourceSpan {
+        stream_id: first_span.stream_id.clone(),
+        start: first_span.start,
+        end: last_span.end,
+    };
+    let mut digest = Sha256::new();
+    for page in pages {
+        digest.update(page.page_id.as_bytes());
+        digest.update([0]);
+        digest.update(page.revision_id.as_bytes());
+        digest.update([0]);
+    }
+    let encoded = format!("{:x}", digest.finalize());
+    let candidate_id = format!("mpc_{}", &encoded[..24]);
+    MaintenancePackCandidate {
+        candidate_id,
+        namespace: first.namespace.clone(),
+        kind: first.kind.clone(),
+        resulting_entry_count: source_span
+            .end
+            .saturating_sub(source_span.start)
+            .saturating_add(1),
+        source_span,
+        input_page_count: pages.len(),
+        content_chars: pages.iter().map(|page| page.content_chars).sum::<u64>(),
+        extends_existing_pack: pages
+            .iter()
+            .any(|page| page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE)),
+        pages: pages
+            .iter()
+            .map(|page| MaintenancePackInput {
+                page_id: page.page_id.clone(),
+                revision_id: page.revision_id.clone(),
+                source_span: page
+                    .source_span
+                    .clone()
+                    .expect("packing candidate has sourceSpan"),
+                media_type: page.media_type.clone(),
+                preview: page.snippet.chars().take(PACKING_ROUTING_CHARS).collect(),
+            })
+            .collect(),
+    }
+}
+
+fn packing_candidate_windows(
     inventory: &[pcp_store::DurablePageInventoryItem],
     config: &PackingMaintenanceConfig,
-) -> Option<Vec<pcp_store::DurablePageInventoryItem>> {
+) -> Vec<Vec<pcp_store::DurablePageInventoryItem>> {
     let eligible = |page: &&pcp_store::DurablePageInventoryItem| {
         let packed = page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE);
         let valid_shape = if packed {
             page.mutability == PageMutability::Revisioned
         } else {
             page.mutability == PageMutability::Sealed
+                && !page.packing_protected
                 && page.summary_revision_id.is_none()
-                && page.relation_types.is_empty()
         };
         valid_shape
             && page.source_span.is_some()
@@ -808,8 +1470,11 @@ fn packing_candidate_window(
             && !excluded_kind(&page.kind, &config.excluded_page_kinds)
     };
     let mut visited = std::collections::HashSet::new();
+    let mut windows = Vec::new();
     for seed in inventory.iter().filter(eligible) {
-        let span = seed.source_span.as_ref()?;
+        let Some(span) = seed.source_span.as_ref() else {
+            continue;
+        };
         let key = (
             seed.namespace.clone(),
             seed.kind.clone(),
@@ -834,17 +1499,12 @@ fn packing_candidate_window(
                 .start
         });
 
-        let mut best = Vec::new();
         let mut run = Vec::new();
         let mut run_chars = 0_u64;
         let mut run_anchors = 0_usize;
         for page in group {
             if page.content_chars > u64::from(config.max_input_chars) {
-                if run.len() >= 2 {
-                    best = std::mem::take(&mut run);
-                } else {
-                    run.clear();
-                }
+                push_packing_window(&mut windows, &mut run, config.max_pages);
                 run_chars = 0;
                 run_anchors = 0;
                 continue;
@@ -862,11 +1522,7 @@ fn packing_candidate_window(
                     <= u64::from(config.max_input_chars)
                 && run_anchors + usize::from(page_is_anchor) <= 1;
             if !contiguous || !fits {
-                if run.len() >= 2 {
-                    best = std::mem::take(&mut run);
-                } else {
-                    run.clear();
-                }
+                push_packing_window(&mut windows, &mut run, config.max_pages);
                 run_chars = 0;
                 run_anchors = 0;
             }
@@ -874,15 +1530,22 @@ fn packing_candidate_window(
             run_anchors += usize::from(page_is_anchor);
             run.push(page);
         }
-        if run.len() >= 2 {
-            best = run;
-        }
-        if best.len() >= 2 {
-            best.truncate(PACKING_CANDIDATE_WINDOW.min(config.max_pages));
-            return Some(best);
-        }
+        push_packing_window(&mut windows, &mut run, config.max_pages);
     }
-    None
+    windows
+}
+
+fn push_packing_window(
+    windows: &mut Vec<Vec<pcp_store::DurablePageInventoryItem>>,
+    run: &mut Vec<pcp_store::DurablePageInventoryItem>,
+    max_pages: usize,
+) {
+    if run.len() >= 2 {
+        run.truncate(PACKING_CANDIDATE_WINDOW.min(max_pages));
+        windows.push(std::mem::take(run));
+    } else {
+        run.clear();
+    }
 }
 
 fn normalize_milestones(
@@ -915,18 +1578,20 @@ fn excluded_kind(kind: &str, excluded: &[String]) -> bool {
     excluded.iter().any(|excluded| excluded == kind)
 }
 
-fn ensure_nonempty_worker_content(content: &str) -> Result<()> {
+fn normalize_worker_summary(content: String) -> Result<String> {
+    let content = content.trim();
     anyhow::ensure!(
-        !content.trim().is_empty(),
-        "semantic maintenance worker returned empty content"
+        !content.is_empty() && content.chars().count() <= MAX_MAINTENANCE_SUMMARY_CHARS,
+        "semantic maintenance worker returned an invalid Summary"
     );
-    Ok(())
+    Ok(content.to_owned())
 }
 
 fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
     match response {
         MaintenanceWorkerResponse::WriteSummary { .. } => "write_summary",
         MaintenanceWorkerResponse::Candidate { .. } => "candidate",
+        MaintenanceWorkerResponse::PackingCandidates { .. } => "packing_candidates",
         MaintenanceWorkerResponse::Relate { .. } => "relate",
         MaintenanceWorkerResponse::Retain { .. } => "retain",
         MaintenanceWorkerResponse::NoCandidate => "no_candidate",
