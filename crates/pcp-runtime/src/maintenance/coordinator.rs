@@ -160,9 +160,8 @@ pub struct ApplyMaintenancePackRequest {
     pub pages: Vec<PageRevisionRef>,
 }
 
-const PACKING_CANDIDATE_WINDOW: usize = 32;
-const PACKING_ROUTING_CHARS: usize = 480;
-const PACKING_GROUPS_PER_MODEL_CALL: usize = 8;
+const PACKING_PREVIEW_CHARS: usize = 480;
+const PACKING_GROUPS_PER_MODEL_CALL: usize = 2;
 const PACKING_RETRY_AFTER_SECONDS: u64 = 86_400;
 const MAINTENANCE_READ_BATCH_PAGES: usize = 20;
 const MAX_MAINTENANCE_SUMMARY_CHARS: usize = 1_200;
@@ -336,7 +335,12 @@ impl RuntimeMaintainer {
                 group_id: packing_scan_group_id(window),
                 pages: window
                     .iter()
-                    .map(|page| PackingCandidatePage::from_inventory(page, PACKING_ROUTING_CHARS))
+                    .map(|page| {
+                        PackingCandidatePage::from_inventory(
+                            page,
+                            self.config.packing.routing_chars_per_page,
+                        )
+                    })
                     .collect(),
             })
             .collect();
@@ -356,11 +360,8 @@ impl RuntimeMaintainer {
         {
             Ok(MaintenanceWorkerResponse::PackingCandidates {
                 candidates: selected_sets,
-            }) => match validate_packing_analysis_batch(
-                batch,
-                selected_sets,
-                self.config.packing.max_pages,
-            ) {
+            }) => match validate_packing_analysis_batch(batch, selected_sets, &self.config.packing)
+            {
                 Ok((mut selected, represented_groups)) => {
                     candidates.append(&mut selected);
                     no_candidate_groups = batch.len().saturating_sub(represented_groups) as u32;
@@ -422,31 +423,7 @@ impl RuntimeMaintainer {
             "maintenance Pack optimization requires apply mode"
         );
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
-        let requested_ids = request
-            .pages
-            .iter()
-            .map(|page| page.page_id.clone())
-            .collect::<Vec<_>>();
-        let candidate = packing_candidate_windows(&inventory, &self.config.packing)
-            .into_iter()
-            .find_map(|window| {
-                let selected =
-                    select_packing_items(&window, &requested_ids, self.config.packing.max_pages)?;
-                let candidate = build_pack_candidate(&selected);
-                (candidate.candidate_id == request.candidate_id).then_some(candidate)
-            })
-            .context("maintenance Pack candidate is stale or no longer eligible")?;
-        anyhow::ensure!(
-            candidate
-                .pages
-                .iter()
-                .zip(&request.pages)
-                .all(|(candidate, requested)| {
-                    candidate.page_id == requested.page_id
-                        && candidate.revision_id == requested.revision_id
-                }),
-            "maintenance Pack candidate revisions changed after scanning"
-        );
+        let candidate = validate_pack_application(&inventory, &request, &self.config.packing)?;
 
         self.client
             .pack_pages(PackPagesRequest {
@@ -639,20 +616,19 @@ impl RuntimeMaintainer {
         inventory: &[pcp_store::DurablePageInventoryItem],
         report: &mut MaintenanceCycleReport,
     ) -> Result<bool> {
-        let Some(candidates) = relation_candidate_windows(
-            inventory,
-            &self.config.relation,
-            self.config.packing.enabled,
-        )
-        .into_iter()
-        .find(|pages| {
-            self.ledger.eligible(&relation_window_key(
-                &pages
-                    .iter()
-                    .map(|page| page.revision_id.clone())
-                    .collect::<Vec<_>>(),
-            ))
-        }) else {
+        let pending_packing_page_ids = self.pending_packing_page_ids(inventory);
+        let Some(candidates) =
+            relation_candidate_windows(inventory, &self.config.relation, &pending_packing_page_ids)
+                .into_iter()
+                .find(|pages| {
+                    self.ledger.eligible(&relation_window_key(
+                        &pages
+                            .iter()
+                            .map(|page| page.revision_id.clone())
+                            .collect::<Vec<_>>(),
+                    ))
+                })
+        else {
             return Ok(false);
         };
         let offered = candidates
@@ -792,6 +768,27 @@ impl RuntimeMaintainer {
         Ok(true)
     }
 
+    fn pending_packing_page_ids(
+        &self,
+        inventory: &[pcp_store::DurablePageInventoryItem],
+    ) -> BTreeSet<String> {
+        if !self.config.packing.enabled {
+            return BTreeSet::new();
+        }
+        packing_candidate_windows(inventory, &self.config.packing)
+            .into_iter()
+            .filter(|pages| {
+                self.ledger.eligible(&selection_window_key(
+                    &pages
+                        .iter()
+                        .map(|page| page.page_id.clone())
+                        .collect::<Vec<_>>(),
+                ))
+            })
+            .flat_map(|pages| pages.into_iter().map(|page| page.page_id))
+            .collect()
+    }
+
     async fn run_packing_job(
         &mut self,
         inventory: &[pcp_store::DurablePageInventoryItem],
@@ -812,12 +809,16 @@ impl RuntimeMaintainer {
         };
         let routing_by_id = candidates
             .iter()
-            .enumerate()
-            .map(|(index, page)| (page.page_id.clone(), (index, page.revision_id.clone())))
+            .map(|page| (page.page_id.clone(), page.revision_id.clone()))
             .collect::<HashMap<_, _>>();
         let routing_pages = candidates
             .iter()
-            .map(|page| PackingCandidatePage::from_inventory(page, PACKING_ROUTING_CHARS))
+            .map(|page| {
+                PackingCandidatePage::from_inventory(
+                    page,
+                    self.config.packing.routing_chars_per_page,
+                )
+            })
             .collect::<Vec<_>>();
         if routing_pages.len() < 2 {
             return Ok(false);
@@ -860,26 +861,7 @@ impl RuntimeMaintainer {
                 response_name(&other)
             ),
         };
-        let unique = page_ids.iter().collect::<std::collections::HashSet<_>>();
-        if unique.len() != page_ids.len()
-            || !(2..=self.config.packing.max_pages).contains(&page_ids.len())
-            || !page_ids
-                .iter()
-                .all(|page_id| routing_by_id.contains_key(page_id))
-        {
-            self.ledger.record(
-                selection_key,
-                "invalid_worker_selection",
-                PACKING_RETRY_AFTER_SECONDS,
-            );
-            report.deferred += 1;
-            return Ok(true);
-        }
-        let positions = page_ids
-            .iter()
-            .map(|page_id| routing_by_id[page_id].0)
-            .collect::<Vec<_>>();
-        if !positions.windows(2).all(|pair| pair[0] + 1 == pair[1]) {
+        if select_packing_items(&candidates, &page_ids, &self.config.packing).is_none() {
             self.ledger.record(
                 selection_key,
                 "invalid_worker_selection",
@@ -913,7 +895,7 @@ impl RuntimeMaintainer {
                         .iter()
                         .map(|page_id| PageRevisionRef {
                             page_id: page_id.clone(),
-                            revision_id: routing_by_id[page_id].1.clone(),
+                            revision_id: routing_by_id[page_id].clone(),
                         })
                         .collect(),
                     idempotency_key: Some(format!(
@@ -1184,22 +1166,18 @@ impl RuntimeMaintainer {
 fn relation_candidate_windows(
     inventory: &[pcp_store::DurablePageInventoryItem],
     config: &RelationMaintenanceConfig,
-    packing_enabled: bool,
+    pending_packing_page_ids: &BTreeSet<String>,
 ) -> Vec<Vec<pcp_store::DurablePageInventoryItem>> {
     let eligible = inventory
         .iter()
         .filter(|page| {
-            let unpacked_stream_leaf = packing_enabled
-                && page.mutability == PageMutability::Sealed
-                && page.source_span.is_some()
-                && page.media_type.as_deref() != Some(PACKED_PAGE_MEDIA_TYPE);
             let has_semantic_input = page.content_chars > 0
                 || page
                     .summary
                     .as_deref()
                     .is_some_and(|value| !value.trim().is_empty())
                 || page.facets.is_some();
-            !unpacked_stream_leaf
+            !pending_packing_page_ids.contains(&page.page_id)
                 && has_semantic_input
                 && !excluded_kind(&page.kind, &config.excluded_page_kinds)
         })
@@ -1281,6 +1259,8 @@ fn packing_scan_id(
     let mut digest = Sha256::new();
     digest.update(config.max_pages.to_le_bytes());
     digest.update(config.max_input_chars.to_le_bytes());
+    digest.update(config.effective_analysis_window_pages().to_le_bytes());
+    digest.update(config.routing_chars_per_page.to_le_bytes());
     for window in windows {
         digest.update(packing_scan_group_id(window).as_bytes());
         digest.update([0]);
@@ -1332,7 +1312,7 @@ fn packing_scan_group(window: &[pcp_store::DurablePageInventoryItem]) -> Mainten
 fn validate_packing_analysis_batch(
     windows: &[Vec<pcp_store::DurablePageInventoryItem>],
     selected_sets: Vec<Vec<String>>,
-    max_pages: usize,
+    config: &PackingMaintenanceConfig,
 ) -> Result<(Vec<MaintenancePackCandidate>, usize)> {
     anyhow::ensure!(
         !selected_sets.is_empty(),
@@ -1353,7 +1333,7 @@ fn validate_packing_analysis_batch(
             .iter()
             .enumerate()
             .filter_map(|(index, window)| {
-                select_packing_items(window, &page_ids, max_pages).map(|pages| (index, pages))
+                select_packing_items(window, &page_ids, config).map(|pages| (index, pages))
             })
             .collect::<Vec<_>>();
         anyhow::ensure!(
@@ -1370,9 +1350,9 @@ fn validate_packing_analysis_batch(
 fn select_packing_items<'a>(
     candidates: &'a [pcp_store::DurablePageInventoryItem],
     page_ids: &[String],
-    max_pages: usize,
+    config: &PackingMaintenanceConfig,
 ) -> Option<Vec<&'a pcp_store::DurablePageInventoryItem>> {
-    if !(2..=max_pages).contains(&page_ids.len()) {
+    if !(2..=config.max_pages).contains(&page_ids.len()) {
         return None;
     }
     let positions = page_ids
@@ -1386,12 +1366,103 @@ fn select_packing_items<'a>(
     if !positions.windows(2).all(|pair| pair[0] + 1 == pair[1]) {
         return None;
     }
-    Some(
-        positions
-            .into_iter()
-            .map(|position| &candidates[position])
-            .collect(),
-    )
+    let selected = positions
+        .into_iter()
+        .map(|position| &candidates[position])
+        .collect::<Vec<_>>();
+    let content_chars = selected.iter().fold(0_u64, |total, page| {
+        total.saturating_add(page.content_chars)
+    });
+    let packed_pages = selected
+        .iter()
+        .filter(|page| page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE))
+        .count();
+    (content_chars <= u64::from(config.max_input_chars) && packed_pages <= 1).then_some(selected)
+}
+
+fn validate_pack_application<'a>(
+    inventory: &'a [pcp_store::DurablePageInventoryItem],
+    request: &ApplyMaintenancePackRequest,
+    config: &PackingMaintenanceConfig,
+) -> Result<MaintenancePackCandidate> {
+    anyhow::ensure!(
+        (2..=config.max_pages).contains(&request.pages.len()),
+        "maintenance Pack candidate is stale or no longer eligible"
+    );
+    let mut unique_page_ids = BTreeSet::new();
+    anyhow::ensure!(
+        request
+            .pages
+            .iter()
+            .all(|page| unique_page_ids.insert(page.page_id.as_str())),
+        "maintenance Pack candidate contains duplicate Pages"
+    );
+    let current_by_id = inventory
+        .iter()
+        .map(|page| (page.page_id.as_str(), page))
+        .collect::<HashMap<_, _>>();
+    let mut selected = Vec::with_capacity(request.pages.len());
+    for requested in &request.pages {
+        let current = current_by_id
+            .get(requested.page_id.as_str())
+            .copied()
+            .context("maintenance Pack candidate is stale or no longer eligible")?;
+        anyhow::ensure!(
+            current.revision_id == requested.revision_id,
+            "maintenance Pack candidate revisions changed after analysis"
+        );
+        anyhow::ensure!(
+            packing_page_eligible(current, config),
+            "maintenance Pack candidate is stale or no longer eligible"
+        );
+        selected.push(current);
+    }
+
+    let first = selected.first().expect("validated Pack has Pages");
+    let first_span = first
+        .source_span
+        .as_ref()
+        .expect("eligible Pack Page has sourceSpan");
+    anyhow::ensure!(
+        selected.iter().all(|page| {
+            let span = page
+                .source_span
+                .as_ref()
+                .expect("eligible Pack Page has sourceSpan");
+            page.namespace == first.namespace
+                && page.kind == first.kind
+                && span.stream_id == first_span.stream_id
+        }) && selected.windows(2).all(|pair| {
+            let previous = pair[0]
+                .source_span
+                .as_ref()
+                .expect("eligible Pack Page has sourceSpan");
+            let current = pair[1]
+                .source_span
+                .as_ref()
+                .expect("eligible Pack Page has sourceSpan");
+            previous.end.checked_add(1) == Some(current.start)
+        }),
+        "maintenance Pack candidate is stale or no longer eligible"
+    );
+    let content_chars = selected.iter().fold(0_u64, |total, page| {
+        total.saturating_add(page.content_chars)
+    });
+    let packed_pages = selected
+        .iter()
+        .filter(|page| page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE))
+        .count();
+    anyhow::ensure!(
+        content_chars <= u64::from(config.max_input_chars) && packed_pages <= 1,
+        "maintenance Pack candidate is stale or no longer eligible"
+    );
+
+    let candidate = build_pack_candidate(&selected);
+    anyhow::ensure!(
+        candidate.candidate_id == request.candidate_id,
+        "maintenance Pack candidate identity no longer matches the analyzed Pages"
+    );
+    Ok(candidate)
 }
 
 fn build_pack_candidate(
@@ -1445,7 +1516,7 @@ fn build_pack_candidate(
                     .clone()
                     .expect("packing candidate has sourceSpan"),
                 media_type: page.media_type.clone(),
-                preview: page.snippet.chars().take(PACKING_ROUTING_CHARS).collect(),
+                preview: page.snippet.chars().take(PACKING_PREVIEW_CHARS).collect(),
             })
             .collect(),
     }
@@ -1455,23 +1526,12 @@ fn packing_candidate_windows(
     inventory: &[pcp_store::DurablePageInventoryItem],
     config: &PackingMaintenanceConfig,
 ) -> Vec<Vec<pcp_store::DurablePageInventoryItem>> {
-    let eligible = |page: &&pcp_store::DurablePageInventoryItem| {
-        let packed = page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE);
-        let valid_shape = if packed {
-            page.mutability == PageMutability::Revisioned
-        } else {
-            page.mutability == PageMutability::Sealed
-                && !page.packing_protected
-                && page.summary_revision_id.is_none()
-        };
-        valid_shape
-            && page.source_span.is_some()
-            && page.content_chars > 0
-            && !excluded_kind(&page.kind, &config.excluded_page_kinds)
-    };
     let mut visited = std::collections::HashSet::new();
     let mut windows = Vec::new();
-    for seed in inventory.iter().filter(eligible) {
+    for seed in inventory
+        .iter()
+        .filter(|page| packing_page_eligible(page, config))
+    {
         let Some(span) = seed.source_span.as_ref() else {
             continue;
         };
@@ -1485,7 +1545,7 @@ fn packing_candidate_windows(
         }
         let mut group = inventory
             .iter()
-            .filter(eligible)
+            .filter(|page| packing_page_eligible(page, config))
             .filter(|page| {
                 let span = page.source_span.as_ref().expect("eligible sourceSpan");
                 page.namespace == key.0 && page.kind == key.1 && span.stream_id == key.2
@@ -1500,16 +1560,11 @@ fn packing_candidate_windows(
         });
 
         let mut run = Vec::new();
-        let mut run_chars = 0_u64;
-        let mut run_anchors = 0_usize;
         for page in group {
             if page.content_chars > u64::from(config.max_input_chars) {
-                push_packing_window(&mut windows, &mut run, config.max_pages);
-                run_chars = 0;
-                run_anchors = 0;
+                push_packing_window(&mut windows, &mut run);
                 continue;
             }
-            let page_is_anchor = page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE);
             let contiguous =
                 run.last()
                     .is_none_or(|previous: &pcp_store::DurablePageInventoryItem| {
@@ -1517,31 +1572,40 @@ fn packing_candidate_windows(
                         let current = page.source_span.as_ref().expect("eligible sourceSpan");
                         previous.end.checked_add(1) == Some(current.start)
                     });
-            let fits = run.len() < config.max_pages
-                && run_chars.saturating_add(page.content_chars)
-                    <= u64::from(config.max_input_chars)
-                && run_anchors + usize::from(page_is_anchor) <= 1;
+            let fits = run.len() < config.effective_analysis_window_pages();
             if !contiguous || !fits {
-                push_packing_window(&mut windows, &mut run, config.max_pages);
-                run_chars = 0;
-                run_anchors = 0;
+                push_packing_window(&mut windows, &mut run);
             }
-            run_chars = run_chars.saturating_add(page.content_chars);
-            run_anchors += usize::from(page_is_anchor);
             run.push(page);
         }
-        push_packing_window(&mut windows, &mut run, config.max_pages);
+        push_packing_window(&mut windows, &mut run);
     }
     windows
+}
+
+fn packing_page_eligible(
+    page: &pcp_store::DurablePageInventoryItem,
+    config: &PackingMaintenanceConfig,
+) -> bool {
+    let packed = page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE);
+    let valid_shape = if packed {
+        page.mutability == PageMutability::Revisioned
+    } else {
+        page.mutability == PageMutability::Sealed
+            && !page.packing_protected
+            && page.summary_revision_id.is_none()
+    };
+    valid_shape
+        && page.source_span.is_some()
+        && page.content_chars > 0
+        && !excluded_kind(&page.kind, &config.excluded_page_kinds)
 }
 
 fn push_packing_window(
     windows: &mut Vec<Vec<pcp_store::DurablePageInventoryItem>>,
     run: &mut Vec<pcp_store::DurablePageInventoryItem>,
-    max_pages: usize,
 ) {
     if run.len() >= 2 {
-        run.truncate(PACKING_CANDIDATE_WINDOW.min(max_pages));
         windows.push(std::mem::take(run));
     } else {
         run.clear();

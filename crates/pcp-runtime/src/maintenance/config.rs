@@ -204,6 +204,8 @@ pub struct PackingMaintenanceConfig {
     pub enabled: bool,
     pub max_pages: usize,
     pub max_input_chars: u32,
+    pub analysis_window_pages: usize,
+    pub routing_chars_per_page: usize,
     pub excluded_page_kinds: Vec<String>,
 }
 
@@ -261,6 +263,8 @@ impl Default for PackingMaintenanceConfig {
             enabled: false,
             max_pages: 8,
             max_input_chars: 64_000,
+            analysis_window_pages: 32,
+            routing_chars_per_page: 800,
             excluded_page_kinds: vec![
                 "pcp_summary".to_owned(),
                 "summary_projection".to_owned(),
@@ -268,6 +272,12 @@ impl Default for PackingMaintenanceConfig {
                 "tombstone".to_owned(),
             ],
         }
+    }
+}
+
+impl PackingMaintenanceConfig {
+    pub fn effective_analysis_window_pages(&self) -> usize {
+        self.analysis_window_pages.max(self.max_pages)
     }
 }
 
@@ -327,6 +337,14 @@ impl MaintenanceConfig {
         anyhow::ensure!(
             !self.packing.enabled || self.packing.max_input_chars > 0,
             "PCP packing max_input_chars must be positive"
+        );
+        anyhow::ensure!(
+            !self.packing.enabled || (2..=64).contains(&self.packing.analysis_window_pages),
+            "PCP packing analysis_window_pages must be between 2 and 64"
+        );
+        anyhow::ensure!(
+            !self.packing.enabled || (1..=4_096).contains(&self.packing.routing_chars_per_page),
+            "PCP packing routing_chars_per_page must be between 1 and 4096"
         );
         anyhow::ensure!(
             !self.relation.enabled || (2..=64).contains(&self.relation.candidate_window),

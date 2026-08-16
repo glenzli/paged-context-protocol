@@ -156,6 +156,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .toolbar-check input { width: 15px; min-height: 15px; margin: 0; padding: 0; }
 .maintenance-heading { gap: 18px; }
 .maintenance-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.maintenance-actions .is-loading::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 6px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: maintenance-spin .8s linear infinite; vertical-align: -1px; }
 .maintenance-scan-metrics { margin-top: 10px; }
 .maintenance-table { min-width: 900px; }
 .maintenance-table .empty { text-align: left; }
@@ -174,6 +175,10 @@ tbody tr:last-child td { border-bottom: 0; }
 .maintenance-inputs { padding-top: 4px; padding-bottom: 4px; }
 .maintenance-input { display: grid; grid-template-columns: 62px minmax(0, 1fr); gap: 9px; padding: 5px 0; border-bottom: 1px solid var(--line); }
 .maintenance-input:last-child { border-bottom: 0; }
+
+@keyframes maintenance-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) { .maintenance-actions .is-loading::before { animation: none; } }
 .maintenance-preview { display: -webkit-box; overflow: hidden; line-height: 1.4; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 input, select { min-height: 34px; border: 1px solid var(--strong-line); border-radius: 5px; background: var(--surface); color: var(--text); padding: 5px 9px; outline: none; }
 input:focus, select:focus { border-color: var(--accent); }

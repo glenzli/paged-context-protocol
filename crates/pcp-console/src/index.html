@@ -84,11 +84,9 @@
       <div class="view-heading maintenance-heading">
         <div><h2>Pack candidates</h2><span id="maintenance-status" class="muted" aria-live="polite">Not loaded</span></div>
         <div class="maintenance-actions">
-          <button id="maintenance-scan" type="button">Scan all</button>
-          <button id="maintenance-analyze" type="button" disabled>Analyze candidates</button>
-          <button id="maintenance-select-all" type="button" disabled>Select all</button>
-          <button id="maintenance-optimize" class="primary-button" type="button" disabled>Optimize selected</button>
-          <button id="maintenance-optimize-all" type="button" disabled>Optimize all</button>
+          <button id="maintenance-scan" type="button">Scan</button>
+          <button id="maintenance-analyze" type="button" disabled>Analyze</button>
+          <button id="maintenance-optimize" class="primary-button" type="button" disabled>Optimize</button>
         </div>
       </div>
       <div id="maintenance-metrics" class="metrics"></div>
@@ -99,7 +97,7 @@
       </div>
       <div class="table-wrap">
         <table class="maintenance-table">
-          <thead><tr><th aria-label="Select"></th><th>Source</th><th>Change</th><th>Inputs</th><th>Content</th></tr></thead>
+          <thead><tr><th class="maintenance-select"><input id="maintenance-select-all" type="checkbox" aria-label="Select all candidates" disabled></th><th>Source</th><th>Change</th><th>Inputs</th><th>Content</th></tr></thead>
           <tbody id="maintenance-rows"></tbody>
         </table>
       </div>

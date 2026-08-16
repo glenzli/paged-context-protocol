@@ -764,6 +764,8 @@ async fn maintenance_status(State(state): State<AppState>) -> Result<Json<Value>
             "enabled": maintenance.packing.enabled,
             "maxPages": maintenance.packing.max_pages,
             "maxInputChars": maintenance.packing.max_input_chars,
+            "analysisWindowPages": maintenance.packing.effective_analysis_window_pages(),
+            "routingCharsPerPage": maintenance.packing.routing_chars_per_page,
         },
     })))
 }

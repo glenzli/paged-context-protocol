@@ -10,7 +10,7 @@ const state = {
   overview: null,
   activeView: "overview",
   pages: { loaded: false, busy: false, cursor: null, count: 0 },
-  maintenance: { loaded: false, busy: false, status: null, scan: null, analysis: null, selected: new Set() },
+  maintenance: { loaded: false, busy: false, activity: null, status: null, scan: null, analysis: null, selected: new Set() },
   access: { loaded: false, busy: false, cursor: null, count: 0, events: [] },
   enrollment: { available: false, seenPending: new Set() },
 };
@@ -552,6 +552,7 @@ function renderMaintenanceStatus(status) {
   byId("maintenance-metrics").replaceChildren(
     metric("Runtime", status.enabled ? "Scheduled" : "Manual", status.enabled ? "positive" : "info"),
     metric("Mode", status.mode || "-"),
+    metric("Analysis window", status.packing ? `${formatNumber(status.packing.analysisWindowPages)} pages` : "-"),
     metric("Pack limit", status.packing ? `${formatNumber(status.packing.maxPages)} pages` : "-"),
     metric("Input limit", status.packing ? formatSize(status.packing.maxInputChars) : "-"),
   );
@@ -610,18 +611,27 @@ function updateMaintenanceActions() {
   const allSelected = candidateCount > 0 && selectedCount === candidateCount;
   const available = maintenanceAvailable();
   const busy = state.maintenance.busy;
+  const activity = state.maintenance.activity;
+  updateMaintenanceButton(byId("maintenance-scan"), "Scan", activity?.kind === "scan", activity);
+  updateMaintenanceButton(byId("maintenance-analyze"), "Analyze", activity?.kind === "analyze", activity);
+  updateMaintenanceButton(byId("maintenance-optimize"), "Optimize", activity?.kind === "optimize", activity);
   byId("maintenance-scan").disabled = !available || busy;
   byId("maintenance-analyze").disabled = !available || busy || !state.maintenance.scan?.candidateGroupCount;
-  byId("maintenance-select-all").disabled = busy || candidateCount === 0;
-  byId("maintenance-select-all").textContent = allSelected ? "Clear selection" : "Select all";
+  const selectAll = byId("maintenance-select-all");
+  selectAll.disabled = busy || candidateCount === 0;
+  selectAll.checked = allSelected;
+  selectAll.indeterminate = selectedCount > 0 && !allSelected;
   byId("maintenance-optimize").disabled = busy || selectedCount === 0;
-  byId("maintenance-optimize").textContent = selectedCount > 0
-    ? `Optimize selected (${selectedCount})`
-    : "Optimize selected";
-  byId("maintenance-optimize-all").disabled = busy || candidateCount === 0;
-  byId("maintenance-optimize-all").textContent = candidateCount > 0
-    ? `Optimize all (${candidateCount})`
-    : "Optimize all";
+}
+
+function updateMaintenanceButton(button, label, loading, activity) {
+  const progress = loading && activity?.total > 0
+    ? ` ${formatNumber(activity.current)} of ${formatNumber(activity.total)}`
+    : "";
+  const activeLabel = { scan: "Scanning", analyze: "Analyzing", optimize: "Optimizing" }[activity?.kind];
+  button.textContent = loading ? `${activeLabel}${progress}` : label;
+  button.classList.toggle("is-loading", loading);
+  button.setAttribute("aria-busy", loading ? "true" : "false");
 }
 
 function renderMaintenanceScan(scan) {
@@ -714,6 +724,7 @@ async function loadMaintenance({ reload = false } = {}) {
 async function scanMaintenance() {
   if (state.maintenance.busy) return;
   state.maintenance.busy = true;
+  state.maintenance.activity = { kind: "scan", current: 0, total: 0 };
   byId("maintenance-status").textContent = "Scanning all Pages";
   updateMaintenanceActions();
   try {
@@ -723,6 +734,7 @@ async function scanMaintenance() {
     showError(error);
   } finally {
     state.maintenance.busy = false;
+    state.maintenance.activity = null;
     updateMaintenanceActions();
   }
 }
@@ -732,11 +744,14 @@ async function analyzeMaintenance() {
   state.maintenance.busy = true;
   const scan = state.maintenance.scan;
   const analysis = emptyMaintenanceAnalysis(scan);
+  state.maintenance.activity = { kind: "analyze", current: 0, total: analysis.batchCount };
   byId("maintenance-status").textContent = `Preparing ${formatNumber(analysis.batchCount)} analysis batches`;
   updateMaintenanceActions();
   try {
     for (let batchIndex = 0; batchIndex < analysis.batchCount; batchIndex += 1) {
+      state.maintenance.activity.current = batchIndex + 1;
       byId("maintenance-status").textContent = `Analyzing batch ${formatNumber(batchIndex + 1)} of ${formatNumber(analysis.batchCount)}`;
+      updateMaintenanceActions();
       const batch = await maintenanceMutation("/api/maintenance/analyze", {
         scanId: scan.scanId,
         batchIndex,
@@ -752,35 +767,54 @@ async function analyzeMaintenance() {
     showError(error);
   } finally {
     state.maintenance.busy = false;
+    state.maintenance.activity = null;
     updateMaintenanceActions();
   }
 }
 
-async function optimizeMaintenanceSelection(all = false) {
+async function optimizeMaintenanceSelection() {
   if (state.maintenance.busy || !state.maintenance.analysis) return;
-  const candidates = all
-    ? state.maintenance.analysis.candidates
-    : state.maintenance.analysis.candidates.filter((candidate) => state.maintenance.selected.has(candidate.candidateId));
+  const candidates = state.maintenance.analysis.candidates
+    .filter((candidate) => state.maintenance.selected.has(candidate.candidateId));
   if (candidates.length === 0) return;
   if (!window.confirm(`Optimize ${candidates.length} Pack candidate${candidates.length === 1 ? "" : "s"}?`)) return;
 
   state.maintenance.busy = true;
-  byId("maintenance-status").textContent = "Optimizing";
+  state.maintenance.activity = { kind: "optimize", current: 0, total: candidates.length };
+  byId("maintenance-status").textContent = `Optimizing 0 of ${formatNumber(candidates.length)}`;
   updateMaintenanceActions();
+  let applied = 0;
+  const skipped = [];
   try {
-    for (const candidate of candidates) {
-      await maintenanceMutation("/api/maintenance/packs/apply", {
-        candidateId: candidate.candidateId,
-        pages: candidate.pages.map((page) => ({ pageId: page.pageId, revisionId: page.revisionId })),
-      });
+    for (const [index, candidate] of candidates.entries()) {
+      state.maintenance.activity.current = index + 1;
+      updateMaintenanceActions();
+      try {
+        await maintenanceMutation("/api/maintenance/packs/apply", {
+          candidateId: candidate.candidateId,
+          pages: candidate.pages.map((page) => ({ pageId: page.pageId, revisionId: page.revisionId })),
+        });
+        applied += 1;
+      } catch (error) {
+        skipped.push({ candidateId: candidate.candidateId, message: error.message || String(error) });
+      }
+      byId("maintenance-status").textContent = `Optimizing ${formatNumber(index + 1)} of ${formatNumber(candidates.length)} · ${formatNumber(applied)} applied · ${formatNumber(skipped.length)} skipped`;
     }
     state.maintenance.busy = false;
     await Promise.all([loadOverview(), scanMaintenance()]);
+    const outcome = `${formatNumber(applied)} applied · ${formatNumber(skipped.length)} skipped`;
+    byId("maintenance-status").textContent = skipped.length > 0
+      ? `Optimization completed · ${outcome} · skipped Pages were left unchanged`
+      : `Optimization completed · ${outcome}`;
+    if (skipped.length > 0) {
+      showError(new Error(`${skipped.length} Pack candidate${skipped.length === 1 ? " was" : "s were"} skipped. First issue: ${skipped[0].message}`));
+    }
   } catch (error) {
-    byId("maintenance-status").textContent = "Optimization stopped";
+    byId("maintenance-status").textContent = `Optimization refresh failed after ${formatNumber(applied)} applied · ${formatNumber(skipped.length)} skipped`;
     showError(error);
   } finally {
     state.maintenance.busy = false;
+    state.maintenance.activity = null;
     updateMaintenanceActions();
   }
 }
@@ -892,9 +926,8 @@ byId("technical-pages").addEventListener("change", () => {
 byId("pages-more").addEventListener("click", () => loadPages({ append: true }).catch(showError));
 byId("maintenance-scan").addEventListener("click", () => scanMaintenance().catch(showError));
 byId("maintenance-analyze").addEventListener("click", () => analyzeMaintenance().catch(showError));
-byId("maintenance-select-all").addEventListener("click", toggleMaintenanceSelection);
+byId("maintenance-select-all").addEventListener("change", toggleMaintenanceSelection);
 byId("maintenance-optimize").addEventListener("click", () => optimizeMaintenanceSelection().catch(showError));
-byId("maintenance-optimize-all").addEventListener("click", () => optimizeMaintenanceSelection(true).catch(showError));
 byId("access-more").addEventListener("click", () => loadAccess({ append: true }).catch(showError));
 byId("health-window").addEventListener("change", () => healthView.load({ reload: true }).catch(showError));
 

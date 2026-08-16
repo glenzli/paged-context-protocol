@@ -41,6 +41,7 @@ fn packing_is_opt_in_and_selection_wire_contains_only_semantic_inputs() {
             created_at: "2026-08-15T08:00:00Z".to_owned(),
             observed_at: None,
             routing_text: "one bounded source excerpt".to_owned(),
+            packed: false,
         }],
         excluded_candidate_sets: Vec::new(),
     })
@@ -70,6 +71,7 @@ fn packing_analysis_wire_batches_mechanical_groups_without_commit_authority() {
                 created_at: "2026-08-16T08:00:00Z".to_owned(),
                 observed_at: None,
                 routing_text: "bounded semantic input".to_owned(),
+                packed: false,
             }],
         }],
         max_pages_per_candidate: 8,
@@ -825,6 +827,151 @@ async fn packing_scan_is_read_only_and_selected_apply_revalidates_exact_revision
 }
 
 #[tokio::test]
+async fn packing_analysis_can_select_across_the_final_pack_size_boundary() {
+    let fixture = Fixture::open("packing-analysis-window").await;
+    let mut pages = Vec::new();
+    for sequence in 1..=10 {
+        pages.push(
+            fixture
+                .client
+                .write_page(fixture.sealed_event(
+                    &format!("One coherent episode, step {sequence}."),
+                    &format!("packing-analysis-window:{sequence}"),
+                    sequence,
+                ))
+                .await
+                .expect("write analysis-window Page"),
+        );
+    }
+    let selected_ids = vec![pages[7].page_id.clone(), pages[8].page_id.clone()];
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::PackingCandidates {
+            candidates: vec![selected_ids.clone()],
+        },
+    ]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = true;
+    config.packing.max_pages = 8;
+    config.packing.analysis_window_pages = 32;
+    config.relation.enabled = false;
+    config.retention.enabled = false;
+    let maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let scan = maintainer
+        .scan_packing_candidates()
+        .await
+        .expect("scan a window larger than one final Pack");
+    assert_eq!(scan.eligible_pages, 10);
+    assert_eq!(scan.candidate_group_count, 1);
+
+    let analysis = maintainer
+        .analyze_packing_candidates(AnalyzeMaintenancePacksRequest {
+            scan_id: scan.scan_id,
+            batch_index: 0,
+        })
+        .await
+        .expect("select across the former eight-Page analysis boundary");
+    assert!(analysis.issue.is_none());
+    assert_eq!(analysis.candidates.len(), 1);
+    assert_eq!(
+        analysis.candidates[0]
+            .pages
+            .iter()
+            .map(|page| page.page_id.clone())
+            .collect::<Vec<_>>(),
+        selected_ids
+    );
+    let requests = worker.requests.lock().expect("fake worker requests");
+    let MaintenanceWorkerRequest::AnalyzePacking { groups, .. } = &requests[0] else {
+        panic!("expected packing analysis request");
+    };
+    assert_eq!(groups[0].pages.len(), 10);
+    drop(requests);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn analyzed_pack_remains_applicable_after_another_pack_shifts_analysis_windows() {
+    let fixture = Fixture::open("packing-apply-window-shift").await;
+    let mut pages = Vec::new();
+    for sequence in 1..=42 {
+        pages.push(
+            fixture
+                .client
+                .write_page(fixture.sealed_event(
+                    &format!("One continuous source episode, entry {sequence}."),
+                    &format!("packing-apply-window-shift:{sequence}"),
+                    sequence,
+                ))
+                .await
+                .expect("write window-shift Page"),
+        );
+    }
+    let first_ids = pages[0..8]
+        .iter()
+        .map(|page| page.page_id.clone())
+        .collect::<Vec<_>>();
+    let second_ids = pages[38..42]
+        .iter()
+        .map(|page| page.page_id.clone())
+        .collect::<Vec<_>>();
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::PackingCandidates {
+            candidates: vec![first_ids, second_ids],
+        },
+    ]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = true;
+    config.packing.max_pages = 8;
+    config.packing.analysis_window_pages = 32;
+    config.relation.enabled = false;
+    config.retention.enabled = false;
+    let maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+
+    let scan = maintainer
+        .scan_packing_candidates()
+        .await
+        .expect("scan two analysis windows");
+    assert_eq!(scan.candidate_group_count, 2);
+    let analysis = maintainer
+        .analyze_packing_candidates(AnalyzeMaintenancePacksRequest {
+            scan_id: scan.scan_id,
+            batch_index: 0,
+        })
+        .await
+        .expect("analyze candidates before window shift");
+    assert_eq!(analysis.candidates.len(), 2);
+
+    for candidate in &analysis.candidates {
+        maintainer
+            .apply_pack_candidate(ApplyMaintenancePackRequest {
+                candidate_id: candidate.candidate_id.clone(),
+                pages: candidate
+                    .pages
+                    .iter()
+                    .map(|page| PageRevisionRef {
+                        page_id: page.page_id.clone(),
+                        revision_id: page.revision_id.clone(),
+                    })
+                    .collect(),
+            })
+            .await
+            .expect("apply candidate independently of shifted analysis windows");
+    }
+    assert_eq!(
+        fixture
+            .client
+            .page_count(Vec::new())
+            .await
+            .expect("count Pages after both Packs"),
+        32
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn packing_analysis_batches_multiple_groups_into_one_worker_call() {
     let fixture = Fixture::open("packing-analysis-batch").await;
     let mut a1 = fixture.sealed_event("Topic A starts.", "packing-analysis:a1", 1);
@@ -1226,6 +1373,119 @@ async fn relation_waits_until_packing_has_no_eligible_window() {
     assert_eq!(relation_report.packs_committed, 0);
     assert_eq!(relation_report.relations_committed, 1);
     assert_eq!(worker.request_count(), 2);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn relation_maintains_a_source_page_without_a_pack_window() {
+    let fixture = Fixture::open("relation-singleton-source-page").await;
+    let source_page = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "A one-page source event that cannot form a Pack by itself.",
+            "relation-singleton-source-page:1",
+            1,
+        ))
+        .await
+        .expect("write singleton source Page");
+    let document = fixture
+        .client
+        .write_page(fixture.page(
+            "A durable document that directly explains the source event.",
+            "relation-singleton-source-page:document",
+        ))
+        .await
+        .expect("write durable relation Page");
+    let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
+        page_ids: [source_page.page_id.clone(), document.page_id.clone()],
+    }]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = true;
+    config.relation.enabled = true;
+    config.retention.enabled = false;
+    let mut maintainer =
+        RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let report = maintainer
+        .run_once()
+        .await
+        .expect("route an unpackable source Page to relation maintenance");
+
+    assert_eq!(report.worker_calls, 1);
+    assert_eq!(report.packs_committed, 0);
+    assert_eq!(report.relations_committed, 1);
+    let requests = worker.requests.lock().expect("read relation request");
+    let MaintenanceWorkerRequest::SelectRelation { pages, .. } = &requests[0] else {
+        panic!("expected relation selection for the unpackable source Page");
+    };
+    assert!(pages.iter().any(|page| page.page_id == source_page.page_id));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn relation_maintains_source_pages_after_packing_declines_their_window() {
+    let fixture = Fixture::open("relation-after-pack-decline").await;
+    let first = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "A first source event in an otherwise packable local episode.",
+            "relation-after-pack-decline:1",
+            1,
+        ))
+        .await
+        .expect("write first source Page");
+    fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "A second source event in an otherwise packable local episode.",
+            "relation-after-pack-decline:2",
+            2,
+        ))
+        .await
+        .expect("write second source Page");
+    let document = fixture
+        .client
+        .write_page(fixture.page(
+            "A durable document with the stable interpretation of the first source event.",
+            "relation-after-pack-decline:document",
+        ))
+        .await
+        .expect("write durable relation Page");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::NoCandidate,
+        MaintenanceWorkerResponse::Relate {
+            page_ids: [first.page_id.clone(), document.page_id.clone()],
+        },
+    ]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = true;
+    config.relation.enabled = true;
+    config.retention.enabled = false;
+    let mut maintainer =
+        RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let packing_report = maintainer
+        .run_once()
+        .await
+        .expect("allow the Pack worker to decline its window");
+    assert_eq!(packing_report.worker_calls, 1);
+    assert_eq!(packing_report.packs_committed, 0);
+    assert_eq!(packing_report.relations_committed, 0);
+
+    let relation_report = maintainer
+        .run_once()
+        .await
+        .expect("route the declined Pack window to relation maintenance");
+    assert_eq!(relation_report.worker_calls, 1);
+    assert_eq!(relation_report.packs_committed, 0);
+    assert_eq!(relation_report.relations_committed, 1);
+    let requests = worker.requests.lock().expect("read maintenance requests");
+    let MaintenanceWorkerRequest::SelectRelation { pages, .. } = &requests[1] else {
+        panic!("expected relation selection after the Pack worker declined");
+    };
+    assert!(pages.iter().any(|page| page.page_id == first.page_id));
     fixture.close().await;
 }
 

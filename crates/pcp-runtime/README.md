@@ -47,9 +47,9 @@ One cycle is bounded by `max_jobs_per_cycle`:
 
 1. Runtime reads the complete authorized current-Page inventory with a bounded routing excerpt per Page.
 2. A long unsummarized Page may be sent to the worker as `summarize_page`.
-3. Runtime deterministically forms a bounded window of sealed leaves and at most one packed anchor that share Scope, kind, and a contiguous SourceSpan, then sends it as `select_packing`.
-4. The worker may select one ordered subset from that exact window. It does not generate packed content.
-5. Runtime validates the selected IDs and, in apply mode, calls `pack_pages`; Store rechecks exact heads, source continuity, leaf references, anchor count, retention, and transaction invariants.
+3. Runtime deterministically forms a bounded analysis window of sealed leaves and packed anchors that share Scope, kind, and a contiguous SourceSpan, then sends compact head-and-tail routing text as `select_packing`. `analysis_window_pages` controls what the worker can compare; it is independent of the smaller `max_pages` commit limit.
+4. The worker may select one ordered coherent episode from that exact window. Lossless packing does not require every Page to state the same fact: questions, answers, corrections, qualifications, and short reasoning transitions may stay together. It does not generate packed content.
+5. Runtime validates the selected IDs, aggregate input size, and at most one packed anchor and, in apply mode, calls `pack_pages`; Store rechecks exact heads, source continuity, identity pins, anchor count, retention, and transaction invariants.
 6. Runtime may send overlapping bounded current-Page routing windows as `select_relation`. The request lists already related or previously proposed pairs; the worker can return only two other offered Page IDs. Runtime fixes the relation to symmetric `related_to`, binds the exact current Revisions as basis, rejects stale or excluded pairs, and owns the commit. A window remains active until the worker returns `no_candidate`.
 7. Runtime obtains a bounded dry-run retention plan and may ask the worker whether any actual old candidate Revision is a semantic milestone.
 8. In apply mode only, Summary writes, packing, Relations, or finite retention leases cross into the PCP commit API. Leases additionally require `maintenance.retention.write_leases = true`. Lease selection and physical collection remain separate operations; the current maintainer does not collect Revision payloads automatically.

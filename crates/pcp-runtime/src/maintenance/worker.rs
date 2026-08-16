@@ -45,6 +45,8 @@ pub struct PackingCandidatePage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<String>,
     pub routing_text: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub packed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -72,19 +74,56 @@ pub struct RelationCandidatePage {
 
 impl PackingCandidatePage {
     pub(crate) fn from_inventory(item: &DurablePageInventoryItem, routing_chars: usize) -> Self {
-        let semantic_text = if item.media_type.as_deref() == Some(pcp_core::PACKED_PAGE_MEDIA_TYPE)
-        {
+        let packed = item.media_type.as_deref() == Some(pcp_core::PACKED_PAGE_MEDIA_TYPE);
+        let semantic_text = if packed {
             item.snippet.as_str()
         } else {
             item.summary.as_deref().unwrap_or(&item.snippet)
         };
-        let routing_text = semantic_text.chars().take(routing_chars).collect();
+        let routing_text = bounded_routing_text(semantic_text, routing_chars);
         Self {
             page_id: item.page_id.clone(),
             created_at: item.created_at.clone(),
             observed_at: item.observed_at.clone(),
             routing_text,
+            packed,
         }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn bounded_routing_text(text: &str, maximum_chars: usize) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.len() <= maximum_chars {
+        return text.to_owned();
+    }
+    const MARKER: &str = "\n...\n";
+    let marker_chars = MARKER.chars().count();
+    if maximum_chars <= marker_chars {
+        return chars.into_iter().take(maximum_chars).collect();
+    }
+    let remaining = maximum_chars - marker_chars;
+    let head_chars = remaining.div_ceil(2);
+    let tail_chars = remaining - head_chars;
+    let mut bounded = chars[..head_chars].iter().collect::<String>();
+    bounded.push_str(MARKER);
+    bounded.extend(chars[chars.len() - tail_chars..].iter());
+    bounded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bounded_routing_text;
+
+    #[test]
+    fn packing_routing_text_preserves_both_boundaries() {
+        let bounded = bounded_routing_text("abcdefghij0123456789", 15);
+        assert_eq!(bounded.chars().count(), 15);
+        assert!(bounded.starts_with("abcde"));
+        assert!(bounded.ends_with("6789"));
     }
 }
 
