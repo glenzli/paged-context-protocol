@@ -3,13 +3,24 @@ use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use infer_runtime_client::{Client, ResponsesRequest, ResponsesResult};
-use serde_json::Value;
+use pcp_core::PACKED_PAGE_MEDIA_TYPE;
+use serde_json::{Value, json};
 use tokio::time::{Instant, sleep, timeout};
 
 use super::{MaintenanceWorkerRequest, MaintenanceWorkerResponse, SemanticMaintenanceWorker};
 
 const MAX_INFER_OUTPUT_BYTES: usize = 1024 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+const PACKING_OVERLAP_REPAIR_INSTRUCTIONS: &str = "The previous answer was rejected because a Page appeared in more than one packing candidate. Re-evaluate the supplied groups from scratch. The candidates array must be a disjoint partition: every page_id may occur in zero or one candidate only. Before responding, verify that no identifier repeats anywhere in candidates. Omit an ambiguous segment rather than returning overlapping alternatives.";
+const CHINESE_SUMMARY_REPAIR_INSTRUCTIONS: &str = "上一版摘要未满足中文输出合同。只输出替换后的摘要正文：自然语言叙述必须使用中文；技术名、产品名、模型名、版本号、URL、代码标识符和原文引号可按原样保留。不要解释，不要 JSON。";
+const ENGLISH_SUMMARY_REPAIR_INSTRUCTIONS: &str = "The previous summary did not meet the English output contract. Return only a replacement summary in English prose; preserve technical names, product names, model names, versions, URLs, code identifiers, and source quotations exactly. Do not explain and do not return JSON.";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SummaryLanguage {
+    Chinese,
+    English,
+    Unspecified,
+}
 
 pub struct InferRuntimeSemanticWorker {
     client: Client,
@@ -43,14 +54,25 @@ impl InferRuntimeSemanticWorker {
     async fn evaluate_inner(
         &self,
         request: &MaintenanceWorkerRequest,
+        additional_instructions: Option<&str>,
     ) -> Result<MaintenanceWorkerResponse> {
-        let infer_request = infer_request(
+        let mut infer_request = infer_request(
             request,
             self.timeout,
             &self.summary_deployment_id,
             &self.reasoning_deployment_id,
             self.relation_deployment_id.as_deref(),
         )?;
+        if let Some(additional_instructions) = additional_instructions {
+            let instructions = infer_request
+                .instructions
+                .as_ref()
+                .and_then(Value::as_str)
+                .context("Infer Runtime maintenance request has no text instructions")?;
+            infer_request.instructions = Some(Value::String(format!(
+                "{instructions}\n\n{additional_instructions}"
+            )));
+        }
         let started = Instant::now();
         let mut response = timeout(self.timeout, self.client.create_response(&infer_request))
             .await
@@ -59,7 +81,7 @@ impl InferRuntimeSemanticWorker {
 
         loop {
             match response.status.as_str() {
-                "completed" => return decode_response(&response),
+                "completed" => return decode_response(&response, request),
                 "queued" | "in_progress" => {}
                 "failed" | "cancelled" | "incomplete" => {
                     anyhow::bail!(
@@ -108,7 +130,29 @@ impl SemanticMaintenanceWorker for InferRuntimeSemanticWorker {
         &self,
         request: MaintenanceWorkerRequest,
     ) -> Result<MaintenanceWorkerResponse> {
-        self.evaluate_inner(&request).await
+        let response = self.evaluate_inner(&request, None).await?;
+        let Some(repair_instructions) = summary_language_repair_instructions(&request, &response)
+        else {
+            return Ok(response);
+        };
+
+        let repaired = self
+            .evaluate_inner(&request, Some(repair_instructions))
+            .await?;
+        if summary_language_repair_instructions(&request, &repaired).is_none() {
+            Ok(repaired)
+        } else {
+            // A wrong-language routing summary is worse than an absent one: it poisons recall.
+            Ok(MaintenanceWorkerResponse::Defer)
+        }
+    }
+
+    async fn repair_packing_analysis_overlap(
+        &self,
+        request: MaintenanceWorkerRequest,
+    ) -> Result<MaintenanceWorkerResponse> {
+        self.evaluate_inner(&request, Some(PACKING_OVERLAP_REPAIR_INSTRUCTIONS))
+            .await
     }
 }
 
@@ -119,8 +163,7 @@ fn infer_request(
     reasoning_deployment_id: &str,
     relation_deployment_id: Option<&str>,
 ) -> Result<ResponsesRequest> {
-    let payload =
-        serde_json::to_string(request).context("encode PCP maintenance inference input")?;
+    let payload = inference_payload(request)?;
     let deadline_ms = timeout.as_millis().clamp(1, u128::from(u64::MAX));
     let mut metadata = BTreeMap::from([
         ("infer.priority".to_owned(), "background".to_owned()),
@@ -129,16 +172,20 @@ fn infer_request(
         ("infer.deadline_ms".to_owned(), deadline_ms.to_string()),
     ]);
     let reasoning = match request {
-        MaintenanceWorkerRequest::SummarizePage { .. } => {
+        MaintenanceWorkerRequest::SummarizePage { .. }
+        | MaintenanceWorkerRequest::SummarizePages { .. } => {
             metadata.insert(
                 "infer.deployment_ids".to_owned(),
                 summary_deployment_id.to_owned(),
             );
+            metadata.insert("infer.placement".to_owned(), "cloud_only".to_owned());
+            metadata.insert("infer.prefer".to_owned(), "cloud".to_owned());
             metadata.insert(
-                "infer.capability_floor".to_owned(),
-                "foundational".to_owned(),
+                "infer.provider_access_class".to_owned(),
+                "subscription".to_owned(),
             );
-            None
+            metadata.insert("infer.capability_floor".to_owned(), "advanced".to_owned());
+            Some(serde_json::json!({"effort": "medium"}))
         }
         MaintenanceWorkerRequest::SelectPacking { .. }
         | MaintenanceWorkerRequest::AnalyzePacking { .. }
@@ -164,19 +211,34 @@ fn infer_request(
     Ok(ResponsesRequest {
         model: intent_for(request).to_owned(),
         input: Value::String(payload),
-        instructions: Some(Value::String(instructions_for(request).to_owned())),
+        instructions: Some(Value::String(instructions_for(request))),
         stream: false,
         background: false,
         metadata,
         tools: Vec::new(),
         reasoning,
+        // The Codex App Server bridge deliberately has no output-budget control.
+        // Summary length is constrained by the prompt and PCP's response validation.
         max_output_tokens: None,
     })
 }
 
+fn inference_payload(request: &MaintenanceWorkerRequest) -> Result<String> {
+    let value = match request {
+        MaintenanceWorkerRequest::SummarizePage { page } => json!({
+            "pageId": page.page_id,
+            "revisionId": page.revision_id,
+            "content": summary_source_text(page),
+        }),
+        _ => serde_json::to_value(request).context("encode PCP maintenance inference input")?,
+    };
+    serde_json::to_string(&value).context("serialize PCP maintenance inference input")
+}
+
 fn intent_for(request: &MaintenanceWorkerRequest) -> &'static str {
     match request {
-        MaintenanceWorkerRequest::SummarizePage { .. } => "language.respond",
+        MaintenanceWorkerRequest::SummarizePage { .. }
+        | MaintenanceWorkerRequest::SummarizePages { .. } => "language.respond",
         MaintenanceWorkerRequest::SelectPacking { .. }
         | MaintenanceWorkerRequest::AnalyzePacking { .. }
         | MaintenanceWorkerRequest::SelectRelation { .. }
@@ -184,29 +246,187 @@ fn intent_for(request: &MaintenanceWorkerRequest) -> &'static str {
     }
 }
 
-fn instructions_for(request: &MaintenanceWorkerRequest) -> &'static str {
+fn instructions_for(request: &MaintenanceWorkerRequest) -> String {
     match request {
-        MaintenanceWorkerRequest::SummarizePage { .. } => {
-            "Return exactly one JSON object and no markdown. Use either {\"decision\":\"write_summary\",\"content\":\"...\"}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Write a concise routing summary of 1-800 Unicode characters. Preserve qualified claims and do not invent facts."
+        MaintenanceWorkerRequest::SummarizePage { page } => summary_instructions(page),
+        MaintenanceWorkerRequest::SummarizePages { .. } => {
+            "Return exactly one JSON object and no markdown. Use either {\"decision\":\"summaries\",\"summaries\":[{\"pageId\":\"pg_...\",\"content\":\"...\"}]}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Every supplied Page is an eligible missing-summary Page: return exactly one entry for every supplied pageId, do not omit or merge Pages, and use each exact pageId once. Each routing summary must be 60-180 Unicode characters, name the concrete subject and the key assertion, decision, observation, or unresolved question, preserve qualifications, distinguish evidence from inference, and never invent facts. Return no_candidate only when none of the supplied Pages has usable content; otherwise return defer rather than a partial list."
+                .to_owned()
         }
         MaintenanceWorkerRequest::SelectPacking { .. } => {
             "Return exactly one JSON object and no markdown. Use either {\"decision\":\"candidate\",\"page_ids\":[\"pg_...\",\"pg_...\"]}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Select a maximal useful ordered contiguous segment for lossless physical packing. Pages need not state the same fact: keep a coherent local episode together, including its question, answer, correction, qualification, or short reasoning transition. Split only at a clear independent subject or event boundary. A candidate may include at most one Page marked packed=true."
+                .to_owned()
         }
         MaintenanceWorkerRequest::AnalyzePacking { .. } => {
-            "Return exactly one JSON object and no markdown. Use either {\"decision\":\"packing_candidates\",\"candidates\":[[\"pg_...\",\"pg_...\"]]}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Analyze every supplied group and return every maximal useful ordered, contiguous, non-overlapping segment for lossless physical packing, with at least two Pages and no more than max_pages_per_candidate. Pages need not state the same fact: keep coherent local episodes together, including questions, answers, corrections, qualifications, and short reasoning transitions. Split only at a clear independent subject or event boundary; temporal adjacency alone is not enough, but do not require semantic equivalence. Never combine Pages from different groups, and include at most one Page marked packed=true in each candidate."
+            "Return exactly one JSON object and no markdown. Use either {\"decision\":\"packing_candidates\",\"candidates\":[[\"pg_...\",\"pg_...\"]]}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Analyze every supplied group and return every maximal useful ordered, contiguous, non-overlapping segment for lossless physical packing, with at least two Pages and no more than max_pages_per_candidate. Candidates must form a disjoint partition within each group: every page_id may occur in zero or one candidate only. Before responding, verify no page_id repeats anywhere in candidates. Pages need not state the same fact: keep coherent local episodes together, including questions, answers, corrections, qualifications, and short reasoning transitions. Split only at a clear independent subject or event boundary; temporal adjacency alone is not enough, but do not require semantic equivalence. Never combine Pages from different groups, and include at most one Page marked packed=true in each candidate."
+                .to_owned()
         }
         MaintenanceWorkerRequest::SelectRelation { .. } => {
             "Return exactly one JSON object and no markdown. Use either {\"decision\":\"relate\",\"page_ids\":[\"pg_...\",\"pg_...\"]}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Select exactly two supplied Pages only when each directly helps understand, verify, or act on the same stable subject or evidence chain, and never select a pair listed in excluded_page_pairs. Temporal adjacency, shared Scope, co-retrieval, lexical similarity, broad analogy, or merely both discussing AI, tools, infrastructure, harnesses, runtimes, or workspaces are insufficient. Return no_candidate when no pair meets this bar."
+                .to_owned()
         }
         MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => {
             "Return exactly one JSON object and no markdown. Use either {\"decision\":\"retain\",\"milestones\":[{\"revisionId\":\"rev_...\",\"reason\":\"...\"}]}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Select only supplied Revisions with durable semantic importance and stay within max_revisions."
+                .to_owned()
         }
     }
 }
 
-fn decode_response(response: &ResponsesResult) -> Result<MaintenanceWorkerResponse> {
+fn summary_instructions(page: &super::MaintenanceDetailPage) -> String {
+    match summary_language_for_text(&summary_source_text(page)) {
+        SummaryLanguage::Chinese => "只输出路由摘要正文，不要 JSON、键、标题、Markdown、引号或解释。该页面已通过结构筛选。写一段 60-180 个 Unicode 字符的摘要。输出语言合同：中文。摘要的自然语言叙述必须以中文书写；技术名、产品名、模型名、版本号、URL、代码标识符和原文引号可按原样保留。不得把中文正文整体翻译成英语。每个提及的命名实体、产品、模型、版本和标识符都必须逐字复制自页面，不得改写拼写、大小写、音译或版本。只写具体主题以及关键主张、决策、观察或未决问题；保留限定条件，不得虚构事实。仅当页面内容无法理解时，精确输出 DEFER。".to_owned(),
+        SummaryLanguage::English => "Return only the routing summary itself as plain text: no JSON, keys, heading, Markdown, quotation marks, or explanation. The supplied Page already passed structural eligibility; write a 60-180 Unicode-character routing summary. Output language contract: English. The summary's natural-language prose must be English; preserve technical terms, product names, model names, versions, URLs, code identifiers, and source quotations exactly. Do not translate the Page into another language. Every named entity, product, model, version, and identifier you mention must be copied exactly from the supplied Page: do not change spelling, capitalization, transliteration, or version. State only the concrete subject and key assertion, decision, observation, or unresolved question. Preserve qualifications and never invent facts. Return exactly DEFER only when the Page content cannot be interpreted.".to_owned(),
+        SummaryLanguage::Unspecified => "Return only the routing summary itself as plain text: no JSON, keys, heading, Markdown, quotation marks, or explanation. The supplied Page already passed structural eligibility; write a 60-180 Unicode-character routing summary in the Page body's dominant natural language. Preserve technical terms and quotations in their original language. Every named entity, product, model, version, and identifier you mention must be copied exactly from the supplied Page: do not change spelling, capitalization, transliteration, or version. State only the concrete subject and key assertion, decision, observation, or unresolved question. Preserve qualifications and never invent facts. Return exactly DEFER only when the Page content cannot be interpreted.".to_owned(),
+    }
+}
+
+fn summary_source_text(page: &super::MaintenanceDetailPage) -> String {
+    let Some(content) = page.content.as_deref() else {
+        return String::new();
+    };
+
+    let parsed = page
+        .media_type
+        .as_deref()
+        .is_some_and(|media_type| {
+            media_type == PACKED_PAGE_MEDIA_TYPE || media_type.ends_with("+json")
+        })
+        .then(|| serde_json::from_str::<Value>(content).ok())
+        .flatten();
+    let Some(parsed) = parsed else {
+        return content.to_owned();
+    };
+
+    if page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE) {
+        let entries = parsed
+            .get("entries")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                entry
+                    .get("payload")
+                    .and_then(|payload| payload.get("content"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+            })
+            .collect::<Vec<_>>();
+        if !entries.is_empty() {
+            return entries.join("\n\n");
+        }
+    }
+
+    let fields = ["title", "summary", "content", "description", "caption"];
+    let text = fields
+        .iter()
+        .filter_map(|field| parsed.get(*field).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+    if text.is_empty() {
+        content.to_owned()
+    } else {
+        text.join("\n\n")
+    }
+}
+
+fn summary_language_for_text(source: &str) -> SummaryLanguage {
+    let chinese = source
+        .chars()
+        .filter(|character| matches!(character, '\u{4E00}'..='\u{9FFF}'))
+        .count();
+    let latin = source
+        .chars()
+        .filter(|character| character.is_ascii_alphabetic())
+        .count();
+    if chinese >= 24 && chinese.saturating_mul(4) >= latin {
+        SummaryLanguage::Chinese
+    } else if latin >= 24 && latin.saturating_mul(4) >= chinese {
+        SummaryLanguage::English
+    } else {
+        SummaryLanguage::Unspecified
+    }
+}
+
+fn summary_language_repair_instructions(
+    request: &MaintenanceWorkerRequest,
+    response: &MaintenanceWorkerResponse,
+) -> Option<&'static str> {
+    let MaintenanceWorkerRequest::SummarizePage { page } = request else {
+        return None;
+    };
+    let MaintenanceWorkerResponse::WriteSummary { content } = response else {
+        return None;
+    };
+    match summary_language_for_text(&summary_source_text(page)) {
+        SummaryLanguage::Chinese if !summary_has_chinese_prose(content) => {
+            Some(CHINESE_SUMMARY_REPAIR_INSTRUCTIONS)
+        }
+        SummaryLanguage::English if !summary_has_english_prose(content) => {
+            Some(ENGLISH_SUMMARY_REPAIR_INSTRUCTIONS)
+        }
+        SummaryLanguage::Unspecified | SummaryLanguage::Chinese | SummaryLanguage::English => None,
+    }
+}
+
+fn summary_has_chinese_prose(summary: &str) -> bool {
+    summary
+        .chars()
+        .filter(|character| matches!(character, '\u{4E00}'..='\u{9FFF}'))
+        .count()
+        >= 12
+}
+
+fn summary_has_english_prose(summary: &str) -> bool {
+    summary
+        .chars()
+        .filter(|character| character.is_ascii_alphabetic())
+        .count()
+        >= 12
+}
+
+fn decode_response(
+    response: &ResponsesResult,
+    request: &MaintenanceWorkerRequest,
+) -> Result<MaintenanceWorkerResponse> {
     let text = extract_output_text(response)?;
+    if matches!(request, MaintenanceWorkerRequest::SummarizePage { .. }) {
+        return decode_single_summary_response(&text);
+    }
     serde_json::from_str(&text).context("decode strict PCP maintenance decision from Infer Runtime")
+}
+
+fn decode_single_summary_response(text: &str) -> Result<MaintenanceWorkerResponse> {
+    let text = text.trim();
+    anyhow::ensure!(
+        !text.is_empty(),
+        "Infer Runtime maintenance summary response contains no text"
+    );
+    if text == "DEFER" {
+        return Ok(MaintenanceWorkerResponse::Defer);
+    }
+
+    // Accept the previous JSON form during the rollout, but only take the summary content.
+    // A single-page summary has no model-owned identity or other structured decision surface.
+    if text.starts_with('{') {
+        let value = serde_json::from_str::<Value>(text)
+            .context("decode legacy JSON summary response from Infer Runtime")?;
+        if value.get("decision").and_then(Value::as_str) == Some("defer") {
+            return Ok(MaintenanceWorkerResponse::Defer);
+        }
+        let content = value
+            .get("content")
+            .and_then(Value::as_str)
+            .context("legacy JSON summary response has no string content")?;
+        return Ok(MaintenanceWorkerResponse::WriteSummary {
+            content: content.to_owned(),
+        });
+    }
+
+    Ok(MaintenanceWorkerResponse::WriteSummary {
+        content: text.to_owned(),
+    })
 }
 
 fn extract_output_text(response: &ResponsesResult) -> Result<String> {
@@ -257,6 +477,24 @@ mod tests {
         }
     }
 
+    fn summary_request() -> MaintenanceWorkerRequest {
+        MaintenanceWorkerRequest::SummarizePage {
+            page: Box::new(MaintenanceDetailPage {
+                page_id: "pg_1".to_owned(),
+                revision_id: "rev_1".to_owned(),
+                namespace: "project:one".to_owned(),
+                created_at: "2026-08-15T00:00:00Z".to_owned(),
+                observed_at: None,
+                media_type: Some("text/markdown".to_owned()),
+                content: Some("这是关于 OpenAI 与 GPT-5.6 的中文页面内容。".repeat(3)),
+                summary: None,
+                facets: None,
+                source_refs: Vec::new(),
+                relations: Vec::new(),
+            }),
+        }
+    }
+
     #[test]
     fn reasoning_request_is_fixed_to_named_luna_without_fallback() {
         let request = MaintenanceWorkerRequest::SelectRelation {
@@ -275,7 +513,7 @@ mod tests {
         let infer = infer_request(
             &request,
             Duration::from_secs(12),
-            "ollama_qwen3_5_4b",
+            "codex_gpt_5_6_luna",
             "codex_gpt_5_6_luna",
             None,
         )
@@ -305,47 +543,129 @@ mod tests {
     }
 
     #[test]
-    fn summary_request_uses_prompt_bound_without_provider_token_constraint() {
-        let request = MaintenanceWorkerRequest::SummarizePage {
-            page: Box::new(MaintenanceDetailPage {
-                page_id: "pg_1".to_owned(),
-                revision_id: "rev_1".to_owned(),
-                namespace: "project:one".to_owned(),
-                created_at: "2026-08-15T00:00:00Z".to_owned(),
-                observed_at: None,
-                media_type: Some("text/markdown".to_owned()),
-                content: Some("bounded text".to_owned()),
-                summary: None,
-                facets: None,
-                source_refs: Vec::new(),
-                relations: Vec::new(),
-            }),
-        };
+    fn summary_request_uses_prompt_bound_without_provider_output_constraint() {
+        let request = summary_request();
         let infer = infer_request(
             &request,
             Duration::from_secs(12),
-            "ollama_qwen3_5_4b",
+            "codex_gpt_5_6_luna",
             "codex_gpt_5_6_luna",
             None,
         )
         .expect("build Infer summary request");
 
         assert_eq!(infer.model, "language.respond");
-        assert_eq!(infer.metadata["infer.deployment_ids"], "ollama_qwen3_5_4b");
-        assert!(!infer.metadata.contains_key("infer.placement"));
-        assert!(!infer.metadata.contains_key("infer.prefer"));
+        assert_eq!(infer.metadata["infer.deployment_ids"], "codex_gpt_5_6_luna");
+        assert_eq!(infer.metadata["infer.placement"], "cloud_only");
+        assert_eq!(infer.metadata["infer.prefer"], "cloud");
         assert!(!infer.metadata.contains_key("infer.offline_required"));
-        assert!(!infer.metadata.contains_key("infer.provider_access_class"));
-        assert_eq!(infer.metadata["infer.capability_floor"], "foundational");
+        assert_eq!(
+            infer.metadata["infer.provider_access_class"],
+            "subscription"
+        );
+        assert_eq!(infer.metadata["infer.capability_floor"], "advanced");
         assert_eq!(infer.metadata["infer.fallback"], "none");
-        assert_eq!(infer.reasoning, None);
+        assert_eq!(
+            infer.reasoning,
+            Some(serde_json::json!({"effort": "medium"}))
+        );
         assert_eq!(infer.max_output_tokens, None);
         assert!(
             infer
                 .instructions
                 .as_ref()
                 .and_then(Value::as_str)
-                .is_some_and(|instructions| instructions.contains("1-800 Unicode characters"))
+                .is_some_and(|instructions| {
+                    instructions.contains("60-180 个 Unicode 字符")
+                        && instructions.contains("输出语言合同：中文")
+                        && instructions.contains("不得把中文正文整体翻译成英语")
+                        && !instructions.contains("write_summary")
+                        && !instructions.contains("pageId")
+                        && !instructions.contains("summaries")
+                })
+        );
+        let payload = infer
+            .input
+            .as_str()
+            .expect("summary inference input is text");
+        assert!(payload.contains("这是关于 OpenAI 与 GPT-5.6 的中文页面内容"));
+        assert!(!payload.contains("project:one"));
+    }
+
+    #[test]
+    fn packed_summary_input_uses_entry_bodies_not_serialized_envelope() {
+        let request = MaintenanceWorkerRequest::SummarizePage {
+            page: Box::new(MaintenanceDetailPage {
+                page_id: "pg_pack".to_owned(),
+                revision_id: "rev_pack".to_owned(),
+                namespace: "conversation:test".to_owned(),
+                created_at: "2026-08-15T00:00:00Z".to_owned(),
+                observed_at: None,
+                media_type: Some(PACKED_PAGE_MEDIA_TYPE.to_owned()),
+                content: Some(
+                    r#"{"entries":[{"payload":{"content":"用户用中文询问 OpenAI 的长期上下文。"},"createdBy":{"actorId":"local-user"}},{"payload":{"content":"回答指出 PCP 应按相关性召回。"},"createdBy":{"actorId":"model:assistant"}}]}"#
+                        .to_owned(),
+                ),
+                summary: None,
+                facets: None,
+                source_refs: Vec::new(),
+                relations: Vec::new(),
+            }),
+        };
+
+        let infer = infer_request(
+            &request,
+            Duration::from_secs(12),
+            "codex_gpt_5_6_luna",
+            "codex_gpt_5_6_luna",
+            None,
+        )
+        .expect("build Infer summary request");
+
+        let payload = infer
+            .input
+            .as_str()
+            .expect("summary inference input is text");
+        assert!(payload.contains("用户用中文询问 OpenAI 的长期上下文"));
+        assert!(payload.contains("回答指出 PCP 应按相关性召回"));
+        assert!(!payload.contains("createdBy"));
+        assert!(!payload.contains("local-user"));
+        assert!(
+            infer
+                .instructions
+                .as_ref()
+                .and_then(Value::as_str)
+                .is_some_and(|instructions| instructions.contains("输出语言合同：中文"))
+        );
+    }
+
+    #[test]
+    fn summary_language_contract_allows_identifiers_but_rejects_english_prose_for_chinese_pages() {
+        let request = summary_request();
+        let MaintenanceWorkerRequest::SummarizePage { page } = &request else {
+            panic!("expected a summary request");
+        };
+
+        assert_eq!(
+            summary_language_for_text(&summary_source_text(page)),
+            SummaryLanguage::Chinese
+        );
+        assert!(summary_has_chinese_prose(
+            "页面讨论 OpenAI 与 GPT-5.6 的中文长期上下文策略，并保留了版本与产品名称。"
+        ));
+        assert!(!summary_has_chinese_prose(
+            "The page discusses OpenAI and GPT-5.6 long-context strategy in Chinese."
+        ));
+        assert!(
+            summary_language_repair_instructions(
+                &request,
+                &MaintenanceWorkerResponse::WriteSummary {
+                    content:
+                        "The page discusses OpenAI and GPT-5.6 long-context strategy in Chinese."
+                            .to_owned(),
+                }
+            )
+            .is_some()
         );
     }
 
@@ -377,10 +697,15 @@ mod tests {
     }
 
     #[test]
-    fn infer_output_requires_exact_json_without_markdown_fences() {
+    fn non_summary_output_requires_exact_json_without_markdown_fences() {
+        let request = MaintenanceWorkerRequest::SelectRetentionMilestones {
+            pages: Vec::new(),
+            max_revisions: 1,
+            lease_days: 30,
+        };
         let decoded = decode_response(&result(
             "{\"decision\":\"retain\",\"milestones\":[{\"revisionId\":\"rev_1\",\"reason\":\"durable\"}]}",
-        ))
+        ), &request)
         .expect("decode strict maintenance response");
         let MaintenanceWorkerResponse::Retain { milestones } = decoded else {
             panic!("expected retain response");
@@ -393,15 +718,60 @@ mod tests {
             }
             .revision_id
         );
-        assert!(decode_response(&result("```json\n{\"decision\":\"no_candidate\"}\n```")).is_err());
+        assert!(
+            decode_response(
+                &result("```json\n{\"decision\":\"no_candidate\"}\n```"),
+                &request
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn single_summary_output_uses_raw_text_or_the_defer_sentinel() {
+        let request = summary_request();
+        let decoded = decode_response(
+            &result("原始页面讨论本地 AI 工作负载下的存储压力与外置 NVMe 方案。"),
+            &request,
+        )
+        .expect("decode raw summary output");
+        assert!(matches!(
+            decoded,
+            MaintenanceWorkerResponse::WriteSummary { content }
+                if content == "原始页面讨论本地 AI 工作负载下的存储压力与外置 NVMe 方案。"
+        ));
+        assert!(matches!(
+            decode_response(&result("DEFER"), &request).expect("decode defer sentinel"),
+            MaintenanceWorkerResponse::Defer
+        ));
+    }
+
+    #[test]
+    fn single_summary_legacy_json_uses_content_and_ignores_extra_fields() {
+        let decoded = decode_response(
+            &result(
+                "{\"decision\":\"write_summary\",\"content\":\"页面讨论本地 AI 工作负载的存储取舍。\",\"rests_on\":[\"pg_previous\"]}",
+            ),
+            &summary_request(),
+        )
+        .expect("decode legacy JSON summary output");
+        assert!(matches!(
+            decoded,
+            MaintenanceWorkerResponse::WriteSummary { content }
+                if content == "页面讨论本地 AI 工作负载的存储取舍。"
+        ));
     }
 
     #[test]
     fn infer_output_rejects_unknown_decision_fields() {
+        let request = MaintenanceWorkerRequest::SelectRelation {
+            pages: Vec::new(),
+            excluded_page_pairs: Vec::new(),
+        };
         assert!(
             decode_response(&result(
                 "{\"decision\":\"relate\",\"page_ids\":[\"pg_1\",\"pg_2\"],\"relation_type\":\"summarizes\"}"
-            ))
+            ), &request)
             .is_err()
         );
     }

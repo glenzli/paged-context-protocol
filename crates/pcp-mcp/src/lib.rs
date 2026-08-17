@@ -4,11 +4,11 @@ use chrono::{SecondsFormat, Utc};
 use pcp_client::PcpApi;
 use pcp_core::{
     AccessAuditEvent, AccessPermission, AccessSession, Actor, ActorType, AssessPageValidityRequest,
-    Capabilities, CreateScopeRequest, IngestPageRequest, LifecycleStatus, LinkPagesRequest,
-    PageMutability, PagePayload, Projection, ProvenanceEvent, ReadPage, ReadPagesRequest, Relation,
-    RevisePageRequest, Scope, SearchFilters, SearchMode, SearchPagesRequest, SearchResult,
-    SearchTermMatch, SourceRef, SourceSpan, ValidityStanding, WritePageRequest,
-    WriteSummaryRequest,
+    BrowseIndexOrder, Capabilities, CreateScopeRequest, IngestPageRequest, LifecycleStatus,
+    LinkPagesRequest, PageMutability, PagePayload, Projection, ProvenanceEvent, ReadPage,
+    ReadPagesRequest, Relation, RevisePageRequest, Scope, SearchFilters, SearchMode,
+    SearchPagesRequest, SearchResult, SearchTermMatch, SourceRef, SourceSpan, ValidityStanding,
+    WritePageRequest, WriteSummaryRequest,
 };
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -65,6 +65,8 @@ pub struct BrowseIndexParams {
     scopes: Vec<String>,
     #[serde(default)]
     excluded_page_kinds: Vec<String>,
+    #[serde(default)]
+    order: BrowseIndexOrder,
     #[serde(default = "default_limit")]
     limit: u32,
     #[serde(default)]
@@ -442,6 +444,7 @@ impl PcpMcpServer {
             .browse_index(
                 params.scopes,
                 params.excluded_page_kinds,
+                params.order,
                 params.limit,
                 params.cursor,
                 params.max_chars,

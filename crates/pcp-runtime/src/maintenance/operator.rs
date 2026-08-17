@@ -7,8 +7,12 @@ use pcp_store::PcpStore;
 use crate::{RuntimeConfig, build_semantic_worker};
 
 use super::{
-    AnalyzeMaintenancePacksRequest, ApplyMaintenancePackRequest, MaintenanceMode,
-    MaintenancePackAnalysis, MaintenancePackScan, RuntimeMaintainer,
+    AnalyzeMaintenancePacksRequest, AnalyzeMaintenanceRelationRequest,
+    AnalyzeMaintenanceSummariesRequest, AnalyzeMaintenanceSummaryRequest,
+    ApplyMaintenancePackRequest, ApplyMaintenanceRelationRequest, ApplyMaintenanceSummaryRequest,
+    MaintenanceMode, MaintenancePackAnalysis, MaintenancePackScan, MaintenanceRelationAnalysis,
+    MaintenanceSummaryAnalysis, MaintenanceSummaryBatchAnalysis, MaintenanceWorkScan,
+    RuntimeMaintainer,
 };
 
 pub struct MaintenanceOperator {
@@ -26,6 +30,8 @@ impl MaintenanceOperator {
         maintenance.enabled = true;
         maintenance.mode = MaintenanceMode::Apply;
         maintenance.packing.enabled = true;
+        maintenance.summary.enabled = true;
+        maintenance.relation.enabled = true;
         maintenance.validate()?;
 
         let store = Arc::new(
@@ -54,6 +60,10 @@ impl MaintenanceOperator {
         self.maintainer.scan_packing_candidates().await
     }
 
+    pub async fn scan_maintenance_work(&self) -> Result<MaintenanceWorkScan> {
+        self.maintainer.scan_maintenance_work().await
+    }
+
     pub async fn analyze_packing(
         &self,
         request: AnalyzeMaintenancePacksRequest,
@@ -66,5 +76,40 @@ impl MaintenanceOperator {
         request: ApplyMaintenancePackRequest,
     ) -> Result<pcp_core::WriteResult> {
         self.maintainer.apply_pack_candidate(request).await
+    }
+
+    pub async fn analyze_summary(
+        &self,
+        request: AnalyzeMaintenanceSummaryRequest,
+    ) -> Result<MaintenanceSummaryAnalysis> {
+        self.maintainer.analyze_summary_candidate(request).await
+    }
+
+    pub async fn analyze_summaries(
+        &self,
+        request: AnalyzeMaintenanceSummariesRequest,
+    ) -> Result<MaintenanceSummaryBatchAnalysis> {
+        self.maintainer.analyze_summary_candidates(request).await
+    }
+
+    pub async fn apply_summary(
+        &self,
+        request: ApplyMaintenanceSummaryRequest,
+    ) -> Result<pcp_core::WriteSummaryResult> {
+        self.maintainer.apply_summary_candidate(request).await
+    }
+
+    pub async fn analyze_relation(
+        &self,
+        request: AnalyzeMaintenanceRelationRequest,
+    ) -> Result<MaintenanceRelationAnalysis> {
+        self.maintainer.analyze_relation_candidate(request).await
+    }
+
+    pub async fn apply_relation(
+        &self,
+        request: ApplyMaintenanceRelationRequest,
+    ) -> Result<pcp_core::Relation> {
+        self.maintainer.apply_relation_candidate(request).await
     }
 }

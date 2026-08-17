@@ -19,12 +19,14 @@ use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 
 use super::{
-    AnalyzeMaintenancePacksRequest, ApplyMaintenancePackRequest, CommandSemanticWorker,
-    MaintenanceConfig, MaintenanceMode, MaintenanceRunAudit, MaintenanceWorkerConfig,
-    MaintenanceWorkerRequest, MaintenanceWorkerResponse, PackingCandidateGroup,
-    PackingMaintenanceConfig, RelationCandidatePage, RelationMaintenanceConfig,
-    RetentionMaintenanceConfig, RetentionMilestone, RuntimeMaintainer, SemanticMaintenanceWorker,
-    SummaryMaintenanceConfig, worker::PackingCandidatePage,
+    AnalyzeMaintenancePacksRequest, AnalyzeMaintenanceRelationRequest,
+    AnalyzeMaintenanceSummariesRequest, AnalyzeMaintenanceSummaryRequest,
+    ApplyMaintenancePackRequest, ApplyMaintenanceRelationRequest, ApplyMaintenanceSummaryRequest,
+    CommandSemanticWorker, MaintenanceConfig, MaintenanceMode, MaintenanceRunAudit,
+    MaintenanceWorkerConfig, MaintenanceWorkerRequest, MaintenanceWorkerResponse,
+    PackingCandidateGroup, PackingMaintenanceConfig, RelationCandidatePage,
+    RelationMaintenanceConfig, RetentionMaintenanceConfig, RetentionMilestone, RuntimeMaintainer,
+    SemanticMaintenanceWorker, SummaryMaintenanceConfig, worker::PackingCandidatePage,
 };
 
 struct FakeWorker {
@@ -34,7 +36,10 @@ struct FakeWorker {
 
 #[test]
 fn packing_is_opt_in_and_selection_wire_contains_only_semantic_inputs() {
-    assert!(!PackingMaintenanceConfig::default().enabled);
+    let config = PackingMaintenanceConfig::default();
+    assert!(!config.enabled);
+    assert_eq!(config.analysis_window_pages, 64);
+    assert_eq!(config.routing_chars_per_page, 1_200);
     let wire = serde_json::to_value(MaintenanceWorkerRequest::SelectPacking {
         pages: vec![PackingCandidatePage {
             page_id: "pg_1".to_owned(),
@@ -91,6 +96,43 @@ fn packing_analysis_wire_batches_mechanical_groups_without_commit_authority() {
                 }]
             }],
             "max_pages_per_candidate": 8
+        })
+    );
+}
+
+#[test]
+fn single_summary_wire_keeps_page_identity_out_of_the_response_contract() {
+    let wire = serde_json::to_value(MaintenanceWorkerRequest::SummarizePage {
+        page: Box::new(super::MaintenanceDetailPage {
+            page_id: "pg_1".to_owned(),
+            revision_id: "rev_1".to_owned(),
+            namespace: "project:one".to_owned(),
+            created_at: "2026-08-16T08:00:00Z".to_owned(),
+            observed_at: None,
+            media_type: Some("text/markdown".to_owned()),
+            content: Some("bounded source content".to_owned()),
+            summary: None,
+            facets: None,
+            source_refs: Vec::new(),
+            relations: Vec::new(),
+        }),
+    })
+    .expect("serialize single-page Summary request");
+
+    assert_eq!(
+        wire,
+        serde_json::json!({
+            "operation": "summarize_page",
+            "page": {
+                "pageId": "pg_1",
+                "revisionId": "rev_1",
+                "namespace": "project:one",
+                "createdAt": "2026-08-16T08:00:00Z",
+                "mediaType": "text/markdown",
+                "content": "bounded source content",
+                "sourceRefs": [],
+                "relations": []
+            }
         })
     );
 }
@@ -469,6 +511,390 @@ async fn packed_conversation_page_can_receive_a_summary() {
             .map(|summary| summary.content.as_str()),
         Some("A summary of the packed continuous discussion.")
     );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn reviewed_summary_is_a_revision_bound_proposal_before_it_is_written() {
+    let fixture = Fixture::open("reviewed-summary").await;
+    let written = fixture
+        .client
+        .write_page(fixture.page(
+            &"A durable Page whose Summary must be proposed before it is written. ".repeat(100),
+            "reviewed-summary:1",
+        ))
+        .await
+        .expect("write reviewable Summary Page");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::WriteSummary {
+            content: "A bounded Summary proposed for explicit operator review.".to_owned(),
+        },
+    ]));
+    let mut config = fixture.config();
+    config.packing.enabled = false;
+    config.relation.enabled = false;
+    let maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+
+    let analysis = maintainer
+        .analyze_summary_candidate(AnalyzeMaintenanceSummaryRequest {
+            page_id: written.page_id.clone(),
+            revision_id: written.revision_id.clone(),
+        })
+        .await
+        .expect("analyze Summary review");
+    let candidate = analysis.candidate.expect("Summary proposal");
+    let before = fixture
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![written.page_id.clone()],
+            revision_ids: Vec::new(),
+            projections: vec![Projection::Manifest, Projection::Summary],
+            max_chars: 2_000,
+        })
+        .await
+        .expect("read unmodified Summary Page");
+    assert!(before[0].summary.is_none());
+
+    let request = ApplyMaintenanceSummaryRequest {
+        candidate_id: candidate.candidate_id.clone(),
+        page_id: candidate.page_id.clone(),
+        revision_id: candidate.revision_id.clone(),
+        expected_summary_revision_id: candidate.expected_summary_revision_id.clone(),
+        content: candidate.content.clone(),
+    };
+    maintainer
+        .apply_summary_candidate(request.clone())
+        .await
+        .expect("apply reviewed Summary");
+    let after = fixture
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![written.page_id],
+            revision_ids: Vec::new(),
+            projections: vec![Projection::Manifest, Projection::Summary],
+            max_chars: 2_000,
+        })
+        .await
+        .expect("read written Summary");
+    assert_eq!(
+        after[0]
+            .summary
+            .as_ref()
+            .map(|summary| summary.content.as_str()),
+        Some(candidate.content.as_str())
+    );
+    assert!(maintainer.apply_summary_candidate(request).await.is_err());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn reviewed_summaries_send_one_page_per_worker_call_before_any_write() {
+    let fixture = Fixture::open("reviewed-summary-batch").await;
+    let first = fixture
+        .client
+        .write_page(fixture.page(
+            &"The first durable routing Page needs a concise Summary. ".repeat(100),
+            "reviewed-summary-batch:1",
+        ))
+        .await
+        .expect("write first reviewable Summary Page");
+    let second = fixture
+        .client
+        .write_page(fixture.page(
+            &"The second durable routing Page needs a concise Summary. ".repeat(100),
+            "reviewed-summary-batch:2",
+        ))
+        .await
+        .expect("write second reviewable Summary Page");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::WriteSummary {
+            content: "First concise routing Summary.".to_owned(),
+        },
+        MaintenanceWorkerResponse::WriteSummary {
+            content: "Second concise routing Summary.".to_owned(),
+        },
+    ]));
+    let mut config = fixture.config();
+    config.packing.enabled = false;
+    config.relation.enabled = false;
+    let maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+    let scan = maintainer
+        .scan_maintenance_work()
+        .await
+        .expect("scan reviewable Summary Pages");
+
+    let analysis = maintainer
+        .analyze_summary_candidates(AnalyzeMaintenanceSummariesRequest {
+            scan_id: scan.summary.scan_id,
+            pages: vec![
+                PageRevisionRef {
+                    page_id: first.page_id.clone(),
+                    revision_id: first.revision_id.clone(),
+                },
+                PageRevisionRef {
+                    page_id: second.page_id.clone(),
+                    revision_id: second.revision_id.clone(),
+                },
+            ],
+        })
+        .await
+        .expect("analyze batch Summary review");
+
+    assert_eq!(scan.summary.estimated_model_calls, 2);
+    assert_eq!(analysis.worker_calls, 2);
+    assert_eq!(analysis.candidates.len(), 2);
+    let requests = worker
+        .requests
+        .lock()
+        .expect("recorded page-local Summary requests");
+    assert_eq!(requests.len(), 2);
+    let requested_page_ids = requests
+        .iter()
+        .map(|request| {
+            let MaintenanceWorkerRequest::SummarizePage { page } = request else {
+                panic!("expected page-local Summary request");
+            };
+            page.page_id.as_str()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        requested_page_ids,
+        vec![first.page_id.as_str(), second.page_id.as_str()]
+    );
+    drop(requests);
+    let pages = fixture
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![first.page_id, second.page_id],
+            revision_ids: Vec::new(),
+            projections: vec![Projection::Summary],
+            max_chars: 2_000,
+        })
+        .await
+        .expect("read unmodified batch Summary Pages");
+    assert!(pages.iter().all(|page| page.summary.is_none()));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn deferred_summary_page_does_not_drop_other_page_proposals() {
+    let fixture = Fixture::open("incomplete-summary-batch").await;
+    let first = fixture
+        .client
+        .write_page(fixture.page(
+            &"The first durable routing Page needs a concise Summary. ".repeat(100),
+            "incomplete-summary-batch:1",
+        ))
+        .await
+        .expect("write first reviewable Summary Page");
+    let second = fixture
+        .client
+        .write_page(fixture.page(
+            &"The second durable routing Page needs a concise Summary. ".repeat(100),
+            "incomplete-summary-batch:2",
+        ))
+        .await
+        .expect("write second reviewable Summary Page");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::WriteSummary {
+            content: "First routing Summary is still reviewable.".to_owned(),
+        },
+        MaintenanceWorkerResponse::Defer,
+    ]));
+    let mut config = fixture.config();
+    config.packing.enabled = false;
+    config.relation.enabled = false;
+    let maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+    let scan = maintainer
+        .scan_maintenance_work()
+        .await
+        .expect("scan reviewable Summary Pages");
+
+    let analysis = maintainer
+        .analyze_summary_candidates(AnalyzeMaintenanceSummariesRequest {
+            scan_id: scan.summary.scan_id,
+            pages: vec![
+                PageRevisionRef {
+                    page_id: first.page_id,
+                    revision_id: first.revision_id,
+                },
+                PageRevisionRef {
+                    page_id: second.page_id,
+                    revision_id: second.revision_id,
+                },
+            ],
+        })
+        .await
+        .expect("analyze independently reviewable Summary Pages");
+
+    assert_eq!(analysis.worker_calls, 2);
+    assert_eq!(analysis.candidates.len(), 1);
+    assert_eq!(analysis.deferred_pages, 1);
+    assert_eq!(analysis.no_candidate_pages, 0);
+    assert!(analysis.issues.is_empty());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn reviewed_summary_keeps_a_language_shift_reviewable() {
+    let fixture = Fixture::open("summary-language-quality-gate").await;
+    let written = fixture
+        .client
+        .write_page(fixture.page(
+            &"这是关于 OpenAI 与 GPT-5.6 的中文长期讨论，必须保留原文语言。".repeat(220),
+            "summary-language-quality-gate:1",
+        ))
+        .await
+        .expect("write Chinese reviewable Summary Page");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::WriteSummary {
+            content: "This English summary changes the language of the supplied Page.".to_owned(),
+        },
+    ]));
+    let mut config = fixture.config();
+    config.packing.enabled = false;
+    config.relation.enabled = false;
+    let maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+    let scan = maintainer
+        .scan_maintenance_work()
+        .await
+        .expect("scan Chinese Summary Page");
+
+    let analysis = maintainer
+        .analyze_summary_candidates(AnalyzeMaintenanceSummariesRequest {
+            scan_id: scan.summary.scan_id,
+            pages: vec![PageRevisionRef {
+                page_id: written.page_id,
+                revision_id: written.revision_id,
+            }],
+        })
+        .await
+        .expect("analyze Chinese Summary Page");
+
+    assert_eq!(analysis.candidates.len(), 1);
+    assert_eq!(
+        analysis.candidates[0].content,
+        "This English summary changes the language of the supplied Page."
+    );
+    assert_eq!(analysis.deferred_pages, 0);
+    assert!(analysis.issues.is_empty());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn reviewed_summary_normalizes_a_near_miss_source_identifier() {
+    let fixture = Fixture::open("summary-identifier-quality-gate").await;
+    let written = fixture
+        .client
+        .write_page(fixture.page(
+            &"OpenAI published a durable English source Page for exact identifier preservation. "
+                .repeat(180),
+            "summary-identifier-quality-gate:1",
+        ))
+        .await
+        .expect("write identifier reviewable Summary Page");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::WriteSummary {
+            content: "Openerai published the durable source discussed by this Page.".to_owned(),
+        },
+    ]));
+    let mut config = fixture.config();
+    config.packing.enabled = false;
+    config.relation.enabled = false;
+    let maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+    let scan = maintainer
+        .scan_maintenance_work()
+        .await
+        .expect("scan identifier Summary Page");
+
+    let analysis = maintainer
+        .analyze_summary_candidates(AnalyzeMaintenanceSummariesRequest {
+            scan_id: scan.summary.scan_id,
+            pages: vec![PageRevisionRef {
+                page_id: written.page_id,
+                revision_id: written.revision_id,
+            }],
+        })
+        .await
+        .expect("analyze identifier Summary Page");
+
+    assert_eq!(analysis.candidates.len(), 1);
+    assert_eq!(
+        analysis.candidates[0].content,
+        "OpenAI published the durable source discussed by this Page."
+    );
+    assert_eq!(analysis.deferred_pages, 0);
+    assert!(analysis.issues.is_empty());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn maintenance_scan_surfaces_separate_pack_summary_and_relation_work() {
+    let fixture = Fixture::open("phase-scan").await;
+    fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "The first source event belongs to one continuous discussion.",
+            "phase-scan:event:1",
+            1,
+        ))
+        .await
+        .expect("write first Pack candidate Page");
+    fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "The second source event continues that same discussion.",
+            "phase-scan:event:2",
+            2,
+        ))
+        .await
+        .expect("write second Pack candidate Page");
+    let long_conversation = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            &"A long conversation Page needs a concise routing Summary. ".repeat(100),
+            "phase-scan:event:3",
+            3,
+        ))
+        .await
+        .expect("write long conversation Page");
+    fixture
+        .client
+        .write_page(fixture.page(
+            "First independent Page available for relation review.",
+            "phase-scan:relation:1",
+        ))
+        .await
+        .expect("write first relation Page");
+    fixture
+        .client
+        .write_page(fixture.page(
+            "Second independent Page available for relation review.",
+            "phase-scan:relation:2",
+        ))
+        .await
+        .expect("write second relation Page");
+
+    let worker = Arc::new(FakeWorker::new(Vec::new()));
+    let mut config = fixture.config();
+    config.packing.enabled = true;
+    config.relation.enabled = true;
+    let maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let scan = maintainer
+        .scan_maintenance_work()
+        .await
+        .expect("scan phase work without invoking a worker");
+
+    assert!(scan.packing.candidate_group_count >= 1);
+    assert!(
+        scan.summary
+            .pages
+            .iter()
+            .any(|page| page.page_id == long_conversation.page_id)
+    );
+    assert!(scan.relation.candidate_group_count >= 1);
+    assert_eq!(worker.request_count(), 0);
     fixture.close().await;
 }
 
@@ -918,7 +1344,10 @@ async fn analyzed_pack_remains_applicable_after_another_pack_shifts_analysis_win
         .collect::<Vec<_>>();
     let worker = Arc::new(FakeWorker::new(vec![
         MaintenanceWorkerResponse::PackingCandidates {
-            candidates: vec![first_ids, second_ids],
+            candidates: vec![first_ids],
+        },
+        MaintenanceWorkerResponse::PackingCandidates {
+            candidates: vec![second_ids],
         },
     ]));
     let mut config = fixture.config();
@@ -935,16 +1364,28 @@ async fn analyzed_pack_remains_applicable_after_another_pack_shifts_analysis_win
         .await
         .expect("scan two analysis windows");
     assert_eq!(scan.candidate_group_count, 2);
-    let analysis = maintainer
+    let first_analysis = maintainer
         .analyze_packing_candidates(AnalyzeMaintenancePacksRequest {
-            scan_id: scan.scan_id,
+            scan_id: scan.scan_id.clone(),
             batch_index: 0,
         })
         .await
-        .expect("analyze candidates before window shift");
-    assert_eq!(analysis.candidates.len(), 2);
+        .expect("analyze the first candidate window before it shifts");
+    let second_analysis = maintainer
+        .analyze_packing_candidates(AnalyzeMaintenancePacksRequest {
+            scan_id: scan.scan_id,
+            batch_index: 1,
+        })
+        .await
+        .expect("analyze the second candidate window before it shifts");
+    let analysis = first_analysis
+        .candidates
+        .into_iter()
+        .chain(second_analysis.candidates)
+        .collect::<Vec<_>>();
+    assert_eq!(analysis.len(), 2);
 
-    for candidate in &analysis.candidates {
+    for candidate in &analysis {
         maintainer
             .apply_pack_candidate(ApplyMaintenancePackRequest {
                 candidate_id: candidate.candidate_id.clone(),
@@ -972,24 +1413,23 @@ async fn analyzed_pack_remains_applicable_after_another_pack_shifts_analysis_win
 }
 
 #[tokio::test]
-async fn packing_analysis_batches_multiple_groups_into_one_worker_call() {
+async fn packing_analysis_uses_one_group_per_worker_call() {
     let fixture = Fixture::open("packing-analysis-batch").await;
     let mut a1 = fixture.sealed_event("Topic A starts.", "packing-analysis:a1", 1);
     let mut a2 = fixture.sealed_event("Topic A continues.", "packing-analysis:a2", 2);
     a1.source_span.as_mut().expect("source span").stream_id = "conversation:a".to_owned();
     a2.source_span.as_mut().expect("source span").stream_id = "conversation:a".to_owned();
-    let a1 = fixture.client.write_page(a1).await.expect("write A1");
-    let a2 = fixture.client.write_page(a2).await.expect("write A2");
+    fixture.client.write_page(a1).await.expect("write A1");
+    fixture.client.write_page(a2).await.expect("write A2");
     let mut b1 = fixture.sealed_event("Topic B starts.", "packing-analysis:b1", 1);
     let mut b2 = fixture.sealed_event("Topic B continues.", "packing-analysis:b2", 2);
     b1.source_span.as_mut().expect("source span").stream_id = "conversation:b".to_owned();
     b2.source_span.as_mut().expect("source span").stream_id = "conversation:b".to_owned();
-    let b1 = fixture.client.write_page(b1).await.expect("write B1");
-    let b2 = fixture.client.write_page(b2).await.expect("write B2");
+    fixture.client.write_page(b1).await.expect("write B1");
+    fixture.client.write_page(b2).await.expect("write B2");
     let worker = Arc::new(FakeWorker::new(vec![
-        MaintenanceWorkerResponse::PackingCandidates {
-            candidates: vec![vec![a1.page_id, a2.page_id], vec![b1.page_id, b2.page_id]],
-        },
+        MaintenanceWorkerResponse::NoCandidate,
+        MaintenanceWorkerResponse::NoCandidate,
     ]));
     let mut config = fixture.config();
     config.summary.enabled = false;
@@ -1003,26 +1443,44 @@ async fn packing_analysis_batches_multiple_groups_into_one_worker_call() {
         .await
         .expect("scan all packing groups");
     assert_eq!(scan.candidate_group_count, 2);
-    assert_eq!(scan.estimated_model_calls, 1);
+    assert_eq!(scan.estimated_model_calls, 2);
     assert_eq!(worker.request_count(), 0);
 
-    let analysis = maintainer
+    let first_analysis = maintainer
         .analyze_packing_candidates(AnalyzeMaintenancePacksRequest {
-            scan_id: scan.scan_id,
+            scan_id: scan.scan_id.clone(),
             batch_index: 0,
         })
         .await
-        .expect("analyze packing groups in one batch");
-    assert_eq!(analysis.worker_calls, 1);
-    assert_eq!(analysis.batch_count, 1);
-    assert_eq!(analysis.analyzed_group_count, 2);
-    assert!(analysis.issue.is_none());
-    assert_eq!(analysis.candidates.len(), 2);
+        .expect("analyze the first packing group");
+    assert_eq!(first_analysis.worker_calls, 1);
+    assert_eq!(first_analysis.batch_count, 2);
+    assert_eq!(first_analysis.analyzed_group_count, 1);
+    assert!(first_analysis.issue.is_none());
+    assert_eq!(first_analysis.no_candidate_groups, 1);
+    assert!(first_analysis.candidates.is_empty());
+
+    let second_analysis = maintainer
+        .analyze_packing_candidates(AnalyzeMaintenancePacksRequest {
+            scan_id: scan.scan_id,
+            batch_index: 1,
+        })
+        .await
+        .expect("analyze the second packing group");
+    assert_eq!(second_analysis.worker_calls, 1);
+    assert_eq!(second_analysis.batch_count, 2);
+    assert_eq!(second_analysis.analyzed_group_count, 1);
+    assert!(second_analysis.issue.is_none());
+    assert_eq!(second_analysis.no_candidate_groups, 1);
+    assert!(second_analysis.candidates.is_empty());
     let requests = worker.requests.lock().expect("fake worker requests");
-    let MaintenanceWorkerRequest::AnalyzePacking { groups, .. } = &requests[0] else {
-        panic!("expected batched packing analysis request");
-    };
-    assert_eq!(groups.len(), 2);
+    assert_eq!(requests.len(), 2);
+    for request in requests.iter() {
+        let MaintenanceWorkerRequest::AnalyzePacking { groups, .. } = request else {
+            panic!("expected packing analysis request");
+        };
+        assert_eq!(groups.len(), 1);
+    }
     drop(requests);
     fixture.close().await;
 }
@@ -1076,11 +1534,94 @@ async fn packing_analysis_defers_an_invalid_model_selection_without_failing_the_
         .expect("invalid model output becomes a batch issue");
 
     assert!(analysis.candidates.is_empty());
+    assert_eq!(analysis.worker_calls, 1);
+    assert_eq!(analysis.overlap_retries, 0);
     assert_eq!(analysis.deferred_groups, 1);
     assert_eq!(analysis.no_candidate_groups, 0);
     let issue = analysis.issue.expect("invalid selection issue");
     assert_eq!(issue.code, "invalid_model_selection");
     assert!(issue.message.contains("outside one supplied group"));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn packing_analysis_repairs_overlapping_candidates_once() {
+    let fixture = Fixture::open("packing-analysis-overlap-repair").await;
+    let first = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "A coherent episode starts here.",
+            "packing-analysis-overlap:1",
+            1,
+        ))
+        .await
+        .expect("write first Page");
+    let second = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "The same episode adds its key qualification.",
+            "packing-analysis-overlap:2",
+            2,
+        ))
+        .await
+        .expect("write second Page");
+    let third = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "The episode reaches its bounded conclusion.",
+            "packing-analysis-overlap:3",
+            3,
+        ))
+        .await
+        .expect("write third Page");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::PackingCandidates {
+            candidates: vec![
+                vec![first.page_id.clone(), second.page_id.clone()],
+                vec![second.page_id.clone(), third.page_id.clone()],
+            ],
+        },
+        MaintenanceWorkerResponse::PackingCandidates {
+            candidates: vec![vec![
+                first.page_id.clone(),
+                second.page_id.clone(),
+                third.page_id.clone(),
+            ]],
+        },
+    ]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = true;
+    config.relation.enabled = false;
+    config.retention.enabled = false;
+    let maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+    let scan = maintainer
+        .scan_packing_candidates()
+        .await
+        .expect("scan packing candidates");
+
+    let analysis = maintainer
+        .analyze_packing_candidates(AnalyzeMaintenancePacksRequest {
+            scan_id: scan.scan_id,
+            batch_index: 0,
+        })
+        .await
+        .expect("repair overlapping model candidates");
+
+    assert_eq!(analysis.worker_calls, 2);
+    assert_eq!(analysis.overlap_retries, 1);
+    assert_eq!(analysis.deferred_groups, 0);
+    assert!(analysis.issue.is_none());
+    assert_eq!(analysis.candidates.len(), 1);
+    assert_eq!(
+        analysis.candidates[0]
+            .pages
+            .iter()
+            .map(|page| page.page_id.clone())
+            .collect::<Vec<_>>(),
+        vec![first.page_id, second.page_id, third.page_id]
+    );
+    assert_eq!(worker.request_count(), 2);
     fixture.close().await;
 }
 
@@ -1306,7 +1847,7 @@ async fn invalid_packing_selection_defers_and_cools_down_the_window() {
 }
 
 #[tokio::test]
-async fn relation_waits_until_packing_has_no_eligible_window() {
+async fn relation_runs_after_packing_against_the_refreshed_inventory() {
     let fixture = Fixture::open("pack-before-relation").await;
     let first = fixture
         .client
@@ -1357,21 +1898,13 @@ async fn relation_waits_until_packing_has_no_eligible_window() {
     let mut maintainer =
         RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
 
-    let packing_report = maintainer
+    let report = maintainer
         .run_once()
         .await
-        .expect("pack before relation selection");
-    assert_eq!(packing_report.worker_calls, 1);
-    assert_eq!(packing_report.packs_committed, 1);
-    assert_eq!(packing_report.relations_committed, 0);
-
-    let relation_report = maintainer
-        .run_once()
-        .await
-        .expect("run relation after packing converges");
-    assert_eq!(relation_report.worker_calls, 1);
-    assert_eq!(relation_report.packs_committed, 0);
-    assert_eq!(relation_report.relations_committed, 1);
+        .expect("run ordered Pack and Relation maintenance");
+    assert_eq!(report.worker_calls, 2);
+    assert_eq!(report.packs_committed, 1);
+    assert_eq!(report.relations_committed, 1);
     assert_eq!(worker.request_count(), 2);
     fixture.close().await;
 }
@@ -1466,21 +1999,13 @@ async fn relation_maintains_source_pages_after_packing_declines_their_window() {
     let mut maintainer =
         RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
 
-    let packing_report = maintainer
-        .run_once()
-        .await
-        .expect("allow the Pack worker to decline its window");
-    assert_eq!(packing_report.worker_calls, 1);
-    assert_eq!(packing_report.packs_committed, 0);
-    assert_eq!(packing_report.relations_committed, 0);
-
-    let relation_report = maintainer
+    let report = maintainer
         .run_once()
         .await
         .expect("route the declined Pack window to relation maintenance");
-    assert_eq!(relation_report.worker_calls, 1);
-    assert_eq!(relation_report.packs_committed, 0);
-    assert_eq!(relation_report.relations_committed, 1);
+    assert_eq!(report.worker_calls, 2);
+    assert_eq!(report.packs_committed, 0);
+    assert_eq!(report.relations_committed, 1);
     let requests = worker.requests.lock().expect("read maintenance requests");
     let MaintenanceWorkerRequest::SelectRelation { pages, .. } = &requests[1] else {
         panic!("expected relation selection after the Pack worker declined");
@@ -1554,6 +2079,86 @@ async fn maintainer_links_only_an_offered_pair_with_runtime_owned_relation_seman
     assert_eq!(second_cycle.relations_committed, 0);
     assert_eq!(second_cycle.deferred, 0);
     assert_eq!(worker.request_count(), 1);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn reviewed_relation_is_target_bound_and_applies_only_once() {
+    let fixture = Fixture::open("reviewed-relation").await;
+    let first = fixture
+        .client
+        .write_page(fixture.page(
+            "PCP keeps durable context outside the active model window.",
+            "reviewed-relation:1",
+        ))
+        .await
+        .expect("write reviewed relation source");
+    let second = fixture
+        .client
+        .write_page(fixture.page(
+            "The runtime restores relevant durable context into a bounded active window.",
+            "reviewed-relation:2",
+        ))
+        .await
+        .expect("write reviewed relation target");
+    let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
+        page_ids: [first.page_id.clone(), second.page_id.clone()],
+    }]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = true;
+    let maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+    let scan = maintainer
+        .scan_maintenance_work()
+        .await
+        .expect("scan relation review windows");
+    let group = scan
+        .relation
+        .groups
+        .first()
+        .expect("one relation review window");
+
+    let analysis = maintainer
+        .analyze_relation_candidate(AnalyzeMaintenanceRelationRequest {
+            scan_id: scan.relation.scan_id,
+            group_id: group.group_id.clone(),
+        })
+        .await
+        .expect("analyze relation review");
+    let candidate = analysis.candidate.expect("relation proposal");
+    assert!(
+        candidate
+            .pages
+            .iter()
+            .any(|page| page.page_id == first.page_id)
+    );
+    let request = ApplyMaintenanceRelationRequest {
+        candidate_id: candidate.candidate_id,
+        pages: candidate.pages.map(|page| PageRevisionRef {
+            page_id: page.page_id,
+            revision_id: page.revision_id,
+        }),
+    };
+    maintainer
+        .apply_relation_candidate(request.clone())
+        .await
+        .expect("apply reviewed relation");
+    let pages = fixture
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![first.page_id],
+            revision_ids: Vec::new(),
+            projections: vec![Projection::Manifest, Projection::Relations],
+            max_chars: 1,
+        })
+        .await
+        .expect("read applied relation");
+    assert!(pages[0].relations.iter().any(|relation| {
+        relation.relation_type == "related_to"
+            && (relation.to_page_id == second.page_id || relation.from_page_id == second.page_id)
+    }));
+    assert!(maintainer.apply_relation_candidate(request).await.is_err());
     fixture.close().await;
 }
 

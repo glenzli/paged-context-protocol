@@ -17,6 +17,9 @@ pub enum MaintenanceWorkerRequest {
     SummarizePage {
         page: Box<MaintenanceDetailPage>,
     },
+    SummarizePages {
+        pages: Vec<MaintenanceDetailPage>,
+    },
     SelectPacking {
         pages: Vec<PackingCandidatePage>,
         excluded_candidate_sets: Vec<Vec<String>>,
@@ -152,13 +155,33 @@ impl RelationCandidatePage {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MaintenanceWorkerResponse {
-    WriteSummary { content: String },
-    Candidate { page_ids: Vec<String> },
-    PackingCandidates { candidates: Vec<Vec<String>> },
-    Relate { page_ids: [String; 2] },
-    Retain { milestones: Vec<RetentionMilestone> },
+    WriteSummary {
+        content: String,
+    },
+    Summaries {
+        summaries: Vec<MaintenanceSummarySelection>,
+    },
+    Candidate {
+        page_ids: Vec<String>,
+    },
+    PackingCandidates {
+        candidates: Vec<Vec<String>>,
+    },
+    Relate {
+        page_ids: [String; 2],
+    },
+    Retain {
+        milestones: Vec<RetentionMilestone>,
+    },
     NoCandidate,
     Defer,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceSummarySelection {
+    pub page_id: String,
+    pub content: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -298,6 +321,15 @@ pub trait SemanticMaintenanceWorker: Send + Sync {
         &self,
         request: MaintenanceWorkerRequest,
     ) -> Result<MaintenanceWorkerResponse>;
+
+    /// Gives workers that support it one bounded chance to repair an invalid Pack partition.
+    /// The default preserves the existing command-worker wire and simply retries the request.
+    async fn repair_packing_analysis_overlap(
+        &self,
+        request: MaintenanceWorkerRequest,
+    ) -> Result<MaintenanceWorkerResponse> {
+        self.evaluate(request).await
+    }
 }
 
 pub struct CommandSemanticWorker {

@@ -1,7 +1,7 @@
-export function createRetentionView({ request, showError, formatNumber, formatTime, openPage }) {
+export function createRetentionView({ request, showError, formatNumber, formatTime, openPage, t }) {
   let loaded = false;
   let busy = false;
-  let capabilities = null;
+  let latest = null;
 
   const byId = (id) => document.getElementById(id);
 
@@ -26,7 +26,7 @@ export function createRetentionView({ request, showError, formatNumber, formatTi
   }
 
   function reasonLabel(reason) {
-    return ({
+    const label = ({
       current_head: "Current head",
       sealed_evidence: "Sealed evidence",
       recent_revision_window: "Recent Revision window",
@@ -40,15 +40,22 @@ export function createRetentionView({ request, showError, formatNumber, formatTi
       provenance_dependency: "Provenance dependency",
       explicit_lease: "Explicit retention lease",
       invalid_timestamp: "Invalid timestamp",
-    })[reason] || reason;
+    })[reason];
+    return label ? t(label) : reason;
   }
 
   function reasonDescription(reason, policy) {
-    return ({
+    if (reason === "recent_revision_window") {
+      const revisions = policy.keepRecentRevisionsPerPage;
+      return `${t("Newest")} ${formatNumber(revisions)} ${t(revisions === 1 ? "Revision on each Page" : "Revisions on each Page")}`;
+    }
+    if (reason === "minimum_age_window") {
+      const days = policy.minimumAgeDays;
+      return `${t("Created less than")} ${formatNumber(days)} ${t(days === 1 ? "day ago" : "days ago")}`;
+    }
+    const description = ({
       current_head: "The Page version used by default reads",
       sealed_evidence: "Immutable source evidence",
-      recent_revision_window: `Newest ${policy.keepRecentRevisionsPerPage} Revision${policy.keepRecentRevisionsPerPage === 1 ? "" : "s"} on each Page`,
-      minimum_age_window: `Created less than ${policy.minimumAgeDays} day${policy.minimumAgeDays === 1 ? "" : "s"} ago`,
       relation_endpoint: "Exact version recorded at a Relation endpoint",
       relation_basis: "Evidence used to assert a Relation",
       projection_head: "Current Summary or Validity projection",
@@ -58,7 +65,8 @@ export function createRetentionView({ request, showError, formatNumber, formatTi
       provenance_dependency: "Input to another protected Revision",
       explicit_lease: "Held by a finite retention lease",
       invalid_timestamp: "Age cannot be proven safely",
-    })[reason] || "Store-defined protection root";
+    })[reason];
+    return description ? t(description) : t("Store-defined protection root");
   }
 
   function pageButton(pageId, revisionId) {
@@ -91,7 +99,7 @@ export function createRetentionView({ request, showError, formatNumber, formatTi
       );
       return row;
     });
-    byId("retention-reason-rows").replaceChildren(...(rows.length ? rows : [emptyRow("No protection roots", 4)]));
+    byId("retention-reason-rows").replaceChildren(...(rows.length ? rows : [emptyRow(t("No protection roots"), 4)]));
   }
 
   function renderCandidates(plan) {
@@ -108,10 +116,11 @@ export function createRetentionView({ request, showError, formatNumber, formatTi
       );
       return row;
     });
-    byId("retention-candidate-rows").replaceChildren(...(rows.length ? rows : [emptyRow("No eligible historical Revisions under this policy", 5)]));
+    byId("retention-candidate-rows").replaceChildren(...(rows.length ? rows : [emptyRow(t("No reclaimable historical Revisions under this policy"), 5)]));
+    byId("retention-candidate-section").hidden = plan.candidateRevisions === 0;
     byId("retention-candidate-status").textContent = plan.candidatesTruncated
-      ? `${formatNumber(plan.candidates.length)} shown of ${formatNumber(plan.candidateRevisions)}`
-      : `${formatNumber(plan.candidateRevisions)} total`;
+      ? `${formatNumber(plan.candidates.length)} ${t("shown of")} ${formatNumber(plan.candidateRevisions)}`
+      : `${formatNumber(plan.candidateRevisions)} ${t("total")}`;
   }
 
   function renderProtected(plan) {
@@ -128,11 +137,11 @@ export function createRetentionView({ request, showError, formatNumber, formatTi
       );
       return row;
     });
-    byId("retention-protected-rows").replaceChildren(...(rows.length ? rows : [emptyRow("No protected historical samples", 5)]));
+    byId("retention-protected-rows").replaceChildren(...(rows.length ? rows : [emptyRow(t("No protected historical samples"), 5)]));
     const protectedHistory = Math.max(0, plan.protectedRevisions - protectionCount(plan, "current_head"));
     byId("retention-protected-status").textContent = plan.protectedSamplesTruncated
-      ? `${formatNumber(plan.protectedSamples.length)} shown of ${formatNumber(protectedHistory)}`
-      : `${formatNumber(protectedHistory)} total`;
+      ? `${formatNumber(plan.protectedSamples.length)} ${t("shown of")} ${formatNumber(protectedHistory)}`
+      : `${formatNumber(protectedHistory)} ${t("total")}`;
   }
 
   function renderLeases(leases, total) {
@@ -149,10 +158,11 @@ export function createRetentionView({ request, showError, formatNumber, formatTi
       );
       return row;
     });
-    byId("retention-lease-rows").replaceChildren(...(rows.length ? rows : [emptyRow("No active explicit retention leases", 5)]));
+    byId("retention-lease-section").hidden = total === 0;
+    byId("retention-lease-rows").replaceChildren(...(rows.length ? rows : [emptyRow(t("No active temporary holds"), 5)]));
     byId("retention-lease-status").textContent = leases.length < total
-      ? `${formatNumber(leases.length)} shown of ${formatNumber(total)} active`
-      : `${formatNumber(total)} active`;
+      ? `${formatNumber(leases.length)} ${t("shown of")} ${formatNumber(total)} ${t("active")}`
+      : `${formatNumber(total)} ${t("active")}`;
   }
 
   function protectionCount(plan, reason) {
@@ -160,79 +170,67 @@ export function createRetentionView({ request, showError, formatNumber, formatTi
   }
 
   function render({ plan, leases = [] }) {
+    latest = { plan, leases };
     const hasCandidates = plan.candidateRevisions > 0;
     const currentHeads = protectionCount(plan, "current_head");
     const protectedHistory = Math.max(0, plan.protectedRevisions - currentHeads);
-    byId("retention-metrics").replaceChildren(
-      metric("Scanned Revisions", formatNumber(plan.scannedRevisions), "", `${formatNumber(plan.scannedPages)} stable Pages`),
-      metric("Current heads", formatNumber(currentHeads), "positive", "Always protected"),
-      metric("Protected history", formatNumber(protectedHistory), "positive", "Historical versions still required"),
-      metric("Eligible history", formatNumber(plan.candidateRevisions), hasCandidates ? "warning" : "positive", `${formatBytes(plan.candidateEstimatedBytes)} across ${formatNumber(plan.candidatePages)} Pages`),
+    const metrics = byId("retention-metrics");
+    metrics.hidden = false;
+    metrics.replaceChildren(
+      metric(t("Reclaimable history"), formatNumber(plan.candidateRevisions), hasCandidates ? "warning" : "positive", `${formatNumber(plan.candidatePages)} ${t("Pages")}`),
+      metric(t("Estimated storage"), formatBytes(plan.candidateEstimatedBytes), hasCandidates ? "warning" : "positive", t("Reclaimable historical revision content")),
+      metric(t("Protected history"), formatNumber(protectedHistory), "positive", t("Historical revisions still required by a protection root")),
+      metric(t("Active temporary holds"), formatNumber(plan.activeRetentionLeases), plan.activeRetentionLeases ? "info" : "", t("Finite holds on revision history")),
     );
 
-    const collectionAvailable = Boolean(capabilities?.features?.includes("revision_retention"));
     const outcome = element(
       "div",
       `health-signal tone-${hasCandidates ? "warning" : "positive"}`,
       hasCandidates
-        ? `${formatNumber(plan.candidateRevisions)} historical Revisions are eligible because they predate ${formatTime(plan.cutoffAt)} and have no protection root.`
-        : `No historical Revision is eligible under this policy. ${formatNumber(protectedHistory)} historical Revisions remain protected.`,
+        ? `${formatNumber(plan.candidateRevisions)} ${t("historical Revisions may be reclaimable under current safeguards.")}`
+        : `${t("No historical Revision is reclaimable under current safeguards.")} ${formatNumber(protectedHistory)} ${t("historical Revisions remain protected.")}`,
     );
     const boundary = element(
       "div",
       "health-signal tone-info",
-      collectionAvailable
-        ? "This Console is dry-run only. The Runtime supports collection through a separately authorized admin client."
-        : "This Console is dry-run only, and the Runtime does not advertise physical collection.",
+      t("This check is read-only. No revision is deleted from the Console."),
     );
-    byId("retention-mode").replaceChildren(outcome, boundary);
+    const mode = byId("retention-mode");
+    mode.hidden = false;
+    mode.replaceChildren(outcome, boundary);
     renderLeases(leases, plan.activeRetentionLeases);
     renderReasons(plan);
     renderCandidates(plan);
     renderProtected(plan);
-    byId("retention-status").textContent = `${plan.scopes.length} scope${plan.scopes.length === 1 ? "" : "s"} · dry run updated ${new Date(plan.generatedAt).toLocaleTimeString()}`;
-  }
-
-  function setScopes(scopes) {
-    const selector = byId("retention-scope");
-    const current = selector.value;
-    const all = element("option", "", "All scopes");
-    all.value = "";
-    const options = (scopes || []).map((scope) => {
-      const option = element("option", "", scope.displayName || scope.namespace);
-      option.value = scope.namespace;
-      return option;
-    });
-    selector.replaceChildren(all, ...options);
-    selector.value = options.some((option) => option.value === current) ? current : "";
-  }
-
-  function setCapabilities(value) {
-    capabilities = value;
+    byId("retention-status").textContent = `${plan.scopes.length} ${t(plan.scopes.length === 1 ? "scope" : "scopes")} · ${t("preview updated")} ${new Date(plan.generatedAt).toLocaleTimeString()}`;
   }
 
   async function load({ reload = false } = {}) {
     if (busy || (loaded && !reload)) return;
     busy = true;
-    byId("retention-run").disabled = true;
-    byId("retention-status").textContent = "Planning";
+    byId("retention-status").textContent = t("Planning");
     try {
-      const params = new URLSearchParams(new FormData(byId("retention-controls")));
-      render(await request(`/api/retention?${params}`));
+      render(await request("/api/retention"));
       loaded = true;
     } catch (error) {
       showError(error);
-      byId("retention-status").textContent = "Plan failed";
+      byId("retention-status").textContent = t("Plan failed");
     } finally {
       busy = false;
-      byId("retention-run").disabled = false;
     }
   }
 
-  byId("retention-controls").addEventListener("submit", (event) => {
-    event.preventDefault();
-    load({ reload: true }).catch(showError);
+  byId("retention-details").addEventListener("toggle", () => {
+    if (byId("retention-details").open) load().catch(showError);
   });
 
-  return { load, setScopes, setCapabilities };
+  async function refreshIfOpen() {
+    if (byId("retention-details").open) await load({ reload: true });
+  }
+
+  function rerender() {
+    if (latest) render(latest);
+  }
+
+  return { refreshIfOpen, rerender };
 }

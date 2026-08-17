@@ -8,11 +8,11 @@ pub use access::{
     AccessSession, OperationTelemetry, ScopeGrant,
 };
 pub use model::{
-    Actor, ActorType, Capabilities, GraphEdgeDirection, GraphEdgeKind, GraphSearchEdge,
-    LifecycleStatus, PACKED_PAGE_MEDIA_TYPE, Page, PageMutability, PagePayload, PageRevision,
-    PageSummary, PageValidity, PageValidityHint, Projection, ProvenanceEvent, ReadPage, Relation,
-    Revision, Scope, SearchHit, SearchMode, SearchResult, SearchTermMatch, SourceRef, SourceSpan,
-    ValidityStanding, WriteResult, WriteSummaryResult, WriteValidityResult,
+    Actor, ActorType, BrowseIndexOrder, Capabilities, GraphEdgeDirection, GraphEdgeKind,
+    GraphSearchEdge, LifecycleStatus, PACKED_PAGE_MEDIA_TYPE, Page, PageMutability, PagePayload,
+    PageRevision, PageSummary, PageValidity, PageValidityHint, Projection, ProvenanceEvent,
+    ReadPage, Relation, Revision, Scope, SearchHit, SearchMode, SearchResult, SearchTermMatch,
+    SourceRef, SourceSpan, ValidityStanding, WriteResult, WriteSummaryResult, WriteValidityResult,
 };
 pub use request::{
     AssessPageValidityRequest, CreateScopeRequest, IngestPageRequest, InitialRelation,

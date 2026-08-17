@@ -155,6 +155,7 @@ impl PcpTenantApi for RemotePcpClient {
         &self,
         scopes: Vec<String>,
         excluded_page_kinds: Vec<String>,
+        order: pcp_core::BrowseIndexOrder,
         limit: u32,
         cursor: Option<String>,
         max_chars: u32,
@@ -163,6 +164,7 @@ impl PcpTenantApi for RemotePcpClient {
             .request(RpcOperation::BrowseIndex {
                 scopes,
                 excluded_page_kinds,
+                order,
                 limit,
                 cursor,
                 max_chars,
@@ -171,6 +173,44 @@ impl PcpTenantApi for RemotePcpClient {
         {
             RpcValue::SearchResult(value) => Ok(value),
             _ => Err(unexpected("browse_index")),
+        }
+    }
+
+    async fn browse_content_pages(
+        &self,
+        scopes: Vec<String>,
+        query: Option<String>,
+        order: pcp_core::BrowseIndexOrder,
+        limit: u32,
+        cursor: Option<String>,
+        max_chars: u32,
+    ) -> Result<pcp_client::ContentLibraryResult> {
+        match self
+            .request(RpcOperation::BrowseContentPages {
+                scopes,
+                query,
+                order,
+                limit,
+                cursor,
+                max_chars,
+            })
+            .await?
+        {
+            RpcValue::ContentLibraryResult(value) => Ok(value),
+            _ => Err(unexpected("browse_content_pages")),
+        }
+    }
+
+    async fn content_library_summary(
+        &self,
+        requested_scopes: Vec<String>,
+    ) -> Result<pcp_client::ContentLibrarySummary> {
+        match self
+            .request(RpcOperation::ContentLibrarySummary { requested_scopes })
+            .await?
+        {
+            RpcValue::ContentLibrarySummary(value) => Ok(value),
+            _ => Err(unexpected("content_library_summary")),
         }
     }
 

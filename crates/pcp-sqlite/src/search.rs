@@ -2,9 +2,10 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use pcp_core::{
-    GraphSearchEdge, LifecycleStatus, PageValidity, PageValidityHint, Projection, SearchHit,
-    SearchMode, SearchPagesRequest, SearchResult, SearchTermMatch,
+    BrowseIndexOrder, GraphSearchEdge, LifecycleStatus, PageValidity, PageValidityHint, Projection,
+    SearchHit, SearchMode, SearchPagesRequest, SearchResult, SearchTermMatch,
 };
+use pcp_store::{ContentLibraryResult, ContentLibraryScope, ContentLibrarySummary};
 use rusqlite::{Connection, params_from_iter, types::Value as SqlValue};
 use serde_json::{Map, Value};
 
@@ -69,6 +70,7 @@ impl SqlitePcpStore {
         &self,
         scopes: Vec<String>,
         excluded_page_kinds: Vec<String>,
+        order: BrowseIndexOrder,
         limit: u32,
         cursor: Option<String>,
         max_chars: u32,
@@ -84,10 +86,54 @@ impl SqlitePcpStore {
                 &connection,
                 &scopes,
                 &excluded_page_kinds,
+                &order,
                 offset,
                 limit,
                 max_chars,
             )
+        })
+        .await
+    }
+
+    pub async fn browse_content_pages(
+        &self,
+        scopes: Vec<String>,
+        query: Option<String>,
+        order: BrowseIndexOrder,
+        limit: u32,
+        cursor: Option<String>,
+        max_chars: u32,
+    ) -> Result<ContentLibraryResult> {
+        if scopes.is_empty() {
+            anyhow::bail!("PCP content library browse requires at least one authorized scope");
+        }
+        let limit = limit.clamp(1, crate::store::MAX_SEARCH_RESULTS) as usize;
+        let offset = parse_cursor(cursor.as_deref())?;
+        let max_chars = max_chars.clamp(1_000, 32_000) as usize;
+        let query = query.filter(|value| !value.trim().is_empty());
+        self.run("content library browse", move |connection| {
+            browse_content_pages_once(
+                &connection,
+                &scopes,
+                query.as_deref(),
+                &order,
+                offset,
+                limit,
+                max_chars,
+            )
+        })
+        .await
+    }
+
+    pub async fn content_library_summary(
+        &self,
+        scopes: Vec<String>,
+    ) -> Result<ContentLibrarySummary> {
+        if scopes.is_empty() {
+            anyhow::bail!("PCP content library summary requires at least one authorized scope");
+        }
+        self.run("content library summary", move |connection| {
+            content_library_summary_once(&connection, &scopes)
         })
         .await
     }
@@ -97,6 +143,7 @@ fn browse_index_once(
     connection: &Connection,
     scopes: &[String],
     excluded_page_kinds: &[String],
+    order: &BrowseIndexOrder,
     offset: usize,
     limit: usize,
     max_chars: usize,
@@ -121,6 +168,25 @@ fn browse_index_once(
            ON summary.summary_revision_id = summary_page.current_revision_id
          LEFT JOIN pcp_revisions summary_revision
            ON summary_revision.revision_id = summary.summary_revision_id
+         LEFT JOIN (
+           SELECT endpoint.page_id, COUNT(DISTINCT endpoint.relation_id) AS direct_relation_count
+           FROM (
+             SELECT relation.relation_id, relation.from_page_id AS page_id
+             FROM pcp_relations relation
+             WHERE NOT EXISTS (
+               SELECT 1 FROM pcp_relation_retractions retraction
+               WHERE retraction.relation_id = relation.relation_id
+             )
+             UNION ALL
+             SELECT relation.relation_id, relation.to_page_id AS page_id
+             FROM pcp_relations relation
+             WHERE NOT EXISTS (
+               SELECT 1 FROM pcp_relation_retractions retraction
+               WHERE retraction.relation_id = relation.relation_id
+             )
+           ) endpoint
+           GROUP BY endpoint.page_id
+         ) relation_counts ON relation_counts.page_id = p.page_id
          WHERE r.namespace IN ("
     );
     push_placeholders(&mut sql, scopes.len());
@@ -146,14 +212,10 @@ fn browse_index_once(
         " AND (
              summary.summary_revision_id IS NOT NULL
              OR r.actor_type IN ('model', 'system')
-         )
-         ORDER BY
-             CASE WHEN COALESCE(json_extract(r.facets_json, '$.indexRole'), '') = 'aggregate'
-                  THEN 0 ELSE 1 END,
-             COALESCE(r.observed_at, r.created_at) DESC,
-             r.revision_id DESC
-         LIMIT ? OFFSET ?",
+         ) ORDER BY ",
     );
+    sql.push_str(browse_index_order_by(order));
+    sql.push_str(" LIMIT ? OFFSET ?");
     values.push(SqlValue::Integer((limit + 1) as i64));
     values.push(SqlValue::Integer(offset as i64));
 
@@ -206,6 +268,273 @@ fn browse_index_once(
         next_cursor: has_more.then(|| (offset + hits.len()).to_string()),
         hits,
     })
+}
+
+fn browse_content_pages_once(
+    connection: &Connection,
+    scopes: &[String],
+    query: Option<&str>,
+    order: &BrowseIndexOrder,
+    offset: usize,
+    limit: usize,
+    max_chars: usize,
+) -> Result<ContentLibraryResult> {
+    let (total_pages, total_content_chars) =
+        content_library_totals_once(connection, scopes, query)?;
+    let mut values = scopes
+        .iter()
+        .cloned()
+        .map(SqlValue::Text)
+        .collect::<Vec<_>>();
+    let mut sql = format!(
+        "SELECT {REVISION_COLUMNS},
+                substr(COALESCE(r.payload_content, ''), 1, 700),
+                'content',
+                summary_page.current_revision_id
+         FROM pcp_pages p
+         JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
+         LEFT JOIN pcp_page_summary_heads summary_head
+           ON summary_head.target_page_id = p.page_id
+         LEFT JOIN pcp_pages summary_page
+           ON summary_page.page_id = summary_head.summary_page_id
+         LEFT JOIN pcp_revisions summary_revision
+           ON summary_revision.revision_id = summary_page.current_revision_id
+         LEFT JOIN (
+           SELECT endpoint.page_id, COUNT(DISTINCT endpoint.relation_id) AS direct_relation_count
+           FROM (
+             SELECT relation.relation_id, relation.from_page_id AS page_id
+             FROM pcp_relations relation
+             WHERE NOT EXISTS (
+               SELECT 1 FROM pcp_relation_retractions retraction
+               WHERE retraction.relation_id = relation.relation_id
+             )
+             UNION ALL
+             SELECT relation.relation_id, relation.to_page_id AS page_id
+             FROM pcp_relations relation
+             WHERE NOT EXISTS (
+               SELECT 1 FROM pcp_relation_retractions retraction
+               WHERE retraction.relation_id = relation.relation_id
+             )
+           ) endpoint
+           GROUP BY endpoint.page_id
+         ) relation_counts ON relation_counts.page_id = p.page_id
+         WHERE r.namespace IN ("
+    );
+    push_placeholders(&mut sql, scopes.len());
+    sql.push(')');
+    append_current_content_page_filter(&mut sql);
+    append_content_library_query_filter(&mut sql, &mut values, query);
+    sql.push_str(" ORDER BY ");
+    sql.push_str(browse_index_order_by(order));
+    sql.push_str(" LIMIT ? OFFSET ?");
+    values.push(SqlValue::Integer((limit + 1) as i64));
+    values.push(SqlValue::Integer(offset as i64));
+
+    let mut statement = connection
+        .prepare(&sql)
+        .context("prepare PCP content library browse")?;
+    let mut rows = statement
+        .query(params_from_iter(values.iter()))
+        .context("browse PCP content library")?;
+    let mut hits = Vec::new();
+    let mut used_chars = 0_usize;
+    let mut has_more = false;
+    while let Some(row) = rows.next().context("read PCP content library row")? {
+        if hits.len() >= limit {
+            has_more = true;
+            break;
+        }
+        let revision = revision_from_row(row, false, true, false, false)?;
+        let snippet: String = row.get(17)?;
+        let matched_projection: String = row.get(18)?;
+        let summary_revision_id: Option<String> = row.get(19)?;
+        let entry_chars = snippet.chars().count().saturating_add(240);
+        if !hits.is_empty() && used_chars.saturating_add(entry_chars) > max_chars {
+            has_more = true;
+            break;
+        }
+        used_chars = used_chars.saturating_add(entry_chars);
+        let validity =
+            current_validity(connection, &revision.revision_id)?.map(compact_validity_hint);
+        let page = page_manifest(connection, &revision.page_id)?;
+        hits.push(SearchHit {
+            page_id: revision.page_id,
+            revision_id: revision.revision_id,
+            kind: page.kind,
+            mutability: page.mutability,
+            namespace: revision.namespace,
+            lifecycle_status: revision.lifecycle_status,
+            created_at: revision.created_at,
+            observed_at: revision.observed_at,
+            snippet,
+            matched_by: if query.is_some() {
+                "content_text".to_owned()
+            } else {
+                "content_library".to_owned()
+            },
+            matched_projection,
+            summary_revision_id,
+            facets: compact_search_facets(revision.facets),
+            validity,
+            graph_edges: Vec::new(),
+        });
+    }
+    Ok(ContentLibraryResult {
+        next_cursor: has_more.then(|| (offset + hits.len()).to_string()),
+        hits,
+        total_pages,
+        total_content_chars,
+    })
+}
+
+fn content_library_summary_once(
+    connection: &Connection,
+    scopes: &[String],
+) -> Result<ContentLibrarySummary> {
+    let values = scopes
+        .iter()
+        .cloned()
+        .map(SqlValue::Text)
+        .collect::<Vec<_>>();
+    let mut sql = String::from(
+        "SELECT r.namespace,
+                COUNT(*),
+                COALESCE(SUM(length(COALESCE(r.payload_content, ''))), 0)
+         FROM pcp_pages p
+         JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
+         WHERE r.namespace IN (",
+    );
+    push_placeholders(&mut sql, scopes.len());
+    sql.push(')');
+    append_current_content_page_filter(&mut sql);
+    sql.push_str(" GROUP BY r.namespace ORDER BY r.namespace ASC");
+
+    let mut statement = connection
+        .prepare(&sql)
+        .context("prepare PCP content library summary")?;
+    let mut rows = statement
+        .query(params_from_iter(values.iter()))
+        .context("read PCP content library summary")?;
+    let mut scopes = Vec::new();
+    let mut page_count = 0_u64;
+    let mut content_chars = 0_u64;
+    while let Some(row) = rows.next().context("read PCP content library scope")? {
+        let namespace: String = row.get(0)?;
+        let scope_page_count = u64::try_from(row.get::<_, i64>(1)?)
+            .context("PCP content library page count must be non-negative")?;
+        let scope_content_chars = u64::try_from(row.get::<_, i64>(2)?)
+            .context("PCP content library character count must be non-negative")?;
+        page_count = page_count.saturating_add(scope_page_count);
+        content_chars = content_chars.saturating_add(scope_content_chars);
+        scopes.push(ContentLibraryScope {
+            namespace,
+            page_count: scope_page_count,
+            content_chars: scope_content_chars,
+        });
+    }
+    Ok(ContentLibrarySummary {
+        page_count,
+        content_chars,
+        scopes,
+    })
+}
+
+fn content_library_totals_once(
+    connection: &Connection,
+    scopes: &[String],
+    query: Option<&str>,
+) -> Result<(u64, u64)> {
+    let mut values = scopes
+        .iter()
+        .cloned()
+        .map(SqlValue::Text)
+        .collect::<Vec<_>>();
+    let mut sql = String::from(
+        "SELECT COUNT(*),
+                COALESCE(SUM(length(COALESCE(r.payload_content, ''))), 0)
+         FROM pcp_pages p
+         JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
+         LEFT JOIN pcp_page_summary_heads summary_head
+           ON summary_head.target_page_id = p.page_id
+         LEFT JOIN pcp_pages summary_page
+           ON summary_page.page_id = summary_head.summary_page_id
+         LEFT JOIN pcp_revisions summary_revision
+           ON summary_revision.revision_id = summary_page.current_revision_id
+         WHERE r.namespace IN (",
+    );
+    push_placeholders(&mut sql, scopes.len());
+    sql.push(')');
+    append_current_content_page_filter(&mut sql);
+    append_content_library_query_filter(&mut sql, &mut values, query);
+    let (page_count, content_chars) = connection
+        .query_row(&sql, params_from_iter(values.iter()), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })
+        .context("count PCP content library")?;
+    Ok((
+        u64::try_from(page_count).context("PCP content library page count must be non-negative")?,
+        u64::try_from(content_chars)
+            .context("PCP content library character count must be non-negative")?,
+    ))
+}
+
+fn append_current_content_page_filter(sql: &mut String) {
+    sql.push_str(" AND r.lifecycle_status = 'active'");
+    append_effective_page_filter(sql);
+    sql.push_str(
+        " AND NOT EXISTS (
+            SELECT 1 FROM pcp_page_summary_heads summary_page_head
+            WHERE summary_page_head.summary_page_id = p.page_id
+        )",
+    );
+}
+
+fn append_content_library_query_filter(
+    sql: &mut String,
+    values: &mut Vec<SqlValue>,
+    query: Option<&str>,
+) {
+    let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    sql.push_str(
+        " AND (
+            instr(lower(COALESCE(r.payload_content, '')), lower(?)) > 0
+            OR instr(lower(COALESCE(summary_revision.payload_content, '')), lower(?)) > 0
+            OR instr(lower(COALESCE(r.facets_json, '')), lower(?)) > 0
+        )",
+    );
+    for _ in 0..3 {
+        values.push(SqlValue::Text(query.to_owned()));
+    }
+}
+
+fn browse_index_order_by(order: &BrowseIndexOrder) -> &'static str {
+    match order {
+        BrowseIndexOrder::Recent => {
+            "COALESCE(r.observed_at, r.created_at) DESC, r.revision_id DESC"
+        }
+        BrowseIndexOrder::Oldest => "COALESCE(r.observed_at, r.created_at) ASC, r.revision_id ASC",
+        BrowseIndexOrder::MostConnected => {
+            "COALESCE(relation_counts.direct_relation_count, 0) DESC, \
+             COALESCE(r.observed_at, r.created_at) DESC, r.revision_id DESC"
+        }
+        BrowseIndexOrder::LeastConnected => {
+            "COALESCE(relation_counts.direct_relation_count, 0) ASC, \
+             COALESCE(r.observed_at, r.created_at) DESC, r.revision_id DESC"
+        }
+        BrowseIndexOrder::Largest => {
+            "length(COALESCE(r.payload_content, '')) DESC, \
+             COALESCE(r.observed_at, r.created_at) DESC, r.revision_id DESC"
+        }
+        BrowseIndexOrder::SourceOrder => {
+            "CASE WHEN r.source_span_json IS NULL THEN 1 ELSE 0 END ASC, \
+             json_extract(r.source_span_json, '$.streamId') ASC, \
+             CAST(json_extract(r.source_span_json, '$.start') AS INTEGER) ASC, \
+             CAST(json_extract(r.source_span_json, '$.end') AS INTEGER) ASC, \
+             COALESCE(r.observed_at, r.created_at) ASC, r.revision_id ASC"
+        }
+    }
 }
 
 fn search_once(

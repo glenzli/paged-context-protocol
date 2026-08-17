@@ -97,6 +97,57 @@ pub struct MaintenancePackScanGroup {
     pub extends_existing_pack: bool,
 }
 
+/// Read-only maintenance inventory. Each phase is scanned from the same current
+/// Store snapshot; model evaluation and writes happen only in later phase calls.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceWorkScan {
+    pub captured_at: String,
+    pub inspected_pages: usize,
+    pub packing: MaintenancePackScan,
+    pub summary: MaintenanceSummaryScan,
+    pub relation: MaintenanceRelationScan,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceSummaryScan {
+    pub scan_id: String,
+    pub inspected_pages: usize,
+    pub eligible_pages: usize,
+    pub estimated_model_calls: usize,
+    pub pages: Vec<MaintenanceSummaryScanPage>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceSummaryScanPage {
+    pub page_id: String,
+    pub revision_id: String,
+    pub namespace: String,
+    pub content_chars: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceRelationScan {
+    pub scan_id: String,
+    pub inspected_pages: usize,
+    pub eligible_pages: usize,
+    pub candidate_group_count: usize,
+    pub estimated_model_calls: usize,
+    pub groups: Vec<MaintenanceRelationScanGroup>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceRelationScanGroup {
+    pub group_id: String,
+    pub anchor_page_id: String,
+    pub anchor_revision_id: String,
+    pub page_count: usize,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaintenancePackAnalysis {
@@ -107,6 +158,7 @@ pub struct MaintenancePackAnalysis {
     pub candidate_group_count: usize,
     pub analyzed_group_count: usize,
     pub worker_calls: u32,
+    pub overlap_retries: u32,
     pub no_candidate_groups: u32,
     pub deferred_groups: u32,
     pub candidates: Vec<MaintenancePackCandidate>,
@@ -160,11 +212,133 @@ pub struct ApplyMaintenancePackRequest {
     pub pages: Vec<PageRevisionRef>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnalyzeMaintenanceSummaryRequest {
+    pub page_id: String,
+    pub revision_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnalyzeMaintenanceSummariesRequest {
+    pub scan_id: String,
+    pub pages: Vec<PageRevisionRef>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceSummaryAnalysis {
+    pub analyzed_at: String,
+    pub decision: MaintenanceReviewDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<MaintenanceSummaryCandidate>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaintenanceReviewDecision {
+    Candidate,
+    NoCandidate,
+    Defer,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceSummaryCandidate {
+    pub candidate_id: String,
+    pub page_id: String,
+    pub revision_id: String,
+    pub namespace: String,
+    pub content_chars: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_summary_revision_id: Option<String>,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceSummaryBatchAnalysis {
+    pub analyzed_at: String,
+    pub requested_pages: usize,
+    pub analyzed_pages: usize,
+    pub worker_calls: u32,
+    pub no_candidate_pages: u32,
+    pub deferred_pages: u32,
+    pub candidates: Vec<MaintenanceSummaryCandidate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<MaintenanceSummaryAnalysisIssue>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceSummaryAnalysisIssue {
+    pub batch_index: usize,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplyMaintenanceSummaryRequest {
+    pub candidate_id: String,
+    pub page_id: String,
+    pub revision_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_summary_revision_id: Option<String>,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnalyzeMaintenanceRelationRequest {
+    pub scan_id: String,
+    pub group_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceRelationAnalysis {
+    pub analyzed_at: String,
+    pub decision: MaintenanceReviewDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<MaintenanceRelationCandidate>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceRelationCandidate {
+    pub candidate_id: String,
+    pub namespace: String,
+    pub pages: [MaintenanceRelationInput; 2],
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceRelationInput {
+    pub page_id: String,
+    pub revision_id: String,
+    pub preview: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplyMaintenanceRelationRequest {
+    pub candidate_id: String,
+    pub pages: [PageRevisionRef; 2],
+}
+
 const PACKING_PREVIEW_CHARS: usize = 480;
-const PACKING_GROUPS_PER_MODEL_CALL: usize = 2;
+// A full analysis window already contains enough context for one routing decision.
+// Keep requests independent so each result has a single, inspectable source window.
+const PACKING_GROUPS_PER_MODEL_CALL: usize = 1;
 const PACKING_RETRY_AFTER_SECONDS: u64 = 86_400;
 const MAINTENANCE_READ_BATCH_PAGES: usize = 20;
-const MAX_MAINTENANCE_SUMMARY_CHARS: usize = 1_200;
+const MAX_MAINTENANCE_SUMMARY_CHARS: usize = 480;
+const SUMMARY_REVIEW_PAGES_PER_MODEL_CALL: usize = 1;
+// Summary proposals are routing metadata, not a replacement for source Pages.
+// Keep each local-worker decision page-local, while bounding the request-wide read.
+const MAX_SUMMARY_REVIEW_INPUT_CHARS: u32 = 24_000;
+const MAX_SUMMARY_REVIEW_PAGES_PER_REQUEST: usize = 16;
 
 pub struct RuntimeMaintainer {
     client: Arc<dyn PcpApi>,
@@ -288,22 +462,30 @@ impl RuntimeMaintainer {
 
     pub async fn scan_packing_candidates(&self) -> Result<MaintenancePackScan> {
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
-        let windows = packing_candidate_windows(&inventory, &self.config.packing);
-        let eligible_pages = windows.iter().map(Vec::len).sum::<usize>();
-        let scan_id = packing_scan_id(&windows, &self.config.packing);
-        let groups = windows
-            .iter()
-            .map(|window| packing_scan_group(window))
-            .collect();
-        Ok(MaintenancePackScan {
-            captured_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-            scan_id,
+        Ok(packing_scan_from_inventory(
+            &inventory,
+            &self.config.packing,
+        ))
+    }
+
+    pub async fn scan_maintenance_work(&self) -> Result<MaintenanceWorkScan> {
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        let captured_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let packing =
+            packing_scan_from_inventory_at(&inventory, &self.config.packing, &captured_at);
+        let summary = summary_scan_from_inventory(&inventory, &self.config.summary);
+        let pending_packing_page_ids = self.pending_packing_page_ids(&inventory);
+        let relation = relation_scan_from_inventory(
+            &inventory,
+            &self.config.relation,
+            &pending_packing_page_ids,
+        );
+        Ok(MaintenanceWorkScan {
+            captured_at,
             inspected_pages: inventory.len(),
-            eligible_pages,
-            excluded_pages: inventory.len().saturating_sub(eligible_pages),
-            candidate_group_count: windows.len(),
-            estimated_model_calls: windows.len().div_ceil(PACKING_GROUPS_PER_MODEL_CALL),
-            groups,
+            packing,
+            summary,
+            relation,
         })
     }
 
@@ -345,19 +527,32 @@ impl RuntimeMaintainer {
             })
             .collect();
 
+        let worker_request = MaintenanceWorkerRequest::AnalyzePacking {
+            groups,
+            max_pages_per_candidate: self.config.packing.max_pages,
+        };
+        let initial_response = self.worker.evaluate(worker_request.clone()).await;
+        let (response, worker_calls, overlap_retries) = match initial_response {
+            Ok(MaintenanceWorkerResponse::PackingCandidates { candidates })
+                if packing_candidates_overlap(&candidates) =>
+            {
+                (
+                    self.worker
+                        .repair_packing_analysis_overlap(worker_request)
+                        .await,
+                    2,
+                    1,
+                )
+            }
+            Ok(response) => (Ok(response), 1, 0),
+            Err(error) => (Err(error), 1, 0),
+        };
+
         let mut candidates = Vec::new();
-        let worker_calls = 1_u32;
         let mut no_candidate_groups = 0_u32;
         let mut deferred_groups = 0_u32;
         let mut issue = None;
-        match self
-            .worker
-            .evaluate(MaintenanceWorkerRequest::AnalyzePacking {
-                groups,
-                max_pages_per_candidate: self.config.packing.max_pages,
-            })
-            .await
-        {
+        match response {
             Ok(MaintenanceWorkerResponse::PackingCandidates {
                 candidates: selected_sets,
             }) => match validate_packing_analysis_batch(batch, selected_sets, &self.config.packing)
@@ -370,7 +565,11 @@ impl RuntimeMaintainer {
                     deferred_groups = batch.len() as u32;
                     issue = Some(MaintenancePackAnalysisIssue {
                         code: "invalid_model_selection".to_owned(),
-                        message: error.to_string(),
+                        message: if overlap_retries > 0 {
+                            format!("after one disjoint-output retry: {error}")
+                        } else {
+                            error.to_string()
+                        },
                     });
                 }
             },
@@ -407,6 +606,7 @@ impl RuntimeMaintainer {
             candidate_group_count: windows.len(),
             analyzed_group_count: batch.len(),
             worker_calls,
+            overlap_retries,
             no_candidate_groups,
             deferred_groups,
             candidates,
@@ -433,6 +633,394 @@ impl RuntimeMaintainer {
             .await
     }
 
+    pub async fn analyze_summary_candidate(
+        &self,
+        request: AnalyzeMaintenanceSummaryRequest,
+    ) -> Result<MaintenanceSummaryAnalysis> {
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        let candidate = inventory
+            .iter()
+            .find(|page| page.page_id == request.page_id)
+            .context("maintenance Summary Page no longer exists")?;
+        anyhow::ensure!(
+            candidate.revision_id == request.revision_id,
+            "maintenance Summary candidate revisions changed after review"
+        );
+        if !summary_page_eligible(candidate, &self.config.summary)
+            || candidate.summary_target_revision_id.as_deref()
+                == Some(candidate.revision_id.as_str())
+        {
+            return Ok(MaintenanceSummaryAnalysis::no_candidate());
+        }
+
+        let mut pages = self
+            .read_detail_pages(
+                vec![candidate.revision_id.clone()],
+                self.config.summary.max_input_chars,
+            )
+            .await?;
+        let page = pages
+            .pop()
+            .context("maintenance Summary Page disappeared")?;
+        let source_text = page.content.clone().unwrap_or_default();
+        let response = self
+            .worker
+            .evaluate(MaintenanceWorkerRequest::SummarizePage {
+                page: Box::new(page),
+            })
+            .await?;
+        match response {
+            MaintenanceWorkerResponse::WriteSummary { content } => {
+                let content = normalize_worker_summary(content, &source_text)?;
+                Ok(MaintenanceSummaryAnalysis::candidate(
+                    build_summary_candidate(candidate, content),
+                ))
+            }
+            MaintenanceWorkerResponse::NoCandidate => {
+                Ok(MaintenanceSummaryAnalysis::no_candidate())
+            }
+            MaintenanceWorkerResponse::Defer => Ok(MaintenanceSummaryAnalysis::defer()),
+            other => anyhow::bail!(
+                "semantic worker returned {} for a summarize_page review request",
+                response_name(&other)
+            ),
+        }
+    }
+
+    pub async fn analyze_summary_candidates(
+        &self,
+        request: AnalyzeMaintenanceSummariesRequest,
+    ) -> Result<MaintenanceSummaryBatchAnalysis> {
+        anyhow::ensure!(
+            !request.pages.is_empty()
+                && request.pages.len() <= MAX_SUMMARY_REVIEW_PAGES_PER_REQUEST,
+            "maintenance Summary review accepts 1..={MAX_SUMMARY_REVIEW_PAGES_PER_REQUEST} Pages"
+        );
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        let scan = summary_scan_from_inventory(&inventory, &self.config.summary);
+        anyhow::ensure!(
+            request.scan_id == scan.scan_id,
+            "maintenance Summary scan is stale; scan the Store again"
+        );
+        let mut requested_ids = BTreeSet::new();
+        anyhow::ensure!(
+            request
+                .pages
+                .iter()
+                .all(|page| requested_ids.insert(page.page_id.as_str())),
+            "maintenance Summary review contains duplicate Pages"
+        );
+
+        let mut eligible = Vec::new();
+        let mut no_candidate_pages = 0_u32;
+        for requested in &request.pages {
+            let Some(page) = inventory
+                .iter()
+                .find(|page| page.page_id == requested.page_id)
+            else {
+                no_candidate_pages = no_candidate_pages.saturating_add(1);
+                continue;
+            };
+            if page.revision_id != requested.revision_id
+                || !summary_page_eligible(page, &self.config.summary)
+                || page.summary_target_revision_id.as_deref() == Some(page.revision_id.as_str())
+            {
+                no_candidate_pages = no_candidate_pages.saturating_add(1);
+                continue;
+            }
+            eligible.push(page);
+        }
+
+        let detail_pages = self
+            .read_detail_pages(
+                eligible
+                    .iter()
+                    .map(|page| page.revision_id.clone())
+                    .collect(),
+                self.config
+                    .summary
+                    .max_input_chars
+                    .min(MAX_SUMMARY_REVIEW_INPUT_CHARS),
+            )
+            .await?;
+        let details = detail_pages
+            .into_iter()
+            .map(|page| (page.page_id.clone(), page))
+            .collect::<HashMap<_, _>>();
+
+        let mut analysis = MaintenanceSummaryBatchAnalysis {
+            analyzed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            requested_pages: request.pages.len(),
+            analyzed_pages: 0,
+            worker_calls: 0,
+            no_candidate_pages,
+            deferred_pages: 0,
+            candidates: Vec::new(),
+            issues: Vec::new(),
+        };
+        for (page_index, page) in eligible.iter().enumerate() {
+            let Some(detail) = details.get(&page.page_id).cloned() else {
+                analysis.deferred_pages = analysis.deferred_pages.saturating_add(1);
+                analysis.issues.push(MaintenanceSummaryAnalysisIssue {
+                    batch_index: page_index,
+                    message: format!("Summary Page {} disappeared during review", page.page_id),
+                });
+                continue;
+            };
+            analysis.analyzed_pages = analysis.analyzed_pages.saturating_add(1);
+            analysis.worker_calls = analysis.worker_calls.saturating_add(1);
+            let source_text = detail.content.clone().unwrap_or_default();
+            let response = self
+                .worker
+                .evaluate(MaintenanceWorkerRequest::SummarizePage {
+                    page: Box::new(detail),
+                })
+                .await;
+            match response {
+                Ok(MaintenanceWorkerResponse::WriteSummary { content }) => {
+                    match normalize_worker_summary(content, &source_text) {
+                        Ok(content) => analysis
+                            .candidates
+                            .push(build_summary_candidate(page, content)),
+                        Err(error) => {
+                            analysis.deferred_pages = analysis.deferred_pages.saturating_add(1);
+                            analysis.issues.push(MaintenanceSummaryAnalysisIssue {
+                                batch_index: page_index,
+                                message: error.to_string(),
+                            });
+                        }
+                    }
+                }
+                Ok(MaintenanceWorkerResponse::NoCandidate) => {
+                    analysis.no_candidate_pages = analysis.no_candidate_pages.saturating_add(1);
+                }
+                Ok(MaintenanceWorkerResponse::Defer) => {
+                    analysis.deferred_pages = analysis.deferred_pages.saturating_add(1);
+                }
+                Ok(other) => {
+                    analysis.deferred_pages = analysis.deferred_pages.saturating_add(1);
+                    analysis.issues.push(MaintenanceSummaryAnalysisIssue {
+                        batch_index: page_index,
+                        message: format!(
+                            "semantic worker returned {} for a summarize_page review request",
+                            response_name(&other)
+                        ),
+                    });
+                }
+                Err(error) => {
+                    analysis.deferred_pages = analysis.deferred_pages.saturating_add(1);
+                    analysis.issues.push(MaintenanceSummaryAnalysisIssue {
+                        batch_index: page_index,
+                        message: format!("{error:#}"),
+                    });
+                }
+            }
+        }
+        Ok(analysis)
+    }
+
+    pub async fn apply_summary_candidate(
+        &self,
+        request: ApplyMaintenanceSummaryRequest,
+    ) -> Result<pcp_core::WriteSummaryResult> {
+        anyhow::ensure!(
+            self.config.mode == MaintenanceMode::Apply,
+            "maintenance Summary optimization requires apply mode"
+        );
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        let page = inventory
+            .iter()
+            .find(|page| page.page_id == request.page_id)
+            .context("maintenance Summary candidate is stale or no longer eligible")?;
+        anyhow::ensure!(
+            page.revision_id == request.revision_id
+                && summary_page_eligible(page, &self.config.summary)
+                && page.summary_revision_id == request.expected_summary_revision_id
+                && page.summary_target_revision_id.as_deref() != Some(page.revision_id.as_str()),
+            "maintenance Summary candidate is stale or no longer eligible"
+        );
+        let mut details = self
+            .read_detail_pages(
+                vec![page.revision_id.clone()],
+                self.config.summary.max_input_chars,
+            )
+            .await?;
+        let source = details
+            .pop()
+            .context("maintenance Summary candidate Page disappeared")?;
+        let content = normalize_worker_summary(
+            request.content,
+            source.content.as_deref().unwrap_or_default(),
+        )?;
+        let candidate = build_summary_candidate(page, content.clone());
+        anyhow::ensure!(
+            candidate.candidate_id == request.candidate_id
+                && candidate.expected_summary_revision_id == request.expected_summary_revision_id,
+            "maintenance Summary candidate identity no longer matches the reviewed Page"
+        );
+        self.client
+            .write_summary(WriteSummaryRequest {
+                target_page_id: page.page_id.clone(),
+                target_revision_id: page.revision_id.clone(),
+                expected_summary_revision_id: page.summary_revision_id.clone(),
+                content,
+                created_by: self.config.worker_actor(),
+                tool_or_model: Some(self.config.worker.actor_id().to_owned()),
+                provenance: Vec::new(),
+                idempotency_key: Some(format!("maintenance:summary:{}", candidate.candidate_id)),
+            })
+            .await
+    }
+
+    pub async fn analyze_relation_candidate(
+        &self,
+        request: AnalyzeMaintenanceRelationRequest,
+    ) -> Result<MaintenanceRelationAnalysis> {
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        let pending_packing_page_ids = self.pending_packing_page_ids(&inventory);
+        let scan = relation_scan_from_inventory(
+            &inventory,
+            &self.config.relation,
+            &pending_packing_page_ids,
+        );
+        anyhow::ensure!(
+            request.scan_id == scan.scan_id,
+            "maintenance relation scan is stale; scan the Store again"
+        );
+        let windows = relation_candidate_windows(
+            &inventory,
+            &self.config.relation,
+            &pending_packing_page_ids,
+        );
+        let Some(window) = windows
+            .into_iter()
+            .find(|window| relation_scan_group_id(window) == request.group_id)
+        else {
+            return Ok(MaintenanceRelationAnalysis::no_candidate());
+        };
+
+        let offered = window
+            .iter()
+            .map(|page| (page.page_id.clone(), page.revision_id.clone()))
+            .collect::<HashMap<_, _>>();
+        let offered_page_ids = offered.keys().cloned().collect::<BTreeSet<_>>();
+        let relation_edges = self.existing_related_pairs(&window).await?;
+        let excluded_page_pairs = connected_relation_pairs(&offered_page_ids, &relation_edges);
+        let response = self
+            .worker
+            .evaluate(MaintenanceWorkerRequest::SelectRelation {
+                pages: window
+                    .iter()
+                    .map(|page| {
+                        RelationCandidatePage::from_inventory(
+                            page,
+                            self.config.relation.routing_chars_per_page,
+                        )
+                    })
+                    .collect(),
+                excluded_page_pairs: excluded_page_pairs.clone(),
+            })
+            .await?;
+        let mut page_ids = match response {
+            MaintenanceWorkerResponse::Relate { page_ids } => page_ids,
+            MaintenanceWorkerResponse::NoCandidate => {
+                return Ok(MaintenanceRelationAnalysis::no_candidate());
+            }
+            MaintenanceWorkerResponse::Defer => return Ok(MaintenanceRelationAnalysis::defer()),
+            other => anyhow::bail!(
+                "semantic worker returned {} for a select_relation review request",
+                response_name(&other)
+            ),
+        };
+        anyhow::ensure!(
+            page_ids[0] != page_ids[1]
+                && page_ids.iter().all(|page_id| offered.contains_key(page_id)),
+            "semantic worker selected an invalid relation pair for the reviewed window"
+        );
+        page_ids.sort();
+        if excluded_page_pairs.iter().any(|pair| pair == &page_ids) {
+            return Ok(MaintenanceRelationAnalysis::no_candidate());
+        }
+        let selected = page_ids
+            .iter()
+            .map(|page_id| {
+                window
+                    .iter()
+                    .find(|page| page.page_id == *page_id)
+                    .expect("offered relation Page exists")
+            })
+            .collect::<Vec<_>>();
+        Ok(MaintenanceRelationAnalysis::candidate(
+            build_relation_candidate(&selected),
+        ))
+    }
+
+    pub async fn apply_relation_candidate(
+        &self,
+        request: ApplyMaintenanceRelationRequest,
+    ) -> Result<pcp_core::Relation> {
+        anyhow::ensure!(
+            self.config.mode == MaintenanceMode::Apply,
+            "maintenance relation optimization requires apply mode"
+        );
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        let current_by_id = inventory
+            .iter()
+            .map(|page| (page.page_id.as_str(), page))
+            .collect::<HashMap<_, _>>();
+        anyhow::ensure!(
+            request.pages[0].page_id != request.pages[1].page_id,
+            "maintenance relation candidate contains duplicate Pages"
+        );
+        let mut selected = request
+            .pages
+            .iter()
+            .map(|requested| {
+                let page = current_by_id
+                    .get(requested.page_id.as_str())
+                    .copied()
+                    .context("maintenance relation candidate is stale or no longer eligible")?;
+                anyhow::ensure!(
+                    page.revision_id == requested.revision_id
+                        && relation_page_eligible(page, &self.config.relation),
+                    "maintenance relation candidate is stale or no longer eligible"
+                );
+                Ok::<_, anyhow::Error>(page)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        selected.sort_by(|left, right| left.page_id.cmp(&right.page_id));
+        anyhow::ensure!(
+            selected[0].namespace == selected[1].namespace,
+            "maintenance relation candidate Pages no longer share a Scope"
+        );
+        let candidate = build_relation_candidate(&selected);
+        anyhow::ensure!(
+            candidate.candidate_id == request.candidate_id,
+            "maintenance relation candidate identity no longer matches the reviewed Pages"
+        );
+        let page_ids = [selected[0].page_id.clone(), selected[1].page_id.clone()];
+        let revision_ids = vec![
+            selected[0].revision_id.clone(),
+            selected[1].revision_id.clone(),
+        ];
+        if self.related_pair_exists(&page_ids, &revision_ids).await? {
+            anyhow::bail!("maintenance relation candidate is already explicitly related");
+        }
+        self.client
+            .link_pages(LinkPagesRequest {
+                from_page_id: page_ids[0].clone(),
+                relation_type: "related_to".to_owned(),
+                to_page_id: page_ids[1].clone(),
+                basis_revision_ids: revision_ids.clone(),
+                created_by: self.config.worker_actor(),
+                idempotency_key: Some(format!(
+                    "maintenance:related:{}:{}",
+                    revision_ids[0], revision_ids[1]
+                )),
+            })
+            .await
+    }
+
     pub async fn run_once_with_job_limit(
         &mut self,
         max_jobs: u32,
@@ -455,22 +1043,15 @@ impl RuntimeMaintainer {
         persist_ledger: bool,
         max_jobs: u32,
     ) -> Result<MaintenanceCycleReport> {
-        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        let mut inventory = self.client.durable_page_inventory(Vec::new()).await?;
         let mut report = MaintenanceCycleReport {
             inspected_pages: inventory.len(),
             ..MaintenanceCycleReport::default()
         };
         let mut jobs_remaining = max_jobs;
 
-        if self.config.summary.enabled
-            && jobs_remaining > 0
-            && self
-                .run_summary_job(&inventory, &mut report)
-                .await
-                .context("run PCP Summary maintenance job")?
-        {
-            jobs_remaining -= 1;
-        }
+        // Packing changes the Page surface, so downstream phases must never
+        // reason over the pre-pack inventory.
         let packing_ran = self.config.packing.enabled
             && jobs_remaining > 0
             && self
@@ -479,9 +1060,22 @@ impl RuntimeMaintainer {
                 .context("run PCP packing maintenance job")?;
         if packing_ran {
             jobs_remaining -= 1;
+            inventory = self.client.durable_page_inventory(Vec::new()).await?;
+            report.inspected_pages = report.inspected_pages.max(inventory.len());
+        }
+
+        let summary_ran = self.config.summary.enabled
+            && jobs_remaining > 0
+            && self
+                .run_summary_job(&inventory, &mut report)
+                .await
+                .context("run PCP Summary maintenance job")?;
+        if summary_ran {
+            jobs_remaining -= 1;
+            inventory = self.client.durable_page_inventory(Vec::new()).await?;
+            report.inspected_pages = report.inspected_pages.max(inventory.len());
         }
         if self.config.relation.enabled
-            && !packing_ran
             && jobs_remaining > 0
             && self
                 .run_relation_job(&inventory, &mut report)
@@ -508,9 +1102,7 @@ impl RuntimeMaintainer {
         report: &mut MaintenanceCycleReport,
     ) -> Result<bool> {
         let eligible = |page: &&pcp_store::DurablePageInventoryItem| {
-            page.content_chars >= self.config.summary.minimum_chars as u64
-                && (page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE)
-                    || !excluded_kind(&page.kind, &self.config.summary.excluded_page_kinds))
+            summary_page_eligible(page, &self.config.summary)
                 && self.ledger.eligible(&summary_key(&page.revision_id))
         };
         let candidate = inventory
@@ -534,6 +1126,7 @@ impl RuntimeMaintainer {
             .read_detail_pages(vec![page_id.clone()], self.config.summary.max_input_chars)
             .await?;
         let page = pages.pop().context("Summary candidate disappeared")?;
+        let source_text = page.content.clone().unwrap_or_default();
         report.worker_calls += 1;
         match self
             .worker
@@ -543,7 +1136,7 @@ impl RuntimeMaintainer {
             .await?
         {
             MaintenanceWorkerResponse::WriteSummary { content } => {
-                let content = match normalize_worker_summary(content) {
+                let content = match normalize_worker_summary(content, &source_text) {
                     Ok(content) => content,
                     Err(_) => {
                         self.ledger.record(
@@ -1171,15 +1764,8 @@ fn relation_candidate_windows(
     let eligible = inventory
         .iter()
         .filter(|page| {
-            let has_semantic_input = page.content_chars > 0
-                || page
-                    .summary
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty())
-                || page.facets.is_some();
             !pending_packing_page_ids.contains(&page.page_id)
-                && has_semantic_input
-                && !excluded_kind(&page.kind, &config.excluded_page_kinds)
+                && relation_page_eligible(page, config)
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -1250,6 +1836,156 @@ fn connected_relation_pairs(
         }
     }
     connected
+}
+
+fn packing_scan_from_inventory(
+    inventory: &[pcp_store::DurablePageInventoryItem],
+    config: &PackingMaintenanceConfig,
+) -> MaintenancePackScan {
+    let captured_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    packing_scan_from_inventory_at(inventory, config, &captured_at)
+}
+
+fn packing_scan_from_inventory_at(
+    inventory: &[pcp_store::DurablePageInventoryItem],
+    config: &PackingMaintenanceConfig,
+    captured_at: &str,
+) -> MaintenancePackScan {
+    let windows = packing_candidate_windows(inventory, config);
+    let eligible_pages = windows.iter().map(Vec::len).sum::<usize>();
+    let scan_id = packing_scan_id(&windows, config);
+    let groups = windows
+        .iter()
+        .map(|window| packing_scan_group(window))
+        .collect();
+    MaintenancePackScan {
+        captured_at: captured_at.to_owned(),
+        scan_id,
+        inspected_pages: inventory.len(),
+        eligible_pages,
+        excluded_pages: inventory.len().saturating_sub(eligible_pages),
+        candidate_group_count: windows.len(),
+        estimated_model_calls: windows.len().div_ceil(PACKING_GROUPS_PER_MODEL_CALL),
+        groups,
+    }
+}
+
+fn summary_scan_from_inventory(
+    inventory: &[pcp_store::DurablePageInventoryItem],
+    config: &super::SummaryMaintenanceConfig,
+) -> MaintenanceSummaryScan {
+    let pages = if config.enabled {
+        inventory
+            .iter()
+            .filter(|page| {
+                summary_page_eligible(page, config)
+                    && page.summary_target_revision_id.as_deref() != Some(page.revision_id.as_str())
+            })
+            .map(|page| MaintenanceSummaryScanPage {
+                page_id: page.page_id.clone(),
+                revision_id: page.revision_id.clone(),
+                namespace: page.namespace.clone(),
+                content_chars: page.content_chars,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let scan_id = summary_scan_id(&pages, config);
+    MaintenanceSummaryScan {
+        scan_id,
+        inspected_pages: inventory.len(),
+        eligible_pages: pages.len(),
+        estimated_model_calls: pages.len().div_ceil(SUMMARY_REVIEW_PAGES_PER_MODEL_CALL),
+        pages,
+    }
+}
+
+fn relation_scan_from_inventory(
+    inventory: &[pcp_store::DurablePageInventoryItem],
+    config: &RelationMaintenanceConfig,
+    pending_packing_page_ids: &BTreeSet<String>,
+) -> MaintenanceRelationScan {
+    let eligible_pages = if config.enabled {
+        inventory
+            .iter()
+            .filter(|page| {
+                !pending_packing_page_ids.contains(&page.page_id)
+                    && relation_page_eligible(page, config)
+            })
+            .count()
+    } else {
+        0
+    };
+    let windows = if config.enabled {
+        relation_candidate_windows(inventory, config, pending_packing_page_ids)
+    } else {
+        Vec::new()
+    };
+    let groups = windows
+        .iter()
+        .map(|window| {
+            let anchor = window.first().expect("relation group is non-empty");
+            MaintenanceRelationScanGroup {
+                group_id: relation_scan_group_id(window),
+                anchor_page_id: anchor.page_id.clone(),
+                anchor_revision_id: anchor.revision_id.clone(),
+                page_count: window.len(),
+            }
+        })
+        .collect::<Vec<_>>();
+    MaintenanceRelationScan {
+        scan_id: relation_scan_id(&groups, config),
+        inspected_pages: inventory.len(),
+        eligible_pages,
+        candidate_group_count: groups.len(),
+        estimated_model_calls: groups.len(),
+        groups,
+    }
+}
+
+fn summary_scan_id(
+    pages: &[MaintenanceSummaryScanPage],
+    config: &super::SummaryMaintenanceConfig,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(config.minimum_chars.to_le_bytes());
+    digest.update(config.max_input_chars.to_le_bytes());
+    for page in pages {
+        digest.update(page.page_id.as_bytes());
+        digest.update([0]);
+        digest.update(page.revision_id.as_bytes());
+        digest.update([0]);
+    }
+    let encoded = format!("{:x}", digest.finalize());
+    format!("mss_{}", &encoded[..24])
+}
+
+fn relation_scan_id(
+    groups: &[MaintenanceRelationScanGroup],
+    config: &RelationMaintenanceConfig,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(config.candidate_window.to_le_bytes());
+    digest.update(config.routing_chars_per_page.to_le_bytes());
+    for group in groups {
+        digest.update(group.group_id.as_bytes());
+        digest.update([0]);
+    }
+    let encoded = format!("{:x}", digest.finalize());
+    format!("mrs_{}", &encoded[..24])
+}
+
+fn relation_scan_group_id(window: &[pcp_store::DurablePageInventoryItem]) -> String {
+    let mut digest = Sha256::new();
+    for page in window {
+        digest.update(page.page_id.as_bytes());
+        digest.update([0]);
+        digest.update(page.revision_id.as_bytes());
+        digest.update([0]);
+    }
+    let encoded = format!("{:x}", digest.finalize());
+    format!("mrg_{}", &encoded[..24])
 }
 
 fn packing_scan_id(
@@ -1345,6 +2081,14 @@ fn validate_packing_analysis_batch(
         candidates.push(build_pack_candidate(&pages));
     }
     Ok((candidates, represented_groups.len()))
+}
+
+fn packing_candidates_overlap(selected_sets: &[Vec<String>]) -> bool {
+    let mut used_page_ids = BTreeSet::new();
+    selected_sets
+        .iter()
+        .flatten()
+        .any(|page_id| !used_page_ids.insert(page_id))
 }
 
 fn select_packing_items<'a>(
@@ -1642,18 +2386,273 @@ fn excluded_kind(kind: &str, excluded: &[String]) -> bool {
     excluded.iter().any(|excluded| excluded == kind)
 }
 
-fn normalize_worker_summary(content: String) -> Result<String> {
+impl MaintenanceSummaryAnalysis {
+    fn candidate(candidate: MaintenanceSummaryCandidate) -> Self {
+        Self {
+            analyzed_at: maintenance_review_timestamp(),
+            decision: MaintenanceReviewDecision::Candidate,
+            candidate: Some(candidate),
+        }
+    }
+
+    fn no_candidate() -> Self {
+        Self {
+            analyzed_at: maintenance_review_timestamp(),
+            decision: MaintenanceReviewDecision::NoCandidate,
+            candidate: None,
+        }
+    }
+
+    fn defer() -> Self {
+        Self {
+            analyzed_at: maintenance_review_timestamp(),
+            decision: MaintenanceReviewDecision::Defer,
+            candidate: None,
+        }
+    }
+}
+
+impl MaintenanceRelationAnalysis {
+    fn candidate(candidate: MaintenanceRelationCandidate) -> Self {
+        Self {
+            analyzed_at: maintenance_review_timestamp(),
+            decision: MaintenanceReviewDecision::Candidate,
+            candidate: Some(candidate),
+        }
+    }
+
+    fn no_candidate() -> Self {
+        Self {
+            analyzed_at: maintenance_review_timestamp(),
+            decision: MaintenanceReviewDecision::NoCandidate,
+            candidate: None,
+        }
+    }
+
+    fn defer() -> Self {
+        Self {
+            analyzed_at: maintenance_review_timestamp(),
+            decision: MaintenanceReviewDecision::Defer,
+            candidate: None,
+        }
+    }
+}
+
+fn maintenance_review_timestamp() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn summary_page_eligible(
+    page: &pcp_store::DurablePageInventoryItem,
+    config: &super::SummaryMaintenanceConfig,
+) -> bool {
+    page.content_chars >= config.minimum_chars as u64
+        && (page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE)
+            || !excluded_kind(&page.kind, &config.excluded_page_kinds))
+}
+
+fn relation_page_eligible(
+    page: &pcp_store::DurablePageInventoryItem,
+    config: &RelationMaintenanceConfig,
+) -> bool {
+    let has_semantic_input = page.content_chars > 0
+        || page
+            .summary
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || page.facets.is_some();
+    has_semantic_input && !excluded_kind(&page.kind, &config.excluded_page_kinds)
+}
+
+fn build_summary_candidate(
+    page: &pcp_store::DurablePageInventoryItem,
+    content: String,
+) -> MaintenanceSummaryCandidate {
+    let mut digest = Sha256::new();
+    digest.update(page.page_id.as_bytes());
+    digest.update([0]);
+    digest.update(page.revision_id.as_bytes());
+    digest.update([0]);
+    if let Some(summary_revision_id) = &page.summary_revision_id {
+        digest.update(summary_revision_id.as_bytes());
+    }
+    digest.update([0]);
+    digest.update(content.as_bytes());
+    let encoded = format!("{:x}", digest.finalize());
+    MaintenanceSummaryCandidate {
+        candidate_id: format!("msu_{}", &encoded[..24]),
+        page_id: page.page_id.clone(),
+        revision_id: page.revision_id.clone(),
+        namespace: page.namespace.clone(),
+        content_chars: page.content_chars,
+        expected_summary_revision_id: page.summary_revision_id.clone(),
+        content,
+    }
+}
+
+fn build_relation_candidate(
+    pages: &[&pcp_store::DurablePageInventoryItem],
+) -> MaintenanceRelationCandidate {
+    assert_eq!(pages.len(), 2, "relation candidate has two Pages");
+    let mut inputs = pages
+        .iter()
+        .map(|page| MaintenanceRelationInput {
+            page_id: page.page_id.clone(),
+            revision_id: page.revision_id.clone(),
+            preview: page
+                .summary
+                .as_deref()
+                .unwrap_or(&page.snippet)
+                .chars()
+                .take(PACKING_PREVIEW_CHARS)
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    inputs.sort_by(|left, right| left.page_id.cmp(&right.page_id));
+    let namespace = pages[0].namespace.clone();
+    assert!(pages.iter().all(|page| page.namespace == namespace));
+    let mut digest = Sha256::new();
+    for page in &inputs {
+        digest.update(page.page_id.as_bytes());
+        digest.update([0]);
+        digest.update(page.revision_id.as_bytes());
+        digest.update([0]);
+    }
+    let encoded = format!("{:x}", digest.finalize());
+    MaintenanceRelationCandidate {
+        candidate_id: format!("mrl_{}", &encoded[..24]),
+        namespace,
+        pages: inputs
+            .try_into()
+            .expect("relation candidate has exactly two inputs"),
+    }
+}
+
+fn normalize_worker_summary(content: String, source_text: &str) -> Result<String> {
     let content = content.trim();
     anyhow::ensure!(
         !content.is_empty() && content.chars().count() <= MAX_MAINTENANCE_SUMMARY_CHARS,
         "semantic maintenance worker returned an invalid Summary"
     );
-    Ok(content.to_owned())
+    Ok(normalize_known_source_identifiers(content, source_text))
+}
+
+fn normalize_known_source_identifiers(summary: &str, source: &str) -> String {
+    let source_identifiers = ascii_identifier_tokens(source)
+        .into_iter()
+        .filter(|identifier| is_protected_identifier(identifier))
+        .collect::<BTreeSet<_>>();
+    if source_identifiers.is_empty() {
+        return summary.to_owned();
+    }
+
+    let mut normalized = String::with_capacity(summary.len());
+    let mut token_start = None;
+    for (index, character) in summary.char_indices() {
+        if is_ascii_identifier_character(character) {
+            token_start.get_or_insert(index);
+            continue;
+        }
+        if let Some(start) = token_start.take() {
+            normalized.push_str(&normalize_identifier_token(
+                &summary[start..index],
+                &source_identifiers,
+            ));
+        }
+        normalized.push(character);
+    }
+    if let Some(start) = token_start {
+        normalized.push_str(&normalize_identifier_token(
+            &summary[start..],
+            &source_identifiers,
+        ));
+    }
+    normalized
+}
+
+fn normalize_identifier_token(token: &str, source_identifiers: &BTreeSet<String>) -> String {
+    let identifier = token.trim_matches(|character| matches!(character, '_' | '-' | '.'));
+    let Some(source_identifier) = source_identifiers.iter().find(|source_identifier| {
+        identifier.eq_ignore_ascii_case(source_identifier)
+            || identifiers_are_near_matches(identifier, source_identifier)
+    }) else {
+        return token.to_owned();
+    };
+    token.replacen(identifier, source_identifier, 1)
+}
+
+fn is_ascii_identifier_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+}
+
+fn ascii_identifier_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+    for (index, character) in text.char_indices() {
+        if is_ascii_identifier_character(character) {
+            start.get_or_insert(index);
+        } else if let Some(start_index) = start.take() {
+            push_ascii_identifier_token(&mut tokens, &text[start_index..index]);
+        }
+    }
+    if let Some(start_index) = start {
+        push_ascii_identifier_token(&mut tokens, &text[start_index..]);
+    }
+    tokens
+}
+
+fn push_ascii_identifier_token(tokens: &mut Vec<String>, raw: &str) {
+    let token = raw.trim_matches(|character| matches!(character, '_' | '-' | '.'));
+    if token.len() >= 3 {
+        tokens.push(token.to_owned());
+    }
+}
+
+fn is_protected_identifier(identifier: &str) -> bool {
+    let uppercase = identifier
+        .bytes()
+        .filter(|byte| byte.is_ascii_uppercase())
+        .count();
+    identifier.bytes().any(|byte| byte.is_ascii_digit())
+        || uppercase >= 2
+        || identifier
+            .bytes()
+            .skip(1)
+            .any(|byte| byte.is_ascii_uppercase())
+        || identifier.contains(['_', '-', '.'])
+}
+
+fn identifiers_are_near_matches(left: &str, right: &str) -> bool {
+    if left == right || left.len() < 5 || right.len() < 5 {
+        return false;
+    }
+    let length_difference = left.len().abs_diff(right.len());
+    length_difference <= 2 && levenshtein_distance(left, right) <= 2
+}
+
+fn levenshtein_distance(left: &str, right: &str) -> usize {
+    let left = left.to_ascii_lowercase();
+    let right = right.to_ascii_lowercase();
+    let right = right.as_bytes();
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    for (left_index, left_byte) in left.bytes().enumerate() {
+        let mut current = Vec::with_capacity(right.len() + 1);
+        current.push(left_index + 1);
+        for (right_index, right_byte) in right.iter().enumerate() {
+            let replacement = previous[right_index] + usize::from(left_byte != *right_byte);
+            let insertion = current[right_index] + 1;
+            let deletion = previous[right_index + 1] + 1;
+            current.push(replacement.min(insertion).min(deletion));
+        }
+        previous = current;
+    }
+    previous[right.len()]
 }
 
 fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
     match response {
         MaintenanceWorkerResponse::WriteSummary { .. } => "write_summary",
+        MaintenanceWorkerResponse::Summaries { .. } => "summaries",
         MaintenanceWorkerResponse::Candidate { .. } => "candidate",
         MaintenanceWorkerResponse::PackingCandidates { .. } => "packing_candidates",
         MaintenanceWorkerResponse::Relate { .. } => "relate",

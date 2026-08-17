@@ -1,7 +1,7 @@
 import { createTopologyMap, relationFamily } from "./page-graph.js";
 import { pagePayloadPreviewText, renderPageContent, renderPagePreview } from "./page-content.js";
 
-export function createPageInspector({ request, showError, formatTime }) {
+export function createPageInspector({ request, showError, formatTime, t = (value) => value }) {
   const dialog = document.getElementById("page-dialog");
   const backButton = document.getElementById("dialog-back");
   const title = document.getElementById("dialog-title");
@@ -54,6 +54,19 @@ export function createPageInspector({ request, showError, formatTime }) {
     return block;
   }
 
+  function rawContentBlock(content, mediaType = "text/plain") {
+    const normalizedMediaType = mediaType.split(";", 1)[0].trim().toLowerCase();
+    const isJson = normalizedMediaType === "application/json" || normalizedMediaType.endsWith("+json");
+    if (isJson && typeof content === "string") {
+      try {
+        return element("pre", "", JSON.stringify(JSON.parse(content), null, 2));
+      } catch {
+        // Keep malformed JSON available exactly as stored.
+      }
+    }
+    return contentBlock(content, mediaType);
+  }
+
   function previewBlock(content, mediaType, options = {}) {
     const block = element("div", "page-content");
     renderPagePreview(block, content, mediaType, options);
@@ -81,7 +94,7 @@ export function createPageInspector({ request, showError, formatTime }) {
 
   function graphPreview(label, value) {
     const node = element("span", "graph-preview");
-    node.append(element("span", "graph-preview-label", label), element("span", "", value));
+    node.append(element("span", "graph-preview-label", t(label)), element("span", "", value));
     return node;
   }
 
@@ -112,27 +125,27 @@ export function createPageInspector({ request, showError, formatTime }) {
       ["History", page.history.length],
     ];
     facts.append(...rows.flatMap(([label, value]) => [
-      element("dt", "", label),
+      element("dt", "", t(label)),
       element("dd", label === "Scope" || label === "Created by" ? "mono" : "", value),
     ]));
 
     const sections = [];
     if (page.summary) {
       sections.push(detailSection(
-        "Summary",
+        t("Summary"),
         contentBlock(page.summary.content, "text/markdown"),
       ));
     }
     sections.push(detailSection(
-      page.page.kind === "summary_projection" ? "Summary content" : "Content",
+      t(page.page.kind === "summary_projection" ? "Summary content" : "Content"),
       previewBlock(
-        payload?.content || "No content projection",
+        payload?.content || t("No content projection"),
         payload?.mediaType || "text/plain",
         { mediaUrl },
       ),
     ));
-    sections.push(detailSection("Page", facts));
-    if (page.validity) sections.push(detailSection("Validity", jsonBlock(page.validity, "No validity assessment")));
+    sections.push(detailSection(t("Page"), facts));
+    if (page.validity) sections.push(detailSection(t("Validity"), jsonBlock(page.validity, t("No validity assessment"))));
     summaryPane.replaceChildren(...sections);
   }
 
@@ -167,7 +180,7 @@ export function createPageInspector({ request, showError, formatTime }) {
       const count = value === "all"
         ? relations.length
         : relations.filter((relation) => relationFamily(relation.relationType, relation.edgeKind) === value).length;
-      const button = element("button", `graph-filter${currentGraphFilter === value ? " active" : ""}`, `${label} ${count}`);
+      const button = element("button", `graph-filter${currentGraphFilter === value ? " active" : ""}`, `${t(label)} ${count}`);
       button.type = "button";
       button.dataset.relationFamily = value;
       button.disabled = count === 0;
@@ -183,9 +196,9 @@ export function createPageInspector({ request, showError, formatTime }) {
   function graphQueryControls() {
     const controls = element("div", "graph-query-controls");
     const depthControl = element("div", "graph-depth-control");
-    depthControl.append(element("span", "muted", "Traversal depth"));
+    depthControl.append(element("span", "muted", t("Traversal depth")));
     for (const depth of [1, 2, 3]) {
-      const button = element("button", `graph-depth-button${currentGraphDepth === depth ? " active" : ""}`, `${depth} hop${depth > 1 ? "s" : ""}`);
+      const button = element("button", `graph-depth-button${currentGraphDepth === depth ? " active" : ""}`, `${depth} ${t(depth > 1 ? "hops" : "hop")}`);
       button.type = "button";
       button.title = `Show Pages within ${depth} graph edge${depth > 1 ? "s" : ""} of the current Page`;
       button.setAttribute("aria-label", button.title);
@@ -197,7 +210,7 @@ export function createPageInspector({ request, showError, formatTime }) {
       depthControl.append(button);
     }
     const budgetLabel = element("label", "graph-budget-control");
-    budgetLabel.append(element("span", "muted", "Node budget"));
+    budgetLabel.append(element("span", "muted", t("Node budget")));
     const budget = element("select", "");
     for (const value of [60, 120, 240]) {
       const option = element("option", "", value);
@@ -332,7 +345,7 @@ export function createPageInspector({ request, showError, formatTime }) {
     rawPane.replaceChildren(
       detailSection(
         payload?.mediaType ? `Raw content · ${payload.mediaType}` : "Raw content",
-        contentBlock(payload?.content || "No payload projection", payload?.mediaType || "text/plain"),
+        rawContentBlock(payload?.content || "No payload projection", payload?.mediaType || "text/plain"),
       ),
       detailSection("Manifest", jsonBlock(manifest, "No manifest")),
       detailSection("Sources and provenance", jsonBlock({

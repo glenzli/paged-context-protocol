@@ -15,18 +15,20 @@ use axum::{
     body::Body,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
-use pcp_client::{PcpApi, PcpTenantApi};
+use pcp_client::{ContentLibraryResult, PcpApi, PcpTenantApi};
 use pcp_core::{
-    PagePayload, PlanRevisionRetentionRequest, Projection, ReadPage, ReadPagesRequest, Relation,
-    RetentionPolicy, SearchFilters, SearchHit, SearchMode, SearchPagesRequest, SearchResult,
-    SearchTermMatch, SourceRef, SourceSpan,
+    BrowseIndexOrder, PagePayload, PlanRevisionRetentionRequest, Projection, ReadPage,
+    ReadPagesRequest, Relation, RetentionPolicy, SearchHit, SourceRef, SourceSpan,
 };
 use pcp_rpc::{EnrollmentAdminClient, EnrollmentAdminResponse, RemotePcpClient};
 use pcp_runtime::{
-    AnalyzeMaintenancePacksRequest, ApplyMaintenancePackRequest, MaintenanceOperator, RuntimeConfig,
+    AnalyzeMaintenancePacksRequest, AnalyzeMaintenanceRelationRequest,
+    AnalyzeMaintenanceSummariesRequest, AnalyzeMaintenanceSummaryRequest,
+    ApplyMaintenancePackRequest, ApplyMaintenanceRelationRequest, ApplyMaintenanceSummaryRequest,
+    MaintenanceOperator, RuntimeConfig,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -40,11 +42,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_PAGE_LIMIT: u32 = 20;
 const MAX_PAGE_LIMIT: u32 = 50;
+const PAGE_LIST_PREVIEW_CHARS: u32 = 8_000;
 const MAX_HISTORY_REVISIONS: usize = 20;
 const MAX_RETENTION_SAMPLE_LIMIT: u32 = 100;
 const MAX_LOCAL_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
 const LOCAL_MEDIA_ROOTS_ENV: &str = "PCP_CONSOLE_LOCAL_MEDIA_ROOTS";
-const TECHNICAL_PAGE_KINDS: [&str; 1] = ["summary_projection"];
+const CONSOLE_STATIC_CACHE_CONTROL: &str = "no-store";
 
 mod graph_view;
 mod managed;
@@ -86,10 +89,9 @@ impl IntoResponse for ApiError {
 struct PageQuery {
     q: Option<String>,
     scope: Option<String>,
-    mode: Option<String>,
+    order: Option<String>,
     cursor: Option<String>,
     limit: Option<u32>,
-    technical: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -98,6 +100,8 @@ struct ConsolePageResult {
     hits: Vec<ConsolePageHit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_cursor: Option<String>,
+    total_pages: u64,
+    total_content_chars: u64,
 }
 
 #[derive(Serialize)]
@@ -111,6 +115,13 @@ struct ConsolePageHit {
     relation_stats: Option<PageListRelationStats>,
     #[serde(skip_serializing_if = "Option::is_none")]
     source_span: Option<SourceSpan>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConsolePagePreview {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview_payload: Option<PagePayload>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -250,7 +261,6 @@ fn router(state: AppState) -> Router {
         .route("/page-content.js", get(page_content_js))
         .route("/page-content.css", get(page_content_css))
         .route("/page-graph.js", get(page_graph_js))
-        .route("/quality-view.js", get(quality_view_js))
         .route("/health-view.js", get(health_view_js))
         .route("/retention-view.js", get(retention_view_js))
         .route("/styles.css", get(styles_css))
@@ -259,18 +269,38 @@ fn router(state: AppState) -> Router {
         .route("/api/runtime/restart", post(restart_runtime))
         .route("/api/overview", get(overview))
         .route("/api/pages", get(pages))
+        .route("/api/pages/{page_id}/preview", get(page_preview))
         .route("/api/pages/{page_id}", get(page_detail))
         .route("/api/pages/{page_id}/raw", get(page_raw))
         .route("/api/pages/{page_id}/media/{source_index}", get(page_media))
         .route("/api/pages/{page_id}/graph", get(page_graph))
         .route("/api/pages/{page_id}/lineage", get(page_lineage))
-        .route("/api/quality", get(quality))
         .route("/api/metrics", get(health_metrics))
         .route("/api/retention", get(retention_plan))
         .route("/api/maintenance", get(maintenance_status))
         .route("/api/maintenance/scan", post(maintenance_scan))
         .route("/api/maintenance/analyze", post(maintenance_analyze))
         .route("/api/maintenance/packs/apply", post(maintenance_apply_pack))
+        .route(
+            "/api/maintenance/summaries/analyze",
+            post(maintenance_analyze_summary),
+        )
+        .route(
+            "/api/maintenance/summaries/analyze-batch",
+            post(maintenance_analyze_summaries),
+        )
+        .route(
+            "/api/maintenance/summaries/apply",
+            post(maintenance_apply_summary),
+        )
+        .route(
+            "/api/maintenance/relations/analyze",
+            post(maintenance_analyze_relation),
+        )
+        .route(
+            "/api/maintenance/relations/apply",
+            post(maintenance_apply_relation),
+        )
         .route("/api/access", get(access_log))
         .route("/api/enrollment", get(enrollment_snapshot))
         .route(
@@ -310,71 +340,66 @@ async fn connect_runtime(
     }
 }
 
-async fn index() -> Html<&'static str> {
-    Html(include_str!("index.html"))
-}
-
-async fn app_js() -> impl IntoResponse {
+fn static_asset(content_type: &'static str, contents: &'static str) -> Response {
     (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        include_str!("app.js"),
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, CONSOLE_STATIC_CACHE_CONTROL),
+        ],
+        contents,
     )
+        .into_response()
 }
 
-async fn page_inspector_js() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+async fn index() -> Response {
+    static_asset("text/html; charset=utf-8", include_str!("index.html"))
+}
+
+async fn app_js() -> Response {
+    static_asset("text/javascript; charset=utf-8", include_str!("app.js"))
+}
+
+async fn page_inspector_js() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
         include_str!("page-inspector.js"),
     )
 }
 
-async fn page_content_js() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+async fn page_content_js() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
         include_str!("page-content.js"),
     )
 }
 
-async fn page_content_css() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        include_str!("page-content.css"),
-    )
+async fn page_content_css() -> Response {
+    static_asset("text/css; charset=utf-8", include_str!("page-content.css"))
 }
 
-async fn page_graph_js() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+async fn page_graph_js() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
         include_str!("page-graph.js"),
     )
 }
 
-async fn quality_view_js() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        include_str!("quality-view.js"),
-    )
-}
-
-async fn health_view_js() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+async fn health_view_js() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
         include_str!("health-view.js"),
     )
 }
 
-async fn retention_view_js() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+async fn retention_view_js() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
         include_str!("retention-view.js"),
     )
 }
 
-async fn styles_css() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        include_str!("styles.css"),
-    )
+async fn styles_css() -> Response {
+    static_asset("text/css; charset=utf-8", include_str!("styles.css"))
 }
 
 async fn health(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
@@ -417,12 +442,41 @@ async fn restart_runtime(
 }
 
 async fn overview(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let (integrity, scopes, page_count, content_chars) = tokio::try_join!(
+    let (integrity, scopes, content_library) = tokio::try_join!(
         state.client.integrity_check(),
         state.client.list_scopes(Vec::new(), None, 10_000, None),
-        state.client.page_count(Vec::new()),
-        state.client.content_char_count(Vec::new()),
+        state.client.content_library_summary(Vec::new()),
     )?;
+    let content_by_scope = content_library
+        .scopes
+        .iter()
+        .map(|scope| {
+            (
+                scope.namespace.as_str(),
+                (scope.page_count, scope.content_chars),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let scopes = scopes
+        .0
+        .into_iter()
+        .map(|scope| {
+            let (page_count, content_chars) = content_by_scope
+                .get(scope.namespace.as_str())
+                .copied()
+                .unwrap_or((0, 0));
+            json!({
+                "namespace": scope.namespace,
+                "displayName": scope.display_name,
+                "description": scope.description,
+                "parentNamespace": scope.parent_namespace,
+                "createdAt": scope.created_at,
+                "updatedAt": scope.updated_at,
+                "pageCount": page_count,
+                "contentChars": content_chars,
+            })
+        })
+        .collect::<Vec<_>>();
     Ok(Json(json!({
         "integrity": integrity,
         "identityId": state.client.identity_id(),
@@ -433,9 +487,9 @@ async fn overview(State(state): State<AppState>) -> Result<Json<Value>, ApiError
             "pid": state.client.server_pid(),
             "startedAtUnixMs": state.client.server_started_at_unix_ms(),
         },
-        "pageCount": page_count,
-        "contentChars": content_chars,
-        "scopes": scopes.0,
+        "pageCount": content_library.page_count,
+        "contentChars": content_library.content_chars,
+        "scopes": scopes,
     })))
 }
 
@@ -448,58 +502,23 @@ async fn pages(
         .unwrap_or(DEFAULT_PAGE_LIMIT)
         .clamp(1, MAX_PAGE_LIMIT);
     let scopes = selected_scopes(state.client.as_ref(), query.scope.as_deref());
-    let include_technical = query.technical.unwrap_or(false);
-    let mut result = match query
+    let search_query = query
         .q
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    {
-        Some(text) => {
-            state
-                .client
-                .search_pages(SearchPagesRequest {
-                    query: text.to_owned(),
-                    scopes,
-                    mode: parse_search_mode(query.mode.as_deref())?,
-                    term_match: SearchTermMatch::All,
-                    projections: vec![
-                        Projection::Manifest,
-                        Projection::Summary,
-                        Projection::Validity,
-                        Projection::Facets,
-                    ],
-                    filters: SearchFilters::default(),
-                    limit,
-                    cursor: query.cursor,
-                })
-                .await?
-        }
-        None => {
-            state
-                .client
-                .browse_index(
-                    scopes,
-                    if include_technical {
-                        Vec::new()
-                    } else {
-                        TECHNICAL_PAGE_KINDS
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect()
-                    },
-                    limit,
-                    query.cursor,
-                    40_000,
-                )
-                .await?
-        }
-    };
-    if !include_technical {
-        result
-            .hits
-            .retain(|hit| !TECHNICAL_PAGE_KINDS.contains(&hit.kind.as_str()));
-    }
+        .map(ToOwned::to_owned);
+    let result = state
+        .client
+        .browse_content_pages(
+            scopes,
+            search_query,
+            parse_browse_index_order(query.order.as_deref())?,
+            limit,
+            query.cursor,
+            PAGE_LIST_PREVIEW_CHARS,
+        )
+        .await?;
     Ok(Json(json!(
         console_page_result(state.client.as_ref(), result).await?
     )))
@@ -507,14 +526,19 @@ async fn pages(
 
 async fn console_page_result(
     client: &RemotePcpClient,
-    result: SearchResult,
+    result: ContentLibraryResult,
 ) -> Result<ConsolePageResult> {
+    let ContentLibraryResult {
+        hits,
+        next_cursor,
+        total_pages,
+        total_content_chars,
+    } = result;
     let capabilities = client.capabilities();
     let chunk_size = usize::try_from(capabilities.max_read_pages)
         .unwrap_or(1)
         .max(1);
-    let page_ids = result
-        .hits
+    let page_ids = hits
         .iter()
         .map(|hit| hit.page_id.clone())
         .collect::<Vec<_>>();
@@ -544,8 +568,7 @@ async fn console_page_result(
     }
 
     Ok(ConsolePageResult {
-        hits: result
-            .hits
+        hits: hits
             .into_iter()
             .map(|hit| {
                 let page_metadata = metadata.remove(&hit.page_id);
@@ -562,7 +585,9 @@ async fn console_page_result(
                 }
             })
             .collect(),
-        next_cursor: result.next_cursor,
+        next_cursor,
+        total_pages,
+        total_content_chars,
     })
 }
 
@@ -588,6 +613,22 @@ async fn page_detail(
     )
     .await?;
     Ok(Json(json!(page)))
+}
+
+async fn page_preview(
+    State(state): State<AppState>,
+    Path(page_id): Path<String>,
+) -> Result<Json<ConsolePagePreview>, ApiError> {
+    let page = read_one_page(
+        state.client.as_ref(),
+        page_id,
+        page_preview_projections(),
+        state.client.capabilities().max_read_chars,
+    )
+    .await?;
+    Ok(Json(ConsolePagePreview {
+        preview_payload: page.revision.payload,
+    }))
 }
 
 async fn page_raw(
@@ -705,11 +746,6 @@ async fn page_lineage(
     Ok(Json(json!({"pages": pages, "total": total})))
 }
 
-async fn quality(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let items = state.client.durable_page_inventory(Vec::new()).await?;
-    Ok(Json(json!({"items": items})))
-}
-
 async fn health_metrics(
     State(state): State<AppState>,
     Query(query): Query<HealthQuery>,
@@ -787,7 +823,7 @@ async fn maintenance_scan(
         )
         .into());
     }
-    let scan = operator.scan_packing().await?;
+    let scan = operator.scan_maintenance_work().await?;
     Ok(Json(json!(scan)))
 }
 
@@ -831,6 +867,78 @@ async fn maintenance_apply_pack(
     }
     let result = operator.apply_pack(request).await?;
     Ok(Json(json!({"optimized": true, "result": result})))
+}
+
+async fn maintenance_analyze_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<AnalyzeMaintenanceSummaryRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let operator = maintenance_operator_for_console(&state).await?;
+    let analysis = operator.analyze_summary(request).await?;
+    Ok(Json(json!(analysis)))
+}
+
+async fn maintenance_analyze_summaries(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<AnalyzeMaintenanceSummariesRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let operator = maintenance_operator_for_console(&state).await?;
+    let analysis = operator.analyze_summaries(request).await?;
+    Ok(Json(json!(analysis)))
+}
+
+async fn maintenance_apply_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ApplyMaintenanceSummaryRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let operator = maintenance_operator_for_console(&state).await?;
+    let result = operator.apply_summary(request).await?;
+    Ok(Json(json!({"optimized": true, "result": result})))
+}
+
+async fn maintenance_analyze_relation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<AnalyzeMaintenanceRelationRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let operator = maintenance_operator_for_console(&state).await?;
+    let analysis = operator.analyze_relation(request).await?;
+    Ok(Json(json!(analysis)))
+}
+
+async fn maintenance_apply_relation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ApplyMaintenanceRelationRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let operator = maintenance_operator_for_console(&state).await?;
+    let result = operator.apply_relation(request).await?;
+    Ok(Json(json!({"optimized": true, "result": result})))
+}
+
+async fn maintenance_operator_for_console(
+    state: &AppState,
+) -> Result<MaintenanceOperator, ApiError> {
+    let config_path = state
+        .runtime_config
+        .as_ref()
+        .context("PCP Console has no Runtime configuration path")?;
+    let operator = MaintenanceOperator::load(config_path).await?;
+    if operator.identity_id() != state.client.identity_id() {
+        return Err(anyhow::anyhow!(
+            "PCP maintenance configuration points to a different Store identity"
+        )
+        .into());
+    }
+    Ok(operator)
 }
 
 async fn access_log(
@@ -1053,12 +1161,19 @@ async fn read_one_page(
         .ok_or_else(|| anyhow::anyhow!("PCP Page was not found").into())
 }
 
-fn parse_search_mode(value: Option<&str>) -> Result<SearchMode, ApiError> {
-    match value.unwrap_or("auto") {
-        "auto" => Ok(SearchMode::Auto),
-        "text" => Ok(SearchMode::Text),
-        "exact" => Ok(SearchMode::Exact),
-        other => Err(anyhow::anyhow!("unsupported console search mode: {other}").into()),
+fn page_preview_projections() -> Vec<Projection> {
+    vec![Projection::Payload]
+}
+
+fn parse_browse_index_order(value: Option<&str>) -> Result<BrowseIndexOrder, ApiError> {
+    match value.unwrap_or("recent") {
+        "recent" => Ok(BrowseIndexOrder::Recent),
+        "oldest" => Ok(BrowseIndexOrder::Oldest),
+        "most_connected" => Ok(BrowseIndexOrder::MostConnected),
+        "least_connected" => Ok(BrowseIndexOrder::LeastConnected),
+        "largest" => Ok(BrowseIndexOrder::Largest),
+        "source_order" => Ok(BrowseIndexOrder::SourceOrder),
+        other => Err(anyhow::anyhow!("unsupported console page order: {other}").into()),
     }
 }
 
@@ -1083,6 +1198,43 @@ fn retention_policy(query: &RetentionQuery) -> RetentionPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_static_assets_disable_browser_caching() {
+        let response = static_asset("text/plain; charset=utf-8", "console");
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            CONSOLE_STATIC_CACHE_CONTROL
+        );
+    }
+
+    #[test]
+    fn console_page_preview_reads_only_the_payload_projection() {
+        assert!(matches!(
+            page_preview_projections().as_slice(),
+            [Projection::Payload]
+        ));
+    }
+
+    #[test]
+    fn console_page_preview_uses_the_browser_wire_field_name() {
+        let preview = ConsolePagePreview {
+            preview_payload: Some(PagePayload {
+                media_type: "text/plain".to_owned(),
+                content: "recovered preview".to_owned(),
+            }),
+        };
+
+        assert_eq!(
+            serde_json::to_value(preview).unwrap(),
+            json!({
+                "previewPayload": {
+                    "mediaType": "text/plain",
+                    "content": "recovered preview"
+                }
+            })
+        );
+    }
 
     fn local_source_ref(path: &std::path::Path, digest: &str) -> SourceRef {
         SourceRef {
@@ -1112,11 +1264,20 @@ mod tests {
     }
 
     #[test]
-    fn console_search_modes_are_explicitly_bounded() {
-        assert_eq!(parse_search_mode(None).unwrap(), SearchMode::Auto);
-        assert_eq!(parse_search_mode(Some("text")).unwrap(), SearchMode::Text);
-        assert_eq!(parse_search_mode(Some("exact")).unwrap(), SearchMode::Exact);
-        assert!(parse_search_mode(Some("graph")).is_err());
+    fn console_browse_orders_are_explicitly_bounded() {
+        assert_eq!(
+            parse_browse_index_order(None).unwrap(),
+            BrowseIndexOrder::Recent
+        );
+        assert_eq!(
+            parse_browse_index_order(Some("most_connected")).unwrap(),
+            BrowseIndexOrder::MostConnected
+        );
+        assert_eq!(
+            parse_browse_index_order(Some("source_order")).unwrap(),
+            BrowseIndexOrder::SourceOrder
+        );
+        assert!(parse_browse_index_order(Some("relevance")).is_err());
     }
 
     #[test]

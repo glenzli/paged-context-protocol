@@ -5,15 +5,18 @@ use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessPermission, AccessPrincipal, AccessSession, AssessPageValidityRequest,
-    Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest, IngestPageRequest,
-    LinkPagesRequest, PackPagesRequest, PlanRevisionRetentionRequest,
+    BrowseIndexOrder, Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest,
+    IngestPageRequest, LinkPagesRequest, PackPagesRequest, PlanRevisionRetentionRequest,
     PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
     RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope, ScopeGrant,
     SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
     WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::PcpStore;
-pub use pcp_store::{DurablePageInventoryItem, HealthSnapshot, TombstoneCascadeResult};
+pub use pcp_store::{
+    ContentLibraryResult, ContentLibraryScope, ContentLibrarySummary, DurablePageInventoryItem,
+    HealthSnapshot, TombstoneCascadeResult,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AccessMode {
@@ -120,10 +123,24 @@ pub trait PcpTenantApi: Send + Sync {
         &self,
         scopes: Vec<String>,
         excluded_page_kinds: Vec<String>,
+        order: BrowseIndexOrder,
         limit: u32,
         cursor: Option<String>,
         max_chars: u32,
     ) -> Result<SearchResult>;
+    async fn browse_content_pages(
+        &self,
+        scopes: Vec<String>,
+        query: Option<String>,
+        order: BrowseIndexOrder,
+        limit: u32,
+        cursor: Option<String>,
+        max_chars: u32,
+    ) -> Result<ContentLibraryResult>;
+    async fn content_library_summary(
+        &self,
+        requested_scopes: Vec<String>,
+    ) -> Result<ContentLibrarySummary>;
     async fn read_pages(&self, request: ReadPagesRequest) -> Result<Vec<ReadPage>>;
     async fn ingest_page(&self, request: IngestPageRequest) -> Result<WriteResult>;
 }
@@ -252,6 +269,7 @@ impl PcpTenantApi for EmbeddedPcpClient {
         &self,
         scopes: Vec<String>,
         excluded_page_kinds: Vec<String>,
+        order: BrowseIndexOrder,
         limit: u32,
         cursor: Option<String>,
         max_chars: u32,
@@ -261,10 +279,34 @@ impl PcpTenantApi for EmbeddedPcpClient {
                 &self.access,
                 scopes,
                 excluded_page_kinds,
+                order,
                 limit,
                 cursor,
                 max_chars,
             )
+            .await
+    }
+
+    async fn browse_content_pages(
+        &self,
+        scopes: Vec<String>,
+        query: Option<String>,
+        order: BrowseIndexOrder,
+        limit: u32,
+        cursor: Option<String>,
+        max_chars: u32,
+    ) -> Result<ContentLibraryResult> {
+        self.store
+            .browse_content_pages(&self.access, scopes, query, order, limit, cursor, max_chars)
+            .await
+    }
+
+    async fn content_library_summary(
+        &self,
+        requested_scopes: Vec<String>,
+    ) -> Result<ContentLibrarySummary> {
+        self.store
+            .content_library_summary(&self.access, requested_scopes)
             .await
     }
 

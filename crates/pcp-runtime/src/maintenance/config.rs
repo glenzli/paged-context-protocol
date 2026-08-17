@@ -191,7 +191,6 @@ impl Default for SummaryMaintenanceConfig {
                 "pcp_summary".to_owned(),
                 "summary_projection".to_owned(),
                 "validity_assessment".to_owned(),
-                "conversation_event".to_owned(),
                 "tombstone".to_owned(),
             ],
         }
@@ -263,8 +262,8 @@ impl Default for PackingMaintenanceConfig {
             enabled: false,
             max_pages: 8,
             max_input_chars: 64_000,
-            analysis_window_pages: 32,
-            routing_chars_per_page: 800,
+            analysis_window_pages: 64,
+            routing_chars_per_page: 1_200,
             excluded_page_kinds: vec![
                 "pcp_summary".to_owned(),
                 "summary_projection".to_owned(),
@@ -464,7 +463,7 @@ fn default_worker_actor_type() -> String {
 }
 
 fn default_infer_summary_deployment_id() -> String {
-    "ollama_qwen3_5_4b".to_owned()
+    "codex_gpt_5_6_luna".to_owned()
 }
 
 fn default_infer_reasoning_deployment_id() -> String {

@@ -4,117 +4,194 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PCP Console</title>
-  <link rel="stylesheet" href="/styles.css">
-  <link rel="stylesheet" href="/page-content.css">
+  <link rel="stylesheet" href="/styles.css?v=20260818.1">
+  <link rel="stylesheet" href="/page-content.css?v=20260816.3">
 </head>
 <body>
   <header class="topbar">
     <div class="title-block">
       <strong>PCP Console</strong>
-      <span id="connection" class="connection">Connecting</span>
+      <span id="connection" class="connection" data-i18n="Connecting">Connecting</span>
     </div>
-    <div class="headline" aria-live="polite">
-      <span><b id="headline-pages">-</b> pages</span>
-      <span><b id="headline-content">-</b> content</span>
-      <button id="enrollment-open" type="button" hidden>Clients <span id="enrollment-badge" class="count-badge" hidden></span></button>
-      <button id="runtime-restart" type="button" hidden>Restart Runtime</button>
-      <button id="refresh" type="button">Refresh</button>
+    <div class="topbar-end">
+      <div class="headline" aria-live="polite">
+        <span><b id="headline-pages">-</b> <span data-i18n="pages">pages</span></span>
+        <span><b id="headline-content">-</b> <span data-i18n="content">content</span></span>
+      </div>
+      <div class="topbar-actions" role="toolbar" data-i18n-aria-label="Console controls" aria-label="Console controls">
+        <button id="enrollment-open" class="topbar-icon-button" type="button" hidden aria-label="Client access" title="Client access" data-i18n-aria-label="Client access" data-i18n-title="Client access">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 21a8 8 0 0 0-16 0"/><circle cx="10" cy="7" r="4"/><path d="M22 21a8 8 0 0 0-6-7.75"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span id="enrollment-badge" class="count-badge" hidden></span>
+        </button>
+        <button id="runtime-restart" class="topbar-icon-button" type="button" hidden aria-label="Restart Runtime" title="Restart Runtime" data-i18n-aria-label="Restart Runtime" data-i18n-title="Restart Runtime">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+        </button>
+        <button id="refresh" class="topbar-icon-button" type="button" aria-label="Refresh" title="Refresh" data-i18n-aria-label="Refresh" data-i18n-title="Refresh">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 0-15.5-6.2L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 15.5 6.2L21 16"/><path d="M21 21v-5h-5"/></svg>
+        </button>
+        <button id="preferences-open" class="topbar-icon-button" type="button" aria-label="Appearance and language" title="Appearance and language" data-i18n-aria-label="Appearance and language" data-i18n-title="Appearance and language">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="10" x2="10" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></svg>
+        </button>
+      </div>
     </div>
   </header>
 
-  <nav class="tabs" aria-label="Console views">
-    <button class="tab active" type="button" data-view="overview">Overview</button>
-    <button class="tab" type="button" data-view="pages">Pages</button>
-    <button class="tab" type="button" data-view="maintenance">Maintenance</button>
-    <button class="tab" type="button" data-view="health">Health</button>
-    <button class="tab" type="button" data-view="retention">Retention</button>
-    <button class="tab" type="button" data-view="access">Access</button>
+  <nav class="tabs" aria-label="Console views" data-i18n-aria-label="Console views">
+    <button class="tab active" type="button" data-view="overview" data-i18n="Overview">Overview</button>
+    <button class="tab" type="button" data-view="pages" data-i18n="Pages">Pages</button>
+    <button class="tab" type="button" data-view="maintenance" data-i18n="Maintenance">Maintenance</button>
+    <button class="tab" type="button" data-view="health" data-i18n="Runtime">Runtime</button>
+    <button class="tab" type="button" data-view="access" data-i18n="Access">Access</button>
   </nav>
 
   <main>
     <section id="view-overview" class="view active">
       <div id="metrics" class="metrics"></div>
       <div class="section-heading">
-        <h2>Scopes</h2>
+        <h2 data-i18n="Scopes">Scopes</h2>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Scope</th><th>Pages</th><th>Updated</th><th></th></tr></thead>
+          <thead><tr><th data-i18n="Scope">Scope</th><th data-i18n="Pages">Pages</th><th data-i18n="Updated">Updated</th><th></th></tr></thead>
           <tbody id="scope-rows"></tbody>
         </table>
       </div>
       <div class="section-heading">
-        <h2>Endpoint</h2>
+        <h2 data-i18n="Endpoint">Endpoint</h2>
       </div>
       <dl id="endpoint-details" class="details-grid"></dl>
       <div class="section-heading">
-        <h2>Capabilities</h2>
+        <h2 data-i18n="Capabilities">Capabilities</h2>
       </div>
       <dl id="capability-details" class="details-grid"></dl>
     </section>
 
     <section id="view-pages" class="view">
       <div class="view-heading">
-        <div><h2>Pages</h2><span id="pages-status" class="muted" aria-live="polite">Not loaded</span></div>
+        <div><h2 data-i18n="Pages">Pages</h2><span id="pages-status" class="muted" aria-live="polite" data-i18n="Not loaded">Not loaded</span></div>
       </div>
-      <form id="page-search" class="toolbar">
-        <input id="query" name="q" type="search" placeholder="Search pages" autocomplete="off">
-        <select id="scope-filter" name="scope" aria-label="Scope"><option value="">All scopes</option></select>
-        <select id="search-mode" name="mode" aria-label="Search method">
-          <option value="auto">Auto</option>
-          <option value="text">Text</option>
-          <option value="exact">Exact</option>
-        </select>
-        <label class="toolbar-check"><input id="technical-pages" type="checkbox"> Technical pages</label>
-        <button type="submit">Search</button>
+      <form id="page-search" class="page-search-bar">
+        <div class="page-query-control">
+          <input id="query" name="q" type="search" placeholder="Search pages" autocomplete="off" data-i18n-placeholder="Search pages">
+          <button class="icon-button" type="submit" aria-label="Search" title="Search" data-i18n-aria-label="Search" data-i18n-title="Search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
+          </button>
+        </div>
+        <div class="page-control-menu">
+          <button id="page-filter-toggle" class="icon-button" type="button" aria-label="Filter Pages" title="Filter Pages" aria-expanded="false" data-i18n-aria-label="Filter Pages" data-i18n-title="Filter Pages">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
+          </button>
+          <div id="page-filter-menu" class="page-menu-panel" role="menu" aria-label="Filter Pages" data-i18n-aria-label="Filter Pages" hidden>
+            <div class="page-menu-heading" data-i18n="Scope">Scope</div>
+            <div id="page-filter-options" class="page-menu-options"></div>
+          </div>
+        </div>
+        <div class="page-sort-controls">
+          <button id="page-sort-direction" class="icon-button" type="button" aria-label="Descending" title="Descending" data-i18n-aria-label="Descending" data-i18n-title="Descending" data-direction="descending">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M8 15l4 4 4-4"/></svg>
+          </button>
+          <div class="page-control-menu">
+            <button id="page-sort-options" class="icon-button" type="button" aria-label="Sort Pages" title="Sort Pages" aria-expanded="false" data-i18n-aria-label="Sort Pages" data-i18n-title="Sort Pages">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg>
+            </button>
+            <div id="page-sort-menu" class="page-menu-panel" role="menu" aria-label="Sort Pages" data-i18n-aria-label="Sort Pages" hidden>
+              <div class="page-menu-heading" data-i18n="Sort by">Sort by</div>
+              <div id="page-sort-options-list" class="page-menu-options"></div>
+            </div>
+          </div>
+        </div>
       </form>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Content</th><th>Type</th><th>Origin</th><th>Connections</th><th>Observed</th></tr></thead>
-          <tbody id="page-rows"></tbody>
-        </table>
-      </div>
-      <div class="list-footer">
+      <div id="page-results" class="page-results" aria-live="polite"></div>
+      <div class="list-footer page-results-footer">
         <span id="pages-loaded" class="muted"></span>
-        <button id="pages-more" type="button" hidden>Load more</button>
+        <nav id="pages-pager" class="page-pager" aria-label="Pages pagination" data-i18n-aria-label="Pages pagination" hidden>
+          <button id="pages-previous" class="icon-button" type="button" aria-label="Previous page" title="Previous page" data-i18n-aria-label="Previous page" data-i18n-title="Previous page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
+          <span id="pages-current" class="muted"></span>
+          <button id="pages-next" class="icon-button" type="button" aria-label="Next page" title="Next page" data-i18n-aria-label="Next page" data-i18n-title="Next page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>
+        </nav>
       </div>
     </section>
 
     <section id="view-maintenance" class="view">
-      <div class="view-heading maintenance-heading">
-        <div><h2>Pack candidates</h2><span id="maintenance-status" class="muted" aria-live="polite">Not loaded</span></div>
-        <div class="maintenance-actions">
-          <button id="maintenance-scan" type="button">Scan</button>
-          <button id="maintenance-analyze" type="button" disabled>Analyze</button>
-          <button id="maintenance-optimize" class="primary-button" type="button" disabled>Optimize</button>
+      <div class="view-heading">
+        <div class="view-heading-copy">
+          <div><h2 data-i18n="Memory maintenance">Memory maintenance</h2><span id="maintenance-status" class="muted" aria-live="polite" data-i18n="Not loaded">Not loaded</span></div>
+          <p class="view-description" data-i18n="A maintenance session scans the full eligible Store one stage at a time. Analysis and writes require your explicit action.">A maintenance session scans the full eligible Store one stage at a time. Analysis and writes require your explicit action.</p>
         </div>
       </div>
-      <div id="maintenance-metrics" class="metrics"></div>
-      <div id="maintenance-scan-metrics" class="metrics maintenance-scan-metrics" hidden></div>
-      <div class="section-heading section-heading-copy">
-        <h2>Candidates</h2>
-        <span id="maintenance-candidate-status" class="muted">Not scanned</span>
-      </div>
-      <div class="table-wrap">
-        <table class="maintenance-table">
-          <thead><tr><th class="maintenance-select"><input id="maintenance-select-all" type="checkbox" aria-label="Select all candidates" disabled></th><th>Source</th><th>Change</th><th>Inputs</th><th>Content</th></tr></thead>
-          <tbody id="maintenance-rows"></tbody>
-        </table>
-      </div>
+      <section id="maintenance-idle" class="maintenance-empty-state">
+        <div>
+          <h3 data-i18n="Start a maintenance session">Start a maintenance session</h3>
+          <p data-i18n="A maintenance session scans the full eligible Store one stage at a time. Analysis and writes require your explicit action.">A maintenance session scans the full eligible Store one stage at a time. Analysis and writes require your explicit action.</p>
+        </div>
+        <button id="maintenance-start" class="primary-button" type="button" disabled data-i18n="Start maintenance">Start maintenance</button>
+      </section>
+
+      <section id="maintenance-workflow" hidden>
+        <ol id="maintenance-steps" class="maintenance-steps" aria-label="Maintenance phases">
+          <li id="maintenance-step-pack"><span>1</span><div><strong data-i18n="Pack">Pack</strong><small id="maintenance-step-pack-status" data-i18n="Not started">Not started</small></div></li>
+          <li id="maintenance-step-summary"><span>2</span><div><strong data-i18n="Summary">Summary</strong><small id="maintenance-step-summary-status" data-i18n="Waiting">Waiting</small></div></li>
+          <li id="maintenance-step-relation"><span>3</span><div><strong data-i18n="Relations">Relations</strong><small id="maintenance-step-relation-status" data-i18n="Waiting">Waiting</small></div></li>
+          <li id="maintenance-step-report"><span>4</span><div><strong data-i18n="Maintenance report">Maintenance report</strong><small id="maintenance-step-report-status" data-i18n="Waiting">Waiting</small></div></li>
+        </ol>
+
+        <section class="maintenance-stage-panel" aria-labelledby="maintenance-phase-title">
+          <div class="maintenance-stage-heading">
+            <div>
+              <span id="maintenance-phase-order" class="maintenance-eyebrow"></span>
+              <h2 id="maintenance-phase-title"></h2>
+              <p id="maintenance-phase-description" class="view-description"></p>
+            </div>
+            <span id="maintenance-candidate-status" class="muted" aria-live="polite"></span>
+          </div>
+          <div id="maintenance-scan-metrics" class="metrics maintenance-stage-metrics"></div>
+          <p id="maintenance-issue" class="maintenance-issue" hidden></p>
+          <div class="maintenance-actions">
+            <button id="maintenance-primary" class="primary-button" type="button" disabled></button>
+            <button id="maintenance-skip" type="button" disabled data-i18n="Skip this stage">Skip this stage</button>
+            <button id="maintenance-retry-failed" type="button" disabled hidden data-i18n="Retry failed batches">Retry failed batches</button>
+            <button id="maintenance-rescan" type="button" disabled data-i18n="Rescan this stage">Rescan this stage</button>
+            <button id="maintenance-cancel" type="button" disabled data-i18n="End session">End session</button>
+          </div>
+          <div id="maintenance-proposals" hidden>
+            <div class="section-heading section-heading-copy">
+              <label class="maintenance-select-all-label"><input id="maintenance-select-all" type="checkbox" aria-label="Select all candidates" data-i18n-aria-label="Select all candidates" disabled><span data-i18n="Proposals">Proposals</span></label>
+              <span id="maintenance-selection-status" class="muted"></span>
+            </div>
+            <div id="maintenance-summary-cards" class="maintenance-summary-cards" hidden></div>
+            <div id="maintenance-table-wrap" class="table-wrap">
+              <table class="maintenance-table">
+                <thead><tr><th class="maintenance-select"></th><th data-i18n="Source">Source</th><th data-i18n="Change">Change</th><th data-i18n="Inputs">Inputs</th><th data-i18n="Content">Content</th></tr></thead>
+                <tbody id="maintenance-rows"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section id="maintenance-report" class="maintenance-report" hidden>
+        <div class="section-heading section-heading-copy">
+          <h2 data-i18n="Maintenance report">Maintenance report</h2>
+          <span id="maintenance-report-status" class="muted" aria-live="polite"></span>
+        </div>
+        <div id="maintenance-report-metrics" class="metrics"></div>
+        <button id="maintenance-start-new" class="primary-button" type="button" data-i18n="Start maintenance">Start maintenance</button>
+      </section>
+
     </section>
 
     <section id="view-health" class="view">
       <div class="view-heading">
         <div class="view-heading-copy">
-          <div><h2>Operational health</h2><span id="health-status" class="muted" aria-live="polite">Not loaded</span></div>
-          <p class="view-description">Runtime activity and stored-memory shape from metadata. These signals do not judge whether content is true or relevant.</p>
+          <div><h2 data-i18n="Runtime activity">Runtime activity</h2><span id="health-status" class="muted" aria-live="polite" data-i18n="Not loaded">Not loaded</span></div>
+          <p class="view-description" data-i18n="Observed client activity, response performance, and telemetry coverage. This view does not evaluate recall relevance.">Observed client activity, response performance, and telemetry coverage. This view does not evaluate recall relevance.</p>
         </div>
-        <label class="window-control">Window
-          <select id="health-window" aria-label="Health analysis window">
-            <option value="24">24 hours</option>
-            <option value="168">7 days</option>
-            <option value="720">30 days</option>
-            <option value="2160">90 days</option>
+        <label class="window-control"><span data-i18n="Window">Window</span>
+          <select id="health-window" aria-label="Health analysis window" data-i18n-aria-label="Health analysis window">
+            <option value="24" data-i18n="24 hours">24 hours</option>
+            <option value="168" data-i18n="7 days">7 days</option>
+            <option value="720" data-i18n="30 days">30 days</option>
+            <option value="2160" data-i18n="90 days">90 days</option>
           </select>
         </label>
       </div>
@@ -122,118 +199,107 @@
       <div id="health-signals" class="health-signals"></div>
 
       <div class="section-heading section-heading-copy">
-        <h2>Runtime behavior</h2>
-        <span class="muted">How clients retrieve, revise, and contract the current memory surface.</span>
+        <h2 data-i18n="Request activity">Request activity</h2>
+        <span class="muted" data-i18n="Observed retrieval and revision traffic. Counts describe use, not recall quality.">Observed retrieval and revision traffic. Counts describe use, not recall quality.</span>
       </div>
       <div id="health-flows" class="aggregate-grid"></div>
 
-      <div class="section-heading"><h2>Activity trend</h2></div>
+      <div class="section-heading"><h2 data-i18n="Activity trend">Activity trend</h2></div>
       <div id="health-timeline" class="timeline-panel"></div>
 
-      <div class="section-heading"><h2>Operations</h2></div>
+      <div class="section-heading"><h2 data-i18n="Operations">Operations</h2></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Operation</th><th>Calls</th><th>Failures</th><th>Output</th><th>p50</th><th>p95</th></tr></thead>
+          <thead><tr><th data-i18n="Operation">Operation</th><th data-i18n="Calls">Calls</th><th data-i18n="Failures">Failures</th><th data-i18n="Output">Output</th><th>p50</th><th>p95</th></tr></thead>
           <tbody id="health-operation-rows"></tbody>
         </table>
       </div>
 
-      <div class="section-heading"><h2>Scopes</h2></div>
+      <div class="section-heading"><h2 data-i18n="Scopes">Scopes</h2></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Scope</th><th>Current</th><th>Pages</th><th>Revisions</th><th>Calls</th><th>Searches</th><th>Writes</th></tr></thead>
+          <thead><tr><th data-i18n="Scope">Scope</th><th data-i18n="Current">Current</th><th data-i18n="Pages">Pages</th><th data-i18n="Revisions">Revisions</th><th data-i18n="Calls">Calls</th><th data-i18n="Searches">Searches</th><th data-i18n="Writes">Writes</th></tr></thead>
           <tbody id="health-scope-rows"></tbody>
         </table>
       </div>
 
-      <div class="section-heading">
-        <h2>Recent data quality sample</h2>
-        <span id="quality-status" class="muted" aria-live="polite">Not loaded</span>
-      </div>
-      <div id="quality-metrics" class="metrics"></div>
-      <div class="section-heading"><h2>Sample findings</h2></div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Page</th><th>Scope</th><th>Size</th><th>Issue</th></tr></thead>
-          <tbody id="quality-rows"></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section id="view-retention" class="view">
-      <div class="view-heading">
-        <div class="view-heading-copy">
-          <div><h2>Revision retention plan</h2><span id="retention-status" class="muted" aria-live="polite">Not loaded</span></div>
-          <p class="view-description">A read-only dry run over historical Revisions. Current Page heads and sealed evidence cannot become candidates.</p>
+      <section class="store-signals">
+        <div class="section-heading section-heading-copy">
+          <div>
+            <h2 data-i18n="Storage safety">Storage safety</h2>
+            <p class="view-description" data-i18n="Revision history remains protected unless no active dependency needs it. Cleanup remains an explicit local operator action.">Revision history remains protected unless no active dependency needs it. Cleanup remains an explicit local operator action.</p>
+          </div>
         </div>
-      </div>
-      <form id="retention-controls" class="retention-controls">
-        <label>Scope
-          <select id="retention-scope" name="scope"><option value="">All scopes</option></select>
-        </label>
-        <label>Older than
-          <span class="input-unit"><input id="retention-minimum-age" name="minimumAgeDays" type="number" min="0" max="36500" step="1" value="30" aria-label="Minimum candidate age in days"><span>days</span></span>
-        </label>
-        <label>Keep newest per Page
-          <input id="retention-recent" name="keepRecentRevisionsPerPage" type="number" min="0" max="1000" step="1" value="2">
-        </label>
-        <label>Preview rows
-          <input id="retention-samples" name="sampleLimit" type="number" min="1" max="100" step="1" value="50">
-        </label>
-        <button id="retention-run" type="submit">Run dry run</button>
-      </form>
-      <p class="control-note">Eligibility requires both age and absence of every protection root. Preview rows only limits the tables below.</p>
-      <div id="retention-mode" class="health-signals"></div>
-      <div id="retention-metrics" class="metrics"></div>
+        <details id="retention-details" class="retention-details runtime-storage-details">
+          <summary>
+            <span data-i18n="Historical revision cleanup">Historical revision cleanup</span>
+            <span id="retention-status" class="muted" aria-live="polite" data-i18n="Open to check">Open to check</span>
+          </summary>
+          <div class="retention-details-content">
+            <p class="control-note" data-i18n="This check is read-only. No revision is deleted from the Console.">This check is read-only. No revision is deleted from the Console.</p>
+            <div id="retention-metrics" class="metrics" hidden></div>
+            <div id="retention-mode" class="health-signals" hidden></div>
 
-      <div class="section-heading section-heading-copy"><h2>Explicit retention leases</h2><span id="retention-lease-status" class="muted"></span></div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Page</th><th>Scope</th><th>Holder</th><th>Reason</th><th>Expires</th></tr></thead>
-          <tbody id="retention-lease-rows"></tbody>
-        </table>
-      </div>
+            <section id="retention-candidate-section" hidden>
+              <div class="section-heading section-heading-copy"><h3 data-i18n="Reclaimable revision history">Reclaimable revision history</h3><span id="retention-candidate-status" class="muted"></span></div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th data-i18n="Page">Page</th><th data-i18n="Scope">Scope</th><th data-i18n="Kind">Kind</th><th data-i18n="Created">Created</th><th data-i18n="Estimated size">Estimated size</th></tr></thead>
+                  <tbody id="retention-candidate-rows"></tbody>
+                </table>
+              </div>
+            </section>
 
-      <div class="section-heading section-heading-copy"><h2>Why Revisions are protected</h2><span class="muted">Reasons overlap; one Revision can match several rows.</span></div>
-      <div class="table-wrap">
-        <table class="retention-reason-table">
-          <thead><tr><th>Reason</th><th>Meaning</th><th>Revisions</th><th>Share of scanned</th></tr></thead>
-          <tbody id="retention-reason-rows"></tbody>
-        </table>
-      </div>
+            <section id="retention-lease-section" hidden>
+              <div class="section-heading section-heading-copy"><h3 data-i18n="Active temporary holds">Active temporary holds</h3><span id="retention-lease-status" class="muted"></span></div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th data-i18n="Page">Page</th><th data-i18n="Scope">Scope</th><th data-i18n="Holder">Holder</th><th data-i18n="Reason">Reason</th><th data-i18n="Expires">Expires</th></tr></thead>
+                  <tbody id="retention-lease-rows"></tbody>
+                </table>
+              </div>
+            </section>
 
-      <div class="section-heading section-heading-copy"><h2>Eligible historical Revisions</h2><span id="retention-candidate-status" class="muted"></span></div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Page</th><th>Scope</th><th>Kind</th><th>Created</th><th>Estimated size</th></tr></thead>
-          <tbody id="retention-candidate-rows"></tbody>
-        </table>
-      </div>
+            <details id="retention-protection-details" class="retention-details retention-protection-details">
+              <summary><span data-i18n="Protection details">Protection details</span> <span id="retention-protected-status" class="muted"></span></summary>
+              <div class="retention-details-content">
+                <p class="control-note" data-i18n="Reasons overlap; one Revision can match several rows.">Reasons overlap; one Revision can match several rows.</p>
+                <div class="table-wrap">
+                  <table class="retention-reason-table">
+                    <thead><tr><th data-i18n="Reason">Reason</th><th data-i18n="Meaning">Meaning</th><th data-i18n="Revisions">Revisions</th><th data-i18n="Share of scanned">Share of scanned</th></tr></thead>
+                    <tbody id="retention-reason-rows"></tbody>
+                  </table>
+                </div>
+                <div class="section-heading"><h3 data-i18n="Protected historical samples">Protected historical samples</h3></div>
+                <div class="table-wrap">
+                  <table>
+                    <thead><tr><th data-i18n="Page">Page</th><th data-i18n="Scope">Scope</th><th data-i18n="Kind">Kind</th><th data-i18n="Reasons">Reasons</th><th data-i18n="Created">Created</th></tr></thead>
+                    <tbody id="retention-protected-rows"></tbody>
+                  </table>
+                </div>
+              </div>
+            </details>
+          </div>
+        </details>
+      </section>
 
-      <div class="section-heading section-heading-copy"><h2>Protected historical Revisions</h2><span id="retention-protected-status" class="muted"></span></div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Page</th><th>Scope</th><th>Kind</th><th>Reasons</th><th>Created</th></tr></thead>
-          <tbody id="retention-protected-rows"></tbody>
-        </table>
-      </div>
     </section>
 
     <section id="view-access" class="view">
       <div class="view-heading">
-        <div><h2>Access</h2><span id="access-status" class="muted" aria-live="polite">Not loaded</span></div>
+        <div><h2 data-i18n="Access">Access</h2><span id="access-status" class="muted" aria-live="polite" data-i18n="Not loaded">Not loaded</span></div>
       </div>
       <div id="access-summary" class="aggregate-grid"></div>
-      <div class="section-heading"><h2>Recent events</h2></div>
+      <div class="section-heading"><h2 data-i18n="Recent events">Recent events</h2></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Time</th><th>Principal</th><th>Operation</th><th>Scopes</th><th>Decision</th></tr></thead>
+          <thead><tr><th data-i18n="Time">Time</th><th data-i18n="Principal">Principal</th><th data-i18n="Operation">Operation</th><th data-i18n="Scopes">Scopes</th><th data-i18n="Decision">Decision</th></tr></thead>
           <tbody id="access-rows"></tbody>
         </table>
       </div>
       <div class="list-footer">
         <span id="access-loaded" class="muted"></span>
-        <button id="access-more" type="button" hidden>Load more</button>
+        <button id="access-more" type="button" hidden data-i18n="Load more">Load more</button>
       </div>
     </section>
   </main>
@@ -241,16 +307,16 @@
   <dialog id="page-dialog">
     <header class="dialog-header">
       <div class="dialog-identity">
-        <button id="dialog-back" class="icon-button" type="button" aria-label="Back" title="Back" hidden>←</button>
-        <div><strong id="dialog-title">Page</strong><div id="dialog-subtitle" class="muted"></div></div>
+        <button id="dialog-back" class="icon-button" type="button" aria-label="Back" title="Back" data-i18n-aria-label="Back" data-i18n-title="Back" hidden>←</button>
+        <div><strong id="dialog-title" data-i18n="Page">Page</strong><div id="dialog-subtitle" class="muted"></div></div>
       </div>
-      <button id="dialog-close" type="button">Close</button>
+      <button id="dialog-close" type="button" data-i18n="Close">Close</button>
     </header>
-    <nav class="detail-tabs" aria-label="Page views">
-      <button class="detail-tab active" type="button" data-detail-view="summary">Overview</button>
-      <button class="detail-tab" type="button" data-detail-view="graph">Connections</button>
-      <button class="detail-tab" type="button" data-detail-view="history">History</button>
-      <button class="detail-tab" type="button" data-detail-view="raw">Raw</button>
+    <nav class="detail-tabs" aria-label="Page views" data-i18n-aria-label="Page views">
+      <button class="detail-tab active" type="button" data-detail-view="summary" data-i18n="Overview">Overview</button>
+      <button class="detail-tab" type="button" data-detail-view="graph" data-i18n="Connections">Connections</button>
+      <button class="detail-tab" type="button" data-detail-view="history" data-i18n="History">History</button>
+      <button class="detail-tab" type="button" data-detail-view="raw" data-i18n="Raw">Raw</button>
     </nav>
     <div id="detail-summary" class="page-detail detail-view active"></div>
     <div id="detail-graph" class="page-detail detail-view"></div>
@@ -260,22 +326,60 @@
 
   <dialog id="enrollment-dialog" class="enrollment-dialog">
     <header class="dialog-header">
-      <div><strong>Client access</strong><div class="muted">Applications requesting access to this PCP Store</div></div>
-      <button id="enrollment-close" type="button">Close</button>
+      <div><strong data-i18n="Client access">Client access</strong><div class="muted" data-i18n="Applications requesting access to this PCP Store">Applications requesting access to this PCP Store</div></div>
+      <button id="enrollment-close" type="button" data-i18n="Close">Close</button>
     </header>
     <div class="enrollment-content">
       <section>
-        <div class="section-heading"><h2>Pending approval</h2></div>
+        <div class="section-heading"><h2 data-i18n="Pending approval">Pending approval</h2></div>
         <div id="enrollment-pending" class="enrollment-list"></div>
       </section>
       <section>
-        <div class="section-heading"><h2>Approved clients</h2></div>
+        <div class="section-heading"><h2 data-i18n="Approved clients">Approved clients</h2></div>
         <div id="enrollment-registered" class="enrollment-list"></div>
       </section>
     </div>
   </dialog>
 
+  <dialog id="action-dialog" class="action-dialog" aria-labelledby="action-dialog-title" aria-describedby="action-dialog-description">
+    <form method="dialog" class="action-dialog-form">
+      <header class="dialog-header">
+        <strong id="action-dialog-title" data-i18n="Confirm action">Confirm action</strong>
+      </header>
+      <p id="action-dialog-description" class="action-dialog-copy"></p>
+      <footer class="action-dialog-actions">
+        <button id="action-dialog-cancel" type="submit" value="cancel" data-i18n="Cancel">Cancel</button>
+        <button id="action-dialog-confirm" class="primary-button" type="submit" value="confirm" data-i18n="Continue">Continue</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="preferences-dialog" class="preferences-dialog" aria-labelledby="preferences-title">
+    <header class="dialog-header">
+      <strong id="preferences-title" data-i18n="Appearance and language">Appearance and language</strong>
+      <button id="preferences-close" type="button" data-i18n="Close">Close</button>
+    </header>
+    <div class="preferences-content">
+      <section class="preferences-section">
+        <h2 data-i18n="Theme">Theme</h2>
+        <div class="segmented-control" role="group" aria-label="Theme" data-i18n-aria-label="Theme">
+          <button type="button" data-theme-setting="system" data-i18n="Follow system">Follow system</button>
+          <button type="button" data-theme-setting="light" data-i18n="Light">Light</button>
+          <button type="button" data-theme-setting="dark" data-i18n="Dark">Dark</button>
+        </div>
+      </section>
+      <section class="preferences-section">
+        <h2 data-i18n="Language">Language</h2>
+        <div class="segmented-control" role="group" aria-label="Language" data-i18n-aria-label="Language">
+          <button type="button" data-language-setting="system" data-i18n="Follow system">Follow system</button>
+          <button type="button" data-language-setting="en" data-i18n="English">English</button>
+          <button type="button" data-language-setting="zh" data-i18n="Chinese">Chinese</button>
+        </div>
+      </section>
+    </div>
+  </dialog>
+
   <div id="error" class="error" hidden></div>
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="/app.js?v=20260817.2"></script>
 </body>
 </html>

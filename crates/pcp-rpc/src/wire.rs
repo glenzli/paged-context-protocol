@@ -1,12 +1,16 @@
 use anyhow::{Context, Result};
-use pcp_client::{DurablePageInventoryItem, HealthSnapshot, TombstoneCascadeResult};
+use pcp_client::{
+    ContentLibraryResult, ContentLibrarySummary, DurablePageInventoryItem, HealthSnapshot,
+    TombstoneCascadeResult,
+};
 use pcp_core::{
-    AccessAuditEvent, AccessSession, Actor, AssessPageValidityRequest, Capabilities,
-    CollectRevisionRetentionRequest, CreateScopeRequest, IngestPageRequest, LinkPagesRequest,
-    PackPagesRequest, PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage,
-    ReadPagesRequest, Relation, RevisePageRequest, RevisionCollectionResult,
-    RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult,
-    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    AccessAuditEvent, AccessSession, Actor, AssessPageValidityRequest, BrowseIndexOrder,
+    Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest, IngestPageRequest,
+    LinkPagesRequest, PackPagesRequest, PlanRevisionRetentionRequest,
+    PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
+    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope,
+    SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
+    WriteSummaryResult, WriteValidityResult,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -48,9 +52,21 @@ pub(crate) enum RpcOperation {
     BrowseIndex {
         scopes: Vec<String>,
         excluded_page_kinds: Vec<String>,
+        order: BrowseIndexOrder,
         limit: u32,
         cursor: Option<String>,
         max_chars: u32,
+    },
+    BrowseContentPages {
+        scopes: Vec<String>,
+        query: Option<String>,
+        order: BrowseIndexOrder,
+        limit: u32,
+        cursor: Option<String>,
+        max_chars: u32,
+    },
+    ContentLibrarySummary {
+        requested_scopes: Vec<String>,
     },
     ReadPages(ReadPagesRequest),
     CurrentRevisionId {
@@ -127,6 +143,8 @@ pub(crate) enum RpcValue {
         next_cursor: Option<String>,
     },
     SearchResult(SearchResult),
+    ContentLibraryResult(ContentLibraryResult),
+    ContentLibrarySummary(ContentLibrarySummary),
     Pages(Vec<ReadPage>),
     RevisionId(String),
     PageCount(u64),

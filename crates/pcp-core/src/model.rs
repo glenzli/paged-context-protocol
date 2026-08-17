@@ -118,6 +118,22 @@ impl SearchMode {
     }
 }
 
+/// Ordering for a non-query browse of current Page heads.
+///
+/// This remains separate from [`SearchMode`]: search preserves retrieval
+/// ranking, while a Store browse can use a stable inventory property.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowseIndexOrder {
+    #[default]
+    Recent,
+    Oldest,
+    MostConnected,
+    LeastConnected,
+    Largest,
+    SourceOrder,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchTermMatch {

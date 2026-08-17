@@ -12,7 +12,10 @@ use pcp_core::{
     SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
     WriteSummaryResult, WriteValidityResult,
 };
-use pcp_store::{DurablePageInventoryItem, HealthSnapshot, PcpStore, TombstoneCascadeResult};
+use pcp_store::{
+    ContentLibraryResult, ContentLibrarySummary, DurablePageInventoryItem, HealthSnapshot,
+    PcpStore, TombstoneCascadeResult,
+};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -166,6 +169,7 @@ impl PcpStore for SqlitePcpStore {
         access: &AccessSession,
         requested_scopes: Vec<String>,
         excluded_page_kinds: Vec<String>,
+        order: pcp_core::BrowseIndexOrder,
         limit: u32,
         cursor: Option<String>,
         max_chars: u32,
@@ -198,6 +202,7 @@ impl PcpStore for SqlitePcpStore {
             self,
             scopes.clone(),
             excluded_page_kinds,
+            order,
             limit,
             cursor,
             max_chars,
@@ -207,6 +212,104 @@ impl PcpStore for SqlitePcpStore {
             self,
             access,
             "browse_index",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
+    }
+
+    async fn browse_content_pages(
+        &self,
+        access: &AccessSession,
+        requested_scopes: Vec<String>,
+        query: Option<String>,
+        order: pcp_core::BrowseIndexOrder,
+        limit: u32,
+        cursor: Option<String>,
+        max_chars: u32,
+    ) -> Result<ContentLibraryResult> {
+        let observation = OperationObservation::start();
+        let scopes = match authorize_scopes(
+            access,
+            &[
+                AccessPermission::Search,
+                AccessPermission::ReadSummary,
+                AccessPermission::ReadDetail,
+            ],
+            &requested_scopes,
+        ) {
+            Ok(scopes) => scopes,
+            Err(error) => {
+                return complete(
+                    self,
+                    access,
+                    "browse_content_pages",
+                    requested_scopes,
+                    Err(error),
+                    true,
+                    observation,
+                )
+                .await;
+            }
+        };
+        let result = SqlitePcpStore::browse_content_pages(
+            self,
+            scopes.clone(),
+            query,
+            order,
+            limit,
+            cursor,
+            max_chars,
+        )
+        .await;
+        complete(
+            self,
+            access,
+            "browse_content_pages",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
+    }
+
+    async fn content_library_summary(
+        &self,
+        access: &AccessSession,
+        requested_scopes: Vec<String>,
+    ) -> Result<ContentLibrarySummary> {
+        let observation = OperationObservation::start();
+        let scopes = match authorize_scopes(
+            access,
+            &[
+                AccessPermission::Search,
+                AccessPermission::ReadSummary,
+                AccessPermission::ReadDetail,
+            ],
+            &requested_scopes,
+        ) {
+            Ok(scopes) => scopes,
+            Err(error) => {
+                return complete(
+                    self,
+                    access,
+                    "content_library_summary",
+                    requested_scopes,
+                    Err(error),
+                    true,
+                    observation,
+                )
+                .await;
+            }
+        };
+        let result = SqlitePcpStore::content_library_summary(self, scopes.clone()).await;
+        complete(
+            self,
+            access,
+            "content_library_summary",
             scopes,
             result,
             false,

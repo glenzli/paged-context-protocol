@@ -279,14 +279,30 @@ async fn dispatch(client: &dyn PcpApi, operation: RpcOperation) -> Result<RpcVal
         RpcOperation::BrowseIndex {
             scopes,
             excluded_page_kinds,
+            order,
             limit,
             cursor,
             max_chars,
         } => RpcValue::SearchResult(
             client
-                .browse_index(scopes, excluded_page_kinds, limit, cursor, max_chars)
+                .browse_index(scopes, excluded_page_kinds, order, limit, cursor, max_chars)
                 .await?,
         ),
+        RpcOperation::BrowseContentPages {
+            scopes,
+            query,
+            order,
+            limit,
+            cursor,
+            max_chars,
+        } => RpcValue::ContentLibraryResult(
+            client
+                .browse_content_pages(scopes, query, order, limit, cursor, max_chars)
+                .await?,
+        ),
+        RpcOperation::ContentLibrarySummary { requested_scopes } => {
+            RpcValue::ContentLibrarySummary(client.content_library_summary(requested_scopes).await?)
+        }
         RpcOperation::ReadPages(request) => RpcValue::Pages(client.read_pages(request).await?),
         RpcOperation::CurrentRevisionId { page_id } => {
             RpcValue::RevisionId(client.current_revision_id(page_id).await?)

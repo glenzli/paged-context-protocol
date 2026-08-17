@@ -224,6 +224,7 @@ fn event(
 fn operation_name(request: &MaintenanceWorkerRequest) -> &'static str {
     match request {
         MaintenanceWorkerRequest::SummarizePage { .. } => "summarize_page",
+        MaintenanceWorkerRequest::SummarizePages { .. } => "summarize_pages",
         MaintenanceWorkerRequest::SelectPacking { .. } => "select_packing",
         MaintenanceWorkerRequest::AnalyzePacking { .. } => "analyze_packing",
         MaintenanceWorkerRequest::SelectRelation { .. } => "select_relation",
@@ -234,6 +235,7 @@ fn operation_name(request: &MaintenanceWorkerRequest) -> &'static str {
 fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
     match response {
         MaintenanceWorkerResponse::WriteSummary { .. } => "write_summary",
+        MaintenanceWorkerResponse::Summaries { .. } => "summaries",
         MaintenanceWorkerResponse::Candidate { .. } => "candidate",
         MaintenanceWorkerResponse::PackingCandidates { .. } => "packing_candidates",
         MaintenanceWorkerResponse::Relate { .. } => "relate",

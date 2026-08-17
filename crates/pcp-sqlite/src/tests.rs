@@ -8,13 +8,13 @@ use chrono::{Duration, SecondsFormat, Utc};
 use pcp_client::{EmbeddedPcpClient, PcpApi};
 use pcp_core::{
     AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    AssessPageValidityRequest, CollectRevisionRetentionRequest, CreateScopeRequest,
-    GraphEdgeDirection, GraphEdgeKind, LifecycleStatus, LinkPagesRequest, PackPagesRequest,
-    PageMutability, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest, Projection,
-    ProvenanceEvent, PutRevisionRetentionLeaseRequest, ReadPagesRequest, RetentionPolicy,
-    RetentionProtectionReason, RevisePageRequest, ScopeGrant, SearchFilters, SearchMode,
-    SearchPagesRequest, SearchTermMatch, SourceRef, SourceSpan, ValidityStanding, WritePageRequest,
-    WriteSummaryRequest,
+    AssessPageValidityRequest, BrowseIndexOrder, CollectRevisionRetentionRequest,
+    CreateScopeRequest, GraphEdgeDirection, GraphEdgeKind, LifecycleStatus, LinkPagesRequest,
+    PackPagesRequest, PageMutability, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest,
+    Projection, ProvenanceEvent, PutRevisionRetentionLeaseRequest, ReadPagesRequest,
+    RetentionPolicy, RetentionProtectionReason, RevisePageRequest, ScopeGrant, SearchFilters,
+    SearchMode, SearchPagesRequest, SearchTermMatch, SourceRef, SourceSpan, ValidityStanding,
+    WritePageRequest, WriteSummaryRequest,
 };
 use pcp_store::PcpStore;
 use rusqlite::{Connection, params};
@@ -1780,7 +1780,14 @@ async fn writes_searches_reads_and_revises_sparse_summaries() {
     assert_eq!(browsed.hits[0].revision_id, page.revision_id);
 
     let model_index = store
-        .browse_index(vec![namespace.clone()], Vec::new(), 10, None, 8_000)
+        .browse_index(
+            vec![namespace.clone()],
+            Vec::new(),
+            BrowseIndexOrder::Recent,
+            10,
+            None,
+            8_000,
+        )
         .await
         .expect("browse model-written index");
     let indexed = model_index
@@ -2408,6 +2415,264 @@ async fn validity_is_revisioned_and_routes_before_detail() {
     assert_eq!(
         latest[0].validity_history[0].assessment_revision_id,
         first.assessment_revision_id
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn browse_index_orders_current_heads_by_inventory_property() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-browse-index-order-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
+        .await
+        .expect("open browse index Store");
+    let identity_id = store.identity_id().to_owned();
+    let namespace = "conversation:inventory-order".to_owned();
+    store
+        .create_scope(CreateScopeRequest {
+            namespace: namespace.clone(),
+            display_name: "Inventory order".to_owned(),
+            description: None,
+            parent_namespace: None,
+        })
+        .await
+        .expect("create scope");
+    let actor = Actor {
+        actor_type: ActorType::Model,
+        actor_id: "model:inventory-test".to_owned(),
+    };
+
+    let mut first_request = write_request(
+        &identity_id,
+        &namespace,
+        actor.clone(),
+        "First current Page.",
+        "inventory-order:first",
+    );
+    first_request.source_span = Some(SourceSpan {
+        stream_id: "host:inventory-order".to_owned(),
+        start: 10,
+        end: 10,
+    });
+    let first = store
+        .write_page(first_request, vec![namespace.clone()])
+        .await
+        .expect("write first Page");
+
+    let mut second_request = write_request(
+        &identity_id,
+        &namespace,
+        actor.clone(),
+        "Second current Page.",
+        "inventory-order:second",
+    );
+    second_request.source_span = Some(SourceSpan {
+        stream_id: "host:inventory-order".to_owned(),
+        start: 20,
+        end: 20,
+    });
+    let second = store
+        .write_page(second_request, vec![namespace.clone()])
+        .await
+        .expect("write second Page");
+
+    let mut large_request = write_request(
+        &identity_id,
+        &namespace,
+        actor.clone(),
+        &"Largest current Page. ".repeat(300),
+        "inventory-order:largest",
+    );
+    large_request.source_span = Some(SourceSpan {
+        stream_id: "host:inventory-order".to_owned(),
+        start: 30,
+        end: 30,
+    });
+    let large = store
+        .write_page(large_request, vec![namespace.clone()])
+        .await
+        .expect("write largest Page");
+
+    for (target, key) in [
+        (&second, "inventory-order:first-second"),
+        (&large, "inventory-order:first-large"),
+    ] {
+        store
+            .link_pages(
+                LinkPagesRequest {
+                    from_page_id: first.page_id.clone(),
+                    relation_type: "related_to".to_owned(),
+                    to_page_id: target.page_id.clone(),
+                    basis_revision_ids: vec![first.revision_id.clone(), target.revision_id.clone()],
+                    created_by: actor.clone(),
+                    idempotency_key: Some(key.to_owned()),
+                },
+                vec![namespace.clone()],
+            )
+            .await
+            .expect("link direct relation");
+    }
+
+    let by_connections = store
+        .browse_index(
+            vec![namespace.clone()],
+            Vec::new(),
+            BrowseIndexOrder::MostConnected,
+            10,
+            None,
+            8_000,
+        )
+        .await
+        .expect("browse most connected");
+    assert_eq!(by_connections.hits[0].page_id, first.page_id);
+
+    let by_fewest_connections = store
+        .browse_index(
+            vec![namespace.clone()],
+            Vec::new(),
+            BrowseIndexOrder::LeastConnected,
+            10,
+            None,
+            8_000,
+        )
+        .await
+        .expect("browse least connected");
+    assert_ne!(by_fewest_connections.hits[0].page_id, first.page_id);
+
+    let by_size = store
+        .browse_index(
+            vec![namespace.clone()],
+            Vec::new(),
+            BrowseIndexOrder::Largest,
+            10,
+            None,
+            8_000,
+        )
+        .await
+        .expect("browse largest");
+    assert_eq!(by_size.hits[0].page_id, large.page_id);
+
+    let by_source = store
+        .browse_index(
+            vec![namespace.clone()],
+            Vec::new(),
+            BrowseIndexOrder::SourceOrder,
+            10,
+            None,
+            8_000,
+        )
+        .await
+        .expect("browse source order");
+    assert_eq!(
+        by_source
+            .hits
+            .iter()
+            .map(|hit| hit.page_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            first.page_id.as_str(),
+            second.page_id.as_str(),
+            large.page_id.as_str()
+        ]
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn content_library_excludes_attached_summaries_without_restricting_page_kind() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-content-library-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
+        .await
+        .expect("open content library Store");
+    let identity_id = store.identity_id().to_owned();
+    let namespace = "conversation:content-library".to_owned();
+    store
+        .create_scope(CreateScopeRequest {
+            namespace: namespace.clone(),
+            display_name: "Content library".to_owned(),
+            description: None,
+            parent_namespace: None,
+        })
+        .await
+        .expect("create Scope");
+    let actor = Actor {
+        actor_type: ActorType::Model,
+        actor_id: "model:content-library-test".to_owned(),
+    };
+
+    let mut source_request = write_request(
+        &identity_id,
+        &namespace,
+        actor.clone(),
+        "Original source text.",
+        "content-library:source",
+    );
+    source_request.kind = "summary_projection".to_owned();
+    let source = store
+        .write_page(source_request, vec![namespace.clone()])
+        .await
+        .expect("write source Page");
+
+    let summary = store
+        .write_summary(
+            WriteSummaryRequest {
+                target_page_id: source.page_id.clone(),
+                target_revision_id: source.revision_id.clone(),
+                expected_summary_revision_id: None,
+                content: "Routing phrase distinct from source.".to_owned(),
+                created_by: actor,
+                tool_or_model: Some("test:content-library".to_owned()),
+                provenance: Vec::new(),
+                idempotency_key: Some("content-library:summary".to_owned()),
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write attached summary");
+
+    let browse = store
+        .browse_content_pages(
+            vec![namespace.clone()],
+            Some("routing phrase".to_owned()),
+            BrowseIndexOrder::Recent,
+            10,
+            None,
+            8_000,
+        )
+        .await
+        .expect("browse content library");
+    assert_eq!(browse.total_pages, 1);
+    assert_eq!(browse.hits.len(), 1);
+    assert_eq!(browse.hits[0].page_id, source.page_id);
+    assert_eq!(browse.hits[0].kind, "summary_projection");
+    assert_eq!(
+        browse.hits[0].summary_revision_id.as_deref(),
+        Some(summary.summary_revision_id.as_str())
+    );
+
+    let summary = store
+        .content_library_summary(vec![namespace.clone()])
+        .await
+        .expect("summarize content library");
+    assert_eq!(summary.page_count, 1);
+    assert_eq!(summary.scopes.len(), 1);
+    assert_eq!(summary.scopes[0].namespace, namespace);
+    assert_eq!(
+        summary.content_chars,
+        "Original source text.".chars().count() as u64
     );
 
     let _ = std::fs::remove_dir_all(root);

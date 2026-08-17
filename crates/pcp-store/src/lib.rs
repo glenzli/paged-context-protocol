@@ -3,11 +3,11 @@ mod health;
 use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
-    AccessAuditEvent, AccessSession, AssessPageValidityRequest, Capabilities,
+    AccessAuditEvent, AccessSession, AssessPageValidityRequest, BrowseIndexOrder, Capabilities,
     CollectRevisionRetentionRequest, CreateScopeRequest, IngestPageRequest, LinkPagesRequest,
     PackPagesRequest, PageMutability, PlanRevisionRetentionRequest,
     PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
-    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope,
+    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchHit,
     SearchPagesRequest, SearchResult, SourceSpan, WritePageRequest, WriteResult,
     WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
@@ -41,6 +41,37 @@ pub struct DurablePageInventoryItem {
     pub relation_types: Vec<String>,
     #[serde(default)]
     pub packing_protected: bool,
+}
+
+/// Current, user-visible Page heads for a content-library browse.
+///
+/// This is intentionally separate from [`SearchResult`]: retrieval indexes may
+/// choose a summary or other projection as a search surface, while this result
+/// always counts and returns the current source Pages in the library.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentLibraryResult {
+    pub hits: Vec<SearchHit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub total_pages: u64,
+    pub total_content_chars: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentLibraryScope {
+    pub namespace: String,
+    pub page_count: u64,
+    pub content_chars: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentLibrarySummary {
+    pub page_count: u64,
+    pub content_chars: u64,
+    pub scopes: Vec<ContentLibraryScope>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -77,10 +108,26 @@ pub trait PcpStore: Send + Sync {
         access: &AccessSession,
         scopes: Vec<String>,
         excluded_page_kinds: Vec<String>,
+        order: BrowseIndexOrder,
         limit: u32,
         cursor: Option<String>,
         max_chars: u32,
     ) -> Result<SearchResult>;
+    async fn browse_content_pages(
+        &self,
+        access: &AccessSession,
+        scopes: Vec<String>,
+        query: Option<String>,
+        order: BrowseIndexOrder,
+        limit: u32,
+        cursor: Option<String>,
+        max_chars: u32,
+    ) -> Result<ContentLibraryResult>;
+    async fn content_library_summary(
+        &self,
+        access: &AccessSession,
+        requested_scopes: Vec<String>,
+    ) -> Result<ContentLibrarySummary>;
     async fn read_pages(
         &self,
         access: &AccessSession,
