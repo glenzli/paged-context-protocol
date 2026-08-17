@@ -36,10 +36,30 @@ Semantic relation maintenance is independently disabled unless
 Principal: the worker still evaluates candidates, but Runtime cannot write an
 assessment, Summary, or replacement Page. `mode = "apply"` must be selected
 explicitly after the worker has been observed against the target Identity.
-`initial_delay_seconds` optionally delays the first cycle after process start;
-Deployments that restart during development can use it to avoid immediate model calls
-and to let dependent services become healthy. Later cycles use
-`interval_seconds`.
+`initial_delay_seconds` optionally delays the first inventory heartbeat after
+process start. `interval_seconds` is only the maximum delay before Runtime
+notices another Page-head write; it does not itself authorize a model call.
+Runtime persists a write watermark, groups changed Pages by source stream, and
+runs semantic maintenance only when `[maintenance.write_trigger]` has both
+enough new Pages and a completed quiet period (or its bounded maximum wait).
+The first heartbeat establishes a baseline rather than treating an existing
+Store backlog as newly written work.
+
+Scheduled packing and Summary work may apply in `mode = "apply"`. Scheduled
+semantic relations remain proposals even in apply mode: they are recorded for
+review and never enter the asserted relation graph or retrieval path merely
+because a worker selected a pair. Direct operator review remains the only path
+that asserts a semantic `related_to` edge.
+
+```toml
+[maintenance.write_trigger]
+# A source stream must receive this many new Pages before normal execution.
+min_new_pages = 8
+# Give an active writer time to finish the local episode.
+quiet_period_seconds = 600
+# Bound latency if a stream remains active indefinitely.
+max_wait_seconds = 3600
+```
 
 ## Maintenance Cycle
 

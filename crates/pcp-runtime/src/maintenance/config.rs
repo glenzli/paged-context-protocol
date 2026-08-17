@@ -31,6 +31,8 @@ pub struct MaintenanceConfig {
     pub interval_seconds: u64,
     #[serde(default)]
     pub initial_delay_seconds: u64,
+    #[serde(default)]
+    pub write_trigger: WriteTriggeredMaintenanceConfig,
     #[serde(default = "default_jobs_per_cycle")]
     pub max_jobs_per_cycle: u32,
     #[serde(default = "default_principal_id")]
@@ -180,6 +182,26 @@ pub struct SummaryMaintenanceConfig {
     pub excluded_page_kinds: Vec<String>,
 }
 
+/// A low-cost inventory heartbeat may discover writes, but semantic work begins
+/// only after a source region has accumulated and then gone quiet.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WriteTriggeredMaintenanceConfig {
+    pub min_new_pages: usize,
+    pub quiet_period_seconds: u64,
+    pub max_wait_seconds: u64,
+}
+
+impl Default for WriteTriggeredMaintenanceConfig {
+    fn default() -> Self {
+        Self {
+            min_new_pages: 8,
+            quiet_period_seconds: 10 * 60,
+            max_wait_seconds: 60 * 60,
+        }
+    }
+}
+
 impl Default for SummaryMaintenanceConfig {
     fn default() -> Self {
         Self {
@@ -319,6 +341,18 @@ impl MaintenanceConfig {
         anyhow::ensure!(
             self.max_jobs_per_cycle > 0,
             "PCP maintenance max_jobs_per_cycle must be positive"
+        );
+        anyhow::ensure!(
+            self.write_trigger.min_new_pages > 0,
+            "PCP maintenance write_trigger min_new_pages must be positive"
+        );
+        anyhow::ensure!(
+            self.write_trigger.quiet_period_seconds > 0,
+            "PCP maintenance write_trigger quiet_period_seconds must be positive"
+        );
+        anyhow::ensure!(
+            self.write_trigger.max_wait_seconds >= self.write_trigger.quiet_period_seconds,
+            "PCP maintenance write_trigger max_wait_seconds must not be shorter than quiet_period_seconds"
         );
         anyhow::ensure!(
             !self.principal_id.trim().is_empty(),
