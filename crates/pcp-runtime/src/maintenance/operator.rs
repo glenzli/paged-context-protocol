@@ -11,8 +11,8 @@ use super::{
     AnalyzeMaintenanceSummariesRequest, AnalyzeMaintenanceSummaryRequest,
     ApplyMaintenancePackRequest, ApplyMaintenanceRelationRequest, ApplyMaintenanceSummaryRequest,
     MaintenanceMode, MaintenancePackAnalysis, MaintenancePackScan, MaintenanceRelationAnalysis,
-    MaintenanceSummaryAnalysis, MaintenanceSummaryBatchAnalysis, MaintenanceWorkScan,
-    RuntimeMaintainer,
+    MaintenanceRelationReviewProposal, MaintenanceSummaryAnalysis, MaintenanceSummaryBatchAnalysis,
+    MaintenanceWorkScan, RuntimeMaintainer,
 };
 
 pub struct MaintenanceOperator {
@@ -111,5 +111,26 @@ impl MaintenanceOperator {
         request: ApplyMaintenanceRelationRequest,
     ) -> Result<pcp_core::Relation> {
         self.maintainer.apply_relation_candidate(request).await
+    }
+
+    pub fn pending_relation_reviews(&self) -> Vec<MaintenanceRelationReviewProposal> {
+        self.maintainer.pending_relation_reviews()
+    }
+
+    pub async fn approve_relation_review(
+        &mut self,
+        candidate_id: &str,
+    ) -> Result<pcp_core::Relation> {
+        self.maintainer.approve_relation_review(candidate_id).await
+    }
+
+    pub async fn reject_relation_review(
+        &mut self,
+        candidate_id: &str,
+        suppress: bool,
+    ) -> Result<()> {
+        self.maintainer
+            .reject_relation_review(candidate_id, suppress)
+            .await
     }
 }

@@ -14,6 +14,7 @@ pub use audit::{MaintenanceRunAudit, MaintenanceRunAuditRecord, persist_audit};
 pub use config::{
     MaintenanceConfig, MaintenanceMode, MaintenanceWorkerConfig, PackingMaintenanceConfig,
     RelationMaintenanceConfig, RetentionMaintenanceConfig, SummaryMaintenanceConfig,
+    WriteTriggeredMaintenanceConfig,
 };
 pub use coordinator::{
     AnalyzeMaintenancePacksRequest, AnalyzeMaintenanceRelationRequest,
@@ -28,6 +29,10 @@ pub use coordinator::{
     MaintenanceWorkScan, RuntimeMaintainer,
 };
 pub use infer_worker::InferRuntimeSemanticWorker;
+pub use ledger::{
+    MaintenanceRelationReviewPage, MaintenanceRelationReviewProposal,
+    MaintenanceRelationReviewStatus,
+};
 pub use operator::MaintenanceOperator;
 pub use worker::{
     CommandSemanticWorker, MaintenanceDetailPage, MaintenanceRelation, MaintenanceRoutingPage,

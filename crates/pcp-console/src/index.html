@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PCP Console</title>
-  <link rel="stylesheet" href="/styles.css?v=20260818.1">
+  <link rel="stylesheet" href="/styles.css?v=20260818.2">
   <link rel="stylesheet" href="/page-content.css?v=20260816.3">
 </head>
 <body>
@@ -119,6 +119,13 @@
           <p class="view-description" data-i18n="A maintenance session scans the full eligible Store one stage at a time. Analysis and writes require your explicit action.">A maintenance session scans the full eligible Store one stage at a time. Analysis and writes require your explicit action.</p>
         </div>
       </div>
+      <section id="maintenance-relation-review" class="maintenance-relation-review" hidden>
+        <div class="section-heading section-heading-copy">
+          <div><h3 data-i18n="Relation review queue">Relation review queue</h3><p data-i18n="These suggested links are not used for retrieval until you approve them.">These suggested links are not used for retrieval until you approve them.</p></div>
+          <span id="maintenance-relation-review-count" class="muted"></span>
+        </div>
+        <div id="maintenance-relation-review-cards" class="maintenance-relation-review-cards"></div>
+      </section>
       <section id="maintenance-idle" class="maintenance-empty-state">
         <div>
           <h3 data-i18n="Start a maintenance session">Start a maintenance session</h3>
@@ -380,6 +387,6 @@
   </dialog>
 
   <div id="error" class="error" hidden></div>
-  <script type="module" src="/app.js?v=20260817.2"></script>
+  <script type="module" src="/app.js?v=20260818.2"></script>
 </body>
 </html>

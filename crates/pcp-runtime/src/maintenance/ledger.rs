@@ -1,7 +1,15 @@
-use std::{collections::BTreeMap, path::Path, time::SystemTime};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    time::SystemTime,
+};
 
 use anyhow::{Context, Result};
+use pcp_store::DurablePageInventoryItem;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use super::WriteTriggeredMaintenanceConfig;
 
 const LEDGER_RETENTION_MILLIS: u64 = 30 * 24 * 60 * 60 * 1_000;
 
@@ -10,6 +18,53 @@ const LEDGER_RETENTION_MILLIS: u64 = 30 * 24 * 60 * 60 * 1_000;
 pub(crate) struct MaintenanceLedger {
     #[serde(default)]
     entries: BTreeMap<String, MaintenanceLedgerEntry>,
+    #[serde(default)]
+    write_trigger: WriteTriggerLedger,
+    #[serde(default)]
+    relation_reviews: BTreeMap<String, MaintenanceRelationReviewProposal>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceRelationReviewProposal {
+    pub candidate_id: String,
+    pub namespace: String,
+    pub relation_type: String,
+    pub pages: [MaintenanceRelationReviewPage; 2],
+    pub proposed_at: String,
+    pub status: MaintenanceRelationReviewStatus,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceRelationReviewPage {
+    pub page_id: String,
+    pub revision_id: String,
+    pub preview: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaintenanceRelationReviewStatus {
+    Pending,
+    Accepted,
+    Rejected,
+    Suppressed,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WriteTriggerLedger {
+    observed_revisions: BTreeMap<String, String>,
+    dirty_regions: BTreeMap<String, DirtyRegion>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DirtyRegion {
+    first_dirty_at_unix_ms: u64,
+    last_dirty_at_unix_ms: u64,
+    new_page_ids: BTreeSet<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -103,8 +158,197 @@ impl MaintenanceLedger {
                 let second = page_ids.next()?.to_owned();
                 page_ids.next().is_none().then_some([first, second])
             })
+            .chain(self.relation_reviews.values().filter_map(|proposal| {
+                matches!(
+                    proposal.status,
+                    MaintenanceRelationReviewStatus::Pending
+                        | MaintenanceRelationReviewStatus::Suppressed
+                )
+                .then(|| {
+                    [
+                        proposal.pages[0].page_id.clone(),
+                        proposal.pages[1].page_id.clone(),
+                    ]
+                })
+            }))
             .collect()
     }
+
+    pub(crate) fn propose_relation_review(
+        &mut self,
+        namespace: String,
+        pages: [MaintenanceRelationReviewPage; 2],
+    ) -> String {
+        let candidate_id = relation_review_id(&pages);
+        self.relation_reviews
+            .entry(candidate_id.clone())
+            .or_insert_with(|| MaintenanceRelationReviewProposal {
+                candidate_id: candidate_id.clone(),
+                namespace,
+                relation_type: "related_to".to_owned(),
+                pages,
+                proposed_at: chrono::Utc::now().to_rfc3339(),
+                status: MaintenanceRelationReviewStatus::Pending,
+            });
+        candidate_id
+    }
+
+    pub(crate) fn relation_reviews(&self) -> Vec<MaintenanceRelationReviewProposal> {
+        self.relation_reviews
+            .values()
+            .filter(|proposal| proposal.status == MaintenanceRelationReviewStatus::Pending)
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn relation_review(
+        &self,
+        candidate_id: &str,
+    ) -> Option<MaintenanceRelationReviewProposal> {
+        self.relation_reviews.get(candidate_id).cloned()
+    }
+
+    pub(crate) fn resolve_relation_review(
+        &mut self,
+        candidate_id: &str,
+        status: MaintenanceRelationReviewStatus,
+    ) -> Result<()> {
+        let proposal = self
+            .relation_reviews
+            .get_mut(candidate_id)
+            .context("unknown PCP relation review candidate")?;
+        anyhow::ensure!(
+            proposal.status == MaintenanceRelationReviewStatus::Pending,
+            "PCP relation review candidate is no longer pending"
+        );
+        proposal.status = status;
+        Ok(())
+    }
+
+    /// Records only current Page-head changes.  The first observation establishes
+    /// a watermark; it deliberately does not turn a pre-existing Store backlog
+    /// into an automatic semantic-maintenance run.
+    pub(crate) fn observe_writes(
+        &mut self,
+        inventory: &[DurablePageInventoryItem],
+        config: &WriteTriggeredMaintenanceConfig,
+    ) -> BTreeSet<String> {
+        let now = now_unix_ms();
+        let current = inventory
+            .iter()
+            .map(|page| (page.page_id.clone(), page.revision_id.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if self.write_trigger.observed_revisions.is_empty() {
+            self.write_trigger.observed_revisions = current;
+            return BTreeSet::new();
+        }
+        for page in inventory.iter().filter(|page| {
+            self.write_trigger.observed_revisions.get(&page.page_id) != Some(&page.revision_id)
+        }) {
+            let region = maintenance_region_key(page);
+            let dirty = self
+                .write_trigger
+                .dirty_regions
+                .entry(region)
+                .or_insert_with(|| DirtyRegion {
+                    first_dirty_at_unix_ms: now,
+                    last_dirty_at_unix_ms: now,
+                    new_page_ids: BTreeSet::new(),
+                });
+            if !self
+                .write_trigger
+                .observed_revisions
+                .contains_key(&page.page_id)
+            {
+                dirty.new_page_ids.insert(page.page_id.clone());
+            }
+            dirty.last_dirty_at_unix_ms = now;
+        }
+        self.write_trigger.observed_revisions = current;
+        self.ready_regions_at(config, now)
+    }
+
+    pub(crate) fn ready_regions(
+        &self,
+        config: &WriteTriggeredMaintenanceConfig,
+    ) -> BTreeSet<String> {
+        self.ready_regions_at(config, now_unix_ms())
+    }
+
+    fn ready_regions_at(
+        &self,
+        config: &WriteTriggeredMaintenanceConfig,
+        now: u64,
+    ) -> BTreeSet<String> {
+        self.write_trigger
+            .dirty_regions
+            .iter()
+            .filter(|(_, dirty)| {
+                let quiet_for = now.saturating_sub(dirty.last_dirty_at_unix_ms);
+                let waiting_for = now.saturating_sub(dirty.first_dirty_at_unix_ms);
+                (dirty.new_page_ids.len() >= config.min_new_pages
+                    && quiet_for >= config.quiet_period_seconds.saturating_mul(1_000))
+                    || waiting_for >= config.max_wait_seconds.saturating_mul(1_000)
+            })
+            .map(|(region, _)| region.clone())
+            .collect()
+    }
+
+    pub(crate) fn region_snapshot(
+        inventory: &[DurablePageInventoryItem],
+        regions: &BTreeSet<String>,
+    ) -> BTreeMap<String, BTreeMap<String, String>> {
+        let mut snapshot = BTreeMap::new();
+        for page in inventory {
+            let region = maintenance_region_key(page);
+            if regions.contains(&region) {
+                snapshot
+                    .entry(region)
+                    .or_insert_with(BTreeMap::new)
+                    .insert(page.page_id.clone(), page.revision_id.clone());
+            }
+        }
+        snapshot
+    }
+
+    /// Clears only regions whose exact Page-head snapshot survived the job.
+    /// A concurrent write (or a maintenance write that needs a follow-up pass)
+    /// remains dirty and is eligible after another quiet window.
+    pub(crate) fn acknowledge_unchanged_regions(
+        &mut self,
+        expected: &BTreeMap<String, BTreeMap<String, String>>,
+        inventory: &[DurablePageInventoryItem],
+    ) {
+        let current = Self::region_snapshot(
+            inventory,
+            &expected.keys().cloned().collect::<BTreeSet<_>>(),
+        );
+        self.write_trigger
+            .dirty_regions
+            .retain(|region, _| expected.get(region) != current.get(region));
+    }
+}
+
+pub(crate) fn maintenance_region_key(page: &DurablePageInventoryItem) -> String {
+    match page.source_span.as_ref() {
+        Some(source) => format!("stream:{}:{}", page.namespace, source.stream_id),
+        None => format!("page:{}:{}", page.namespace, page.page_id),
+    }
+}
+
+fn relation_review_id(pages: &[MaintenanceRelationReviewPage; 2]) -> String {
+    let mut revisions = pages
+        .iter()
+        .map(|page| page.revision_id.as_str())
+        .collect::<Vec<_>>();
+    revisions.sort_unstable();
+    let mut digest = Sha256::new();
+    for revision in revisions {
+        digest.update(revision.as_bytes());
+        digest.update([0]);
+    }
+    let encoded = format!("mrr_{:x}", digest.finalize());
+    encoded[..28].to_owned()
 }
 
 pub(crate) fn summary_key(page_id: &str) -> String {
@@ -136,4 +380,72 @@ fn now_unix_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use pcp_core::PageMutability;
+
+    use super::*;
+
+    fn page(id: &str, revision: &str) -> DurablePageInventoryItem {
+        DurablePageInventoryItem {
+            page_id: id.to_owned(),
+            revision_id: revision.to_owned(),
+            namespace: "conversation:test".to_owned(),
+            kind: "conversation_event".to_owned(),
+            mutability: PageMutability::Sealed,
+            created_at: "2026-08-18T00:00:00Z".to_owned(),
+            observed_at: None,
+            source_span: Some(pcp_core::SourceSpan {
+                stream_id: "conversation:write-trigger".to_owned(),
+                start: id.parse().unwrap_or(0),
+                end: id.parse().unwrap_or(0),
+            }),
+            media_type: Some("text/plain".to_owned()),
+            content_chars: 10,
+            snippet: "event".to_owned(),
+            facets: None,
+            summary_revision_id: None,
+            summary_target_revision_id: None,
+            summary: None,
+            relation_types: Vec::new(),
+            packing_protected: false,
+        }
+    }
+
+    #[test]
+    fn write_trigger_establishes_a_baseline_then_waits_for_a_new_page() {
+        let mut ledger = MaintenanceLedger::default();
+        let trigger = WriteTriggeredMaintenanceConfig {
+            min_new_pages: 1,
+            quiet_period_seconds: 0,
+            max_wait_seconds: 0,
+        };
+        let first = page("1", "rev_1");
+        assert!(ledger.observe_writes(&[first.clone()], &trigger).is_empty());
+
+        let second = page("2", "rev_2");
+        let ready = ledger.observe_writes(&[first, second.clone()], &trigger);
+        let expected = BTreeSet::from([maintenance_region_key(&second)]);
+        assert_eq!(ready, expected);
+    }
+
+    #[test]
+    fn unchanged_processed_region_is_acknowledged() {
+        let mut ledger = MaintenanceLedger::default();
+        let trigger = WriteTriggeredMaintenanceConfig {
+            min_new_pages: 1,
+            quiet_period_seconds: 0,
+            max_wait_seconds: 0,
+        };
+        let first = page("1", "rev_1");
+        let second = page("2", "rev_2");
+        let _ = ledger.observe_writes(&[first.clone()], &trigger);
+        let regions = ledger.observe_writes(&[first.clone(), second.clone()], &trigger);
+        let expected =
+            MaintenanceLedger::region_snapshot(&[first.clone(), second.clone()], &regions);
+        ledger.acknowledge_unchanged_regions(&expected, &[first, second]);
+        assert!(ledger.ready_regions(&trigger).is_empty());
+    }
 }

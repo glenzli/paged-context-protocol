@@ -25,6 +25,7 @@ const ZH_MESSAGES = {
   "Analyze": "分析",
   "Analysis failed": "分析失败",
   "Analysis incomplete": "分析未完成",
+  "Approve": "批准",
   "Analyzing": "正在分析",
   "Batches completed": "已完成批次",
   "Pages completed": "已完成页面",
@@ -103,6 +104,11 @@ const ZH_MESSAGES = {
   "No eligible work": "没有可处理内容",
   "No pages": "没有页面",
   "No proposals": "没有提案",
+  "Relation review queue": "关联审核队列",
+  "These suggested links are not used for retrieval until you approve them.": "这些建议关联在你批准前不会参与检索。",
+  "Review evidence": "审核依据",
+  "Reject": "拒绝",
+  "Suppress": "抑制",
   "No preview": "没有预览",
   "Preview unavailable": "预览暂不可用",
   "New Pack": "新建打包页",
@@ -606,6 +612,7 @@ const state = {
     analyses: { pack: null, summary: null, relation: null },
     pendingCandidates: [],
     selected: new Set(),
+    relationReviews: [],
   },
   access: { loaded: false, busy: false, cursor: null, count: 0, events: [] },
   enrollment: { available: false, seenPending: new Set() },
@@ -1237,6 +1244,86 @@ function renderMaintenanceStatus(status) {
   renderMaintenanceSession();
 }
 
+function compactRelationReviewPreview(value, limit = 220) {
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 1)}…`;
+}
+
+function relationReviewCard(proposal) {
+  const card = element("article", "maintenance-relation-review-card");
+  const heading = element("div", "maintenance-relation-review-card-heading");
+  heading.append(
+    element("strong", "", t("Review evidence")),
+    element("span", "muted", formatTime(proposal.proposedAt)),
+  );
+  const pages = element("div", "maintenance-relation-review-pages");
+  proposal.pages.forEach((page, index) => {
+    const pageCard = element("button", "maintenance-relation-review-page");
+    pageCard.type = "button";
+    pageCard.title = page.pageId;
+    pageCard.append(
+      element("span", "mono muted", page.pageId),
+      element("span", "maintenance-relation-review-preview", compactRelationReviewPreview(page.preview)),
+      element("span", "mono muted", page.revisionId),
+    );
+    pageCard.addEventListener("click", () => pageInspector.open(page.pageId));
+    pages.append(pageCard);
+    if (index === 0) pages.append(element("span", "maintenance-relation-review-link", "↔"));
+  });
+  const actions = element("div", "maintenance-relation-review-actions");
+  const approve = element("button", "primary-button", t("Approve"));
+  const reject = element("button", "", t("Reject"));
+  const suppress = element("button", "danger-button", t("Suppress"));
+  [approve, reject, suppress].forEach((button) => { button.type = "button"; });
+  approve.addEventListener("click", () => resolveRelationReview(proposal.candidateId, "approve"));
+  reject.addEventListener("click", () => resolveRelationReview(proposal.candidateId, "reject"));
+  suppress.addEventListener("click", () => resolveRelationReview(proposal.candidateId, "suppress"));
+  actions.append(approve, reject, suppress);
+  card.append(heading, pages, actions);
+  return card;
+}
+
+function renderRelationReviews() {
+  const section = byId("maintenance-relation-review");
+  const reviews = state.maintenance.relationReviews;
+  section.hidden = !reviews.length;
+  byId("maintenance-relation-review-count").textContent = reviews.length
+    ? `${formatNumber(reviews.length)} ${t("proposals")}`
+    : "";
+  byId("maintenance-relation-review-cards").replaceChildren(
+    ...reviews.map(relationReviewCard),
+  );
+}
+
+async function loadRelationReviews() {
+  if (!maintenanceAvailable()) {
+    state.maintenance.relationReviews = [];
+    renderRelationReviews();
+    return;
+  }
+  const response = await api("/api/maintenance/relation-reviews");
+  state.maintenance.relationReviews = response.proposals || [];
+  renderRelationReviews();
+}
+
+async function resolveRelationReview(candidateId, decision) {
+  if (state.maintenance.busy) return;
+  state.maintenance.busy = true;
+  try {
+    const suffix = decision === "approve" ? "approve" : "reject";
+    await maintenanceMutation(
+      `/api/maintenance/relation-reviews/${encodeURIComponent(candidateId)}/${suffix}`,
+      decision === "approve" ? {} : { suppress: decision === "suppress" },
+    );
+    await loadMaintenance({ reload: true });
+  } catch (error) {
+    showError(error);
+  } finally {
+    state.maintenance.busy = false;
+    renderRelationReviews();
+  }
+}
+
 function maintenanceAvailable() {
   return Boolean(state.maintenance.status?.available);
 }
@@ -1661,6 +1748,7 @@ function appendMaintenanceAnalysisBatch(analysis, batch) {
 async function loadMaintenance({ reload = false } = {}) {
   if (!state.maintenance.loaded || reload) renderMaintenanceStatus(await api("/api/maintenance"));
   else renderMaintenanceSession();
+  await loadRelationReviews();
 }
 
 async function requestMaintenanceScan() {

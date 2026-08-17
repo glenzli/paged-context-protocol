@@ -197,6 +197,13 @@ struct RetentionQuery {
 #[serde(deny_unknown_fields)]
 struct MaintenanceScanRequest {}
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RelationReviewDecisionRequest {
+    #[serde(default)]
+    suppress: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let runtime = match managed::ManagedOptions::parse(env::args_os().skip(1))? {
@@ -300,6 +307,18 @@ fn router(state: AppState) -> Router {
         .route(
             "/api/maintenance/relations/apply",
             post(maintenance_apply_relation),
+        )
+        .route(
+            "/api/maintenance/relation-reviews",
+            get(maintenance_relation_reviews),
+        )
+        .route(
+            "/api/maintenance/relation-reviews/{candidate_id}/approve",
+            post(approve_relation_review),
+        )
+        .route(
+            "/api/maintenance/relation-reviews/{candidate_id}/reject",
+            post(reject_relation_review),
         )
         .route("/api/access", get(access_log))
         .route("/api/enrollment", get(enrollment_snapshot))
@@ -922,6 +941,42 @@ async fn maintenance_apply_relation(
     let operator = maintenance_operator_for_console(&state).await?;
     let result = operator.apply_relation(request).await?;
     Ok(Json(json!({"optimized": true, "result": result})))
+}
+
+async fn maintenance_relation_reviews(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
+    let operator = maintenance_operator_for_console(&state).await?;
+    Ok(Json(
+        json!({"proposals": operator.pending_relation_reviews()}),
+    ))
+}
+
+async fn approve_relation_review(
+    State(state): State<AppState>,
+    Path(candidate_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let mut operator = maintenance_operator_for_console(&state).await?;
+    let relation = operator.approve_relation_review(&candidate_id).await?;
+    Ok(Json(json!({"approved": true, "relation": relation})))
+}
+
+async fn reject_relation_review(
+    State(state): State<AppState>,
+    Path(candidate_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<RelationReviewDecisionRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let mut operator = maintenance_operator_for_console(&state).await?;
+    operator
+        .reject_relation_review(&candidate_id, request.suppress)
+        .await?;
+    Ok(Json(
+        json!({"rejected": true, "suppressed": request.suppress}),
+    ))
 }
 
 async fn maintenance_operator_for_console(

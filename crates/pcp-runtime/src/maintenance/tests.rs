@@ -26,7 +26,8 @@ use super::{
     MaintenanceWorkerConfig, MaintenanceWorkerRequest, MaintenanceWorkerResponse,
     PackingCandidateGroup, PackingMaintenanceConfig, RelationCandidatePage,
     RelationMaintenanceConfig, RetentionMaintenanceConfig, RetentionMilestone, RuntimeMaintainer,
-    SemanticMaintenanceWorker, SummaryMaintenanceConfig, worker::PackingCandidatePage,
+    SemanticMaintenanceWorker, SummaryMaintenanceConfig, WriteTriggeredMaintenanceConfig,
+    worker::PackingCandidatePage,
 };
 
 struct FakeWorker {
@@ -2210,6 +2211,161 @@ async fn observe_relation_records_a_proposal_without_linking_pages() {
 }
 
 #[tokio::test]
+async fn scheduled_relation_waits_for_review_before_it_is_asserted() {
+    let fixture = Fixture::open("scheduled-relation-review").await;
+    let first = fixture
+        .client
+        .write_page(fixture.sealed_event("First stable source event.", "scheduled-relation:1", 1))
+        .await
+        .expect("write first source event");
+    let second = fixture
+        .client
+        .write_page(fixture.sealed_event("Second stable source event.", "scheduled-relation:2", 2))
+        .await
+        .expect("write second source event");
+    let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
+        page_ids: [first.page_id.clone(), second.page_id.clone()],
+    }]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = true;
+    config.write_trigger.min_new_pages = 1;
+    config.write_trigger.quiet_period_seconds = 0;
+    config.write_trigger.max_wait_seconds = 0;
+    let state_path = config.state_path.clone();
+    let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+
+    let baseline = maintainer
+        .run_scheduled_cycle()
+        .await
+        .expect("establish write watermark");
+    assert_eq!(baseline.worker_calls, 0);
+    fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "Third event makes the stream ready.",
+            "scheduled-relation:3",
+            3,
+        ))
+        .await
+        .expect("write triggering source event");
+
+    let report = maintainer
+        .run_scheduled_cycle()
+        .await
+        .expect("schedule conservative relation review");
+    assert_eq!(report.relations_proposed, 1);
+    assert_eq!(report.relations_committed, 0);
+    let reviews = maintainer.pending_relation_reviews();
+    assert_eq!(reviews.len(), 1);
+    let reviewed_page_ids = reviews[0]
+        .pages
+        .iter()
+        .map(|page| page.page_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        reviewed_page_ids,
+        std::collections::BTreeSet::from([first.page_id.as_str(), second.page_id.as_str()])
+    );
+    assert!(!reviews[0].pages[0].preview.is_empty());
+    let restored_ledger = super::ledger::MaintenanceLedger::load(&state_path)
+        .await
+        .expect("reload persisted review queue");
+    assert_eq!(restored_ledger.relation_reviews().len(), 1);
+    let pages = fixture
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![first.page_id.clone()],
+            revision_ids: Vec::new(),
+            projections: vec![Projection::Manifest, Projection::Relations],
+            max_chars: 1,
+        })
+        .await
+        .expect("read scheduled relation source");
+    assert!(pages[0].relations.is_empty());
+    let relation = maintainer
+        .approve_relation_review(&reviews[0].candidate_id)
+        .await
+        .expect("approve scheduled relation");
+    assert_eq!(relation.relation_type, "related_to");
+    assert!(maintainer.pending_relation_reviews().is_empty());
+    let pages = fixture
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![first.page_id],
+            revision_ids: Vec::new(),
+            projections: vec![Projection::Manifest, Projection::Relations],
+            max_chars: 1,
+        })
+        .await
+        .expect("read approved relation source");
+    assert_eq!(pages[0].relations.len(), 1);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn scheduled_write_trigger_applies_a_stable_large_page_summary() {
+    let fixture = Fixture::open("scheduled-summary").await;
+    let baseline = fixture
+        .client
+        .write_page(fixture.page(
+            "Existing Page establishes the watermark.",
+            "scheduled-summary:1",
+        ))
+        .await
+        .expect("write baseline Page");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::WriteSummary {
+            content: "这是一段稳定页面的自动摘要。".to_owned(),
+        },
+    ]));
+    let mut config = fixture.config();
+    config.packing.enabled = false;
+    config.relation.enabled = false;
+    config.summary.minimum_chars = 1;
+    config.write_trigger.min_new_pages = 1;
+    config.write_trigger.quiet_period_seconds = 0;
+    config.write_trigger.max_wait_seconds = 0;
+    let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+    maintainer
+        .run_scheduled_cycle()
+        .await
+        .expect("establish write watermark");
+    let written = fixture
+        .client
+        .write_page(
+            fixture.page(
+                "这是达到稳定窗口后应自动写入摘要的长页面。"
+                    .repeat(24)
+                    .as_str(),
+                "scheduled-summary:2",
+            ),
+        )
+        .await
+        .expect("write triggering Page");
+
+    let report = maintainer
+        .run_scheduled_cycle()
+        .await
+        .expect("run scheduled Summary maintenance");
+    assert_eq!(report.summaries_written, 1);
+    let pages = fixture
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![written.page_id],
+            revision_ids: Vec::new(),
+            projections: vec![Projection::Manifest, Projection::Summary],
+            max_chars: 1,
+        })
+        .await
+        .expect("read scheduled Summary result");
+    assert!(pages[0].summary.is_some());
+    let _ = baseline;
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn relation_selection_excludes_pairs_already_connected_by_a_path() {
     let fixture = Fixture::open("relation-path-exclusion").await;
     let first = fixture
@@ -2548,6 +2704,7 @@ impl Fixture {
             allowed_scopes: vec![self.namespace.clone()],
             interval_seconds: 60,
             initial_delay_seconds: 0,
+            write_trigger: WriteTriggeredMaintenanceConfig::default(),
             max_jobs_per_cycle: 2,
             principal_id: "service:maintenance-test".to_owned(),
             principal_name: "Maintenance test".to_owned(),

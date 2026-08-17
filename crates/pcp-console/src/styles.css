@@ -214,6 +214,17 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 .maintenance-empty-state h3 { margin: 0 0 7px; font-size: 15px; }
 .maintenance-empty-state p { margin: 0; color: var(--muted); line-height: 1.55; }
 .maintenance-empty-state > button { flex: 0 0 auto; }
+.maintenance-relation-review { margin: 0 0 18px; padding: 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.maintenance-relation-review-cards { display: grid; gap: 10px; }
+.maintenance-relation-review-card { padding: 12px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-subtle); }
+.maintenance-relation-review-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.maintenance-relation-review-pages { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: stretch; gap: 9px; }
+.maintenance-relation-review-page { min-width: 0; min-height: 0; display: grid; gap: 5px; padding: 9px; border-color: var(--line); text-align: left; }
+.maintenance-relation-review-page:hover { border-color: var(--accent); }
+.maintenance-relation-review-page > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.maintenance-relation-review-preview { color: var(--text); line-height: 1.45; }
+.maintenance-relation-review-link { align-self: center; color: var(--accent); font-size: 17px; }
+.maintenance-relation-review-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin-top: 10px; }
 .maintenance-steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; margin: 20px 0; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--surface); }
 .maintenance-steps li { position: relative; display: grid; grid-template-columns: 26px minmax(0, 1fr); align-items: center; gap: 9px; min-height: 62px; padding: 10px 12px; border-right: 1px solid var(--line); color: var(--muted); }
 .maintenance-steps li:last-child { border-right: 0; }

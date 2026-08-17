@@ -20,7 +20,9 @@ use super::{
     PackingMaintenanceConfig, RelationMaintenanceConfig, RetentionMilestone,
     SemanticMaintenanceWorker,
     ledger::{
-        MaintenanceLedger, packing_key, retention_window_key, selection_window_key, summary_key,
+        MaintenanceLedger, MaintenanceRelationReviewPage, MaintenanceRelationReviewProposal,
+        MaintenanceRelationReviewStatus, maintenance_region_key, packing_key, retention_window_key,
+        selection_window_key, summary_key,
     },
     worker::{
         MaintenanceDetailPage, MaintenanceRoutingPage, PackingCandidateGroup, PackingCandidatePage,
@@ -402,7 +404,7 @@ impl RuntimeMaintainer {
             tokio::time::sleep(Duration::from_secs(self.config.initial_delay_seconds)).await;
         }
         loop {
-            let retry_soon = match self.run_bounded_cycle().await {
+            let retry_soon = match self.run_scheduled_cycle().await {
                 Ok(report)
                     if report.summaries_written > 0
                         || report.summaries_proposed > 0
@@ -443,21 +445,70 @@ impl RuntimeMaintainer {
     }
 
     pub async fn run_once(&mut self) -> Result<MaintenanceCycleReport> {
-        self.run_once_inner(true, self.config.max_jobs_per_cycle)
+        self.run_once_inner(true, self.config.max_jobs_per_cycle, None, false)
             .await
     }
 
     pub async fn run_bounded_cycle(&mut self) -> Result<MaintenanceCycleReport> {
         let mut aggregate = MaintenanceCycleReport::default();
         while aggregate.worker_calls < self.config.max_jobs_per_cycle {
-            let report = self.run_once_inner(true, 1).await?;
+            let report = self.run_once_inner(false, 1, None, false).await?;
             let worker_calls = report.worker_calls;
             aggregate.merge(report);
             if worker_calls == 0 {
                 break;
             }
         }
+        self.ledger.save(&self.config.state_path).await?;
         Ok(aggregate)
+    }
+
+    /// The long-running scheduler is write-driven.  Its interval is only the
+    /// maximum discovery latency for a lightweight inventory watermark; no
+    /// semantic worker is called until a dirty region becomes eligible.
+    pub(crate) async fn run_scheduled_cycle(&mut self) -> Result<MaintenanceCycleReport> {
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        self.ledger
+            .observe_writes(&inventory, &self.config.write_trigger);
+        let regions = self.ledger.ready_regions(&self.config.write_trigger);
+        if regions.is_empty() {
+            self.ledger.save(&self.config.state_path).await?;
+            return Ok(MaintenanceCycleReport {
+                inspected_pages: inventory.len(),
+                ..MaintenanceCycleReport::default()
+            });
+        }
+        let expected = MaintenanceLedger::region_snapshot(&inventory, &regions);
+        let mut aggregate = MaintenanceCycleReport::default();
+        while aggregate.worker_calls < self.config.max_jobs_per_cycle {
+            let report = self.run_once_inner(false, 1, Some(&regions), true).await?;
+            let worker_calls = report.worker_calls;
+            aggregate.merge(report);
+            if worker_calls == 0 {
+                break;
+            }
+        }
+        let refreshed = self.client.durable_page_inventory(Vec::new()).await?;
+        self.ledger
+            .observe_writes(&refreshed, &self.config.write_trigger);
+        self.ledger
+            .acknowledge_unchanged_regions(&expected, &refreshed);
+        self.ledger.save(&self.config.state_path).await?;
+        Ok(aggregate)
+    }
+
+    async fn scoped_inventory(
+        &self,
+        regions: Option<&BTreeSet<String>>,
+    ) -> Result<Vec<pcp_store::DurablePageInventoryItem>> {
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        Ok(match regions {
+            Some(regions) => inventory
+                .into_iter()
+                .filter(|page| regions.contains(&maintenance_region_key(page)))
+                .collect(),
+            None => inventory,
+        })
     }
 
     pub async fn scan_packing_candidates(&self) -> Result<MaintenancePackScan> {
@@ -466,6 +517,79 @@ impl RuntimeMaintainer {
             &inventory,
             &self.config.packing,
         ))
+    }
+
+    pub fn pending_relation_reviews(&self) -> Vec<MaintenanceRelationReviewProposal> {
+        self.ledger.relation_reviews()
+    }
+
+    pub async fn approve_relation_review(
+        &mut self,
+        candidate_id: &str,
+    ) -> Result<pcp_core::Relation> {
+        anyhow::ensure!(
+            self.config.applies_changes(),
+            "PCP relation review approval requires apply mode"
+        );
+        let proposal = self
+            .ledger
+            .relation_review(candidate_id)
+            .context("unknown PCP relation review candidate")?;
+        anyhow::ensure!(
+            proposal.status == MaintenanceRelationReviewStatus::Pending,
+            "PCP relation review candidate is no longer pending"
+        );
+        let revision_ids = proposal
+            .pages
+            .iter()
+            .map(|page| page.revision_id.clone())
+            .collect::<Vec<_>>();
+        for page in &proposal.pages {
+            anyhow::ensure!(
+                self.client
+                    .current_revision_id(page.page_id.clone())
+                    .await?
+                    == page.revision_id,
+                "PCP relation review candidate changed after proposal"
+            );
+        }
+        let page_ids = [
+            proposal.pages[0].page_id.clone(),
+            proposal.pages[1].page_id.clone(),
+        ];
+        anyhow::ensure!(
+            !self.related_pair_exists(&page_ids, &revision_ids).await?,
+            "PCP relation review candidate is already explicitly related"
+        );
+        let relation = self
+            .client
+            .link_pages(LinkPagesRequest {
+                from_page_id: proposal.pages[0].page_id.clone(),
+                relation_type: proposal.relation_type,
+                to_page_id: proposal.pages[1].page_id.clone(),
+                basis_revision_ids: revision_ids,
+                created_by: self.config.worker_actor(),
+                idempotency_key: Some(format!("maintenance:review:{candidate_id}")),
+            })
+            .await?;
+        self.ledger
+            .resolve_relation_review(candidate_id, MaintenanceRelationReviewStatus::Accepted)?;
+        self.ledger.save(&self.config.state_path).await?;
+        Ok(relation)
+    }
+
+    pub async fn reject_relation_review(
+        &mut self,
+        candidate_id: &str,
+        suppress: bool,
+    ) -> Result<()> {
+        let status = if suppress {
+            MaintenanceRelationReviewStatus::Suppressed
+        } else {
+            MaintenanceRelationReviewStatus::Rejected
+        };
+        self.ledger.resolve_relation_review(candidate_id, status)?;
+        self.ledger.save(&self.config.state_path).await
     }
 
     pub async fn scan_maintenance_work(&self) -> Result<MaintenanceWorkScan> {
@@ -1026,8 +1150,13 @@ impl RuntimeMaintainer {
         max_jobs: u32,
     ) -> Result<MaintenanceCycleReport> {
         anyhow::ensure!(max_jobs > 0, "maintenance job limit must be positive");
-        self.run_once_inner(true, max_jobs.min(self.config.max_jobs_per_cycle))
-            .await
+        self.run_once_inner(
+            true,
+            max_jobs.min(self.config.max_jobs_per_cycle),
+            None,
+            false,
+        )
+        .await
     }
 
     pub async fn run_operator_observe_once(&mut self) -> Result<MaintenanceCycleReport> {
@@ -1035,15 +1164,17 @@ impl RuntimeMaintainer {
             self.config.mode == MaintenanceMode::Observe,
             "operator maintenance run-once only permits observe mode"
         );
-        self.run_once_inner(false, 1).await
+        self.run_once_inner(false, 1, None, false).await
     }
 
     async fn run_once_inner(
         &mut self,
         persist_ledger: bool,
         max_jobs: u32,
+        regions: Option<&BTreeSet<String>>,
+        scheduled: bool,
     ) -> Result<MaintenanceCycleReport> {
-        let mut inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        let mut inventory = self.scoped_inventory(regions).await?;
         let mut report = MaintenanceCycleReport {
             inspected_pages: inventory.len(),
             ..MaintenanceCycleReport::default()
@@ -1060,7 +1191,7 @@ impl RuntimeMaintainer {
                 .context("run PCP packing maintenance job")?;
         if packing_ran {
             jobs_remaining -= 1;
-            inventory = self.client.durable_page_inventory(Vec::new()).await?;
+            inventory = self.scoped_inventory(regions).await?;
             report.inspected_pages = report.inspected_pages.max(inventory.len());
         }
 
@@ -1072,13 +1203,13 @@ impl RuntimeMaintainer {
                 .context("run PCP Summary maintenance job")?;
         if summary_ran {
             jobs_remaining -= 1;
-            inventory = self.client.durable_page_inventory(Vec::new()).await?;
+            inventory = self.scoped_inventory(regions).await?;
             report.inspected_pages = report.inspected_pages.max(inventory.len());
         }
         if self.config.relation.enabled
             && jobs_remaining > 0
             && self
-                .run_relation_job(&inventory, &mut report)
+                .run_relation_job(&inventory, &mut report, scheduled)
                 .await
                 .context("run PCP relation maintenance job")?
         {
@@ -1208,6 +1339,7 @@ impl RuntimeMaintainer {
         &mut self,
         inventory: &[pcp_store::DurablePageInventoryItem],
         report: &mut MaintenanceCycleReport,
+        scheduled: bool,
     ) -> Result<bool> {
         let pending_packing_page_ids = self.pending_packing_page_ids(inventory);
         let Some(candidates) =
@@ -1328,7 +1460,27 @@ impl RuntimeMaintainer {
             return Ok(true);
         }
 
-        if self.config.applies_changes() {
+        if scheduled {
+            let selected = page_ids
+                .iter()
+                .map(|page_id| {
+                    let page = candidates
+                        .iter()
+                        .find(|page| &page.page_id == page_id)
+                        .expect("validated relation Page is offered");
+                    MaintenanceRelationReviewPage {
+                        page_id: page.page_id.clone(),
+                        revision_id: page.revision_id.clone(),
+                        preview: page.snippet.clone(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            self.ledger.propose_relation_review(
+                candidates[0].namespace.clone(),
+                [selected[0].clone(), selected[1].clone()],
+            );
+            report.relations_proposed += 1;
+        } else if self.config.applies_changes() {
             self.client
                 .link_pages(LinkPagesRequest {
                     from_page_id: page_ids[0].clone(),
@@ -1346,7 +1498,9 @@ impl RuntimeMaintainer {
         } else {
             report.relations_proposed += 1;
         }
-        let outcome = if self.config.applies_changes() {
+        let outcome = if scheduled {
+            "relation_pending_review"
+        } else if self.config.applies_changes() {
             "related"
         } else {
             "observed_relation"
