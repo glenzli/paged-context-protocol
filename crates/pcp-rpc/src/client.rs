@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use pcp_client::{
     DurablePageInventoryItem, HealthSnapshot, PcpApi, PcpTenantApi, TombstoneCascadeResult,
+    UnpackPageResult,
 };
 use pcp_core::{
     AccessAuditEvent, AccessSession, AssessPageValidityRequest, Capabilities,
@@ -18,7 +19,8 @@ use pcp_core::{
     PackPagesRequest, PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage,
     ReadPagesRequest, Relation, RevisePageRequest, RevisionCollectionResult,
     RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult,
-    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    UnpackPageRequest, WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult,
+    WriteValidityResult,
 };
 use tokio::net::UnixStream;
 
@@ -351,6 +353,13 @@ impl PcpApi for RemotePcpClient {
         match self.request(RpcOperation::PackPages(request)).await? {
             RpcValue::WriteResult(value) => Ok(value),
             _ => Err(unexpected("pack_pages")),
+        }
+    }
+
+    async fn unpack_page(&self, request: UnpackPageRequest) -> Result<UnpackPageResult> {
+        match self.request(RpcOperation::UnpackPage(request)).await? {
+            RpcValue::UnpackPageResult(value) => Ok(value),
+            _ => Err(unexpected("unpack_page")),
         }
     }
 

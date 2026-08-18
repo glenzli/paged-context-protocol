@@ -18,10 +18,12 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use chrono::{DateTime, Utc};
 use pcp_client::{ContentLibraryResult, PcpApi, PcpTenantApi};
 use pcp_core::{
-    BrowseIndexOrder, PagePayload, PlanRevisionRetentionRequest, Projection, ReadPage,
-    ReadPagesRequest, Relation, RetentionPolicy, SearchHit, SourceRef, SourceSpan,
+    Actor, ActorType, BrowseIndexOrder, PackPagesRequest, PagePayload, PageRevisionRef,
+    PlanRevisionRetentionRequest, Projection, ReadPage, ReadPagesRequest, Relation,
+    RetentionPolicy, SearchHit, SourceRef, SourceSpan, UnpackPageRequest,
 };
 use pcp_rpc::{EnrollmentAdminClient, EnrollmentAdminResponse, RemotePcpClient};
 use pcp_runtime::{
@@ -52,12 +54,16 @@ const LOCAL_MEDIA_ROOTS_ENV: &str = "PCP_CONSOLE_LOCAL_MEDIA_ROOTS";
 const CONSOLE_STATIC_CACHE_CONTROL: &str = "no-store";
 
 mod graph_view;
+mod intent_match;
 mod managed;
 mod query;
+mod semantic_search;
 
 #[derive(Clone)]
 struct AppState {
     client: Arc<RemotePcpClient>,
+    semantic_search: Option<Arc<query::SemanticSearchProvider>>,
+    intent_match: Option<Arc<intent_match::IntentMatchProvider>>,
     enrollment: EnrollmentAdminClient,
     runtime: Option<Arc<managed::ManagedRuntime>>,
     runtime_config: Option<PathBuf>,
@@ -217,6 +223,28 @@ struct MaintenanceSettingsRequest {
     max_wait_seconds: u64,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RepairPackSplitRequest {
+    page_id: String,
+    expected_revision_id: String,
+    split_after_source_positions: Vec<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RetirePackRequest {
+    page_id: String,
+    expected_revision_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RepackRestoredPackRequest {
+    pages: Vec<PageRevisionRef>,
+    split_after_source_positions: Vec<u64>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let runtime = match managed::ManagedOptions::parse(env::args_os().skip(1))? {
@@ -234,6 +262,22 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|runtime| runtime.runtime_config().to_path_buf())
         .or_else(|| env::var_os("PCP_RUNTIME_CONFIG").map(PathBuf::from));
+    let query_config = runtime_config
+        .as_ref()
+        .map(RuntimeConfig::load)
+        .transpose()?;
+    let semantic_search = query_config
+        .as_ref()
+        .and_then(|config| config.semantic_search.clone())
+        .map(query::SemanticSearchProvider::new)
+        .transpose()?
+        .map(Arc::new);
+    let intent_match = query_config
+        .as_ref()
+        .and_then(|config| config.intent_match.clone())
+        .map(intent_match::IntentMatchProvider::new)
+        .transpose()?
+        .map(Arc::new);
     let principal_id =
         env::var("PCP_CLIENT_ID").unwrap_or_else(|_| DEFAULT_PRINCIPAL_ID.to_owned());
     let client = connect_runtime(&socket_path, &principal_id).await?;
@@ -258,6 +302,8 @@ async fn main() -> Result<()> {
         listener,
         router(AppState {
             client: Arc::new(client),
+            semantic_search,
+            intent_match,
             enrollment: EnrollmentAdminClient::new(enrollment_socket),
             runtime: runtime.clone(),
             runtime_config,
@@ -308,6 +354,18 @@ fn router(state: AppState) -> Router {
         .route("/api/maintenance/scan", post(maintenance_scan))
         .route("/api/maintenance/analyze", post(maintenance_analyze))
         .route("/api/maintenance/packs/apply", post(maintenance_apply_pack))
+        .route(
+            "/api/maintenance/packs/repair-split",
+            post(maintenance_repair_pack_split),
+        )
+        .route(
+            "/api/maintenance/packs/retire",
+            post(maintenance_retire_pack),
+        )
+        .route(
+            "/api/maintenance/packs/repack-restored",
+            post(maintenance_repack_restored),
+        )
         .route(
             "/api/maintenance/summaries/analyze",
             post(maintenance_analyze_summary),
@@ -570,15 +628,26 @@ async fn pages(
     )))
 }
 
-async fn query_capabilities() -> Json<query::QueryCapabilities> {
-    Json(query::capabilities())
+async fn query_capabilities(State(state): State<AppState>) -> Json<query::QueryCapabilities> {
+    Json(query::capabilities(
+        state.semantic_search.as_deref(),
+        state.intent_match.as_deref(),
+    ))
 }
 
 async fn run_query(
     State(state): State<AppState>,
     Json(request): Json<query::QueryRequest>,
 ) -> Result<Json<query::QueryResponse>, ApiError> {
-    Ok(Json(query::execute(state.client.as_ref(), request).await?))
+    Ok(Json(
+        query::execute(
+            state.client.as_ref(),
+            state.semantic_search.as_deref(),
+            state.intent_match.as_deref(),
+            request,
+        )
+        .await?,
+    ))
 }
 
 async fn console_page_result(
@@ -958,6 +1027,191 @@ async fn maintenance_apply_pack(
     }
     let result = operator.apply_pack(request).await?;
     Ok(Json(json!({"optimized": true, "result": result})))
+}
+
+async fn maintenance_repair_pack_split(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<RepairPackSplitRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let operator = maintenance_operator_for_console(&state).await?;
+    let unpacked = operator
+        .unpack_page(UnpackPageRequest {
+            page_id: request.page_id,
+            expected_revision_id: request.expected_revision_id,
+            idempotency_key: None,
+        })
+        .await?;
+    let packs = pack_restored_parts(
+        &state,
+        &operator,
+        unpacked.restored_pages.clone(),
+        request.split_after_source_positions,
+    )
+    .await?;
+    Ok(Json(json!({
+        "unpacked": unpacked,
+        "packs": packs,
+        "repaired": true,
+    })))
+}
+
+async fn maintenance_repack_restored(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<RepackRestoredPackRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let operator = maintenance_operator_for_console(&state).await?;
+    let packs = pack_restored_parts(
+        &state,
+        &operator,
+        request.pages,
+        request.split_after_source_positions,
+    )
+    .await?;
+    Ok(Json(json!({"repacked": true, "packs": packs})))
+}
+
+async fn pack_restored_parts(
+    state: &AppState,
+    operator: &MaintenanceOperator,
+    pages: Vec<PageRevisionRef>,
+    mut split_after_source_positions: Vec<u64>,
+) -> Result<Vec<pcp_core::WriteResult>, ApiError> {
+    split_after_source_positions.sort_unstable();
+    split_after_source_positions.dedup();
+    if split_after_source_positions.is_empty() {
+        return Err(anyhow::anyhow!("a repaired Pack needs at least one split boundary").into());
+    }
+    let mut restored = Vec::new();
+    for batch in pages.chunks(20) {
+        restored.extend(
+            state
+                .client
+                .read_pages(ReadPagesRequest {
+                    page_ids: batch.iter().map(|entry| entry.page_id.clone()).collect(),
+                    revision_ids: Vec::new(),
+                    projections: vec![Projection::Payload],
+                    max_chars: 1,
+                })
+                .await?,
+        );
+    }
+    let spans = restored
+        .into_iter()
+        .map(|page| {
+            (
+                page.page.page_id,
+                (
+                    page.revision.revision_id,
+                    page.revision.source_span,
+                    page.revision
+                        .observed_at
+                        .unwrap_or(page.revision.created_at),
+                ),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut groups = vec![Vec::new(); split_after_source_positions.len() + 1];
+    let mut group_spans = vec![Vec::new(); split_after_source_positions.len() + 1];
+    let mut group_times = vec![Vec::new(); split_after_source_positions.len() + 1];
+    for entry in pages {
+        let (current_revision_id, source_span, observed_at) = spans
+            .get(&entry.page_id)
+            .with_context(|| format!("restored Page {} is not readable", entry.page_id))?;
+        if current_revision_id != &entry.revision_id {
+            return Err(anyhow::anyhow!(
+                "restored Page {} changed before repacking",
+                entry.page_id
+            )
+            .into());
+        }
+        let span = source_span
+            .as_ref()
+            .with_context(|| format!("restored Page {} has no source span", entry.page_id))?;
+        let mut group_index = split_after_source_positions.len();
+        for (index, boundary) in split_after_source_positions.iter().enumerate() {
+            if span.end <= *boundary {
+                group_index = index;
+                break;
+            }
+            if span.start <= *boundary {
+                return Err(anyhow::anyhow!("split position cuts through a restored Page").into());
+            }
+        }
+        groups[group_index].push(entry);
+        group_spans[group_index].push(span.clone());
+        group_times[group_index].push(observed_at.clone());
+    }
+    if groups.iter().any(|group| group.len() < 2) {
+        return Err(anyhow::anyhow!("each repaired Pack group needs at least two Pages").into());
+    }
+    let mut packs = Vec::with_capacity(groups.len());
+    for pages in groups {
+        packs.push(
+            operator
+                .pack_pages(PackPagesRequest {
+                    pages,
+                    idempotency_key: None,
+                })
+                .await?,
+        );
+    }
+    for (spans, times) in group_spans.iter().zip(&group_times) {
+        for pair in spans.windows(2) {
+            if pair[0].stream_id != pair[1].stream_id
+                || pair[0].end.checked_add(1) != Some(pair[1].start)
+            {
+                return Err(anyhow::anyhow!(
+                    "a repaired Pack group must be contiguous in one source stream"
+                )
+                .into());
+            }
+        }
+        let parsed_times = times
+            .iter()
+            .map(|time| {
+                DateTime::parse_from_rfc3339(time)
+                    .map(|time| time.with_timezone(&Utc))
+                    .with_context(|| format!("decode restored Page timestamp {time}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if parsed_times.windows(2).any(|pair| {
+            let seconds = pair[1].signed_duration_since(pair[0]).num_seconds();
+            !(0..=15 * 60).contains(&seconds)
+        }) {
+            return Err(anyhow::anyhow!(
+                "a repaired Pack group exceeds the 15-minute continuity limit"
+            )
+            .into());
+        }
+    }
+    Ok(packs)
+}
+
+async fn maintenance_retire_pack(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<RetirePackRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let current_revision_id = state.client.current_revision_id(request.page_id).await?;
+    if current_revision_id != request.expected_revision_id {
+        return Err(anyhow::anyhow!("packed Page changed before retirement").into());
+    }
+    let operator = maintenance_operator_for_console(&state).await?;
+    let result = operator
+        .retire_page(
+            current_revision_id,
+            Actor {
+                actor_type: ActorType::Tool,
+                actor_id: "tool:service:pcp-console-pack-repair".to_owned(),
+            },
+        )
+        .await?;
+    Ok(Json(json!({"retired": true, "result": result})))
 }
 
 async fn maintenance_analyze_summary(

@@ -9,13 +9,13 @@ use pcp_core::{
     IngestPageRequest, LinkPagesRequest, PackPagesRequest, PlanRevisionRetentionRequest,
     PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
     RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope, ScopeGrant,
-    SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
-    WriteSummaryResult, WriteValidityResult,
+    SearchPagesRequest, SearchResult, UnpackPageRequest, WritePageRequest, WriteResult,
+    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::PcpStore;
 pub use pcp_store::{
     ContentLibraryResult, ContentLibraryScope, ContentLibrarySummary, DurablePageInventoryItem,
-    HealthSnapshot, TombstoneCascadeResult,
+    HealthSnapshot, TombstoneCascadeResult, UnpackPageResult,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -177,6 +177,7 @@ pub trait PcpApi: PcpTenantApi {
     async fn write_page(&self, request: WritePageRequest) -> Result<WriteResult>;
     async fn revise_page(&self, request: RevisePageRequest) -> Result<WriteResult>;
     async fn pack_pages(&self, request: PackPagesRequest) -> Result<WriteResult>;
+    async fn unpack_page(&self, request: UnpackPageRequest) -> Result<UnpackPageResult>;
     async fn link_pages(&self, request: LinkPagesRequest) -> Result<Relation>;
     async fn write_summary(&self, request: WriteSummaryRequest) -> Result<WriteSummaryResult>;
     async fn next_summary_candidate(
@@ -390,6 +391,10 @@ impl PcpApi for EmbeddedPcpClient {
 
     async fn pack_pages(&self, request: PackPagesRequest) -> Result<WriteResult> {
         self.store.pack_pages(&self.access, request).await
+    }
+
+    async fn unpack_page(&self, request: UnpackPageRequest) -> Result<UnpackPageResult> {
+        self.store.unpack_page(&self.access, request).await
     }
 
     async fn link_pages(&self, request: LinkPagesRequest) -> Result<Relation> {

@@ -1,8 +1,10 @@
 use std::{path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
-use pcp_client::EmbeddedPcpClient;
+use pcp_client::{EmbeddedPcpClient, PcpApi};
+use pcp_core::{Actor, PackPagesRequest, UnpackPageRequest};
 use pcp_store::PcpStore;
+use pcp_store::{TombstoneCascadeResult, UnpackPageResult};
 
 use crate::{RuntimeConfig, build_semantic_worker};
 
@@ -18,6 +20,7 @@ use super::{
 pub struct MaintenanceOperator {
     identity_id: String,
     maintainer: RuntimeMaintainer,
+    repair_client: Arc<dyn PcpApi>,
 }
 
 impl MaintenanceOperator {
@@ -44,11 +47,16 @@ impl MaintenanceOperator {
             Arc::clone(&store) as Arc<dyn PcpStore>,
             maintenance.access_session(&identity_id),
         );
+        let repair_client = EmbeddedPcpClient::shared(
+            Arc::clone(&store) as Arc<dyn PcpStore>,
+            maintenance.repair_access_session(&identity_id),
+        );
         let worker = build_semantic_worker(&maintenance.worker)?;
         let maintainer = RuntimeMaintainer::load(client, worker, maintenance).await?;
         Ok(Self {
             identity_id,
             maintainer,
+            repair_client,
         })
     }
 
@@ -76,6 +84,24 @@ impl MaintenanceOperator {
         request: ApplyMaintenancePackRequest,
     ) -> Result<pcp_core::WriteResult> {
         self.maintainer.apply_pack_candidate(request).await
+    }
+
+    pub async fn unpack_page(&self, request: UnpackPageRequest) -> Result<UnpackPageResult> {
+        self.repair_client.unpack_page(request).await
+    }
+
+    pub async fn pack_pages(&self, request: PackPagesRequest) -> Result<pcp_core::WriteResult> {
+        self.repair_client.pack_pages(request).await
+    }
+
+    pub async fn retire_page(
+        &self,
+        root_revision_id: String,
+        actor: Actor,
+    ) -> Result<TombstoneCascadeResult> {
+        self.repair_client
+            .tombstone_derivation_cascade(root_revision_id, actor)
+            .await
     }
 
     pub async fn analyze_summary(

@@ -8,7 +8,7 @@ use pcp_core::{
     PackPagesRequest, PageMutability, PlanRevisionRetentionRequest,
     PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
     RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchHit,
-    SearchPagesRequest, SearchResult, SourceSpan, WritePageRequest, WriteResult,
+    SearchPagesRequest, SearchResult, SourceSpan, UnpackPageRequest, WritePageRequest, WriteResult,
     WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use serde::{Deserialize, Serialize};
@@ -79,6 +79,15 @@ pub struct TombstoneCascadeResult {
     pub retracted_revision_ids: Vec<String>,
     pub restored_page_ids: Vec<String>,
     pub tombstone_revision_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnpackPageResult {
+    pub retired_page_id: String,
+    pub retired_revision_id: String,
+    pub restored_pages: Vec<pcp_core::PageRevisionRef>,
+    pub retracted_relation_ids: Vec<String>,
 }
 
 #[async_trait]
@@ -185,6 +194,11 @@ pub trait PcpStore: Send + Sync {
         access: &AccessSession,
         request: PackPagesRequest,
     ) -> Result<WriteResult>;
+    async fn unpack_page(
+        &self,
+        access: &AccessSession,
+        request: UnpackPageRequest,
+    ) -> Result<UnpackPageResult>;
     async fn link_pages(
         &self,
         access: &AccessSession,

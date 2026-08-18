@@ -26,10 +26,10 @@ impl SqlitePcpStore {
             let transaction = connection
                 .transaction()
                 .context("start PCP derivation retraction")?;
-            let root_namespace = transaction
+            let (root_page_id, root_namespace) = transaction
                 .query_row(
                     "
-                    SELECT current.namespace
+                    SELECT current.page_id, current.namespace
                     FROM pcp_pages page
                     JOIN pcp_revisions current
                       ON current.revision_id = page.current_revision_id
@@ -37,7 +37,7 @@ impl SqlitePcpStore {
                       AND current.lifecycle_status <> 'tombstoned'
                     ",
                     [&root_revision_id],
-                    |row| row.get::<_, String>(0),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )
                 .optional()
                 .context("find current PCP retraction root")?
@@ -58,6 +58,13 @@ impl SqlitePcpStore {
                 .collect::<HashSet<_>>();
             let page_ids = affected_page_ids(&transaction, &affected_revision_ids)?;
             let timestamp = now();
+            let _retracted_relation_ids = retract_incident_relations(
+                &transaction,
+                &page_ids,
+                &actor,
+                &timestamp,
+                "retracted Page is no longer a valid relation endpoint",
+            )?;
             let mut retracted_revision_ids = Vec::new();
             let mut restored_page_ids = Vec::new();
             let mut tombstone_revision_ids = Vec::new();
@@ -73,7 +80,15 @@ impl SqlitePcpStore {
                 let current_revision_id = current.revision_id.clone();
                 retracted_revision_ids.push(current_revision_id.clone());
 
-                let fallback = latest_unaffected_revision(&transaction, &page_id, &affected)?;
+                // The requested root is an explicit withdrawal, not an
+                // ordinary stale derivation: never revive an older revision
+                // of that same Page. Downstream Pages may still recover a
+                // valid independent predecessor.
+                let fallback = if page_id == root_page_id {
+                    None
+                } else {
+                    latest_unaffected_revision(&transaction, &page_id, &affected)?
+                };
                 let next_revision_id = random_id(&transaction, "rev_")?;
                 let (next_kind, next_lifecycle_status) = match fallback {
                     Some(fallback) => {
@@ -177,6 +192,55 @@ impl SqlitePcpStore {
         })
         .await
     }
+}
+
+pub(crate) fn retract_incident_relations(
+    transaction: &rusqlite::Transaction<'_>,
+    page_ids: &[String],
+    actor: &Actor,
+    timestamp: &str,
+    reason: &str,
+) -> Result<Vec<String>> {
+    let page_ids = page_ids.iter().collect::<BTreeSet<_>>();
+    let mut retracted = Vec::new();
+    let mut select = transaction
+        .prepare(
+            "SELECT relation_id FROM pcp_relations
+             WHERE (from_page_id = ?1 OR to_page_id = ?1)
+               AND NOT EXISTS (
+                   SELECT 1 FROM pcp_relation_retractions existing
+                   WHERE existing.relation_id = pcp_relations.relation_id
+               )",
+        )
+        .context("prepare incident PCP relation retraction")?;
+    for page_id in page_ids {
+        let ids = select
+            .query_map([page_id.as_str()], |row| row.get::<_, String>(0))
+            .context("query incident PCP relations")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collect incident PCP relations")?;
+        retracted.extend(ids);
+    }
+    drop(select);
+    retracted.sort();
+    retracted.dedup();
+    for relation_id in &retracted {
+        transaction
+            .execute(
+                "INSERT INTO pcp_relation_retractions (
+                    relation_id, retracted_actor_type, retracted_actor_id, retracted_at, reason
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    relation_id,
+                    actor.actor_type.as_str(),
+                    actor.actor_id,
+                    timestamp,
+                    reason,
+                ],
+            )
+            .context("retract incident PCP relation")?;
+    }
+    Ok(retracted)
 }
 
 fn downstream_revision_ids(

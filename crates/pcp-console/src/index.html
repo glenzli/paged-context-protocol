@@ -118,18 +118,22 @@
         <div class="view-heading-copy"><div><h2 data-i18n="Query">Query</h2><span id="query-status" class="muted" aria-live="polite" data-i18n="No query yet">No query yet</span></div><p class="view-description" data-i18n="Search all authorized context, then review the deterministic context pack.">Search all authorized context, then review the deterministic context pack.</p></div>
       </div>
       <form id="context-query-form" class="context-query-form">
-        <label class="context-query-intent"><span data-i18n="Search or intent">Search or intent</span><textarea id="context-query-text" rows="3" required placeholder="Describe what you need to recall" data-i18n-placeholder="Describe what you need to recall"></textarea></label>
+        <label class="context-query-intent"><span data-i18n="Query intent">Query intent</span><textarea id="context-query-text" rows="3" required placeholder="Describe what you need to recall" data-i18n-placeholder="Describe what you need to recall"></textarea></label>
         <div class="context-query-controls">
-          <div id="context-query-methods" class="context-query-methods" role="group" aria-label="Retrieval method" data-i18n-aria-label="Retrieval method">
-            <button type="button" data-query-method="search" data-i18n="Search">Search</button>
-            <button type="button" data-query-method="semantic_search" data-i18n="Semantic search">Semantic search</button>
-            <button type="button" data-query-method="match_intent" data-i18n="Match intent">Match intent</button>
-          </div>
+          <label class="context-query-select"><span data-i18n="Retrieval method">Retrieval method</span><select id="context-query-method"><option value="semantic_search" data-i18n="Semantic search">Semantic search</option><option value="match_intent" data-i18n="Match intent">Match intent</option></select></label>
+          <label id="context-query-effort-control" class="context-query-select" hidden><span data-i18n="Retrieval effort">Retrieval effort</span><select id="context-query-effort"><option value="low" data-i18n="Low">Low</option><option value="medium" selected data-i18n="Medium">Medium</option><option value="high" data-i18n="High">High</option></select></label>
           <label class="context-query-select"><span data-i18n="Scope">Scope</span><select id="context-query-scope"><option value="" data-i18n="All authorized scopes">All authorized scopes</option></select></label>
-          <label class="context-query-select"><span data-i18n="Top results">Top results</span><select id="context-query-top-k"><option value="6">6</option><option value="12" selected>12</option><option value="20">20</option></select></label>
+          <label class="context-query-select"><span data-i18n="Top results">Top results</span><select id="context-query-top-k"><option value="6" selected>6</option><option value="12">12</option><option value="20">20</option></select></label>
           <button id="context-query-submit" class="primary-button" type="submit" data-i18n="Build context pack">Build context pack</button>
         </div>
         <p id="context-query-method-note" class="control-note"></p>
+        <div id="context-query-error" class="context-query-error" role="alert" hidden>
+          <div>
+            <strong data-i18n="Query failed">Query failed</strong>
+            <span id="context-query-error-message"></span>
+          </div>
+          <button id="context-query-retry" type="button" class="compact-button" data-i18n="Try again">Try again</button>
+        </div>
       </form>
       <section class="context-pack-review" aria-labelledby="context-pack-title">
         <div class="section-heading"><h2 id="context-pack-title" data-i18n="Context pack review">Context pack review</h2></div>
@@ -447,6 +451,6 @@
   </dialog>
 
   <div id="error" class="error" hidden></div>
-  <script type="module" src="/app.js?v=20260818.8"></script>
+  <script type="module" src="/app.js?v=20260819.1"></script>
 </body>
 </html>

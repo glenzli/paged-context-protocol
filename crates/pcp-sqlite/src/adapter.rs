@@ -9,12 +9,12 @@ use pcp_core::{
     PackPagesRequest, PageMutability, PlanRevisionRetentionRequest, Projection, ProvenanceEvent,
     PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
     RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope,
-    SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
-    WriteSummaryResult, WriteValidityResult,
+    SearchPagesRequest, SearchResult, UnpackPageRequest, WritePageRequest, WriteResult,
+    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::{
     ContentLibraryResult, ContentLibrarySummary, DurablePageInventoryItem, HealthSnapshot,
-    PcpStore, TombstoneCascadeResult,
+    PcpStore, TombstoneCascadeResult, UnpackPageResult,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -876,6 +876,65 @@ impl PcpStore for SqlitePcpStore {
             self,
             access,
             "pack_pages",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
+    }
+
+    async fn unpack_page(
+        &self,
+        access: &AccessSession,
+        request: UnpackPageRequest,
+    ) -> Result<UnpackPageResult> {
+        let observation = OperationObservation::start().with_input_count(1);
+        let scopes = match self.page_namespaces(vec![request.page_id.clone()]).await {
+            Ok(scopes) => scopes,
+            Err(error) => {
+                return complete(
+                    self,
+                    access,
+                    "unpack_page",
+                    Vec::new(),
+                    Err(error),
+                    false,
+                    observation,
+                )
+                .await;
+            }
+        };
+        let authorization = scopes
+            .iter()
+            .try_for_each(|scope| authorize_exact(access, scope, AccessPermission::Retract));
+        if let Err(error) = authorization {
+            return complete(
+                self,
+                access,
+                "unpack_page",
+                scopes,
+                Err(error),
+                true,
+                observation,
+            )
+            .await;
+        }
+        let actor_type = match access.principal.principal_type {
+            AccessPrincipalType::ModelClient => ActorType::Model,
+            AccessPrincipalType::Host | AccessPrincipalType::Cli | AccessPrincipalType::Service => {
+                ActorType::Tool
+            }
+        };
+        let actor = Actor {
+            actor_type,
+            actor_id: access.principal.principal_id.clone(),
+        };
+        let result = SqlitePcpStore::unpack_page(self, request, actor, scopes.clone()).await;
+        complete(
+            self,
+            access,
+            "unpack_page",
             scopes,
             result,
             false,

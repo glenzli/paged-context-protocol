@@ -125,6 +125,19 @@ pub struct PackPagesRequest {
     pub idempotency_key: Option<String>,
 }
 
+/// Restore the sealed source Pages held losslessly by one current packed Page.
+///
+/// This operator-only repair primitive never guesses how assertions about the
+/// combined episode should be redistributed.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnpackPageRequest {
+    pub page_id: String,
+    pub expected_revision_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchFilters {

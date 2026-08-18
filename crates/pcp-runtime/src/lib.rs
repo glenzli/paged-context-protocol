@@ -4,7 +4,7 @@ mod infra_socket;
 mod maintenance;
 mod observer;
 
-pub use config::{RuntimeConfig, RuntimeEndpointConfig};
+pub use config::{IntentMatchConfig, RuntimeConfig, RuntimeEndpointConfig, SemanticSearchConfig};
 pub use enrollment::{EnrollmentConfig, EnrollmentManager};
 pub use maintenance::{
     AnalyzeMaintenancePacksRequest, AnalyzeMaintenanceRelationRequest,

@@ -17,7 +17,7 @@ pub use model::{
 pub use request::{
     AssessPageValidityRequest, CreateScopeRequest, IngestPageRequest, InitialRelation,
     LinkPagesRequest, PackPagesRequest, PageRevisionRef, ReadPagesRequest, RevisePageRequest,
-    SearchFilters, SearchPagesRequest, WritePageRequest, WriteSummaryRequest,
+    SearchFilters, SearchPagesRequest, UnpackPageRequest, WritePageRequest, WriteSummaryRequest,
     default_search_projections,
 };
 pub use retention::{

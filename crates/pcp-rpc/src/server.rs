@@ -343,6 +343,9 @@ async fn dispatch(client: &dyn PcpApi, operation: RpcOperation) -> Result<RpcVal
         RpcOperation::PackPages(request) => {
             RpcValue::WriteResult(client.pack_pages(request).await?)
         }
+        RpcOperation::UnpackPage(request) => {
+            RpcValue::UnpackPageResult(client.unpack_page(request).await?)
+        }
         RpcOperation::LinkPages(request) => RpcValue::Relation(client.link_pages(request).await?),
         RpcOperation::WriteSummary(request) => {
             RpcValue::SummaryResult(client.write_summary(request).await?)

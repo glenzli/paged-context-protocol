@@ -455,6 +455,34 @@ impl MaintenanceConfig {
         session
     }
 
+    /// A local operator-only session for reversible Pack repair.  Scheduled
+    /// maintenance never uses this privilege; it is constructed only by the
+    /// Console's explicit repair endpoints.
+    pub fn repair_access_session(&self, identity_id: &str) -> AccessSession {
+        let started = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let scopes = self
+            .allowed_scopes
+            .iter()
+            .map(|scope| scope.replace("{identity_id}", identity_id))
+            .collect();
+        AccessMode::Admin.session(
+            AccessPrincipal {
+                principal_id: format!("{}:pack-repair", self.principal_id),
+                principal_type: AccessPrincipalType::Service,
+                display_name: Some("PCP maintenance Pack repair".to_owned()),
+            },
+            format!(
+                "pcp-maintenance-pack-repair:{}:{started}",
+                std::process::id()
+            ),
+            scopes,
+            false,
+        )
+    }
+
     pub fn applies_changes(&self) -> bool {
         self.mode == MaintenanceMode::Apply
     }

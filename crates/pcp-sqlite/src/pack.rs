@@ -4,14 +4,16 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use pcp_core::{
     Actor, ActorType, LifecycleStatus, PACKED_PAGE_MEDIA_TYPE, PackPagesRequest, PagePayload,
-    PageRevisionRef, ProvenanceEvent, SourceRef, SourceSpan, WriteResult,
+    PageRevisionRef, ProvenanceEvent, SourceRef, SourceSpan, UnpackPageRequest, WriteResult,
 };
-use rusqlite::{Transaction, params};
+use pcp_store::UnpackPageResult;
+use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
     SqlitePcpStore,
+    retract::retract_incident_relations,
     write::{insert_revision, lookup_write_idempotency, now, random_id, record_idempotency},
 };
 
@@ -68,6 +70,217 @@ impl PackInput {
 }
 
 impl SqlitePcpStore {
+    pub async fn unpack_page(
+        &self,
+        request: UnpackPageRequest,
+        actor: Actor,
+        allowed_scopes: Vec<String>,
+    ) -> Result<UnpackPageResult> {
+        let allowed_scopes = allowed_scopes.into_iter().collect::<HashSet<_>>();
+        self.run("Page unpacking", move |mut connection| {
+            let transaction = connection.transaction().context("start PCP Page unpacking")?;
+            transaction
+                .execute_batch("PRAGMA defer_foreign_keys = ON")
+                .context("defer PCP unpack foreign-key checks")?;
+            let (namespace, kind, payload_content) = transaction
+                .query_row(
+                    "SELECT page.namespace, page.kind, revision.payload_content
+                     FROM pcp_pages page
+                     JOIN pcp_revisions revision ON revision.revision_id = page.current_revision_id
+                     WHERE page.page_id = ?1
+                       AND page.current_revision_id = ?2
+                       AND page.lifecycle_status = 'active'
+                       AND revision.payload_media_type = ?3",
+                    params![
+                        request.page_id,
+                        request.expected_revision_id,
+                        PACKED_PAGE_MEDIA_TYPE,
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .context("find exact current packed PCP Page")?
+                .context("PCP unpack requires an exact active packed Page")?;
+            anyhow::ensure!(
+                allowed_scopes.contains(&namespace),
+                "PCP unpack input is outside the authorized Scopes"
+            );
+            let packed: PackedPayload = serde_json::from_str(&payload_content)
+                .context("decode PCP packed Page for unpack")?;
+            anyhow::ensure!(
+                packed.entries.len() >= 2,
+                "PCP unpack requires at least two packed entries"
+            );
+            let source_span = SourceSpan {
+                stream_id: packed.entries[0].source_span.stream_id.clone(),
+                start: packed.entries[0].source_span.start,
+                end: packed
+                    .entries
+                    .last()
+                    .expect("packed entry count was validated")
+                    .source_span
+                    .end,
+            };
+            ensure_flat_entries(&packed.entries, &source_span)?;
+            for entry in &packed.entries {
+                let exists: bool = transaction
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pcp_pages WHERE page_id = ?1)",
+                        [&entry.page_id],
+                        |row| row.get(0),
+                    )
+                    .context("check restored PCP Page identity")?;
+                anyhow::ensure!(
+                    !exists,
+                    "PCP unpack cannot overwrite existing source Page {}",
+                    entry.page_id
+                );
+            }
+
+            for entry in &packed.entries {
+                transaction
+                    .execute(
+                        "INSERT INTO pcp_pages (
+                            page_id, current_revision_id, created_at, namespace,
+                            kind, mutability, lifecycle_status, updated_at
+                         ) VALUES (?1, NULL, ?2, ?3, ?4, 'sealed', 'active', ?5)",
+                        params![entry.page_id, entry.created_at, namespace, kind, now()],
+                    )
+                    .context("restore packed PCP Page identity")?;
+            }
+            let restored_revision_ids = packed
+                .entries
+                .iter()
+                .map(|entry| entry.revision_id.as_str())
+                .collect::<HashSet<_>>();
+            for entry in &packed.entries {
+                // A historical Pack can carry provenance references to Pages
+                // that were independently collected or superseded before this
+                // repair. Keep the signed event, but do not recreate a broken
+                // provenance edge merely because the Pack happened to retain
+                // its old identifier string.
+                let mut provenance = entry.provenance.clone();
+                for event in &mut provenance {
+                    let input_revision_ids = std::mem::take(&mut event.input_revision_ids);
+                    for revision_id in input_revision_ids {
+                        let exists = restored_revision_ids.contains(revision_id.as_str())
+                            || transaction
+                                .query_row(
+                                    "SELECT EXISTS(SELECT 1 FROM pcp_revisions WHERE revision_id = ?1)",
+                                    [&revision_id],
+                                    |row| row.get::<_, bool>(0),
+                                )
+                                .context("check restored provenance input")?;
+                        if exists {
+                            event.input_revision_ids.push(revision_id);
+                        }
+                    }
+                }
+                insert_revision(
+                    &transaction,
+                    &entry.page_id,
+                    &entry.revision_id,
+                    &namespace,
+                    LifecycleStatus::Active.as_str(),
+                    &entry.created_at,
+                    entry.observed_at.as_deref(),
+                    Some(&entry.source_span),
+                    entry.valid_from.as_deref(),
+                    entry.valid_to.as_deref(),
+                    &entry.created_by,
+                    entry.payload.as_ref(),
+                    &entry.source_refs,
+                    entry.facets.as_ref(),
+                    &provenance,
+                )?;
+                transaction
+                    .execute(
+                        "UPDATE pcp_pages SET current_revision_id = ?2 WHERE page_id = ?1",
+                        params![entry.page_id, entry.revision_id],
+                    )
+                    .context("publish restored PCP Page")?;
+            }
+            transaction
+                .execute(
+                    "DELETE FROM pcp_page_packs WHERE packed_page_id = ?1",
+                    [&request.page_id],
+                )
+                .context("remove unpacked PCP Page memberships")?;
+
+            let timestamp = now();
+            let retracted_relation_ids = retract_incident_relations(
+                &transaction,
+                &[request.page_id.clone()],
+                &actor,
+                &timestamp,
+                "packed topic was manually split; old relation endpoint is ambiguous",
+            )?;
+            let tombstone_revision_id = random_id(&transaction, "rev_")?;
+            insert_revision(
+                &transaction,
+                &request.page_id,
+                &tombstone_revision_id,
+                &namespace,
+                LifecycleStatus::Tombstoned.as_str(),
+                &timestamp,
+                Some(&timestamp),
+                None,
+                None,
+                None,
+                &actor,
+                None,
+                &[],
+                Some(&serde_json::json!({
+                    "kind": "tombstone",
+                    "unpackedRevisionId": request.expected_revision_id,
+                })),
+                &[ProvenanceEvent {
+                    operation: "unpack".to_owned(),
+                    actor: actor.clone(),
+                    timestamp: timestamp.clone(),
+                    input_revision_ids: vec![request.expected_revision_id.clone()],
+                    tool_or_model: Some(actor.actor_id.clone()),
+                }],
+            )?;
+            let published = transaction
+                .execute(
+                    "UPDATE pcp_pages
+                     SET current_revision_id = ?2, kind = 'tombstone', lifecycle_status = 'tombstoned', updated_at = ?3
+                     WHERE page_id = ?1 AND current_revision_id = ?4",
+                    params![
+                        request.page_id,
+                        tombstone_revision_id,
+                        timestamp,
+                        request.expected_revision_id,
+                    ],
+                )
+                .context("retire unpacked PCP Page")?;
+            anyhow::ensure!(published == 1, "packed PCP Page changed during unpack");
+            let restored_pages = packed
+                .entries
+                .into_iter()
+                .map(|entry| PageRevisionRef {
+                    page_id: entry.page_id,
+                    revision_id: entry.revision_id,
+                })
+                .collect();
+            transaction.commit().context("commit PCP Page unpacking")?;
+            Ok(UnpackPageResult {
+                retired_page_id: request.page_id,
+                retired_revision_id: tombstone_revision_id,
+                restored_pages,
+                retracted_relation_ids,
+            })
+        })
+        .await
+    }
+
     pub async fn pack_pages(
         &self,
         request: PackPagesRequest,

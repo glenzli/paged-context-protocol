@@ -263,7 +263,7 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 .maintenance-eyebrow { color: var(--muted); font-size: 11px; font-weight: 650; text-transform: uppercase; }
 .maintenance-stage-metrics { margin-top: 16px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .maintenance-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; }
-.maintenance-actions .is-loading::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 6px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: maintenance-spin .8s linear infinite; vertical-align: -1px; }
+.maintenance-actions .is-loading::before, .context-query-controls .is-loading::before, .context-query-progress::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 6px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: maintenance-spin .8s linear infinite; vertical-align: -1px; }
 .maintenance-issue { margin: 16px 0 0; padding: 9px 11px; border: 1px solid var(--warning-line); border-radius: 5px; color: var(--warning); background: var(--warning-soft); white-space: pre-wrap; }
 .maintenance-report { margin-top: 20px; }
 .maintenance-report > button { margin-top: 12px; }
@@ -301,7 +301,7 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 
 @keyframes maintenance-spin { to { transform: rotate(360deg); } }
 
-@media (prefers-reduced-motion: reduce) { .maintenance-actions .is-loading::before { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .maintenance-actions .is-loading::before, .context-query-controls .is-loading::before, .context-query-progress::before { animation: none; } }
 .maintenance-preview { display: -webkit-box; overflow: hidden; line-height: 1.4; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 @media (max-width: 720px) {
   .maintenance-summary-card-heading { grid-template-columns: 1fr auto; }
@@ -329,6 +329,12 @@ input:focus, select:focus { border-color: var(--accent); }
 .context-query-select select { min-width: 132px; }
 .context-query-select:last-of-type select { min-width: 76px; }
 .context-query-controls .primary-button { min-height: 34px; }
+.context-query-error { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 12px; border: 1px solid var(--danger); border-left-width: 4px; border-radius: 5px; background: color-mix(in srgb, var(--danger) 8%, var(--surface)); color: var(--text); }
+.context-query-error > div { display: grid; gap: 3px; min-width: 0; }
+.context-query-error strong { color: var(--danger); font-size: 13px; }
+.context-query-error span { color: var(--danger); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.context-query-error .compact-button { flex: 0 0 auto; border-color: var(--danger); color: var(--danger); }
+.context-query-progress { display: flex; align-items: center; justify-content: center; gap: 1px; border-bottom: 1px solid var(--line); background: var(--surface-subtle); font-variant-numeric: tabular-nums; }
 .context-pack-review { margin-top: 18px; }
 .context-pack-results { border-top: 1px solid var(--line); }
 .context-pack-entry { padding: 15px 4px; border-bottom: 1px solid var(--line); }
@@ -587,6 +593,7 @@ pre { margin: 0; max-height: 420px; overflow: auto; padding: 11px; border: 1px s
   .metric { border-bottom: 1px solid var(--line); }
   .toolbar { grid-template-columns: 1fr; }
   .context-query-controls { align-items: stretch; flex-direction: column; }
+  .context-query-error { align-items: flex-start; flex-direction: column; }
   .context-query-methods { width: 100%; }
   .context-query-methods button { flex: 1; }
   .context-query-select select { width: 100%; }

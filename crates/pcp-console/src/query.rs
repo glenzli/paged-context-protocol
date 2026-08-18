@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use pcp_client::PcpTenantApi;
 use pcp_core::{
     GraphEdgeDirection, GraphEdgeKind, Projection, ReadPage, ReadPagesRequest, SearchFilters,
@@ -10,14 +10,24 @@ use pcp_rpc::RemotePcpClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-const DEFAULT_TOP_K: u32 = 12;
+use crate::intent_match::{IntentEffort, IntentMatchAudit, IntentMatchProvider};
+
+pub use crate::semantic_search::SemanticSearchProvider;
+
+const DEFAULT_TOP_K: u32 = 6;
 const MAX_TOP_K: u32 = 20;
 const DEFAULT_PACK_BUDGET_CHARS: u32 = 24_000;
 const MIN_PACK_BUDGET_CHARS: u32 = 4_000;
 const MAX_PACK_BUDGET_CHARS: u32 = 48_000;
 const FOCUS_ANCHOR_COUNT: usize = 3;
-const GRAPH_SEED_COUNT: usize = 4;
-const MAX_RELATED_CONTEXTS: usize = 4;
+const SEMANTIC_CANDIDATE_MULTIPLIER: usize = 3;
+const MIN_SEMANTIC_CANDIDATES: usize = 12;
+const MAX_SEMANTIC_CANDIDATES: usize = 36;
+const STRUCTURAL_RERANK_SEED_COUNT: usize = 8;
+const STRUCTURAL_RERANK_NEIGHBOR_LIMIT: u32 = 32;
+const STRUCTURAL_RERANK_ELIGIBLE_CANDIDATES: usize = 12;
+const MAX_STRUCTURAL_SEMANTIC_GAP: f32 = 0.08;
+const MAX_STRUCTURAL_BOOST: f32 = 0.025;
 const MAX_FOCUS_ENTRY_CHARS: usize = 4_000;
 const MAX_SUMMARY_ENTRY_CHARS: usize = 1_600;
 const MAX_RELATED_ENTRY_CHARS: usize = 1_600;
@@ -28,7 +38,6 @@ const PROJECTION_TRUNCATION_MARKER: &str = "[projection truncated by host budget
 #[serde(rename_all = "snake_case")]
 pub enum QueryMethod {
     #[default]
-    Search,
     SemanticSearch,
     MatchIntent,
 }
@@ -45,6 +54,8 @@ pub struct QueryRequest {
     pub top_k: Option<u32>,
     #[serde(default)]
     pub pack_budget_chars: Option<u32>,
+    #[serde(default)]
+    pub intent_effort: IntentEffort,
 }
 
 #[derive(Serialize)]
@@ -71,6 +82,12 @@ pub struct QueryResponse {
     pub pack_budget_chars: u32,
     pub anchor_count: usize,
     pub related_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_indexed_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_embedded_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent_match: Option<IntentMatchAudit>,
     pub entries: Vec<QueryPackEntry>,
     pub model_context: String,
 }
@@ -86,6 +103,14 @@ pub struct QueryPackEntry {
     pub kind: String,
     pub matched_by: String,
     pub matched_projection: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structural_boost: Option<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub structural_relations: Vec<QueryRelation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent_reason: Option<String>,
     pub detail: QueryDetail,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relation: Option<QueryRelation>,
@@ -110,6 +135,19 @@ struct PlannedHit {
     hit: SearchHit,
     anchor_rank: usize,
     relation: Option<QueryRelation>,
+    semantic_score: Option<f32>,
+    structural_boost: f32,
+    structural_relations: Vec<QueryRelation>,
+    intent_reason: Option<String>,
+}
+
+#[derive(Clone)]
+struct RankedHit {
+    hit: SearchHit,
+    semantic_score: Option<f32>,
+    structural_boost: f32,
+    structural_relations: Vec<QueryRelation>,
+    intent_reason: Option<String>,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -121,27 +159,40 @@ pub enum QueryDetail {
     Reference,
 }
 
-pub fn capabilities() -> QueryCapabilities {
+pub fn capabilities(
+    semantic_search: Option<&SemanticSearchProvider>,
+    intent_match: Option<&IntentMatchProvider>,
+) -> QueryCapabilities {
+    let mut available_methods = Vec::new();
+    let mut unavailable_methods = Vec::new();
+    if semantic_search.is_some() {
+        available_methods.push(QueryMethod::SemanticSearch);
+    } else {
+        unavailable_methods.push(UnavailableQueryMethod {
+            method: QueryMethod::SemanticSearch,
+            reason: "No vector retrieval provider is configured for this Runtime.",
+        });
+    }
+    if semantic_search.is_some() && intent_match.is_some() {
+        available_methods.push(QueryMethod::MatchIntent);
+    } else {
+        unavailable_methods.push(UnavailableQueryMethod {
+            method: QueryMethod::MatchIntent,
+            reason: "Intent matching is unavailable: it requires both semantic retrieval and a configured query intent Router.",
+        });
+    }
     QueryCapabilities {
-        available_methods: vec![QueryMethod::Search],
-        unavailable_methods: vec![
-            UnavailableQueryMethod {
-                method: QueryMethod::SemanticSearch,
-                reason: "No vector retrieval provider is configured for this Runtime.",
-            },
-            UnavailableQueryMethod {
-                method: QueryMethod::MatchIntent,
-                reason: "No query intent router is configured for this Runtime.",
-            },
-        ],
+        available_methods,
+        unavailable_methods,
     }
 }
 
-pub async fn execute(client: &RemotePcpClient, request: QueryRequest) -> Result<QueryResponse> {
-    ensure!(
-        matches!(request.method, QueryMethod::Search),
-        unavailable_reason(&request.method)
-    );
+pub async fn execute(
+    client: &RemotePcpClient,
+    semantic_search: Option<&SemanticSearchProvider>,
+    intent_match: Option<&IntentMatchProvider>,
+    request: QueryRequest,
+) -> Result<QueryResponse> {
     let query = request.query.trim();
     ensure!(!query.is_empty(), "A query is required");
     let scope = request.scope.and_then(normalized_scope);
@@ -151,29 +202,79 @@ pub async fn execute(client: &RemotePcpClient, request: QueryRequest) -> Result<
         .unwrap_or(DEFAULT_PACK_BUDGET_CHARS)
         .clamp(MIN_PACK_BUDGET_CHARS, MAX_PACK_BUDGET_CHARS);
     let scopes = scope.iter().cloned().collect::<Vec<_>>();
-    let anchors = client
-        .search_pages(SearchPagesRequest {
-            query: query.to_owned(),
-            scopes: scopes.clone(),
-            mode: SearchMode::Text,
-            term_match: SearchTermMatch::All,
-            projections: vec![Projection::Summary, Projection::Payload],
-            filters: SearchFilters::default(),
-            limit: top_k,
-            cursor: None,
-        })
-        .await?;
-    let relation_budget = ((top_k as usize) / 3).min(MAX_RELATED_CONTEXTS);
-    let related = relation_candidates(client, &anchors.hits, &scopes, relation_budget).await?;
-    let anchor_count = anchors
-        .hits
-        .len()
-        .min((top_k as usize).saturating_sub(related.len()));
-    let related = related
-        .into_iter()
-        .filter(|candidate| candidate.anchor_rank <= anchor_count)
-        .collect::<Vec<_>>();
-    let planned = plan_pack(&anchors.hits, related, anchor_count);
+    let (anchors, semantic_indexed_count, semantic_embedded_count, intent_audit) = match request
+        .method
+    {
+        QueryMethod::SemanticSearch => {
+            let provider = semantic_search.context(unavailable_reason(&request.method))?;
+            let candidate_limit = semantic_candidate_limit(top_k);
+            let result = provider
+                .search(client, query, &scopes, candidate_limit)
+                .await
+                .context("semantic search is unavailable")?;
+            let mut anchors = result
+                .hits
+                .into_iter()
+                .map(|hit| RankedHit {
+                    hit: hit.hit,
+                    semantic_score: Some(hit.score),
+                    structural_boost: 0.0,
+                    structural_relations: Vec::new(),
+                    intent_reason: None,
+                })
+                .collect::<Vec<_>>();
+            rerank_semantic_with_relations(client, &mut anchors, &scopes).await?;
+            anchors.truncate(top_k as usize);
+            (
+                anchors,
+                Some(result.indexed_count),
+                Some(result.embedded_count),
+                None,
+            )
+        }
+        QueryMethod::MatchIntent => {
+            let semantic_search = semantic_search.context(unavailable_reason(&request.method))?;
+            let intent_match = intent_match.context(unavailable_reason(&request.method))?;
+            let result = intent_match
+                .search(
+                    client,
+                    semantic_search,
+                    query,
+                    &scopes,
+                    request.intent_effort,
+                    top_k as usize,
+                )
+                .await
+                .context("intent matching is unavailable")?;
+            let anchors = result
+                .hits
+                .into_iter()
+                .map(|hit| RankedHit {
+                    hit: SearchHit {
+                        matched_by: "intent_router".to_owned(),
+                        matched_projection: "reviewed_page".to_owned(),
+                        ..hit.hit
+                    },
+                    semantic_score: hit.semantic_score,
+                    structural_boost: 0.0,
+                    structural_relations: Vec::new(),
+                    intent_reason: Some(hit.intent_reason),
+                })
+                .collect::<Vec<_>>();
+            (
+                anchors,
+                Some(result.indexed_count),
+                Some(result.embedded_count),
+                Some(result.audit),
+            )
+        }
+    };
+    // Semantic search must remain a conservative page retriever. Graph
+    // structure can only make a small, transparent adjustment between pages
+    // that were independently retrieved above; it cannot introduce a graph
+    // neighbor into the Context Pack. Intent matching owns that later decision.
+    let anchor_count = anchors.len();
+    let planned = plan_pack(&anchors);
     let pages = read_planned_pages(client, &planned).await?;
     let mut remaining_chars = pack_budget_chars as usize;
     let entries = planned
@@ -199,9 +300,17 @@ pub async fn execute(client: &RemotePcpClient, request: QueryRequest) -> Result<
             .iter()
             .filter(|entry| entry.relation.is_some())
             .count(),
+        semantic_indexed_count,
+        semantic_embedded_count,
+        intent_match: intent_audit,
         model_context: model_context(&entries),
         entries,
     })
+}
+
+fn semantic_candidate_limit(top_k: u32) -> usize {
+    ((top_k as usize) * SEMANTIC_CANDIDATE_MULTIPLIER)
+        .clamp(MIN_SEMANTIC_CANDIDATES, MAX_SEMANTIC_CANDIDATES)
 }
 
 async fn read_planned_pages(
@@ -231,84 +340,155 @@ async fn read_planned_pages(
     Ok(pages)
 }
 
-async fn relation_candidates(
+/// Applies a deliberately bounded structural signal to semantic candidates.
+///
+/// A relation can only corroborate a page that semantic retrieval already
+/// placed in the candidate pool; it never introduces a new anchor, follows
+/// more than one hop, or uses provenance as if it were a semantic assertion.
+async fn rerank_semantic_with_relations(
     client: &RemotePcpClient,
-    anchors: &[SearchHit],
+    anchors: &mut Vec<RankedHit>,
     scopes: &[String],
-    limit: usize,
-) -> Result<Vec<PlannedHit>> {
-    if limit == 0 {
-        return Ok(Vec::new());
+) -> Result<()> {
+    if anchors.len() < 2 {
+        return Ok(());
     }
-    let anchor_revisions = anchors
+    let candidate_positions = anchors
         .iter()
-        .map(|hit| hit.revision_id.clone())
-        .collect::<HashSet<_>>();
-    let mut related_revisions = HashSet::new();
-    let mut related = Vec::new();
-    for (index, anchor) in anchors.iter().take(GRAPH_SEED_COUNT).enumerate() {
-        if related.len() >= limit {
-            break;
-        }
+        .enumerate()
+        .map(|(index, candidate)| (candidate.hit.revision_id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let seeds = anchors
+        .iter()
+        .take(STRUCTURAL_RERANK_SEED_COUNT)
+        .enumerate()
+        .map(|(index, candidate)| {
+            (
+                index,
+                candidate.hit.revision_id.clone(),
+                candidate.semantic_score,
+            )
+        })
+        .collect::<Vec<_>>();
+    for (seed_index, revision_id, seed_score) in seeds {
         let graph = client
             .search_pages(SearchPagesRequest {
-                query: anchor.revision_id.clone(),
+                query: revision_id,
                 scopes: scopes.to_vec(),
                 mode: SearchMode::Graph,
                 term_match: SearchTermMatch::All,
                 projections: vec![Projection::Summary, Projection::Payload],
                 filters: SearchFilters::default(),
-                limit: 2,
+                limit: STRUCTURAL_RERANK_NEIGHBOR_LIMIT,
                 cursor: None,
             })
             .await?;
-        for hit in graph.hits {
-            if anchor_revisions.contains(&hit.revision_id)
-                || !related_revisions.insert(hit.revision_id.clone())
-            {
-                continue;
-            }
-            let relation = hit
-                .graph_edges
-                .iter()
-                .find(|edge| edge.edge_kind == GraphEdgeKind::Relation)
-                .map(|edge| QueryRelation {
-                    relation_type: edge.relation_type.clone(),
-                    direction: graph_direction(&edge.direction),
-                });
-            let Some(relation) = relation else {
+        for neighbor in graph.hits {
+            let Some(&candidate_index) = candidate_positions.get(&neighbor.revision_id) else {
                 continue;
             };
-            related.push(PlannedHit {
-                hit,
-                anchor_rank: index + 1,
-                relation: Some(relation),
-            });
-            break;
+            if candidate_index == seed_index {
+                continue;
+            }
+            if !can_reinforce_semantic_candidate(
+                seed_score,
+                anchors[candidate_index].semantic_score,
+                candidate_index,
+            ) {
+                continue;
+            }
+            let relations = neighbor
+                .graph_edges
+                .iter()
+                .filter(|edge| edge.edge_kind == GraphEdgeKind::Relation)
+                .filter_map(structural_relation)
+                .collect::<Vec<_>>();
+            let edge_weight = relations
+                .iter()
+                .map(|relation| structural_relation_weight(&relation.relation_type))
+                .fold(0.0_f32, f32::max);
+            if edge_weight == 0.0 {
+                continue;
+            }
+            // Strong semantic seeds may corroborate a near-tie a little more,
+            // but no seed can turn a relation into the primary retrieval signal.
+            let semantic_confidence = seed_score.unwrap_or_default().clamp(0.0, 1.0);
+            let boost = edge_weight * (0.75 + 0.25 * semantic_confidence);
+            let candidate = &mut anchors[candidate_index];
+            let remaining = (MAX_STRUCTURAL_BOOST - candidate.structural_boost).max(0.0);
+            let applied = boost.min(remaining);
+            if applied == 0.0 {
+                continue;
+            }
+            candidate.structural_boost += applied;
+            for relation in relations {
+                if !candidate.structural_relations.iter().any(|existing| {
+                    existing.relation_type == relation.relation_type
+                        && existing.direction == relation.direction
+                }) {
+                    candidate.structural_relations.push(relation);
+                }
+            }
         }
     }
-    Ok(related)
+    anchors.sort_by(|left, right| {
+        let left_score = left.semantic_score.unwrap_or_default() + left.structural_boost;
+        let right_score = right.semantic_score.unwrap_or_default() + right.structural_boost;
+        right_score.total_cmp(&left_score).then_with(|| {
+            right
+                .semantic_score
+                .unwrap_or_default()
+                .total_cmp(&left.semantic_score.unwrap_or_default())
+        })
+    });
+    Ok(())
 }
 
-fn plan_pack(
-    anchors: &[SearchHit],
-    related: Vec<PlannedHit>,
-    anchor_count: usize,
-) -> Vec<PlannedHit> {
-    let mut planned = Vec::with_capacity(anchor_count + related.len());
-    for (index, hit) in anchors.iter().take(anchor_count).enumerate() {
+/// A graph relation is corroborating evidence, not a second retrieval system.
+/// Both endpoints must be independently strong semantic candidates for this
+/// query and must be close enough that a small structural tie-break is useful.
+fn can_reinforce_semantic_candidate(
+    seed_score: Option<f32>,
+    candidate_score: Option<f32>,
+    candidate_rank: usize,
+) -> bool {
+    candidate_rank < STRUCTURAL_RERANK_ELIGIBLE_CANDIDATES
+        && seed_score.is_some_and(|seed| {
+            candidate_score.is_some_and(|candidate| candidate >= seed - MAX_STRUCTURAL_SEMANTIC_GAP)
+        })
+}
+
+fn structural_relation(edge: &pcp_core::GraphSearchEdge) -> Option<QueryRelation> {
+    (edge.edge_kind == GraphEdgeKind::Relation).then(|| QueryRelation {
+        relation_type: edge.relation_type.clone(),
+        direction: graph_direction(&edge.direction),
+    })
+}
+
+fn structural_relation_weight(relation_type: &str) -> f32 {
+    match relation_type {
+        "summarizes" => 0.025,
+        "aggregates" | "depends_on" => 0.020,
+        "derived_from" => 0.015,
+        "references" | "cites" => 0.012,
+        "related_to" => 0.008,
+        _ => 0.010,
+    }
+}
+
+fn plan_pack(anchors: &[RankedHit]) -> Vec<PlannedHit> {
+    let mut planned = Vec::with_capacity(anchors.len());
+    for (index, hit) in anchors.iter().enumerate() {
         let anchor_rank = index + 1;
         planned.push(PlannedHit {
-            hit: hit.clone(),
+            hit: hit.hit.clone(),
             anchor_rank,
             relation: None,
+            semantic_score: hit.semantic_score,
+            structural_boost: hit.structural_boost,
+            structural_relations: hit.structural_relations.clone(),
+            intent_reason: hit.intent_reason.clone(),
         });
-        planned.extend(
-            related
-                .iter()
-                .filter(|candidate| candidate.anchor_rank == anchor_rank)
-                .cloned(),
-        );
     }
     planned
 }
@@ -327,7 +507,6 @@ fn normalized_scope(scope: String) -> Option<String> {
 
 fn unavailable_reason(method: &QueryMethod) -> &'static str {
     match method {
-        QueryMethod::Search => "",
         QueryMethod::SemanticSearch => {
             "Semantic search is unavailable: no vector retrieval provider is configured."
         }
@@ -372,6 +551,10 @@ fn pack_entry(
         kind: hit.kind.clone(),
         matched_by: hit.matched_by.clone(),
         matched_projection: hit.matched_projection.clone(),
+        semantic_score: candidate.semantic_score,
+        structural_boost: (candidate.structural_boost > 0.0).then_some(candidate.structural_boost),
+        structural_relations: candidate.structural_relations.clone(),
+        intent_reason: candidate.intent_reason.clone(),
         detail,
         relation: candidate.relation.clone(),
         source_projection_truncated: page_has_truncated_projection(page),
@@ -451,7 +634,7 @@ fn current_summary(
     Some(content)
 }
 
-fn truncate_chars(value: &str, limit: usize) -> (String, bool) {
+pub(crate) fn truncate_chars(value: &str, limit: usize) -> (String, bool) {
     let value = value.trim();
     if value.chars().count() <= limit {
         return (value.to_owned(), false);
@@ -476,7 +659,7 @@ fn payload_projection_truncated(page: Option<&ReadPage>) -> bool {
         .is_some_and(|payload| projection_was_truncated(&payload.content))
 }
 
-fn projection_was_truncated(content: &str) -> bool {
+pub(crate) fn projection_was_truncated(content: &str) -> bool {
     content.trim_end().ends_with(PROJECTION_TRUNCATION_MARKER)
 }
 
@@ -493,7 +676,7 @@ fn model_search_snippet(hit: &SearchHit) -> Option<String> {
     model_projection("text/plain", &hit.snippet)
 }
 
-fn model_projection(media_type: &str, content: &str) -> Option<String> {
+pub(crate) fn model_projection(media_type: &str, content: &str) -> Option<String> {
     let content = content.trim();
     if content.is_empty() || projection_was_truncated(content) {
         return None;
@@ -599,6 +782,47 @@ mod tests {
     }
 
     #[test]
+    fn query_defaults_to_semantic_retrieval_and_rejects_literal_search() {
+        let default_request = serde_json::from_str::<QueryRequest>(r#"{"query":"OET 是什么"}"#)
+            .expect("decode default query request");
+        assert!(matches!(
+            default_request.method,
+            QueryMethod::SemanticSearch
+        ));
+        assert!(
+            serde_json::from_str::<QueryRequest>(r#"{"query":"OET 是什么","method":"search"}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn semantic_structural_weights_are_small_and_type_aware() {
+        assert_eq!(semantic_candidate_limit(1), MIN_SEMANTIC_CANDIDATES);
+        assert_eq!(semantic_candidate_limit(12), MAX_SEMANTIC_CANDIDATES);
+        assert_eq!(semantic_candidate_limit(MAX_TOP_K), MAX_SEMANTIC_CANDIDATES);
+        assert!(
+            structural_relation_weight("summarizes") > structural_relation_weight("related_to")
+        );
+        assert!(structural_relation_weight("related_to") < MAX_STRUCTURAL_BOOST);
+    }
+
+    #[test]
+    fn structure_only_reinforces_nearby_strong_semantic_candidates() {
+        assert!(can_reinforce_semantic_candidate(Some(0.72), Some(0.66), 11));
+        assert!(!can_reinforce_semantic_candidate(
+            Some(0.72),
+            Some(0.63),
+            11
+        ));
+        assert!(!can_reinforce_semantic_candidate(
+            Some(0.72),
+            Some(0.70),
+            12
+        ));
+        assert!(!can_reinforce_semantic_candidate(Some(0.72), None, 1));
+    }
+
+    #[test]
     fn model_context_includes_related_content_without_internal_page_ids() {
         let related = QueryPackEntry {
             rank: 2,
@@ -609,6 +833,10 @@ mod tests {
             kind: "note".to_owned(),
             matched_by: "graph".to_owned(),
             matched_projection: "relations".to_owned(),
+            semantic_score: None,
+            structural_boost: None,
+            structural_relations: Vec::new(),
+            intent_reason: None,
             detail: QueryDetail::Summary,
             relation: Some(QueryRelation {
                 relation_type: "depends_on".to_owned(),
@@ -653,6 +881,10 @@ mod tests {
             kind: "note".to_owned(),
             matched_by: "text".to_owned(),
             matched_projection: "payload".to_owned(),
+            semantic_score: None,
+            structural_boost: None,
+            structural_relations: Vec::new(),
+            intent_reason: None,
             detail: QueryDetail::Excerpt,
             relation: None,
             source_projection_truncated: true,

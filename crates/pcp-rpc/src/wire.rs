@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use pcp_client::{
     ContentLibraryResult, ContentLibrarySummary, DurablePageInventoryItem, HealthSnapshot,
-    TombstoneCascadeResult,
+    TombstoneCascadeResult, UnpackPageResult,
 };
 use pcp_core::{
     AccessAuditEvent, AccessSession, Actor, AssessPageValidityRequest, BrowseIndexOrder,
@@ -9,8 +9,8 @@ use pcp_core::{
     LinkPagesRequest, PackPagesRequest, PlanRevisionRetentionRequest,
     PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
     RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope,
-    SearchPagesRequest, SearchResult, WritePageRequest, WriteResult, WriteSummaryRequest,
-    WriteSummaryResult, WriteValidityResult,
+    SearchPagesRequest, SearchResult, UnpackPageRequest, WritePageRequest, WriteResult,
+    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -89,6 +89,7 @@ pub(crate) enum RpcOperation {
     WritePage(WritePageRequest),
     RevisePage(RevisePageRequest),
     PackPages(PackPagesRequest),
+    UnpackPage(UnpackPageRequest),
     LinkPages(LinkPagesRequest),
     WriteSummary(WriteSummaryRequest),
     NextSummaryCandidate {
@@ -154,6 +155,7 @@ pub(crate) enum RpcValue {
     RevisionRetentionLease(RevisionRetentionLease),
     RevisionRetentionLeases(Vec<RevisionRetentionLease>),
     WriteResult(WriteResult),
+    UnpackPageResult(UnpackPageResult),
     Relation(Relation),
     SummaryResult(WriteSummaryResult),
     SummaryCandidate(Option<String>),

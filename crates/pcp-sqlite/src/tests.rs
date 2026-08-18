@@ -13,8 +13,8 @@ use pcp_core::{
     PackPagesRequest, PageMutability, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest,
     Projection, ProvenanceEvent, PutRevisionRetentionLeaseRequest, ReadPagesRequest,
     RetentionPolicy, RetentionProtectionReason, RevisePageRequest, ScopeGrant, SearchFilters,
-    SearchMode, SearchPagesRequest, SearchTermMatch, SourceRef, SourceSpan, ValidityStanding,
-    WritePageRequest, WriteSummaryRequest,
+    SearchMode, SearchPagesRequest, SearchTermMatch, SourceRef, SourceSpan, UnpackPageRequest,
+    ValidityStanding, WritePageRequest, WriteSummaryRequest,
 };
 use pcp_store::PcpStore;
 use rusqlite::{Connection, params};
@@ -3348,6 +3348,164 @@ async fn packs_contiguous_unreferenced_sealed_pages_without_rewriting_content() 
         2
     );
 
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn unpack_restores_lossless_leaves_and_retracts_the_ambiguous_pack_relations() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-unpacking-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
+        .await
+        .expect("open store");
+    let identity_id = store.identity_id().to_owned();
+    let namespace = "conversation:repair".to_owned();
+    store
+        .create_scope(CreateScopeRequest {
+            namespace: namespace.clone(),
+            display_name: "Repair".to_owned(),
+            description: None,
+            parent_namespace: None,
+        })
+        .await
+        .expect("create scope");
+    let actor = Actor {
+        actor_type: ActorType::Tool,
+        actor_id: "tool:test".to_owned(),
+    };
+    let mut leaves = Vec::new();
+    for index in 0..3 {
+        let mut request = write_request(
+            &identity_id,
+            &namespace,
+            actor.clone(),
+            &format!("topic {index}"),
+            &format!("unpack:{index}"),
+        );
+        request.kind = "conversation_event".to_owned();
+        request.mutability = PageMutability::Sealed;
+        request.source_span = Some(SourceSpan {
+            stream_id: "conversation:repair".to_owned(),
+            start: index,
+            end: index,
+        });
+        leaves.push(
+            store
+                .write_page(request, vec![namespace.clone()])
+                .await
+                .expect("write source leaf"),
+        );
+    }
+    let packed = store
+        .pack_pages(
+            PackPagesRequest {
+                pages: leaves
+                    .iter()
+                    .map(|leaf| PageRevisionRef {
+                        page_id: leaf.page_id.clone(),
+                        revision_id: leaf.revision_id.clone(),
+                    })
+                    .collect(),
+                idempotency_key: None,
+            },
+            actor.clone(),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("pack source leaves");
+    let mut external_request = write_request(
+        &identity_id,
+        &namespace,
+        actor.clone(),
+        "external relation target",
+        "unpack:external",
+    );
+    external_request.kind = "conversation_event".to_owned();
+    external_request.mutability = PageMutability::Sealed;
+    external_request.source_span = Some(SourceSpan {
+        stream_id: "conversation:repair".to_owned(),
+        start: 3,
+        end: 3,
+    });
+    let external = store
+        .write_page(external_request, vec![namespace.clone()])
+        .await
+        .expect("write external Page");
+    let relation = store
+        .link_pages(
+            LinkPagesRequest {
+                from_page_id: packed.page_id.clone(),
+                relation_type: "related_to".to_owned(),
+                to_page_id: external.page_id,
+                basis_revision_ids: vec![packed.revision_id.clone()],
+                created_by: actor.clone(),
+                idempotency_key: None,
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("link packed Page");
+    let unpacked = store
+        .unpack_page(
+            UnpackPageRequest {
+                page_id: packed.page_id.clone(),
+                expected_revision_id: packed.revision_id,
+                idempotency_key: None,
+            },
+            actor,
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("unpack Page");
+    assert_eq!(unpacked.restored_pages.len(), leaves.len());
+    assert!(
+        unpacked
+            .restored_pages
+            .iter()
+            .zip(&leaves)
+            .all(|(restored, leaf)| restored.page_id == leaf.page_id
+                && restored.revision_id == leaf.revision_id)
+    );
+    assert_eq!(unpacked.retracted_relation_ids, vec![relation.relation_id]);
+    let restored = store
+        .read_pages(
+            ReadPagesRequest {
+                page_ids: leaves.iter().map(|leaf| leaf.page_id.clone()).collect(),
+                revision_ids: Vec::new(),
+                projections: vec![Projection::Payload],
+                max_chars: 1_024,
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("read restored leaves");
+    assert_eq!(restored.len(), leaves.len());
+    let retired = store
+        .read_pages(
+            ReadPagesRequest {
+                page_ids: vec![packed.page_id],
+                revision_ids: Vec::new(),
+                projections: vec![Projection::Facets],
+                max_chars: 1_024,
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("read retired pack")
+        .remove(0);
+    assert_eq!(retired.page.lifecycle_status, LifecycleStatus::Tombstoned);
+    assert_eq!(
+        store
+            .page_count(vec![namespace])
+            .await
+            .expect("count active leaves after unpack"),
+        4
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
