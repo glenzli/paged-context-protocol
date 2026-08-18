@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PCP Console</title>
-  <link rel="stylesheet" href="/styles.css?v=20260818.7">
+  <link rel="stylesheet" href="/styles.css?v=20260818.8">
   <link rel="stylesheet" href="/page-content.css?v=20260816.3">
 </head>
 <body>
@@ -39,6 +39,7 @@
   <nav class="tabs" aria-label="Console views" data-i18n-aria-label="Console views">
     <button class="tab active" type="button" data-view="overview" data-i18n="Overview">Overview</button>
     <button class="tab" type="button" data-view="pages" data-i18n="Pages">Pages</button>
+    <button class="tab" type="button" data-view="query" data-i18n="Query">Query</button>
     <button class="tab" type="button" data-view="maintenance" data-i18n="Maintenance">Maintenance</button>
     <button class="tab" type="button" data-view="health" data-i18n="Runtime">Runtime</button>
     <button class="tab" type="button" data-view="access" data-i18n="Access">Access</button>
@@ -112,11 +113,40 @@
       </div>
     </section>
 
+    <section id="view-query" class="view">
+      <div class="view-heading">
+        <div class="view-heading-copy"><div><h2 data-i18n="Query">Query</h2><span id="query-status" class="muted" aria-live="polite" data-i18n="No query yet">No query yet</span></div><p class="view-description" data-i18n="Search all authorized context, then review the deterministic context pack.">Search all authorized context, then review the deterministic context pack.</p></div>
+      </div>
+      <form id="context-query-form" class="context-query-form">
+        <label class="context-query-intent"><span data-i18n="Search or intent">Search or intent</span><textarea id="context-query-text" rows="3" required placeholder="Describe what you need to recall" data-i18n-placeholder="Describe what you need to recall"></textarea></label>
+        <div class="context-query-controls">
+          <div id="context-query-methods" class="context-query-methods" role="group" aria-label="Retrieval method" data-i18n-aria-label="Retrieval method">
+            <button type="button" data-query-method="search" data-i18n="Search">Search</button>
+            <button type="button" data-query-method="semantic_search" data-i18n="Semantic search">Semantic search</button>
+            <button type="button" data-query-method="match_intent" data-i18n="Match intent">Match intent</button>
+          </div>
+          <label class="context-query-select"><span data-i18n="Scope">Scope</span><select id="context-query-scope"><option value="" data-i18n="All authorized scopes">All authorized scopes</option></select></label>
+          <label class="context-query-select"><span data-i18n="Top results">Top results</span><select id="context-query-top-k"><option value="6">6</option><option value="12" selected>12</option><option value="20">20</option></select></label>
+          <button id="context-query-submit" class="primary-button" type="submit" data-i18n="Build context pack">Build context pack</button>
+        </div>
+        <p id="context-query-method-note" class="control-note"></p>
+      </form>
+      <section class="context-pack-review" aria-labelledby="context-pack-title">
+        <div class="section-heading"><h2 id="context-pack-title" data-i18n="Context pack review">Context pack review</h2></div>
+        <div id="context-pack-results" class="context-pack-results"><div class="empty" data-i18n="Run a query to inspect the ranked context pack.">Run a query to inspect the ranked context pack.</div></div>
+        <details id="context-model-preview" class="context-model-preview" open hidden>
+          <summary><span data-i18n="Context sent to model">Context sent to model</span><span id="context-model-context-status" class="muted"></span></summary>
+          <p data-i18n="This is the exact deterministic context assembled by PCP for the model.">This is the exact deterministic context assembled by PCP for the model.</p>
+          <pre id="context-model-context"></pre>
+        </details>
+      </section>
+    </section>
+
     <section id="view-maintenance" class="view">
       <div class="view-heading">
         <div class="view-heading-copy">
           <div><h2 data-i18n="Memory maintenance">Memory maintenance</h2><span id="maintenance-status" class="muted" aria-live="polite" data-i18n="Not loaded">Not loaded</span></div>
-          <p class="view-description" data-i18n="A maintenance session scans the full eligible Store one stage at a time. Analysis and writes require your explicit action.">A maintenance session scans the full eligible Store one stage at a time. Analysis and writes require your explicit action.</p>
+          <p class="view-description" data-i18n="Each maintenance type first scans structural candidates, then analyzes them with a model, then waits for your explicit application. Suggested links are never retrievable before approval.">Each maintenance type first scans structural candidates, then analyzes them with a model, then waits for your explicit application. Suggested links are never retrievable before approval.</p>
         </div>
       </div>
       <section id="maintenance-automation-status" class="maintenance-automation-status" hidden>
@@ -137,16 +167,16 @@
       <section id="maintenance-idle" class="maintenance-empty-state">
         <div>
           <h3 data-i18n="Start a maintenance session">Start a maintenance session</h3>
-          <p data-i18n="A maintenance session scans the full eligible Store one stage at a time. Analysis and writes require your explicit action.">A maintenance session scans the full eligible Store one stage at a time. Analysis and writes require your explicit action.</p>
+          <p data-i18n="Maintenance runs in two passes: first Pack boundaries, then summaries and relations on the refreshed inventory. Each pass scans candidates, analyzes suggestions, then waits for your explicit application. Suggested links are never retrievable before approval.">Maintenance runs in two passes: first Pack boundaries, then summaries and relations on the refreshed inventory. Each pass scans candidates, analyzes suggestions, then waits for your explicit application. Suggested links are never retrievable before approval.</p>
         </div>
         <button id="maintenance-start" class="primary-button" type="button" disabled data-i18n="Start maintenance">Start maintenance</button>
       </section>
 
       <section id="maintenance-workflow" hidden>
         <ol id="maintenance-steps" class="maintenance-steps" aria-label="Maintenance phases">
-          <li id="maintenance-step-pack"><span>1</span><div><strong data-i18n="Pack">Pack</strong><small id="maintenance-step-pack-status" data-i18n="Not started">Not started</small></div></li>
-          <li id="maintenance-step-summary"><span>2</span><div><strong data-i18n="Summary">Summary</strong><small id="maintenance-step-summary-status" data-i18n="Waiting">Waiting</small></div></li>
-          <li id="maintenance-step-relation"><span>3</span><div><strong data-i18n="Relations">Relations</strong><small id="maintenance-step-relation-status" data-i18n="Waiting">Waiting</small></div></li>
+          <li id="maintenance-step-scan"><span>1</span><div><strong data-i18n="Scan candidates">Scan candidates</strong><small id="maintenance-step-scan-status" data-i18n="Not started">Not started</small></div></li>
+          <li id="maintenance-step-analyze"><span>2</span><div><strong data-i18n="Analyze suggestions">Analyze suggestions</strong><small id="maintenance-step-analyze-status" data-i18n="Waiting">Waiting</small></div></li>
+          <li id="maintenance-step-review"><span>3</span><div><strong data-i18n="Review and apply">Review and apply</strong><small id="maintenance-step-review-status" data-i18n="Waiting">Waiting</small></div></li>
           <li id="maintenance-step-report"><span>4</span><div><strong data-i18n="Maintenance report">Maintenance report</strong><small id="maintenance-step-report-status" data-i18n="Waiting">Waiting</small></div></li>
         </ol>
 
@@ -417,6 +447,6 @@
   </dialog>
 
   <div id="error" class="error" hidden></div>
-  <script type="module" src="/app.js?v=20260818.7"></script>
+  <script type="module" src="/app.js?v=20260818.8"></script>
 </body>
 </html>

@@ -2721,6 +2721,115 @@ fn pcp_client(store: Arc<SqlitePcpStore>, access: AccessSession) -> Arc<dyn PcpA
 }
 
 #[tokio::test]
+async fn text_search_boosts_directly_related_lexical_pages() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-text-relation-ranking-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
+        .await
+        .expect("open store");
+    let identity_id = store.identity_id().to_owned();
+    let namespace = "project:text-relation-ranking".to_owned();
+    store
+        .create_scope(CreateScopeRequest {
+            namespace: namespace.clone(),
+            display_name: "Text relation ranking".to_owned(),
+            description: None,
+            parent_namespace: None,
+        })
+        .await
+        .expect("create scope");
+    let actor = Actor {
+        actor_type: ActorType::Model,
+        actor_id: "model:text-relation-ranking".to_owned(),
+    };
+    let anchor = store
+        .write_page(
+            write_request(
+                &identity_id,
+                &namespace,
+                actor.clone(),
+                "PCP structure anchor evidence.",
+                "text-relation-ranking:anchor",
+            ),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write anchor Page");
+    let supported = store
+        .write_page(
+            write_request(
+                &identity_id,
+                &namespace,
+                actor.clone(),
+                "PCP structure supported evidence.",
+                "text-relation-ranking:supported",
+            ),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write supported Page");
+    let isolated = store
+        .write_page(
+            write_request(
+                &identity_id,
+                &namespace,
+                actor.clone(),
+                "PCP structure isolated evidence.",
+                "text-relation-ranking:isolated",
+            ),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write isolated Page");
+    store
+        .link_pages(
+            LinkPagesRequest {
+                from_page_id: anchor.page_id.clone(),
+                relation_type: "related_to".to_owned(),
+                to_page_id: supported.page_id.clone(),
+                basis_revision_ids: vec![anchor.revision_id.clone(), supported.revision_id.clone()],
+                created_by: actor,
+                idempotency_key: Some("text-relation-ranking:related".to_owned()),
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("link lexical Pages");
+
+    let result = store
+        .search_pages(SearchPagesRequest {
+            query: "PCP structure".to_owned(),
+            scopes: vec![namespace.clone()],
+            mode: SearchMode::Text,
+            term_match: SearchTermMatch::All,
+            projections: vec![Projection::Payload],
+            filters: SearchFilters::default(),
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .expect("search lexical Pages");
+    let page_ids = result
+        .hits
+        .iter()
+        .map(|hit| hit.page_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(page_ids.len(), 3);
+    assert!(
+        page_ids[..2].contains(&anchor.page_id.as_str())
+            && page_ids[..2].contains(&supported.page_id.as_str())
+    );
+    assert_eq!(page_ids[2], isolated.page_id);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn plans_revision_retention_from_roots_without_deleting_history() {
     let root = std::env::temp_dir().join(format!(
         "pcp-retention-{}",
@@ -3545,27 +3654,65 @@ async fn extends_one_packed_page_as_a_flat_revision_without_changing_its_identit
         )
         .await
         .expect("create second packed Page");
-    let two_anchor_error = store
+    let merged = store
         .pack_pages(
             PackPagesRequest {
                 pages: vec![
                     PageRevisionRef {
-                        page_id: extended.page_id,
-                        revision_id: extended.revision_id,
+                        page_id: extended.page_id.clone(),
+                        revision_id: extended.revision_id.clone(),
                     },
                     PageRevisionRef {
-                        page_id: second_packed.page_id,
-                        revision_id: second_packed.revision_id,
+                        page_id: second_packed.page_id.clone(),
+                        revision_id: second_packed.revision_id.clone(),
                     },
                 ],
                 idempotency_key: Some("packing-extension:two-anchors".to_owned()),
             },
             actor,
-            vec![namespace],
+            vec![namespace.clone()],
         )
         .await
-        .expect_err("reject two packed anchors");
-    assert!(format!("{two_anchor_error:#}").contains("at most one existing packed Page"));
+        .expect("merge two contiguous packed anchors");
+    assert_eq!(merged.page_id, extended.page_id);
+    assert_ne!(merged.revision_id, extended.revision_id);
+
+    let merged_page_id = merged.page_id.clone();
+    let merged_revision_id = merged.revision_id.clone();
+    let merged_members = store
+        .run("read merged packed membership", move |connection| {
+            let mut statement = connection.prepare(
+                "SELECT position, packed_revision_id FROM pcp_page_packs WHERE packed_page_id = ?1 ORDER BY position",
+            )?;
+            statement
+                .query_map([merged_page_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Into::into)
+        })
+        .await
+        .expect("read merged packed membership");
+    assert_eq!(
+        merged_members,
+        (0_i64..6)
+            .map(|position| (position, merged_revision_id.clone()))
+            .collect::<Vec<_>>()
+    );
+    let active_pages = store
+        .durable_page_inventory(vec![namespace], Vec::new())
+        .await
+        .expect("read current Pages after pack merge");
+    assert!(
+        active_pages
+            .iter()
+            .any(|page| page.page_id == merged.page_id)
+    );
+    assert!(
+        !active_pages
+            .iter()
+            .any(|page| page.page_id == second_packed.page_id)
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }

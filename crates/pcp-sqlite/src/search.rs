@@ -12,6 +12,7 @@ use serde_json::{Map, Value};
 use crate::{
     row::{REVISION_COLUMNS, page_manifest, revision_from_row},
     store::{MAX_SEARCH_RESULTS, SqlitePcpStore},
+    text_ranking::{RelationPair, rank_text_hits},
     validity::current_validity,
 };
 
@@ -560,6 +561,9 @@ fn search_surfaces(
     offset: usize,
     limit: usize,
 ) -> Result<SearchResult> {
+    if mode == SearchMode::Text {
+        return search_text_surfaces(connection, request, offset, limit);
+    }
     let fetch_limit = offset.saturating_add(limit).saturating_add(1);
     let mut candidates = Vec::new();
     let projections = request.projections.iter().collect::<HashSet<_>>();
@@ -597,6 +601,129 @@ fn search_surfaces(
         hits,
         next_cursor: has_more.then(|| (offset + limit).to_string()),
     })
+}
+
+fn search_text_surfaces(
+    connection: &Connection,
+    request: &SearchPagesRequest,
+    offset: usize,
+    limit: usize,
+) -> Result<SearchResult> {
+    // FTS scores are only meaningful within a single projection index. Recall
+    // a bounded candidate pool per surface, then fuse the ranks in Rust.
+    let requested = offset.saturating_add(limit).saturating_add(1);
+    let fetch_limit = requested.saturating_mul(4).max(20);
+    let projections = request.projections.iter().collect::<HashSet<_>>();
+    let mut surfaces = Vec::<Vec<SearchHit>>::new();
+    let mut source_has_more = false;
+
+    if projections.contains(&Projection::Summary) {
+        let result = search_summaries(connection, request, SearchMode::Text, 0, fetch_limit)?;
+        source_has_more |= result.next_cursor.is_some();
+        surfaces.push(result.hits);
+    }
+    if projections.contains(&Projection::Payload) {
+        let result = search_revision_surface(
+            connection,
+            request,
+            SearchMode::Text,
+            "payload",
+            0,
+            fetch_limit,
+        )?;
+        source_has_more |= result.next_cursor.is_some();
+        surfaces.push(result.hits);
+    }
+    if projections.contains(&Projection::Facets) {
+        let result = search_revision_surface(
+            connection,
+            request,
+            SearchMode::Text,
+            "facets",
+            0,
+            fetch_limit,
+        )?;
+        source_has_more |= result.next_cursor.is_some();
+        surfaces.push(result.hits);
+    }
+    if surfaces.is_empty() {
+        anyhow::bail!("PCP search projections must include summary, payload, or facets");
+    }
+
+    let candidate_page_ids = surfaces
+        .iter()
+        .flatten()
+        .map(|hit| hit.page_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let relation_pairs = active_relation_pairs(connection, &candidate_page_ids, request)?;
+    let ranked = rank_text_hits(surfaces, &relation_pairs);
+    let has_more = ranked.len() > offset.saturating_add(limit) || source_has_more;
+    let hits = ranked.into_iter().skip(offset).take(limit).collect();
+    Ok(SearchResult {
+        hits,
+        next_cursor: has_more.then(|| (offset + limit).to_string()),
+    })
+}
+
+/// Return only direct, active Page Relations within the lexical candidate pool.
+/// Provenance lives in a separate table and is deliberately excluded here.
+fn active_relation_pairs(
+    connection: &Connection,
+    page_ids: &[String],
+    request: &SearchPagesRequest,
+) -> Result<Vec<RelationPair>> {
+    if page_ids.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let mut sql = String::from(
+        "SELECT DISTINCT relation.from_page_id, relation.to_page_id
+         FROM pcp_relations relation
+         WHERE relation.from_page_id IN (",
+    );
+    push_placeholders(&mut sql, page_ids.len());
+    sql.push_str(") AND relation.to_page_id IN (");
+    push_placeholders(&mut sql, page_ids.len());
+    sql.push_str(
+        ") AND relation.from_page_id <> relation.to_page_id
+         AND NOT EXISTS (
+             SELECT 1 FROM pcp_relation_retractions retraction
+             WHERE retraction.relation_id = relation.relation_id
+         )",
+    );
+    let mut values = page_ids
+        .iter()
+        .chain(page_ids.iter())
+        .cloned()
+        .map(SqlValue::Text)
+        .collect::<Vec<_>>();
+    if !request.filters.relation_types.is_empty() {
+        sql.push_str(" AND relation.relation_type IN (");
+        push_placeholders(&mut sql, request.filters.relation_types.len());
+        sql.push(')');
+        values.extend(
+            request
+                .filters
+                .relation_types
+                .iter()
+                .cloned()
+                .map(SqlValue::Text),
+        );
+    }
+    let mut statement = connection
+        .prepare(&sql)
+        .context("prepare PCP lexical relation support")?;
+    statement
+        .query_map(params_from_iter(values.iter()), |row| {
+            Ok(RelationPair {
+                from_page_id: row.get(0)?,
+                to_page_id: row.get(1)?,
+            })
+        })
+        .context("query PCP lexical relation support")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect PCP lexical relation support")
 }
 
 fn search_revision_surface(

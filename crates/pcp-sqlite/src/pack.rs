@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use pcp_core::{
     Actor, ActorType, LifecycleStatus, PACKED_PAGE_MEDIA_TYPE, PackPagesRequest, PagePayload,
     PageRevisionRef, ProvenanceEvent, SourceRef, SourceSpan, WriteResult,
@@ -15,6 +16,7 @@ use crate::{
 };
 
 const MAX_PACK_INPUTS: usize = 64;
+const MAX_PACK_ENTRY_GAP_SECONDS: i64 = 15 * 60;
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -102,8 +104,8 @@ impl SqlitePcpStore {
 
             let anchor_count = inputs.iter().filter(|input| input.is_anchor()).count();
             anyhow::ensure!(
-                anchor_count <= 1,
-                "PCP packing accepts at most one existing packed Page"
+                anchor_count <= 2,
+                "PCP packing accepts at most two existing packed Pages"
             );
             let namespace = inputs[0].namespace.clone();
             let kind = inputs[0].kind.clone();
@@ -137,17 +139,14 @@ impl SqlitePcpStore {
                     .source_span
                     .end,
             };
-            let anchor = inputs
+            let anchors = inputs
                 .iter()
-                .find(|input| input.is_anchor())
-                .map(|input| input.exact.clone());
-            let anchor_entry_count = inputs
-                .iter()
-                .find_map(|input| match &input.content {
-                    PackInputContent::Anchor(entries) => Some(entries.len()),
+                .filter_map(|input| match &input.content {
+                    PackInputContent::Anchor(entries) => Some((input.exact.clone(), entries.len())),
                     PackInputContent::Leaf(_) => None,
                 })
-                .unwrap_or(0);
+                .collect::<Vec<_>>();
+            let anchor = anchors.first().map(|(exact, _)| exact.clone());
             let leaf_refs = inputs
                 .iter()
                 .filter(|input| !input.is_anchor())
@@ -161,6 +160,7 @@ impl SqlitePcpStore {
                 }
             }
             ensure_flat_entries(&entries, &source_span)?;
+            ensure_continuous_entry_times(&entries)?;
             let observed_at = entries.last().and_then(|entry| entry.observed_at.clone());
             let entry_positions = entries
                 .iter()
@@ -242,23 +242,23 @@ impl SqlitePcpStore {
                 "packed PCP Page head changed during packing"
             );
 
-            if anchor.is_some() {
+            for (anchor, entry_count) in &anchors {
                 let mut updated_members = 0;
                 for (source_page_id, position) in &entry_positions {
                     updated_members += transaction
                         .execute(
                             "
                             UPDATE pcp_page_packs
-                            SET packed_revision_id = ?3, position = ?4
+                            SET packed_page_id = ?3, packed_revision_id = ?4, position = ?5
                             WHERE source_page_id = ?1 AND packed_page_id = ?2
                             ",
-                            params![source_page_id, packed_page_id, packed_revision_id, position,],
+                            params![source_page_id, anchor.page_id, packed_page_id, packed_revision_id, position],
                         )
                         .context("reindex existing packed PCP Page input")?;
                 }
                 anyhow::ensure!(
-                    updated_members == anchor_entry_count,
-                    "packed PCP Page membership changed during extension"
+                    updated_members == *entry_count,
+                    "packed PCP Page membership changed during repacking"
                 );
             }
 
@@ -304,6 +304,25 @@ impl SqlitePcpStore {
                         [&exact.revision_id],
                     )
                     .context("remove packed input from PCP search index")?;
+            }
+            // When two Pack Pages are merged, the first remains the active
+            // anchor and the other remains readable as superseded history. Its
+            // members now resolve to the new anchor above; keeping the old Page
+            // avoids rewriting its existing summaries and asserted relations as
+            // though they described the larger, newly merged episode.
+            for (absorbed, _) in anchors.iter().skip(1) {
+                transaction
+                    .execute(
+                        "UPDATE pcp_pages SET lifecycle_status = 'superseded', updated_at = ?2 WHERE page_id = ?1",
+                        params![absorbed.page_id, timestamp],
+                    )
+                    .context("supersede absorbed packed PCP Page")?;
+                transaction
+                    .execute(
+                        "DELETE FROM pcp_revision_fts WHERE revision_id = ?1",
+                        [&absorbed.revision_id],
+                    )
+                    .context("remove absorbed packed Page from PCP search index")?;
             }
             rewrite_pack_references(
                 &transaction,
@@ -528,6 +547,26 @@ fn ensure_flat_entries(entries: &[PackedEntry], outer_span: &SourceSpan) -> Resu
     Ok(())
 }
 
+fn ensure_continuous_entry_times(entries: &[PackedEntry]) -> Result<()> {
+    let entry_times = entries
+        .iter()
+        .map(|entry| {
+            let timestamp = entry.observed_at.as_deref().unwrap_or(&entry.created_at);
+            DateTime::parse_from_rfc3339(timestamp)
+                .map(|value| value.with_timezone(&Utc))
+                .with_context(|| format!("decode PCP packed entry timestamp for {}", entry.page_id))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for pair in entry_times.windows(2) {
+        let gap = pair[1].signed_duration_since(pair[0]).num_seconds();
+        anyhow::ensure!(
+            (0..=MAX_PACK_ENTRY_GAP_SECONDS).contains(&gap),
+            "PCP packing entries must form one time-continuous episode (maximum gap {MAX_PACK_ENTRY_GAP_SECONDS}s)"
+        );
+    }
+    Ok(())
+}
+
 fn ensure_packable_leaf(transaction: &Transaction<'_>, revision_id: &str) -> Result<()> {
     let referenced: bool = transaction
         .query_row(
@@ -709,4 +748,47 @@ fn rewrite_pack_references(
             .context("remove superseded PCP provenance input")?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use pcp_core::{Actor, ActorType, SourceSpan};
+
+    use super::{PackedEntry, ensure_continuous_entry_times};
+
+    fn entry(id: &str, observed_at: &str) -> PackedEntry {
+        PackedEntry {
+            page_id: format!("pg_{id}"),
+            revision_id: format!("rev_{id}"),
+            source_span: SourceSpan {
+                stream_id: "conversation:test".to_owned(),
+                start: 0,
+                end: 0,
+            },
+            created_at: observed_at.to_owned(),
+            observed_at: Some(observed_at.to_owned()),
+            valid_from: None,
+            valid_to: None,
+            created_by: Actor {
+                actor_type: ActorType::User,
+                actor_id: "test".to_owned(),
+            },
+            payload: None,
+            source_refs: Vec::new(),
+            facets: None,
+            provenance: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn packed_episode_uses_every_entry_timestamp_not_container_boundaries() {
+        let error = ensure_continuous_entry_times(&[
+            entry("first", "2026-08-19T00:00:00Z"),
+            entry("middle", "2026-08-19T00:05:00Z"),
+            entry("last", "2026-08-19T00:25:01Z"),
+        ])
+        .expect_err("a gap within an existing Pack must prevent merging it");
+
+        assert!(format!("{error:#}").contains("time-continuous episode"));
+    }
 }

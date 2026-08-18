@@ -69,6 +69,13 @@ pub struct MaintenanceRelationReviewProposal {
     pub relation_type: String,
     pub pages: [MaintenanceRelationReviewPage; 2],
     pub proposed_at: String,
+    /// Relation proposals reach this queue only when their structural evidence
+    /// is not sufficient for unattended assertion. Keep the reason persisted
+    /// with the revision-bound proposal so Console can explain the gate.
+    #[serde(default)]
+    pub risk: String,
+    #[serde(default)]
+    pub review_reason: String,
     pub status: MaintenanceRelationReviewStatus,
 }
 
@@ -234,6 +241,8 @@ impl MaintenanceLedger {
                 relation_type: "related_to".to_owned(),
                 pages,
                 proposed_at: chrono::Utc::now().to_rfc3339(),
+                risk: "manual_review".to_owned(),
+                review_reason: "The selected Pages are not a continuous Pack boundary with a shared protected identifier.".to_owned(),
                 status: MaintenanceRelationReviewStatus::Pending,
             });
         candidate_id

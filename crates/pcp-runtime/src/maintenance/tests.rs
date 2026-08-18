@@ -516,6 +516,111 @@ async fn packed_conversation_page_can_receive_a_summary() {
 }
 
 #[tokio::test]
+async fn manual_relation_review_includes_adjacent_packed_conversation_pages() {
+    let fixture = Fixture::open("packed-relation-review").await;
+    let first = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "The user asks what OET means in this durable conversation.",
+            "packed-relation-review:1",
+            1,
+        ))
+        .await
+        .expect("write first OET event");
+    let second = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "The assistant explains that OET needs a precise definition before use.",
+            "packed-relation-review:2",
+            2,
+        ))
+        .await
+        .expect("write second OET event");
+    let first_pack = fixture
+        .client
+        .pack_pages(PackPagesRequest {
+            pages: vec![first, second]
+                .into_iter()
+                .map(|page| PageRevisionRef {
+                    page_id: page.page_id,
+                    revision_id: page.revision_id,
+                })
+                .collect(),
+            idempotency_key: Some("packed-relation-review:first-pack".to_owned()),
+        })
+        .await
+        .expect("pack first OET episode");
+    let third = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "The OET definition distinguishes its strict core from later research conjectures.",
+            "packed-relation-review:3",
+            3,
+        ))
+        .await
+        .expect("write third OET event");
+    let fourth = fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "That OET maturity boundary determines how future context should be recalled.",
+            "packed-relation-review:4",
+            4,
+        ))
+        .await
+        .expect("write fourth OET event");
+    let second_pack = fixture
+        .client
+        .pack_pages(PackPagesRequest {
+            pages: vec![third, fourth]
+                .into_iter()
+                .map(|page| PageRevisionRef {
+                    page_id: page.page_id,
+                    revision_id: page.revision_id,
+                })
+                .collect(),
+            idempotency_key: Some("packed-relation-review:second-pack".to_owned()),
+        })
+        .await
+        .expect("pack second OET episode");
+    let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
+        page_ids: [first_pack.page_id.clone(), second_pack.page_id.clone()],
+    }]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = true;
+    config.relation.enabled = true;
+    let maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let scan = maintainer
+        .scan_maintenance_work()
+        .await
+        .expect("scan packed relation review candidates");
+    let group = scan
+        .relation
+        .groups
+        .iter()
+        .find(|group| group.page_count >= 2)
+        .expect("packed conversation Pages remain relation eligible");
+    let analysis = maintainer
+        .analyze_relation_candidate(AnalyzeMaintenanceRelationRequest {
+            scan_id: scan.relation.scan_id,
+            group_id: group.group_id.clone(),
+        })
+        .await
+        .expect("analyze packed relation candidate");
+    let candidate = analysis.candidate.expect("packed relation proposal");
+    let proposed_page_ids = candidate
+        .pages
+        .iter()
+        .map(|page| page.page_id.as_str())
+        .collect::<Vec<_>>();
+    assert!(proposed_page_ids.contains(&first_pack.page_id.as_str()));
+    assert!(proposed_page_ids.contains(&second_pack.page_id.as_str()));
+    assert_eq!(worker.request_count(), 1);
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn reviewed_summary_is_a_revision_bound_proposal_before_it_is_written() {
     let fixture = Fixture::open("reviewed-summary").await;
     let written = fixture
@@ -896,6 +1001,90 @@ async fn maintenance_scan_surfaces_separate_pack_summary_and_relation_work() {
     );
     assert!(scan.relation.candidate_group_count >= 1);
     assert_eq!(worker.request_count(), 0);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn adjacent_packs_require_model_approval_before_becoming_merge_proposals() {
+    let fixture = Fixture::open("deterministic-pack-merge").await;
+    let mut leaves = Vec::new();
+    for sequence in 1..=4 {
+        leaves.push(
+            fixture
+                .client
+                .write_page(fixture.sealed_event(
+                    &format!("OET discussion episode entry {sequence}."),
+                    &format!("deterministic-pack-merge:{sequence}"),
+                    sequence,
+                ))
+                .await
+                .expect("write merge source Page"),
+        );
+    }
+    let first = fixture
+        .client
+        .pack_pages(PackPagesRequest {
+            pages: leaves[..2]
+                .iter()
+                .map(|page| PageRevisionRef {
+                    page_id: page.page_id.clone(),
+                    revision_id: page.revision_id.clone(),
+                })
+                .collect(),
+            idempotency_key: Some("deterministic-pack-merge:first".to_owned()),
+        })
+        .await
+        .expect("pack first OET episode");
+    let second = fixture
+        .client
+        .pack_pages(PackPagesRequest {
+            pages: leaves[2..]
+                .iter()
+                .map(|page| PageRevisionRef {
+                    page_id: page.page_id.clone(),
+                    revision_id: page.revision_id.clone(),
+                })
+                .collect(),
+            idempotency_key: Some("deterministic-pack-merge:second".to_owned()),
+        })
+        .await
+        .expect("pack second OET episode");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::PackingCandidates {
+            candidates: vec![vec![first.page_id.clone(), second.page_id.clone()]],
+        },
+    ]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = true;
+    config.relation.enabled = false;
+    config.retention.enabled = false;
+    let maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let scan = maintainer
+        .scan_packing_candidates()
+        .await
+        .expect("scan adjacent Packs");
+    assert_eq!(scan.candidate_group_count, 1);
+    let analysis = maintainer
+        .analyze_packing_candidates(AnalyzeMaintenancePacksRequest {
+            scan_id: scan.scan_id,
+            batch_index: 0,
+        })
+        .await
+        .expect("create a model-approved Pack merge proposal");
+
+    assert_eq!(analysis.worker_calls, 1);
+    assert_eq!(analysis.candidates.len(), 1);
+    assert_eq!(
+        analysis.candidates[0]
+            .pages
+            .iter()
+            .map(|page| page.page_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![first.page_id.as_str(), second.page_id.as_str()]
+    );
+    assert_eq!(worker.request_count(), 1);
     fixture.close().await;
 }
 
@@ -1757,6 +1946,8 @@ async fn observe_mode_records_a_packing_proposal_without_replacing_pages() {
         MaintenanceWorkerResponse::Candidate {
             page_ids: vec![first.page_id.clone(), second.page_id.clone()],
         },
+        // Observe mode still exhausts the Pack pass before moving on.
+        MaintenanceWorkerResponse::NoCandidate,
     ]));
     let mut config = fixture.config();
     config.mode = MaintenanceMode::Observe;
@@ -2230,6 +2421,7 @@ async fn scheduled_relation_waits_for_review_before_it_is_asserted() {
     config.summary.enabled = false;
     config.packing.enabled = false;
     config.relation.enabled = true;
+    config.max_jobs_per_cycle = 1;
     config.write_trigger.min_new_pages = 1;
     config.write_trigger.quiet_period_seconds = 0;
     config.write_trigger.max_wait_seconds = 0;
@@ -2317,6 +2509,156 @@ async fn scheduled_relation_waits_for_review_before_it_is_asserted() {
         .await
         .expect("read approved relation source");
     assert_eq!(pages[0].relations.len(), 1);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn scheduled_low_risk_pack_boundary_relation_is_asserted_automatically() {
+    let fixture = Fixture::open("scheduled-low-risk-pack-relation").await;
+    let mut leaves = Vec::new();
+    for sequence in 1..=4 {
+        leaves.push(
+            fixture
+                .client
+                .write_page(fixture.sealed_event(
+                    &format!("OET continuity evidence entry {sequence}."),
+                    &format!("scheduled-low-risk-pack-relation:{sequence}"),
+                    sequence,
+                ))
+                .await
+                .expect("write Pack boundary source"),
+        );
+    }
+    let first_pack = fixture
+        .client
+        .pack_pages(PackPagesRequest {
+            pages: leaves[..2]
+                .iter()
+                .map(|page| PageRevisionRef {
+                    page_id: page.page_id.clone(),
+                    revision_id: page.revision_id.clone(),
+                })
+                .collect(),
+            idempotency_key: Some("scheduled-low-risk-pack-relation:first".to_owned()),
+        })
+        .await
+        .expect("pack first OET boundary");
+    let second_pack = fixture
+        .client
+        .pack_pages(PackPagesRequest {
+            pages: leaves[2..]
+                .iter()
+                .map(|page| PageRevisionRef {
+                    page_id: page.page_id.clone(),
+                    revision_id: page.revision_id.clone(),
+                })
+                .collect(),
+            idempotency_key: Some("scheduled-low-risk-pack-relation:second".to_owned()),
+        })
+        .await
+        .expect("pack second OET boundary");
+    let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
+        page_ids: [first_pack.page_id.clone(), second_pack.page_id.clone()],
+    }]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = true;
+    config.max_jobs_per_cycle = 1;
+    config.write_trigger.min_new_pages = 1;
+    config.write_trigger.quiet_period_seconds = 0;
+    config.write_trigger.max_wait_seconds = 0;
+    let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+
+    maintainer
+        .run_scheduled_cycle()
+        .await
+        .expect("establish Pack-boundary write watermark");
+    fixture
+        .client
+        .write_page(fixture.sealed_event(
+            "A later OET write makes the source stream eligible.",
+            "scheduled-low-risk-pack-relation:trigger",
+            5,
+        ))
+        .await
+        .expect("write triggering source event");
+
+    let report = maintainer
+        .run_scheduled_cycle()
+        .await
+        .expect("run low-risk automatic relation");
+    assert_eq!(report.relations_committed, 1);
+    assert_eq!(report.relations_proposed, 0);
+    assert!(maintainer.pending_relation_reviews().is_empty());
+    let pages = fixture
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![first_pack.page_id.clone(), second_pack.page_id.clone()],
+            revision_ids: Vec::new(),
+            projections: vec![Projection::Relations],
+            max_chars: 1,
+        })
+        .await
+        .expect("read asserted automatic relation");
+    assert!(pages.iter().any(|page| {
+        let counterpart = if page.page.page_id == first_pack.page_id {
+            &second_pack.page_id
+        } else {
+            &first_pack.page_id
+        };
+        page.relations.iter().any(|relation| {
+            relation.relation_type == "related_to" && relation.to_page_id == *counterpart
+        })
+    }));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn automatic_cycle_exhausts_packing_before_entering_semantic_maintenance() {
+    let fixture = Fixture::open("automatic-pack-first").await;
+    let mut pages = Vec::new();
+    for sequence in 1..=4 {
+        pages.push(
+            fixture
+                .client
+                .write_page(fixture.sealed_event(
+                    &format!("PCP Pack-first source event {sequence}."),
+                    &format!("automatic-pack-first:{sequence}"),
+                    sequence,
+                ))
+                .await
+                .expect("write Pack-first source"),
+        );
+    }
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::Candidate {
+            page_ids: pages[..2].iter().map(|page| page.page_id.clone()).collect(),
+        },
+        MaintenanceWorkerResponse::NoCandidate,
+    ]));
+    let mut config = fixture.config();
+    config.summary.minimum_chars = 1;
+    config.packing.enabled = true;
+    config.relation.enabled = false;
+    config.max_jobs_per_cycle = 2;
+    let mut maintainer =
+        RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let report = maintainer
+        .run_once()
+        .await
+        .expect("run Pack-first automatic maintenance");
+    assert_eq!(report.packs_committed, 1);
+    assert_eq!(report.summaries_written, 0);
+    assert!(
+        worker
+            .requests
+            .lock()
+            .expect("inspect worker requests")
+            .iter()
+            .all(|request| matches!(request, MaintenanceWorkerRequest::SelectPacking { .. }))
+    );
     fixture.close().await;
 }
 

@@ -228,14 +228,20 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 .maintenance-relation-review { margin: 0 0 18px; padding: 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
 .maintenance-relation-review-cards { display: grid; gap: 10px; }
 .maintenance-relation-review-card { padding: 12px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-subtle); }
-.maintenance-relation-review-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.maintenance-relation-review-card-heading { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
 .maintenance-relation-review-pages { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: stretch; gap: 9px; }
+.maintenance-relation-review-page-column { min-width: 0; display: grid; gap: 6px; }
 .maintenance-relation-review-page { min-width: 0; min-height: 0; display: grid; gap: 5px; padding: 9px; border-color: var(--line); text-align: left; }
 .maintenance-relation-review-page:hover { border-color: var(--accent); }
 .maintenance-relation-review-page > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .maintenance-relation-review-preview { color: var(--text); line-height: 1.45; }
 .maintenance-relation-review-link { align-self: center; color: var(--accent); font-size: 17px; }
 .maintenance-relation-review-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin-top: 10px; }
+.maintenance-relation-review-risk { color: var(--warning); background: var(--warning-soft); border-radius: 999px; padding: 2px 7px; font-size: 12px; font-weight: 700; }
+.maintenance-relation-review-reason { margin: 0 0 10px; font-size: 13px; }
+.maintenance-relation-review-full-page { border: 1px solid var(--line); border-radius: 4px; background: var(--surface); }
+.maintenance-relation-review-full-page > summary { cursor: pointer; padding: 7px 9px; color: var(--accent); font-size: 13px; }
+.maintenance-relation-review-full-page-body { display: grid; gap: 8px; padding: 0 9px 9px; max-height: 520px; overflow: auto; }
 .maintenance-steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; margin: 20px 0; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--surface); }
 .maintenance-steps li { position: relative; display: grid; grid-template-columns: 26px minmax(0, 1fr); align-items: center; gap: 9px; min-height: 62px; padding: 10px 12px; border-right: 1px solid var(--line); color: var(--muted); }
 .maintenance-steps li:last-child { border-right: 0; }
@@ -308,6 +314,38 @@ input:focus, select:focus { border-color: var(--accent); }
 .page-pager { display: flex; align-items: center; gap: 8px; }
 .page-pager .icon-button { display: grid; place-items: center; }
 .page-pager .muted { min-width: 92px; text-align: center; font-variant-numeric: tabular-nums; }
+.context-query-form { display: grid; gap: 12px; padding: 15px 0 16px; border-bottom: 1px solid var(--line); }
+.context-query-intent { display: grid; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 650; }
+.context-query-intent textarea { width: 100%; min-height: 76px; resize: vertical; border: 1px solid var(--strong-line); border-radius: 5px; background: var(--surface); color: var(--text); padding: 8px 9px; font: inherit; font-size: 14px; font-weight: 400; line-height: 1.5; outline: none; }
+.context-query-intent textarea:focus { border-color: var(--accent); }
+.context-query-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.context-query-methods { display: flex; }
+.context-query-methods button { min-height: 34px; margin-left: -1px; border-radius: 0; padding: 5px 9px; color: var(--muted); }
+.context-query-methods button:first-child { margin-left: 0; border-radius: 5px 0 0 5px; }
+.context-query-methods button:last-child { border-radius: 0 5px 5px 0; }
+.context-query-methods button[aria-pressed="true"] { position: relative; z-index: 1; border-color: var(--accent); background: var(--accent); color: var(--surface); }
+.context-query-methods button:disabled { cursor: not-allowed; opacity: .55; }
+.context-query-select { display: grid; gap: 4px; color: var(--muted); font-size: 11px; font-weight: 650; }
+.context-query-select select { min-width: 132px; }
+.context-query-select:last-of-type select { min-width: 76px; }
+.context-query-controls .primary-button { min-height: 34px; }
+.context-pack-review { margin-top: 18px; }
+.context-pack-results { border-top: 1px solid var(--line); }
+.context-pack-entry { padding: 15px 4px; border-bottom: 1px solid var(--line); }
+.context-pack-entry-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.context-pack-entry-identity { display: grid; min-width: 0; gap: 3px; overflow-wrap: anywhere; }
+.context-pack-entry-identity strong { font-size: 13px; }
+.context-pack-entry-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; }
+.context-pack-reference-button { display: grid; width: 28px; min-width: 28px; min-height: 28px; place-items: center; padding: 0; font-size: 16px; line-height: 1; }
+.context-pack-entry-reason, .context-pack-entry-reference { margin-top: 8px; color: var(--muted); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.context-pack-entry-content { max-height: 260px; margin: 10px 0 0; overflow: auto; padding: 10px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-subtle); color: var(--text); font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.context-pack-entry-evidence { margin-top: 8px; color: var(--muted); font-size: 11px; }
+.context-pack-entry-evidence summary { cursor: pointer; user-select: none; }
+.context-pack-entry-evidence[open] summary { color: var(--text); }
+.context-model-preview { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--strong-line); }
+.context-model-preview summary { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; cursor: pointer; font-weight: 700; }
+.context-model-preview p { margin: 7px 0 10px; color: var(--muted); font-size: 12px; }
+.context-model-preview pre { max-height: 440px; margin: 0; }
 .aggregate-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 #health-flows { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
 .aggregate-panel { min-width: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); overflow: hidden; }
@@ -548,6 +586,12 @@ pre { margin: 0; max-height: 420px; overflow: auto; padding: 11px; border: 1px s
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric { border-bottom: 1px solid var(--line); }
   .toolbar { grid-template-columns: 1fr; }
+  .context-query-controls { align-items: stretch; flex-direction: column; }
+  .context-query-methods { width: 100%; }
+  .context-query-methods button { flex: 1; }
+  .context-query-select select { width: 100%; }
+  .context-pack-entry-heading { align-items: flex-start; flex-direction: column; }
+  .context-pack-entry-actions { width: 100%; justify-content: space-between; }
   .page-result { padding: 13px 0; }
   .maintenance-empty-state, .maintenance-stage-heading { align-items: flex-start; flex-direction: column; }
   .maintenance-steps { grid-template-columns: 1fr 1fr; }

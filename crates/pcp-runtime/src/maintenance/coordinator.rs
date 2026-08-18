@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use pcp_client::PcpApi;
 use pcp_core::{
     LinkPagesRequest, PACKED_PAGE_MEDIA_TYPE, PackPagesRequest, PageMutability, PageRevisionRef,
@@ -333,6 +333,7 @@ const PACKING_PREVIEW_CHARS: usize = 480;
 // A full analysis window already contains enough context for one routing decision.
 // Keep requests independent so each result has a single, inspectable source window.
 const PACKING_GROUPS_PER_MODEL_CALL: usize = 1;
+const MAX_PACK_ENTRY_GAP_SECONDS: i64 = 15 * 60;
 const PACKING_RETRY_AFTER_SECONDS: u64 = 86_400;
 const MAINTENANCE_READ_BATCH_PAGES: usize = 20;
 const MAX_MAINTENANCE_SUMMARY_CHARS: usize = 480;
@@ -537,9 +538,17 @@ impl RuntimeMaintainer {
 
     pub async fn scan_packing_candidates(&self) -> Result<MaintenancePackScan> {
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
-        Ok(packing_scan_from_inventory(
+        let windows = self
+            .time_continuous_packing_windows(packing_candidate_windows(
+                &inventory,
+                &self.config.packing,
+            ))
+            .await?;
+        Ok(packing_scan_from_windows(
             &inventory,
+            &windows,
             &self.config.packing,
+            &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         ))
     }
 
@@ -619,14 +628,20 @@ impl RuntimeMaintainer {
     pub async fn scan_maintenance_work(&self) -> Result<MaintenanceWorkScan> {
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
         let captured_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let windows = self
+            .time_continuous_packing_windows(packing_candidate_windows(
+                &inventory,
+                &self.config.packing,
+            ))
+            .await?;
         let packing =
-            packing_scan_from_inventory_at(&inventory, &self.config.packing, &captured_at);
+            packing_scan_from_windows(&inventory, &windows, &self.config.packing, &captured_at);
         let summary = summary_scan_from_inventory(&inventory, &self.config.summary);
-        let pending_packing_page_ids = self.pending_packing_page_ids(&inventory);
+        let active_packing_page_ids = self.active_packing_page_ids();
         let relation = relation_scan_from_inventory(
             &inventory,
             &self.config.relation,
-            &pending_packing_page_ids,
+            &active_packing_page_ids,
         );
         Ok(MaintenanceWorkScan {
             captured_at,
@@ -642,7 +657,12 @@ impl RuntimeMaintainer {
         request: AnalyzeMaintenancePacksRequest,
     ) -> Result<MaintenancePackAnalysis> {
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
-        let windows = packing_candidate_windows(&inventory, &self.config.packing);
+        let windows = self
+            .time_continuous_packing_windows(packing_candidate_windows(
+                &inventory,
+                &self.config.packing,
+            ))
+            .await?;
         let scan_id = packing_scan_id(&windows, &self.config.packing);
         anyhow::ensure!(
             request.scan_id == scan_id,
@@ -659,7 +679,10 @@ impl RuntimeMaintainer {
         let batch_start = request.batch_index * PACKING_GROUPS_PER_MODEL_CALL;
         let batch_end = (batch_start + PACKING_GROUPS_PER_MODEL_CALL).min(windows.len());
         let batch = &windows[batch_start..batch_end];
-        let groups = batch
+        // Temporal continuity, stream identity, and protected identifiers are
+        // candidate gates only. Adjacent Packs can still have changed topic, so
+        // every proposed Pack boundary is decided by the semantic worker.
+        let groups: Vec<PackingCandidateGroup> = batch
             .iter()
             .map(|window| PackingCandidateGroup {
                 group_id: packing_scan_group_id(window),
@@ -1025,21 +1048,18 @@ impl RuntimeMaintainer {
         request: AnalyzeMaintenanceRelationRequest,
     ) -> Result<MaintenanceRelationAnalysis> {
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
-        let pending_packing_page_ids = self.pending_packing_page_ids(&inventory);
+        let active_packing_page_ids = self.active_packing_page_ids();
         let scan = relation_scan_from_inventory(
             &inventory,
             &self.config.relation,
-            &pending_packing_page_ids,
+            &active_packing_page_ids,
         );
         anyhow::ensure!(
             request.scan_id == scan.scan_id,
             "maintenance relation scan is stale; scan the Store again"
         );
-        let windows = relation_candidate_windows(
-            &inventory,
-            &self.config.relation,
-            &pending_packing_page_ids,
-        );
+        let windows =
+            relation_candidate_windows(&inventory, &self.config.relation, &active_packing_page_ids);
         let Some(window) = windows
             .into_iter()
             .find(|window| relation_scan_group_id(window) == request.group_id)
@@ -1205,15 +1225,19 @@ impl RuntimeMaintainer {
         };
         let mut jobs_remaining = max_jobs;
 
-        // Packing changes the Page surface, so downstream phases must never
-        // reason over the pre-pack inventory.
-        let packing_ran = self.config.packing.enabled
-            && jobs_remaining > 0
-            && self
+        // Pack boundaries change the Page surface. Exhaust the current Pack
+        // pass before Summary or Relation sees the inventory. If the cycle
+        // budget is consumed here, semantic maintenance waits for the next
+        // eligible automatic cycle instead of reasoning over a half-packed
+        // conversation.
+        while self.config.packing.enabled && jobs_remaining > 0 {
+            let packing_ran = self
                 .run_packing_job(&inventory, &mut report)
                 .await
                 .context("run PCP packing maintenance job")?;
-        if packing_ran {
+            if !packing_ran {
+                break;
+            }
             jobs_remaining -= 1;
             inventory = self.scoped_inventory(regions).await?;
             report.inspected_pages = report.inspected_pages.max(inventory.len());
@@ -1365,9 +1389,9 @@ impl RuntimeMaintainer {
         report: &mut MaintenanceCycleReport,
         scheduled: bool,
     ) -> Result<bool> {
-        let pending_packing_page_ids = self.pending_packing_page_ids(inventory);
+        let active_packing_page_ids = self.active_packing_page_ids();
         let Some(candidates) =
-            relation_candidate_windows(inventory, &self.config.relation, &pending_packing_page_ids)
+            relation_candidate_windows(inventory, &self.config.relation, &active_packing_page_ids)
                 .into_iter()
                 .find(|pages| {
                     self.ledger.eligible(&relation_window_key(
@@ -1484,7 +1508,17 @@ impl RuntimeMaintainer {
             return Ok(true);
         }
 
-        if scheduled {
+        let selected_pages = page_ids
+            .iter()
+            .map(|page_id| {
+                candidates
+                    .iter()
+                    .find(|page| &page.page_id == page_id)
+                    .expect("validated relation Page is offered")
+            })
+            .collect::<Vec<_>>();
+        let requires_review = scheduled && !is_low_risk_automatic_relation(&selected_pages);
+        if requires_review {
             let selected = page_ids
                 .iter()
                 .map(|page_id| {
@@ -1522,7 +1556,7 @@ impl RuntimeMaintainer {
         } else {
             report.relations_proposed += 1;
         }
-        let outcome = if scheduled {
+        let outcome = if requires_review {
             "relation_pending_review"
         } else if self.config.applies_changes() {
             "related"
@@ -1539,24 +1573,16 @@ impl RuntimeMaintainer {
         Ok(true)
     }
 
-    fn pending_packing_page_ids(
-        &self,
-        inventory: &[pcp_store::DurablePageInventoryItem],
-    ) -> BTreeSet<String> {
-        if !self.config.packing.enabled {
-            return BTreeSet::new();
-        }
-        packing_candidate_windows(inventory, &self.config.packing)
+    /// Only a concrete, still-active Pack proposal blocks relation analysis.
+    ///
+    /// A Page being *eligible* for packing is not a pending mutation. Excluding
+    /// every such Page made manual relation review skip whole conversation
+    /// streams indefinitely, including already-packed adjacent episodes.
+    fn active_packing_page_ids(&self) -> BTreeSet<String> {
+        self.ledger
+            .active_packing_sets()
             .into_iter()
-            .filter(|pages| {
-                self.ledger.eligible(&selection_window_key(
-                    &pages
-                        .iter()
-                        .map(|page| page.page_id.clone())
-                        .collect::<Vec<_>>(),
-                ))
-            })
-            .flat_map(|pages| pages.into_iter().map(|page| page.page_id))
+            .flatten()
             .collect()
     }
 
@@ -1932,36 +1958,243 @@ impl RuntimeMaintainer {
         }
         Ok(pairs.into_iter().collect())
     }
+
+    /// A packed Page's outer revision time is only the time of its most recent
+    /// rewrite. Hydrate the original entries before offering a merge candidate,
+    /// so a quiet-looking container cannot hide a long interruption inside it.
+    async fn time_continuous_packing_windows(
+        &self,
+        windows: Vec<Vec<pcp_store::DurablePageInventoryItem>>,
+    ) -> Result<Vec<Vec<pcp_store::DurablePageInventoryItem>>> {
+        let revision_ids = windows
+            .iter()
+            .flatten()
+            .map(|page| page.revision_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if revision_ids.is_empty() {
+            return Ok(windows);
+        }
+        let mut pages = Vec::with_capacity(revision_ids.len());
+        // `max_chars` is a request-wide budget. Hydrate one Pack at a time so
+        // an earlier large payload cannot make a later candidate look absent.
+        for revision_id in revision_ids {
+            pages.extend(
+                self.client
+                    .read_pages(ReadPagesRequest {
+                        page_ids: Vec::new(),
+                        revision_ids: vec![revision_id],
+                        projections: vec![Projection::Payload],
+                        max_chars: 64_000,
+                    })
+                    .await?,
+            );
+        }
+        let entry_times = pages
+            .into_iter()
+            .filter_map(|page| {
+                packing_page_entry_times(&page)
+                    .ok()
+                    .map(|times| (page.revision.revision_id, times))
+            })
+            .collect::<HashMap<_, _>>();
+        Ok(windows
+            .into_iter()
+            .filter(|window| {
+                let times = window
+                    .iter()
+                    .map(|page| entry_times.get(&page.revision_id))
+                    .collect::<Option<Vec<_>>>();
+                times.is_some_and(|parts| packing_times_are_continuous(parts.into_iter().flatten()))
+            })
+            .collect())
+    }
+}
+
+/// The only automatic relation assertion allowed by the conservative policy:
+/// the model has selected two adjacent Pack Pages from one source stream that
+/// independently share a protected identifier. Every other model-selected
+/// relation remains a revision-bound Console review proposal.
+fn is_low_risk_automatic_relation(pages: &[&pcp_store::DurablePageInventoryItem]) -> bool {
+    let [left, right] = pages else {
+        return false;
+    };
+    let (Some(left_span), Some(right_span)) = (&left.source_span, &right.source_span) else {
+        return false;
+    };
+    left.namespace == right.namespace
+        && left_span.stream_id == right_span.stream_id
+        && left.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE)
+        && right.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE)
+        && ((right_span.start <= left_span.end.saturating_add(1))
+            || (left_span.start <= right_span.end.saturating_add(1)))
+        && shares_protected_identifier(left, right)
+}
+
+fn packing_page_entry_times(page: &pcp_core::ReadPage) -> Result<Vec<DateTime<Utc>>> {
+    let payload = page
+        .revision
+        .payload
+        .as_ref()
+        .context("maintenance packing candidate payload is unavailable")?;
+    if payload.media_type != PACKED_PAGE_MEDIA_TYPE {
+        return Ok(vec![revision_time(
+            &page.revision.created_at,
+            page.revision.observed_at.as_deref(),
+        )?]);
+    }
+    let value = serde_json::from_str::<serde_json::Value>(&payload.content)
+        .context("decode packed maintenance candidate")?;
+    let entries = value
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .context("packed maintenance candidate has no entries")?;
+    entries
+        .iter()
+        .map(|entry| {
+            let created_at = entry
+                .get("createdAt")
+                .and_then(serde_json::Value::as_str)
+                .context("packed maintenance entry has no createdAt")?;
+            let observed_at = entry.get("observedAt").and_then(serde_json::Value::as_str);
+            revision_time(created_at, observed_at)
+        })
+        .collect()
+}
+
+fn revision_time(created_at: &str, observed_at: Option<&str>) -> Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(observed_at.unwrap_or(created_at))
+        .map(|time| time.with_timezone(&Utc))
+        .context("decode maintenance packing timestamp")
+}
+
+fn packing_times_are_continuous<'a>(times: impl Iterator<Item = &'a DateTime<Utc>>) -> bool {
+    let times = times.collect::<Vec<_>>();
+    !times.is_empty()
+        && times.windows(2).all(|pair| {
+            let gap = pair[1].signed_duration_since(*pair[0]).num_seconds();
+            (0..=MAX_PACK_ENTRY_GAP_SECONDS).contains(&gap)
+        })
 }
 
 fn relation_candidate_windows(
     inventory: &[pcp_store::DurablePageInventoryItem],
     config: &RelationMaintenanceConfig,
-    pending_packing_page_ids: &BTreeSet<String>,
+    active_packing_page_ids: &BTreeSet<String>,
 ) -> Vec<Vec<pcp_store::DurablePageInventoryItem>> {
-    let eligible = inventory
-        .iter()
-        .filter(|page| {
-            !pending_packing_page_ids.contains(&page.page_id)
-                && relation_page_eligible(page, config)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    // Relation writes are namespace-local. Preserve the inventory ordering inside
+    // each namespace, but never offer the worker a pair that `apply_relation_candidate`
+    // would have to reject later. Apart from wasting a review round, mixed windows
+    // made a semantically relevant local Page compete with unrelated Pages from a
+    // different source scope.
+    let mut eligible_by_namespace = BTreeMap::<String, Vec<_>>::new();
+    for page in inventory.iter().filter(|page| {
+        !active_packing_page_ids.contains(&page.page_id) && relation_page_eligible(page, config)
+    }) {
+        eligible_by_namespace
+            .entry(page.namespace.clone())
+            .or_default()
+            .push(page.clone());
+    }
     let window_size = config.candidate_window.max(2);
     let stride = (window_size / 2).max(1);
-    let mut windows = Vec::new();
-    let mut start = 0;
-    while start < eligible.len() {
-        let end = start.saturating_add(window_size).min(eligible.len());
-        if end.saturating_sub(start) >= 2 {
-            windows.push(eligible[start..end].to_vec());
+    // A Pack boundary is often where a question, correction, and its explanation
+    // become separate Pages. A broad recency window can bury that pair among many
+    // otherwise related conversation Pages. Offer only high-signal boundaries as
+    // their own two-Page review: they must be contiguous in the same source stream,
+    // both be Pack Pages, and share a protected identifier such as OET or PCP.
+    // This is a candidate-generation hint, never an asserted Relation.
+    let mut windows = source_boundary_relation_windows(&eligible_by_namespace);
+    for eligible in eligible_by_namespace.into_values() {
+        let mut start = 0;
+        while start < eligible.len() {
+            let end = start.saturating_add(window_size).min(eligible.len());
+            if end.saturating_sub(start) >= 2 {
+                windows.push(eligible[start..end].to_vec());
+            }
+            if end == eligible.len() {
+                break;
+            }
+            start = start.saturating_add(stride);
         }
-        if end == eligible.len() {
-            break;
-        }
-        start = start.saturating_add(stride);
     }
     windows
+}
+
+fn source_boundary_relation_windows(
+    eligible_by_namespace: &BTreeMap<String, Vec<pcp_store::DurablePageInventoryItem>>,
+) -> Vec<Vec<pcp_store::DurablePageInventoryItem>> {
+    let mut pages_by_stream = BTreeMap::<(String, String), Vec<_>>::new();
+    for (namespace, pages) in eligible_by_namespace {
+        for page in pages {
+            let Some(span) = &page.source_span else {
+                continue;
+            };
+            if page.media_type.as_deref() != Some(PACKED_PAGE_MEDIA_TYPE) {
+                continue;
+            }
+            pages_by_stream
+                .entry((namespace.clone(), span.stream_id.clone()))
+                .or_default()
+                .push(page.clone());
+        }
+    }
+
+    let mut windows = Vec::new();
+    for pages in pages_by_stream.values_mut() {
+        pages.sort_by(|left, right| {
+            left.source_span
+                .as_ref()
+                .expect("source stream page has a source span")
+                .start
+                .cmp(
+                    &right
+                        .source_span
+                        .as_ref()
+                        .expect("source stream page has a source span")
+                        .start,
+                )
+                .then_with(|| left.page_id.cmp(&right.page_id))
+        });
+        for pair in pages.windows(2) {
+            let [left, right] = pair else {
+                continue;
+            };
+            let left_span = left
+                .source_span
+                .as_ref()
+                .expect("source stream page has a source span");
+            let right_span = right
+                .source_span
+                .as_ref()
+                .expect("source stream page has a source span");
+            if right_span.start <= left_span.end.saturating_add(1)
+                && shares_protected_identifier(left, right)
+            {
+                windows.push(vec![left.clone(), right.clone()]);
+            }
+        }
+    }
+    windows
+}
+
+fn shares_protected_identifier(
+    left: &pcp_store::DurablePageInventoryItem,
+    right: &pcp_store::DurablePageInventoryItem,
+) -> bool {
+    let protected_identifiers = |page: &pcp_store::DurablePageInventoryItem| {
+        [page.summary.as_deref(), Some(page.snippet.as_str())]
+            .into_iter()
+            .flatten()
+            .flat_map(ascii_identifier_tokens)
+            .filter(|identifier| is_protected_identifier(identifier))
+            .map(|identifier| identifier.to_ascii_lowercase())
+            .collect::<BTreeSet<_>>()
+    };
+    let left = protected_identifiers(left);
+    let right = protected_identifiers(right);
+    !left.is_empty() && !left.is_disjoint(&right)
 }
 
 fn relation_window_key(revision_ids: &[String]) -> String {
@@ -2016,20 +2249,12 @@ fn connected_relation_pairs(
     connected
 }
 
-fn packing_scan_from_inventory(
+fn packing_scan_from_windows(
     inventory: &[pcp_store::DurablePageInventoryItem],
-    config: &PackingMaintenanceConfig,
-) -> MaintenancePackScan {
-    let captured_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-    packing_scan_from_inventory_at(inventory, config, &captured_at)
-}
-
-fn packing_scan_from_inventory_at(
-    inventory: &[pcp_store::DurablePageInventoryItem],
+    windows: &[Vec<pcp_store::DurablePageInventoryItem>],
     config: &PackingMaintenanceConfig,
     captured_at: &str,
 ) -> MaintenancePackScan {
-    let windows = packing_candidate_windows(inventory, config);
     let eligible_pages = windows.iter().map(Vec::len).sum::<usize>();
     let scan_id = packing_scan_id(&windows, config);
     let groups = windows
@@ -2082,13 +2307,13 @@ fn summary_scan_from_inventory(
 fn relation_scan_from_inventory(
     inventory: &[pcp_store::DurablePageInventoryItem],
     config: &RelationMaintenanceConfig,
-    pending_packing_page_ids: &BTreeSet<String>,
+    active_packing_page_ids: &BTreeSet<String>,
 ) -> MaintenanceRelationScan {
     let eligible_pages = if config.enabled {
         inventory
             .iter()
             .filter(|page| {
-                !pending_packing_page_ids.contains(&page.page_id)
+                !active_packing_page_ids.contains(&page.page_id)
                     && relation_page_eligible(page, config)
             })
             .count()
@@ -2096,7 +2321,7 @@ fn relation_scan_from_inventory(
         0
     };
     let windows = if config.enabled {
-        relation_candidate_windows(inventory, config, pending_packing_page_ids)
+        relation_candidate_windows(inventory, config, active_packing_page_ids)
     } else {
         Vec::new()
     };
@@ -2299,7 +2524,7 @@ fn select_packing_items<'a>(
         .iter()
         .filter(|page| page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE))
         .count();
-    (content_chars <= u64::from(config.max_input_chars) && packed_pages <= 1).then_some(selected)
+    (content_chars <= u64::from(config.max_input_chars) && packed_pages <= 2).then_some(selected)
 }
 
 fn validate_pack_application<'a>(
@@ -2375,7 +2600,7 @@ fn validate_pack_application<'a>(
         .filter(|page| page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE))
         .count();
     anyhow::ensure!(
-        content_chars <= u64::from(config.max_input_chars) && packed_pages <= 1,
+        content_chars <= u64::from(config.max_input_chars) && packed_pages <= 2,
         "maintenance Pack candidate is stale or no longer eligible"
     );
 
@@ -2448,8 +2673,8 @@ fn packing_candidate_windows(
     inventory: &[pcp_store::DurablePageInventoryItem],
     config: &PackingMaintenanceConfig,
 ) -> Vec<Vec<pcp_store::DurablePageInventoryItem>> {
+    let mut windows = packing_merge_candidate_windows(inventory, config);
     let mut visited = std::collections::HashSet::new();
-    let mut windows = Vec::new();
     for seed in inventory
         .iter()
         .filter(|page| packing_page_eligible(page, config))
@@ -2505,6 +2730,59 @@ fn packing_candidate_windows(
     windows
 }
 
+fn packing_merge_candidate_windows(
+    inventory: &[pcp_store::DurablePageInventoryItem],
+    config: &PackingMaintenanceConfig,
+) -> Vec<Vec<pcp_store::DurablePageInventoryItem>> {
+    let mut pages_by_stream = BTreeMap::<(String, String, String), Vec<_>>::new();
+    for page in inventory.iter().filter(|page| {
+        packing_page_eligible(page, config)
+            && page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE)
+    }) {
+        let span = page
+            .source_span
+            .as_ref()
+            .expect("eligible Pack has sourceSpan");
+        pages_by_stream
+            .entry((
+                page.namespace.clone(),
+                page.kind.clone(),
+                span.stream_id.clone(),
+            ))
+            .or_default()
+            .push(page.clone());
+    }
+
+    let mut windows = Vec::new();
+    for pages in pages_by_stream.values_mut() {
+        pages.sort_by_key(|page| {
+            page.source_span
+                .as_ref()
+                .expect("eligible Pack has sourceSpan")
+                .start
+        });
+        for pair in pages.windows(2) {
+            let [left, right] = pair else {
+                continue;
+            };
+            let left_span = left
+                .source_span
+                .as_ref()
+                .expect("eligible Pack has sourceSpan");
+            let right_span = right
+                .source_span
+                .as_ref()
+                .expect("eligible Pack has sourceSpan");
+            if left_span.end.checked_add(1) == Some(right_span.start)
+                && shares_protected_identifier(left, right)
+            {
+                windows.push(vec![left.clone(), right.clone()]);
+            }
+        }
+    }
+    windows
+}
+
 fn packing_page_eligible(
     page: &pcp_store::DurablePageInventoryItem,
     config: &PackingMaintenanceConfig,
@@ -2527,7 +2805,11 @@ fn push_packing_window(
     windows: &mut Vec<Vec<pcp_store::DurablePageInventoryItem>>,
     run: &mut Vec<pcp_store::DurablePageInventoryItem>,
 ) {
-    if run.len() >= 2 {
+    if run.len() >= 2
+        && run
+            .iter()
+            .any(|page| page.media_type.as_deref() != Some(PACKED_PAGE_MEDIA_TYPE))
+    {
         windows.push(std::mem::take(run));
     } else {
         run.clear();
@@ -2837,5 +3119,143 @@ fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
         MaintenanceWorkerResponse::Retain { .. } => "retain",
         MaintenanceWorkerResponse::NoCandidate => "no_candidate",
         MaintenanceWorkerResponse::Defer => "defer",
+    }
+}
+
+#[cfg(test)]
+mod relation_window_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use pcp_core::{PACKED_PAGE_MEDIA_TYPE, PageMutability, SourceSpan};
+    use pcp_store::DurablePageInventoryItem;
+
+    use super::{
+        PackingMaintenanceConfig, RelationMaintenanceConfig, packing_candidate_windows,
+        relation_candidate_windows, source_boundary_relation_windows,
+    };
+
+    fn page(namespace: &str, page_id: &str) -> DurablePageInventoryItem {
+        DurablePageInventoryItem {
+            page_id: page_id.to_owned(),
+            revision_id: format!("rev_{page_id}"),
+            namespace: namespace.to_owned(),
+            kind: "note".to_owned(),
+            mutability: PageMutability::Sealed,
+            created_at: "2026-08-18T00:00:00Z".to_owned(),
+            observed_at: None,
+            source_span: None,
+            media_type: Some("text/markdown".to_owned()),
+            content_chars: 1,
+            snippet: page_id.to_owned(),
+            facets: None,
+            summary_revision_id: None,
+            summary_target_revision_id: None,
+            summary: None,
+            relation_types: Vec::new(),
+            packing_protected: false,
+        }
+    }
+
+    #[test]
+    fn relation_windows_never_cross_namespaces() {
+        let inventory = vec![
+            page("conversation:alpha", "alpha-1"),
+            page("conversation:beta", "beta-1"),
+            page("conversation:alpha", "alpha-2"),
+            page("conversation:beta", "beta-2"),
+        ];
+        let config = RelationMaintenanceConfig {
+            enabled: true,
+            candidate_window: 2,
+            ..RelationMaintenanceConfig::default()
+        };
+
+        let windows = relation_candidate_windows(&inventory, &config, &BTreeSet::new());
+
+        assert_eq!(windows.len(), 2);
+        assert!(windows.iter().all(|window| {
+            window
+                .iter()
+                .map(|page| &page.namespace)
+                .all(|namespace| namespace == &window[0].namespace)
+        }));
+    }
+
+    #[test]
+    fn source_boundary_windows_prioritize_contiguous_packs_with_a_shared_identifier() {
+        let mut first = page("conversation:alpha", "oet-question");
+        first.media_type = Some(PACKED_PAGE_MEDIA_TYPE.to_owned());
+        first.source_span = Some(SourceSpan {
+            stream_id: "host:alpha".to_owned(),
+            start: 157,
+            end: 158,
+        });
+        first.snippet = "What is OET?".to_owned();
+        let mut second = page("conversation:alpha", "oet-answer");
+        second.media_type = Some(PACKED_PAGE_MEDIA_TYPE.to_owned());
+        second.source_span = Some(SourceSpan {
+            stream_id: "host:alpha".to_owned(),
+            start: 159,
+            end: 163,
+        });
+        second.snippet = "OET is the requested formal framework.".to_owned();
+        let mut unrelated = page("conversation:alpha", "other-pack");
+        unrelated.media_type = Some(PACKED_PAGE_MEDIA_TYPE.to_owned());
+        unrelated.source_span = Some(SourceSpan {
+            stream_id: "host:alpha".to_owned(),
+            start: 164,
+            end: 165,
+        });
+        unrelated.snippet = "A separate discussion of PCP maintenance.".to_owned();
+
+        let windows = source_boundary_relation_windows(&BTreeMap::from([(
+            "conversation:alpha".to_owned(),
+            vec![unrelated, second.clone(), first.clone()],
+        )]));
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(
+            windows[0]
+                .iter()
+                .map(|page| page.page_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![first.page_id.as_str(), second.page_id.as_str()]
+        );
+    }
+
+    #[test]
+    fn packing_windows_expose_a_coherent_pair_of_adjacent_packs_for_merge() {
+        let mut first = page("conversation:alpha", "oet-question");
+        first.media_type = Some(PACKED_PAGE_MEDIA_TYPE.to_owned());
+        first.mutability = PageMutability::Revisioned;
+        first.source_span = Some(SourceSpan {
+            stream_id: "host:alpha".to_owned(),
+            start: 157,
+            end: 158,
+        });
+        first.snippet = "What is OET?".to_owned();
+        let mut second = page("conversation:alpha", "oet-answer");
+        second.media_type = Some(PACKED_PAGE_MEDIA_TYPE.to_owned());
+        second.mutability = PageMutability::Revisioned;
+        second.source_span = Some(SourceSpan {
+            stream_id: "host:alpha".to_owned(),
+            start: 159,
+            end: 163,
+        });
+        second.snippet = "OET is the requested formal framework.".to_owned();
+
+        let windows = packing_candidate_windows(
+            &[first.clone(), second.clone()],
+            &PackingMaintenanceConfig::default(),
+        );
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(
+            windows[0]
+                .iter()
+                .map(|page| page.page_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![first.page_id.as_str(), second.page_id.as_str()]
+        );
     }
 }

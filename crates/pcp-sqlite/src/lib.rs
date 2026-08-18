@@ -15,6 +15,7 @@ mod schema;
 mod search;
 mod store;
 mod summary;
+mod text_ranking;
 mod validity;
 mod write;
 

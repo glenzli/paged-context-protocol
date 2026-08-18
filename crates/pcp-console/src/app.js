@@ -1,7 +1,8 @@
 import { createPageInspector } from "/page-inspector.js?v=20260816.3";
-import { describePagePayload, pagePayloadPreviewText } from "/page-content.js?v=20260816.3";
+import { describePagePayload, pagePayloadPreviewText, renderPagePreview } from "/page-content.js?v=20260816.3";
 import { createHealthView } from "/health-view.js?v=20260816.3";
 import { createRetentionView } from "/retention-view.js?v=20260818.1";
+import { createQueryView } from "/query-view.js?v=20260818.8";
 
 const DEFAULT_PAGE_LIMIT = 20;
 const PAGE_LIMIT_OPTIONS = new Set([10, 20, 30]);
@@ -25,6 +26,10 @@ const ZH_MESSAGES = {
   "Structural signals are descriptive only. Scan evaluates the full eligible inventory before each maintenance phase.": "结构信号只用于描述。每个维护阶段开始前，扫描会检查全部符合条件的页面库存。",
   "All scopes": "所有范围",
   "Analyze": "分析",
+  "Analyze suggestions": "分析建议",
+  "Pack maintenance": "打包维护",
+  "Semantic maintenance": "语义维护",
+  "Continue to semantic maintenance": "继续语义维护",
   "Analysis failed": "分析失败",
   "Analysis incomplete": "分析未完成",
   "Automatic maintenance": "自动维护",
@@ -54,6 +59,11 @@ const ZH_MESSAGES = {
   "Dirty regions": "待整理范围",
   "Ready regions": "已就绪范围",
   "Pending relation review": "待审关联",
+  "Uncertain relation": "不确定关联",
+  "Manual approval required": "需要人工批准",
+  "Expand full Page": "展开完整页面",
+  "Loading full Page…": "正在加载完整页面…",
+  "Open in inspector": "在检查器中打开",
   "Write trigger": "写入触发条件",
   "Last completed": "最近完成",
   "Awaiting the first Runtime heartbeat.": "等待 Runtime 首次心跳。",
@@ -164,6 +174,50 @@ const ZH_MESSAGES = {
   "Scope and source": "范围与源",
   "Page views": "页面视图",
   "Pages": "页面",
+  "Query": "查询",
+  "No query yet": "尚未查询",
+  "Search all authorized context, then review the deterministic context pack.": "检索所有已授权上下文，再审阅确定性组装的 Context Pack。",
+  "Search or intent": "搜索内容或完整意图",
+  "Describe what you need to recall": "描述你希望找回的内容",
+  "Retrieval method": "检索方法",
+  "Semantic search": "语义搜索",
+  "Match intent": "意图匹配",
+  "All authorized scopes": "所有已授权范围",
+  "Top results": "结果数量",
+  "Build context pack": "组装 Context Pack",
+  "Context pack review": "Context Pack 审阅",
+  "Run a query to inspect the ranked context pack.": "执行查询以审阅按相关度排序的 Context Pack。",
+  "Search ranks literal matches and assembles the selected results without inference.": "关键词搜索按字面匹配排序，并在不进行推断的情况下组装结果。",
+  "Full payload": "完整内容",
+  "Excerpt": "内容片段",
+  "Current summary": "当前摘要",
+  "Reference": "引用",
+  "Anchor": "锚点",
+  "anchors": "个锚点",
+  "related": "个关联上下文",
+  "Related context": "关联上下文",
+  "Asserted relation": "明确关联",
+  "from anchor": "来自锚点",
+  "Incoming relation": "入边",
+  "Outgoing relation": "出边",
+  "Inclusion reason": "纳入理由",
+  "Literal match in": "字面命中",
+  "Ranked": "排名",
+  "Focus layer": "重点层",
+  "Summary layer": "摘要层",
+  "Reference layer": "引用层",
+  "Current summary is tied to the selected revision.": "当前摘要已校验属于选中的 revision。",
+  "Included as a reference after detailed context.": "详细上下文之后，作为引用保留。",
+  "Open source page": "打开来源页面",
+  "Reference and provenance": "引用与溯源",
+  "Revision": "Revision",
+  "Provenance": "溯源",
+  "Context sent to model": "发送给模型的 Context",
+  "context entries": "条上下文",
+  "This is the exact deterministic context assembled by PCP for the model.": "这是 PCP 将实际交给模型的确定性 Context。",
+  "Source projection was incomplete; PCP downgraded it before packing.": "来源 projection 未完整读取；PCP 已在组装前降级处理。",
+  "results": "条结果",
+  "char budget": "字符预算",
   "pages": "页",
   "Pending approval": "待批准",
   "Preparing": "正在准备",
@@ -215,6 +269,7 @@ const ZH_MESSAGES = {
   "Start maintenance": "开始维护",
   "Start a maintenance session": "发起维护会话",
   "A maintenance session scans the full eligible Store one stage at a time. Analysis and writes require your explicit action.": "维护会话会逐阶段扫描完整的可处理库存。分析和写入都需要你明确发起。",
+  "Each maintenance type first scans structural candidates, then analyzes them with a model, then waits for your explicit application. Suggested links are never retrievable before approval.": "每类维护都会先扫描结构候选，再由模型分析，最后等待你明确应用；建议关联在批准前绝不参与检索。",
   "Maintenance policy": "维护策略",
   "Scheduled": "已调度",
   "Manual": "手动",
@@ -226,6 +281,8 @@ const ZH_MESSAGES = {
   "Ready to apply": "可应用提案",
   "Ready to continue": "可继续",
   "Scan complete": "扫描完成",
+  "Scan candidates": "扫描候选",
+  "Review and apply": "审阅应用",
   "Analyze Pack": "分析打包",
   "Analyze Summary": "分析摘要",
   "Analyze Relations": "分析关联",
@@ -243,6 +300,8 @@ const ZH_MESSAGES = {
   "No changes were applied": "没有应用变更",
   "Model calls": "模型调用",
   "Eligible work in this stage": "本阶段可处理库存",
+  "Scanned candidate groups": "扫描到的候选组",
+  "Scanned eligible pages": "扫描到的待处理页面",
   "Review diagnostics": "查看诊断",
   "Retry failed batches": "重试失败批次",
   "Retry failed pages": "重试失败页面",
@@ -256,6 +315,7 @@ const ZH_MESSAGES = {
   "No additional Page writes will occur. Unapplied proposals remain unapplied.": "不会再写入页面；未应用的提案将保持未应用。",
   "Maintenance session started": "维护会话已开始",
   "Maintenance session completed": "维护会话已完成",
+  "Maintenance runs in two passes: first Pack boundaries, then summaries and relations on the refreshed inventory. Each pass scans candidates, analyzes suggestions, then waits for your explicit application. Suggested links are never retrievable before approval.": "维护分为两段：先处理 Pack 边界，再基于刷新后的库存处理摘要与关联。每段都会扫描候选、分析建议，并等待你明确应用；建议关联在批准前绝不参与检索。",
   "Scope": "范围",
   "Scopes": "范围",
   "Search": "搜索",
@@ -423,6 +483,7 @@ const ZH_MESSAGES = {
   "estimated model calls": "预计模型调用",
   "groups": "组",
   "Extend Pack": "扩展打包页",
+  "Merge Packs": "合并打包页",
   "entries": "条目",
   "total": "项",
   "Update preview": "更新预览",
@@ -667,6 +728,8 @@ const state = {
       },
     },
     scan: null,
+    pass: "pack",
+    workflowStage: "scan",
     phase: "pack",
     analyses: { pack: null, summary: null, relation: null },
     pendingCandidates: [],
@@ -852,6 +915,15 @@ function showError(error) {
 }
 
 const pageInspector = createPageInspector({ request: api, showError, formatTime, t });
+const queryView = createQueryView({
+  request: api,
+  byId,
+  element,
+  showError,
+  t,
+  formatNumber,
+  openPage: (pageId) => pageInspector.open(pageId),
+});
 const healthView = createHealthView({ request: api, showError, formatNumber, t });
 const retentionView = createRetentionView({
   request: api,
@@ -909,6 +981,7 @@ function orderedScopes(scopes) {
 
 function renderOverview(data) {
   state.overview = data;
+  queryView.setScopes(data.scopes || []);
   const connected = data.integrity === "ok";
   byId("connection").textContent = connected ? t("Connected") : t("Degraded");
   byId("connection").classList.toggle("ready", connected);
@@ -1290,6 +1363,8 @@ function resetMaintenanceSession() {
       relation: emptyMaintenanceOutcome(),
     },
   };
+  state.maintenance.pass = "pack";
+  state.maintenance.workflowStage = "scan";
   state.maintenance.phase = "pack";
   state.maintenance.scan = null;
   state.maintenance.analyses = { pack: null, summary: null, relation: null };
@@ -1416,15 +1491,56 @@ function compactRelationReviewPreview(value, limit = 220) {
   return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 1)}…`;
 }
 
+function revisionBoundPageExpansion(page) {
+  const fullPage = element("details", "maintenance-relation-review-full-page");
+  const fullPageSummary = element("summary", "", t("Expand full Page"));
+  const fullPageBody = element("div", "maintenance-relation-review-full-page-body muted", "");
+  fullPage.append(fullPageSummary, fullPageBody);
+  let loaded = false;
+  fullPage.addEventListener("toggle", async () => {
+    if (!fullPage.open || loaded) return;
+    loaded = true;
+    fullPageBody.textContent = t("Loading full Page…");
+    try {
+      const detail = await api(`/api/pages/${encodeURIComponent(page.revisionId)}`);
+      if (detail.revision?.revisionId !== page.revisionId) {
+        throw new Error("The reviewed revision is no longer available.");
+      }
+      fullPageBody.classList.remove("muted");
+      fullPageBody.replaceChildren();
+      const content = element("div", "page-content");
+      renderPagePreview(
+        content,
+        detail.revision?.payload?.content || t("No content projection"),
+        detail.revision?.payload?.mediaType || "text/plain",
+      );
+      const open = element("button", "subtle-button", t("Open in inspector"));
+      open.type = "button";
+      open.addEventListener("click", () => pageInspector.open(page.pageId));
+      fullPageBody.append(content, open);
+    } catch (error) {
+      loaded = false;
+      fullPageBody.textContent = error.message || String(error);
+      showError(error);
+    }
+  });
+  return fullPage;
+}
+
 function relationReviewCard(proposal) {
   const card = element("article", "maintenance-relation-review-card");
   const heading = element("div", "maintenance-relation-review-card-heading");
   heading.append(
     element("strong", "", t("Review evidence")),
+    element("span", "maintenance-relation-review-risk", t("Manual approval required")),
     element("span", "muted", formatTime(proposal.proposedAt)),
   );
+  if (proposal.reviewReason) {
+    card.append(element("p", "maintenance-relation-review-reason muted", proposal.reviewReason));
+  }
   const pages = element("div", "maintenance-relation-review-pages");
   proposal.pages.forEach((page, index) => {
+    const pageColumn = element("div", "maintenance-relation-review-page-column");
     const pageCard = element("button", "maintenance-relation-review-page");
     pageCard.type = "button";
     pageCard.title = page.pageId;
@@ -1434,7 +1550,8 @@ function relationReviewCard(proposal) {
       element("span", "mono muted", page.revisionId),
     );
     pageCard.addEventListener("click", () => pageInspector.open(page.pageId));
-    pages.append(pageCard);
+    pageColumn.append(pageCard, revisionBoundPageExpansion(page));
+    pages.append(pageColumn);
     if (index === 0) pages.append(element("span", "maintenance-relation-review-link", "↔"));
   });
   const actions = element("div", "maintenance-relation-review-actions");
@@ -1501,6 +1618,37 @@ const MAINTENANCE_PHASES = {
   relation: { label: "Relations", scanKey: "relation", operation: "relation", next: null, order: 3 },
 };
 
+const MAINTENANCE_STAGES = {
+  scan: { label: "Scan candidates", order: 1 },
+  analyze: { label: "Analyze suggestions", order: 2 },
+  review: { label: "Review and apply", order: 3 },
+};
+
+const MAINTENANCE_PASSES = {
+  pack: { label: "Pack maintenance", phases: ["pack"], order: 1 },
+  semantic: { label: "Semantic maintenance", phases: ["summary", "relation"], order: 2 },
+};
+
+function maintenancePass() {
+  return state.maintenance.pass;
+}
+
+function maintenancePassConfig(pass = maintenancePass()) {
+  return MAINTENANCE_PASSES[pass];
+}
+
+function maintenancePassPhases(pass = maintenancePass()) {
+  return maintenancePassConfig(pass).phases;
+}
+
+function maintenanceWorkflowStage() {
+  return state.maintenance.workflowStage;
+}
+
+function maintenanceStageConfig(stage = maintenanceWorkflowStage()) {
+  return MAINTENANCE_STAGES[stage];
+}
+
 function maintenancePhase() {
   return state.maintenance.phase;
 }
@@ -1533,15 +1681,22 @@ function maintenanceWorkCount(phase = maintenancePhase()) {
   return scan.candidateGroupCount || 0;
 }
 
+function maintenanceWorkLabel(phase = maintenancePhase()) {
+  return phase === "summary" ? t("Scanned eligible pages") : t("Scanned candidate groups");
+}
+
 function maintenanceEstimatedCalls(phase = maintenancePhase()) {
   return maintenanceScanForPhase(phase)?.estimatedModelCalls || 0;
 }
 
 function maintenanceCandidates() {
+  if (maintenanceWorkflowStage() === "review") {
+    return state.maintenance.pendingCandidates;
+  }
   const phase = maintenancePhase();
   if (phase === "pack") {
-    return (state.maintenance.analyses.pack?.candidates || [])
-      .map((candidate) => ({ ...candidate, operation: "pack" }));
+    return state.maintenance.pendingCandidates
+      .filter((candidate) => candidate.operation === "pack");
   }
   return state.maintenance.pendingCandidates
     .filter((candidate) => candidate.operation === phase);
@@ -1603,17 +1758,20 @@ function maintenanceCandidateRow(candidate) {
       item.append(
         element("span", "mono muted", page.pageId),
         element("span", "maintenance-preview", compactPreview(page.preview || t("No preview"))),
+        revisionBoundPageExpansion(page),
       );
       inputs.append(item);
     }
     content.append(element("strong", "", "related_to"));
   } else {
+    const mergesPacks = candidate.pages.length === 2
+      && candidate.pages.every((page) => page.mediaType === "application/vnd.pcp.packed-page+json");
     source.append(
       element("strong", "", candidate.namespace),
       element("span", "mono muted", `${t("Stream")} ${candidate.sourceSpan.start}–${candidate.sourceSpan.end}`),
     );
     change.append(
-      element("strong", "", t(candidate.extendsExistingPack ? "Extend Pack" : "New Pack")),
+      element("strong", "", t(mergesPacks ? "Merge Packs" : candidate.extendsExistingPack ? "Extend Pack" : "New Pack")),
       element("span", "muted", `${formatNumber(candidate.inputPageCount)} ${t("Pages")} → ${formatNumber(candidate.resultingEntryCount)} ${t("entries")}`),
     );
     for (const page of candidate.pages) {
@@ -1710,8 +1868,8 @@ function maintenancePhaseDescription() {
     : "Waiting to scan the full eligible inventory.";
   if (!analysis && maintenanceWorkCount() === 0) return t("No eligible work");
   if (!analysis) return currentLanguage === "zh"
-    ? `扫描发现 ${formatNumber(maintenanceWorkCount())} 个工作项。分析会在你点击后才调用模型。`
-    : `The scan found ${formatNumber(maintenanceWorkCount())} work items. Analysis invokes models only after you continue.`;
+    ? `扫描已发现 ${formatNumber(maintenanceWorkCount())} 个结构候选。它们不是已建议的变更；点击分析后才会调用模型判断是否应合并、摘要或关联。`
+    : `The scan found ${formatNumber(maintenanceWorkCount())} structural candidates. They are not recommendations yet: analysis calls a model to decide whether to pack, summarize, or relate them.`;
   const failedBatches = phase === "summary" ? summaryFailedBatches() : [];
   if (failedBatches.length) return currentLanguage === "zh"
     ? `${formatNumber(failedBatches.length)} 个摘要页面未完成。已完成的提案仍可应用；请重试失败页面，或重新扫描本阶段。`
@@ -1722,29 +1880,24 @@ function maintenancePhaseDescription() {
 
 function currentMaintenanceAction() {
   if (!maintenanceSessionActive()) return "start";
-  const scan = maintenanceScanForPhase();
-  if (!scan) return "scan";
-  const analysis = state.maintenance.analyses[maintenancePhase()];
-  if (!analysis && maintenanceWorkCount()) return "analyze";
+  const stage = maintenanceWorkflowStage();
+  if (stage === "scan") return "scan";
+  if (stage === "analyze") return "analyze";
   const selectedCount = maintenanceCandidates()
     .filter((candidate) => state.maintenance.selected.has(candidate.candidateId)).length;
-  if (maintenancePhase() === "summary" && summaryFailedBatches().length && selectedCount === 0) return "retry";
   return selectedCount ? "apply" : "advance";
 }
 
 function maintenancePrimaryLabel(action = currentMaintenanceAction()) {
-  const phase = maintenancePhaseConfig();
   if (action === "start") return t("Start maintenance");
-  if (action === "scan") return `${t("Scan")} ${t(phase.label)}`;
-  if (action === "analyze") return `${t("Analyze")} ${t(phase.label)}`;
+  if (action === "scan") return t("Scan candidates");
+  if (action === "analyze") return t("Analyze suggestions");
   if (action === "retry") return t("Retry failed pages");
   if (action === "apply") {
     const count = maintenanceCandidates().filter((candidate) => state.maintenance.selected.has(candidate.candidateId)).length;
     return `${t("Apply selected")} (${formatNumber(count)})`;
   }
-  if (phase.next === "summary") return t("Continue to Summary");
-  if (phase.next === "relation") return t("Continue to Relations");
-  return t("Complete maintenance");
+  return maintenancePass() === "pack" ? t("Continue to semantic maintenance") : t("Complete maintenance");
 }
 
 function phaseIssue(phase) {
@@ -1764,13 +1917,21 @@ function phaseIssue(phase) {
 }
 
 function renderMaintenanceSteps() {
-  const activePhase = maintenancePhase();
-  for (const phase of Object.keys(MAINTENANCE_PHASES)) {
-    const step = byId(`maintenance-step-${phase}`);
-    const phaseConfig = maintenancePhaseConfig(phase);
-    step.classList.toggle("active", maintenanceSessionActive() && phase === activePhase);
-    step.classList.toggle("completed", maintenanceSessionComplete() || (maintenanceSessionActive() && phaseConfig.order < maintenancePhaseConfig().order));
-    byId(`maintenance-step-${phase}-status`).textContent = maintenanceStepStatus(phase);
+  const activeStage = maintenanceWorkflowStage();
+  for (const stage of Object.keys(MAINTENANCE_STAGES)) {
+    const step = byId(`maintenance-step-${stage}`);
+    const config = maintenanceStageConfig(stage);
+    const activeConfig = maintenanceStageConfig();
+    step.classList.toggle("active", maintenanceSessionActive() && stage === activeStage);
+    step.classList.toggle("completed", maintenanceSessionComplete() || (maintenanceSessionActive() && config.order < activeConfig.order));
+    const status = maintenanceSessionComplete() || config.order < activeConfig.order
+      ? t("Completed")
+      : stage === activeStage && state.maintenance.busy
+        ? (currentLanguage === "zh" ? "处理中" : "Working")
+        : stage === activeStage
+          ? (stage === "review" ? t("Ready to apply") : t("Ready to continue"))
+          : t("Waiting");
+    byId(`maintenance-step-${stage}-status`).textContent = status;
   }
   const report = byId("maintenance-step-report");
   report.classList.toggle("active", maintenanceSessionComplete());
@@ -1779,46 +1940,72 @@ function renderMaintenanceSteps() {
 }
 
 function renderMaintenanceWorkflow() {
-  const phase = maintenancePhase();
-  const phaseConfig = maintenancePhaseConfig();
-  const scan = maintenanceScanForPhase();
-  const analysis = state.maintenance.analyses[phase];
+  const stage = maintenanceWorkflowStage();
+  const stageConfig = maintenanceStageConfig();
+  const pass = maintenancePass();
+  const passConfig = maintenancePassConfig();
+  const scans = state.maintenance.scan || {};
+  const scanGroups = maintenancePassPhases().reduce((count, phase) => count + (phase === "summary"
+    ? 0
+    : maintenanceScanForPhase(phase)?.candidateGroupCount || 0), 0);
+  const scanPages = pass === "semantic" ? scans.summary?.eligiblePages || 0 : 0;
+  const estimatedCalls = maintenancePassPhases()
+    .reduce((count, phase) => count + maintenanceEstimatedCalls(phase), 0);
+  const analyses = maintenancePassPhases()
+    .map((phase) => state.maintenance.analyses[phase])
+    .filter(Boolean);
+  const modelCalls = analyses.reduce((sum, analysis) => sum + (analysis.workerCalls || 0), 0);
+  const issues = analyses.flatMap((analysis) => analysis.issues || []);
   const candidates = maintenanceCandidates();
   const selectedCount = candidates.filter((candidate) => state.maintenance.selected.has(candidate.candidateId)).length;
-  const outcome = maintenanceOutcome();
 
   renderMaintenanceSteps();
   byId("maintenance-phase-order").textContent = currentLanguage === "zh"
-    ? `第 ${phaseConfig.order} 步，共 3 步`
-    : `Step ${phaseConfig.order} of 3`;
-  byId("maintenance-phase-title").textContent = t(phaseConfig.label);
-  byId("maintenance-phase-description").textContent = maintenancePhaseDescription();
+    ? `第 ${passConfig.order} 段 · ${t(passConfig.label)} · 第 ${stageConfig.order} 步，共 3 步`
+    : `Pass ${passConfig.order}: ${t(passConfig.label)} · Step ${stageConfig.order} of 3`;
+  byId("maintenance-phase-title").textContent = t(passConfig.label);
+  byId("maintenance-phase-description").textContent = stage === "scan"
+    ? (currentLanguage === "zh"
+      ? "读取完整可处理库存，生成结构候选；这一阶段不调用模型，也不写入任何页面。"
+      : "Read the full eligible inventory and form structural candidates. This stage makes no model calls or Page writes.")
+    : stage === "analyze" && pass === "pack"
+      ? (currentLanguage === "zh"
+        ? "只分析 Pack 合并建议；不会分析摘要或关联。应用或跳过本段后，才会基于刷新后的库存启动语义维护。"
+        : "Analyze only Pack merge proposals. Summary and relation analysis wait until this pass is applied or skipped and the inventory is refreshed.")
+    : stage === "analyze"
+      ? (currentLanguage === "zh"
+        ? "模型评估摘要与关联候选，只提出建议；不会写入页面。"
+        : "The model evaluates summary and relation candidates and only proposes changes; it writes nothing.")
+      : (currentLanguage === "zh"
+        ? "统一审阅所有建议。只会应用你勾选的项目，每项写入前都会重新校验当前版本。"
+        : "Review every suggestion together. Only selected items are applied, and each write revalidates the current revision.");
 
-  const calls = analysis?.workerCalls ?? maintenanceEstimatedCalls();
-  const metrics = [
-    metric(t("Eligible work in this stage"), `${formatNumber(maintenanceWorkCount())} ${phase === "summary" ? t("pages") : t("groups")}`),
-    metric(analysis ? t("Model calls") : t("Estimated calls"), formatNumber(calls), analysis ? "info" : ""),
-    metric(t("Proposals"), formatNumber(analysis ? candidates.length : 0), analysis && candidates.length ? "info" : ""),
-  ];
-  if (phase === "summary" && analysis) {
-    metrics.push(metric(t("Pages completed"), `${formatNumber(analysis.batchesCompleted)} / ${formatNumber(analysis.batchCount)}`));
-    const failedBatches = summaryFailedBatches();
-    if (failedBatches.length) metrics.push(metric(t("Failed pages"), formatNumber(failedBatches.length), "warning"));
-  }
+  const metrics = stage === "scan"
+    ? [
+      metric(t("Scanned candidate groups"), formatNumber(scanGroups)),
+      metric(t("Scanned eligible pages"), formatNumber(scanPages)),
+      metric(t("Estimated calls"), formatNumber(estimatedCalls)),
+    ]
+    : [
+      metric(t("Scanned candidate groups"), formatNumber(scanGroups)),
+      metric(t("Scanned eligible pages"), formatNumber(scanPages)),
+      metric(t("Model calls"), formatNumber(modelCalls), modelCalls ? "info" : ""),
+      metric(t("Proposals"), formatNumber(stage === "review" ? candidates.length : 0), candidates.length ? "info" : ""),
+    ];
   byId("maintenance-scan-metrics").replaceChildren(...metrics);
-  byId("maintenance-candidate-status").textContent = !scan
-    ? t("Scanning")
-    : analysis
-      ? `${formatNumber(candidates.length)} ${t("proposals")} · ${formatNumber(selectedCount)} ${currentLanguage === "zh" ? "已选" : "selected"}`
-      : `${formatNumber(maintenanceWorkCount())} ${currentLanguage === "zh" ? "工作项" : "work items"} · ${formatNumber(calls)} ${t("estimated model calls")}`;
+  byId("maintenance-candidate-status").textContent = stage === "review"
+    ? `${formatNumber(candidates.length)} ${t("proposals")} · ${formatNumber(selectedCount)} ${currentLanguage === "zh" ? "已选" : "selected"}`
+    : stage === "analyze"
+      ? `${formatNumber(modelCalls)} ${t("Model calls")} · ${formatNumber(estimatedCalls)} ${t("estimated model calls")}`
+      : `${formatNumber(scanGroups + scanPages)} ${currentLanguage === "zh" ? "扫描项" : "scanned items"}`;
 
-  const issue = phaseIssue(phase);
+  const issue = issues.map((item) => item.message || String(item)).join("\n");
   const issueNode = byId("maintenance-issue");
   issueNode.hidden = !issue;
   issueNode.textContent = issue ? `${t("Analysis incomplete")}: ${issue}` : "";
 
   const proposals = byId("maintenance-proposals");
-  proposals.hidden = !analysis || candidates.length === 0;
+  proposals.hidden = stage !== "review" || candidates.length === 0;
   if (!proposals.hidden) {
     renderMaintenanceProposals(candidates);
     byId("maintenance-selection-status").textContent = currentLanguage === "zh"
@@ -1833,10 +2020,11 @@ function renderMaintenanceWorkflow() {
   const rescan = byId("maintenance-rescan");
   rescan.disabled = state.maintenance.busy;
   const skip = byId("maintenance-skip");
+  skip.hidden = stage !== "review";
   skip.disabled = state.maintenance.busy;
   const retryFailed = byId("maintenance-retry-failed");
-  retryFailed.hidden = phase !== "summary" || summaryFailedBatches().length === 0;
-  retryFailed.disabled = state.maintenance.busy || summaryFailedBatches().length === 0;
+  retryFailed.hidden = true;
+  retryFailed.disabled = true;
   const cancel = byId("maintenance-cancel");
   cancel.disabled = state.maintenance.busy;
   const selectAll = byId("maintenance-select-all");
@@ -1845,9 +2033,8 @@ function renderMaintenanceWorkflow() {
   selectAll.indeterminate = selectedCount > 0 && selectedCount < candidates.length;
 
   if (!state.maintenance.busy) {
-    byId("maintenance-status").textContent = `${t(phaseConfig.label)} · ${maintenanceStepStatus(phase)}`;
+    byId("maintenance-status").textContent = `${t(stageConfig.label)} · ${stage === "review" ? t("Ready to apply") : t("Ready to continue")}`;
   }
-  outcome.proposals = Math.max(outcome.proposals, candidates.length);
 }
 
 function renderMaintenanceReport() {
@@ -1920,21 +2107,6 @@ async function loadMaintenance({ reload = false } = {}) {
 
 async function requestMaintenanceScan() {
   return maintenanceMutation("/api/maintenance/scan", {});
-}
-
-async function analyzeMaintenanceScan(scan, { batchLimit = scan.estimatedModelCalls, onProgress, onBatch } = {}) {
-  const analysis = emptyMaintenanceAnalysis(scan);
-  const batchesToRun = Math.min(analysis.batchCount, Math.max(0, batchLimit));
-  for (let batchIndex = 0; batchIndex < batchesToRun; batchIndex += 1) {
-    onProgress?.({ batchIndex, batchCount: analysis.batchCount });
-    const batch = await maintenanceMutation("/api/maintenance/analyze", {
-      scanId: scan.scanId,
-      batchIndex,
-    });
-    appendMaintenanceAnalysisBatch(analysis, batch);
-    onBatch?.(analysis);
-  }
-  return analysis;
 }
 
 async function applyMaintenanceCandidates(candidates, onProgress) {
@@ -2052,15 +2224,19 @@ async function scanMaintenance() {
   resetCurrentMaintenanceWork();
   state.maintenance.busy = true;
   state.maintenance.activity = { kind: "scan", current: 0, total: 1 };
-  byId("maintenance-status").textContent = `${t("Scanning")} ${t(maintenancePhaseConfig().label)}`;
+  byId("maintenance-status").textContent = `${t("Scanning")} ${t(maintenancePassConfig().label)}`;
   renderMaintenanceSession();
   try {
     const scan = await requestMaintenanceScan();
     state.maintenance.activity.current = 1;
     state.maintenance.scan = scan;
-    const outcome = maintenanceOutcome();
-    outcome.scannedAt = scan.capturedAt;
-    outcome.workItems = maintenanceWorkCount();
+    for (const phase of maintenancePassPhases()) {
+      const outcome = maintenanceOutcome(phase);
+      outcome.scannedAt = scan.capturedAt;
+      outcome.workItems = maintenanceWorkCount(phase);
+    }
+    state.maintenance.phase = maintenancePassPhases()[0];
+    state.maintenance.workflowStage = "analyze";
     byId("maintenance-status").textContent = `${t("Scan complete")} · ${formatTime(scan.capturedAt)}`;
   } catch (error) {
     byId("maintenance-status").textContent = `${t("Scan failed")}: ${error.message || String(error)}`;
@@ -2075,14 +2251,21 @@ async function scanMaintenance() {
 async function analyzePackingPhase(scan) {
   const analysis = emptyMaintenanceAnalysis(scan);
   state.maintenance.analyses.pack = analysis;
-  await analyzeMaintenanceScan(scan, {
-    onProgress: ({ batchIndex }) => {
-      state.maintenance.activity.current = batchIndex + 1;
-      byId("maintenance-status").textContent = `${t("Analyzing")} ${t("Pack")} ${formatNumber(batchIndex + 1)} / ${formatNumber(analysis.batchCount)}`;
-      renderMaintenanceSession();
-    },
-    onBatch: () => renderMaintenanceSession(),
-  });
+  // Mechanical Pack merges are valid proposals with zero model calls. Keep
+  // them in the same review queue as model-selected Pack candidates so a zero
+  // worker count can never look like this pass was skipped.
+  for (let batchIndex = 0; batchIndex < analysis.batchCount; batchIndex += 1) {
+    state.maintenance.activity.current = batchIndex + 1;
+    byId("maintenance-status").textContent = `${t("Analyzing")} ${t("Pack")} ${formatNumber(batchIndex + 1)} / ${formatNumber(analysis.batchCount)}`;
+    renderMaintenanceSession();
+    const batch = await maintenanceMutation("/api/maintenance/analyze", {
+      scanId: scan.scanId,
+      batchIndex,
+    });
+    appendMaintenanceAnalysisBatch(analysis, batch);
+    appendMaintenanceCandidates("pack", batch.candidates);
+    renderMaintenanceSession();
+  }
   state.maintenance.analyses.pack = analysis;
 }
 
@@ -2163,26 +2346,36 @@ async function analyzeRelationPhase(scan) {
 }
 
 async function analyzeMaintenance() {
-  if (state.maintenance.busy || !state.maintenance.scan) return;
-  const phase = maintenancePhase();
-  const scan = maintenanceScanForPhase();
-  if (!scan || maintenanceWorkCount() === 0) return;
+  if (state.maintenance.busy || !state.maintenance.scan || maintenanceWorkflowStage() !== "analyze") return;
   state.maintenance.busy = true;
-  state.maintenance.activity = { kind: "analyze", current: 0, total: maintenanceEstimatedCalls() };
-  byId("maintenance-status").textContent = `${t("Preparing")} ${t(maintenancePhaseConfig().label)}`;
+  const total = maintenancePassPhases()
+    .reduce((count, phase) => count + maintenanceEstimatedCalls(phase), 0);
+  state.maintenance.activity = { kind: "analyze", current: 0, total };
+  byId("maintenance-status").textContent = t("Preparing");
   renderMaintenanceSession();
   try {
-    if (phase === "pack") await analyzePackingPhase(scan);
-    else if (phase === "summary") await analyzeSummaryPhase(scan);
-    else await analyzeRelationPhase(scan);
+    for (const phase of maintenancePassPhases()) {
+      state.maintenance.phase = phase;
+      const scan = maintenanceScanForPhase(phase);
+      if (!scan || maintenanceWorkCount(phase) === 0) continue;
+      if (phase === "pack") await analyzePackingPhase(scan);
+      else if (phase === "summary") await analyzeSummaryPhase(scan);
+      else await analyzeRelationPhase(scan);
+      const analysis = state.maintenance.analyses[phase];
+      const outcome = maintenanceOutcome(phase);
+      outcome.analyzedAt = analysis?.analyzedAt || new Date().toISOString();
+      outcome.modelCalls += analysis?.workerCalls || 0;
+      outcome.proposals = phase === "pack"
+        ? (analysis?.candidates.length || 0)
+        : state.maintenance.pendingCandidates.filter((candidate) => candidate.operation === phase).length;
+      outcome.issues = [...(analysis?.issues || [])];
+    }
+    state.maintenance.workflowStage = "review";
+    state.maintenance.phase = maintenancePassPhases()[0];
     for (const candidate of maintenanceCandidates()) state.maintenance.selected.add(candidate.candidateId);
-    const analysis = state.maintenance.analyses[phase];
-    const outcome = maintenanceOutcome();
-    outcome.analyzedAt = analysis?.analyzedAt || new Date().toISOString();
-    outcome.modelCalls += analysis?.workerCalls || 0;
-    outcome.proposals = maintenanceCandidates().length;
-    outcome.issues = [...(analysis?.issues || [])];
   } catch (error) {
+    const analysis = state.maintenance.analyses[maintenancePhase()];
+    if (analysis) analysis.issues.push({ message: error.message || String(error) });
     byId("maintenance-status").textContent = `${t("Analysis failed")}: ${error.message || String(error)}`;
     showError(error);
   } finally {
@@ -2252,17 +2445,25 @@ async function optimizeMaintenanceSelection() {
     });
     state.maintenance.selected.clear();
     const consumed = new Set([...result.appliedCandidateIds, ...result.skipped.map((item) => item.candidateId)]);
-    if (maintenancePhase() === "pack") {
+    if (maintenanceWorkflowStage() === "review") {
       const analysis = state.maintenance.analyses.pack;
       if (analysis) analysis.candidates = analysis.candidates.filter((candidate) => !consumed.has(candidate.candidateId));
-    } else {
       state.maintenance.pendingCandidates = state.maintenance.pendingCandidates
         .filter((candidate) => !consumed.has(candidate.candidateId));
     }
-    const outcome = maintenanceOutcome();
-    outcome.applied += result.applied;
-    outcome.skipped += result.skipped.length;
-    outcome.issues.push(...result.skipped);
+    const byCandidateId = new Map(candidates.map((candidate) => [candidate.candidateId, candidate]));
+    for (const candidateId of result.appliedCandidateIds) {
+      const candidate = byCandidateId.get(candidateId);
+      if (candidate) maintenanceOutcome(candidate.operation).applied += 1;
+    }
+    for (const skipped of result.skipped) {
+      const candidate = byCandidateId.get(skipped.candidateId);
+      if (candidate) {
+        const outcome = maintenanceOutcome(candidate.operation);
+        outcome.skipped += 1;
+        outcome.issues.push(skipped);
+      }
+    }
     await loadOverview();
     const outcomeText = `${formatNumber(result.applied)} applied · ${formatNumber(result.skipped.length)} skipped`;
     byId("maintenance-status").textContent = `${t("Optimization completed")} · ${outcomeText}`;
@@ -2302,14 +2503,13 @@ async function startMaintenanceSession() {
 
 async function advanceMaintenancePhase() {
   if (!maintenanceSessionActive() || state.maintenance.busy) return;
-  const phase = maintenancePhase();
   const candidates = maintenanceCandidates();
   if (candidates.length > 0) {
     const confirmed = await confirmAction({
       title: currentLanguage === "zh" ? "跳过未应用的提案？" : "Continue without applying remaining proposals?",
       description: currentLanguage === "zh"
-        ? `当前阶段还有 ${formatNumber(candidates.length)} 个未应用提案。它们不会写入，下一阶段会重新扫描完整库存。`
-        : `${formatNumber(candidates.length)} proposals remain unapplied. They will not be written, and the next stage will rescan the full inventory.`,
+        ? `本段还有 ${formatNumber(candidates.length)} 个未应用提案。它们不会写入；下一维护段会重新扫描实际库存。`
+        : `${formatNumber(candidates.length)} proposals remain unapplied. They will not be written; the next maintenance pass will rescan the actual inventory.`,
       confirmLabel: t("Continue"),
     });
     if (!confirmed) return;
@@ -2319,13 +2519,13 @@ async function advanceMaintenancePhase() {
 
 async function skipMaintenancePhase() {
   if (!maintenanceSessionActive() || state.maintenance.busy) return;
-  const phase = maintenancePhaseConfig();
+  const pass = maintenancePassConfig();
   const candidates = maintenanceCandidates();
   const confirmed = await confirmAction({
-    title: currentLanguage === "zh" ? `跳过${t(phase.label)}阶段？` : `Skip ${t(phase.label)} stage?`,
+    title: currentLanguage === "zh" ? `跳过${t(pass.label)}？` : `Skip ${t(pass.label)}?`,
     description: currentLanguage === "zh"
-      ? "不会调用模型或写入页面。当前阶段尚未应用的提案将被丢弃，下一阶段会重新扫描完整的可处理库存。"
-      : "No model call or Page write will occur. Unapplied proposals in this stage will be discarded, and the next stage will rescan the full eligible inventory.",
+      ? "不会再调用模型或写入页面。本段未应用提案将被丢弃；下一维护段会重新扫描实际库存。"
+      : "No additional model call or Page write will occur. Unapplied proposals in this pass are discarded; the next pass rescans the actual inventory.",
     confirmLabel: t("Skip this stage"),
   });
   if (!confirmed) return;
@@ -2333,20 +2533,28 @@ async function skipMaintenancePhase() {
 }
 
 async function completeMaintenancePhase({ skippedProposals = 0 } = {}) {
-  const outcome = maintenanceOutcome();
-  outcome.skipped += skippedProposals;
-  outcome.completed = true;
-  const nextPhase = maintenancePhaseConfig().next;
-  if (!nextPhase) {
-    state.maintenance.session.state = "complete";
-    state.maintenance.session.completedAt = new Date().toISOString();
+  const candidates = maintenanceCandidates();
+  const skippedByOperation = new Map();
+  for (const candidate of candidates) {
+    skippedByOperation.set(candidate.operation, (skippedByOperation.get(candidate.operation) || 0) + 1);
+  }
+  for (const phase of maintenancePassPhases()) {
+    const outcome = maintenanceOutcome(phase);
+    outcome.skipped += skippedByOperation.get(phase) || 0;
+    outcome.completed = true;
+  }
+  if (maintenancePass() === "pack") {
+    state.maintenance.pass = "semantic";
+    state.maintenance.phase = "summary";
+    state.maintenance.workflowStage = "scan";
+    resetCurrentMaintenanceWork();
     renderMaintenanceSession();
+    await scanMaintenance();
     return;
   }
-  state.maintenance.phase = nextPhase;
-  resetCurrentMaintenanceWork();
+  state.maintenance.session.state = "complete";
+  state.maintenance.session.completedAt = new Date().toISOString();
   renderMaintenanceSession();
-  await scanMaintenance();
 }
 
 async function rescanMaintenancePhase() {
@@ -2392,6 +2600,7 @@ async function activateView(name, { reload = false } = {}) {
   document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === name));
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === `view-${name}`));
   if (name === "pages" && (reload || !state.pages.loaded)) await loadPages();
+  if (name === "query") await queryView.load({ reload });
   if (name === "maintenance") await loadMaintenance({ reload });
   if (name === "health") {
     await healthView.load({ reload });
@@ -2415,6 +2624,7 @@ async function refresh() {
       resetPages();
       await loadPages();
     }
+    if (state.activeView === "query") await queryView.load({ reload: true });
     if (state.activeView === "maintenance") await loadMaintenance({ reload: true });
     if (state.activeView === "health") {
       await healthView.load({ reload: true });
@@ -2428,6 +2638,7 @@ function rerenderForLocale() {
   if (state.overview) renderOverview(state.overview);
   const currentPage = state.pages.pageCache.get(state.pages.page);
   if (currentPage) renderPages(currentPage, state.pages.page);
+  queryView.rerender();
   if (state.maintenance.loaded) {
     renderAutomationStatus();
     renderMaintenanceSession();

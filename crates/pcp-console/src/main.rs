@@ -53,6 +53,7 @@ const CONSOLE_STATIC_CACHE_CONTROL: &str = "no-store";
 
 mod graph_view;
 mod managed;
+mod query;
 
 #[derive(Clone)]
 struct AppState {
@@ -282,12 +283,15 @@ fn router(state: AppState) -> Router {
         .route("/page-graph.js", get(page_graph_js))
         .route("/health-view.js", get(health_view_js))
         .route("/retention-view.js", get(retention_view_js))
+        .route("/query-view.js", get(query_view_js))
         .route("/styles.css", get(styles_css))
         .route("/api/health", get(health))
         .route("/api/runtime", get(runtime_status))
         .route("/api/runtime/restart", post(restart_runtime))
         .route("/api/overview", get(overview))
         .route("/api/pages", get(pages))
+        .route("/api/query/capabilities", get(query_capabilities))
+        .route("/api/query", post(run_query))
         .route("/api/pages/{page_id}/preview", get(page_preview))
         .route("/api/pages/{page_id}", get(page_detail))
         .route("/api/pages/{page_id}/raw", get(page_raw))
@@ -433,6 +437,13 @@ async fn retention_view_js() -> Response {
     )
 }
 
+async fn query_view_js() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("query_view.js"),
+    )
+}
+
 async fn styles_css() -> Response {
     static_asset("text/css; charset=utf-8", include_str!("styles.css"))
 }
@@ -557,6 +568,17 @@ async fn pages(
     Ok(Json(json!(
         console_page_result(state.client.as_ref(), result).await?
     )))
+}
+
+async fn query_capabilities() -> Json<query::QueryCapabilities> {
+    Json(query::capabilities())
+}
+
+async fn run_query(
+    State(state): State<AppState>,
+    Json(request): Json<query::QueryRequest>,
+) -> Result<Json<query::QueryResponse>, ApiError> {
+    Ok(Json(query::execute(state.client.as_ref(), request).await?))
 }
 
 async fn console_page_result(

@@ -86,6 +86,7 @@ impl SqlitePcpStore {
                   ON summary_revision.revision_id = summary.summary_revision_id
                 WHERE r.namespace IN ({placeholders})
                   AND r.lifecycle_status = 'active'
+                  AND page.lifecycle_status = 'active'
                 "
             );
             let boundary_chars = MAX_INVENTORY_SNIPPET_CHARS / 2;
