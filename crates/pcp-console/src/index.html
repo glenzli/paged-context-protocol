@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PCP Console</title>
-  <link rel="stylesheet" href="/styles.css?v=20260818.2">
+  <link rel="stylesheet" href="/styles.css?v=20260818.7">
   <link rel="stylesheet" href="/page-content.css?v=20260816.3">
 </head>
 <body>
@@ -119,6 +119,14 @@
           <p class="view-description" data-i18n="A maintenance session scans the full eligible Store one stage at a time. Analysis and writes require your explicit action.">A maintenance session scans the full eligible Store one stage at a time. Analysis and writes require your explicit action.</p>
         </div>
       </div>
+      <section id="maintenance-automation-status" class="maintenance-automation-status" hidden>
+        <div class="section-heading section-heading-copy">
+          <div><div class="maintenance-automation-title"><h3 data-i18n="Automatic maintenance">Automatic maintenance</h3><span id="maintenance-automation-state" class="status-pill"></span></div><p data-i18n="Runtime-owned write-trigger state. It never makes suggested relations retrievable.">Runtime-owned write-trigger state. It never makes suggested relations retrievable.</p></div>
+        </div>
+        <div id="maintenance-automation-metrics" class="metrics maintenance-automation-metrics"></div>
+        <p id="maintenance-automation-detail" class="muted"></p>
+        <p id="maintenance-automation-error" class="maintenance-issue" hidden></p>
+      </section>
       <section id="maintenance-relation-review" class="maintenance-relation-review" hidden>
         <div class="section-heading section-heading-copy">
           <div><h3 data-i18n="Relation review queue">Relation review queue</h3><p data-i18n="These suggested links are not used for retrieval until you approve them.">These suggested links are not used for retrieval until you approve them.</p></div>
@@ -363,11 +371,15 @@
 
   <dialog id="preferences-dialog" class="preferences-dialog" aria-labelledby="preferences-title">
     <header class="dialog-header">
-      <strong id="preferences-title" data-i18n="Appearance and language">Appearance and language</strong>
+      <strong id="preferences-title" data-i18n="Settings">Settings</strong>
       <button id="preferences-close" type="button" data-i18n="Close">Close</button>
     </header>
+    <nav class="preferences-tabs" role="tablist" aria-label="Settings sections" data-i18n-aria-label="Settings sections">
+      <button class="preferences-tab active" type="button" role="tab" aria-selected="true" data-preferences-tab="general" data-i18n="General">General</button>
+      <button id="maintenance-settings-tab" class="preferences-tab" type="button" role="tab" aria-selected="false" data-preferences-tab="maintenance" data-i18n="Automatic maintenance">Automatic maintenance</button>
+    </nav>
     <div class="preferences-content">
-      <section class="preferences-section">
+      <section class="preferences-section preferences-panel active" data-preferences-panel="general">
         <h2 data-i18n="Theme">Theme</h2>
         <div class="segmented-control" role="group" aria-label="Theme" data-i18n-aria-label="Theme">
           <button type="button" data-theme-setting="system" data-i18n="Follow system">Follow system</button>
@@ -375,7 +387,7 @@
           <button type="button" data-theme-setting="dark" data-i18n="Dark">Dark</button>
         </div>
       </section>
-      <section class="preferences-section">
+      <section class="preferences-section preferences-panel" data-preferences-panel="general">
         <h2 data-i18n="Language">Language</h2>
         <div class="segmented-control" role="group" aria-label="Language" data-i18n-aria-label="Language">
           <button type="button" data-language-setting="system" data-i18n="Follow system">Follow system</button>
@@ -383,10 +395,28 @@
           <button type="button" data-language-setting="zh" data-i18n="Chinese">Chinese</button>
         </div>
       </section>
+      <section class="preferences-section preferences-panel" data-preferences-panel="general">
+        <h2 data-i18n="Page results">Page results</h2>
+        <label class="preferences-select"><span data-i18n="Results per page">Results per page</span><select id="page-limit-setting"><option value="10">10</option><option value="20">20</option><option value="30">30</option></select><small data-i18n="Changing this reloads the current page list.">Changing this reloads the current page list.</small></label>
+      </section>
+      <section id="maintenance-settings-section" class="preferences-section preferences-panel" data-preferences-panel="maintenance" hidden>
+        <h2 data-i18n="Automatic maintenance">Automatic maintenance</h2>
+        <p class="muted preferences-copy" data-i18n="Changes restart the Runtime. Suggested relations still require review.">Changes restart the Runtime. Suggested relations still require review.</p>
+        <form id="maintenance-settings-form" class="maintenance-settings-form">
+          <label class="maintenance-settings-toggle"><input id="maintenance-settings-enabled" type="checkbox"><span><strong data-i18n="Enable automatic maintenance">Enable automatic maintenance</strong><small data-i18n="When disabled, Runtime records no automatic maintenance heartbeat.">When disabled, Runtime records no automatic maintenance heartbeat.</small></span></label>
+          <label><span data-i18n="Mode">Mode</span><select id="maintenance-settings-mode"><option value="observe" data-i18n="Observe">Observe</option><option value="apply" data-i18n="Apply">Apply</option></select></label>
+          <div class="maintenance-settings-grid">
+            <label><span data-i18n="New Pages">New Pages</span><input id="maintenance-settings-min-pages" type="number" min="1" required></label>
+            <label><span data-i18n="Quiet period (minutes)">Quiet period (minutes)</span><input id="maintenance-settings-quiet" type="number" min="1" required></label>
+            <label><span data-i18n="Maximum wait (minutes)">Maximum wait (minutes)</span><input id="maintenance-settings-max-wait" type="number" min="1" required></label>
+          </div>
+          <button id="maintenance-settings-save" class="primary-button" type="submit" data-i18n="Save and restart Runtime">Save and restart Runtime</button>
+        </form>
+      </section>
     </div>
   </dialog>
 
   <div id="error" class="error" hidden></div>
-  <script type="module" src="/app.js?v=20260818.2"></script>
+  <script type="module" src="/app.js?v=20260818.7"></script>
 </body>
 </html>

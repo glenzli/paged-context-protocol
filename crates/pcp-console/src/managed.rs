@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use pcp_runtime::{MaintenanceMode, RuntimeConfig};
 use tokio::{
     process::{Child, Command},
     sync::Mutex,
@@ -85,6 +86,15 @@ pub(super) struct ManagedRuntimeStatus {
     pub home: PathBuf,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct MaintenanceSettings {
+    pub enabled: bool,
+    pub mode: MaintenanceMode,
+    pub min_new_pages: usize,
+    pub quiet_period_seconds: u64,
+    pub max_wait_seconds: u64,
+}
+
 impl ManagedRuntime {
     pub(super) async fn start(options: ManagedOptions) -> Result<Arc<Self>> {
         let paths = ManagedPaths::prepare(options.home)?;
@@ -113,6 +123,15 @@ impl ManagedRuntime {
         stop_child(previous).await?;
         self.start_locked(&mut child).await?;
         Ok(self.status_locked(&child))
+    }
+
+    pub(super) async fn update_maintenance_settings(
+        &self,
+        settings: MaintenanceSettings,
+    ) -> Result<ManagedRuntimeStatus> {
+        settings.validate()?;
+        rewrite_maintenance_settings(&self.paths.runtime_config, &settings)?;
+        self.restart().await
     }
 
     pub(super) async fn shutdown(&self) -> Result<()> {
@@ -194,6 +213,130 @@ impl ManagedRuntime {
             home: self.paths.home.clone(),
         }
     }
+}
+
+impl MaintenanceSettings {
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(self.min_new_pages > 0, "minimum new Pages must be positive");
+        anyhow::ensure!(
+            self.quiet_period_seconds > 0,
+            "quiet period must be positive"
+        );
+        anyhow::ensure!(
+            self.max_wait_seconds >= self.quiet_period_seconds,
+            "maximum wait must not be shorter than the quiet period"
+        );
+        Ok(())
+    }
+}
+
+fn rewrite_maintenance_settings(path: &Path, settings: &MaintenanceSettings) -> Result<()> {
+    let original = fs::read_to_string(path)
+        .with_context(|| format!("read managed Runtime configuration {}", path.display()))?;
+    let mode = match settings.mode {
+        MaintenanceMode::Observe => "\"observe\"",
+        MaintenanceMode::Apply => "\"apply\"",
+    };
+    let rewritten = rewrite_toml_key(
+        &original,
+        "maintenance",
+        "enabled",
+        &settings.enabled.to_string(),
+    )?;
+    let rewritten = rewrite_toml_key(&rewritten, "maintenance", "mode", mode)?;
+    let rewritten = rewrite_toml_key(
+        &rewritten,
+        "maintenance.write_trigger",
+        "min_new_pages",
+        &settings.min_new_pages.to_string(),
+    )?;
+    let rewritten = rewrite_toml_key(
+        &rewritten,
+        "maintenance.write_trigger",
+        "quiet_period_seconds",
+        &settings.quiet_period_seconds.to_string(),
+    )?;
+    let rewritten = rewrite_toml_key(
+        &rewritten,
+        "maintenance.write_trigger",
+        "max_wait_seconds",
+        &settings.max_wait_seconds.to_string(),
+    )?;
+    let temporary = path.with_extension("toml.tmp");
+    fs::write(&temporary, rewritten).with_context(|| {
+        format!(
+            "write managed Runtime configuration {}",
+            temporary.display()
+        )
+    })?;
+    let config = RuntimeConfig::load(&temporary)?;
+    config
+        .maintenance
+        .as_ref()
+        .context("managed Runtime configuration has no maintenance section")?
+        .validate()?;
+    let permissions = fs::metadata(path)
+        .with_context(|| format!("inspect managed Runtime configuration {}", path.display()))?
+        .permissions();
+    fs::set_permissions(&temporary, permissions).with_context(|| {
+        format!(
+            "secure managed Runtime configuration {}",
+            temporary.display()
+        )
+    })?;
+    fs::rename(&temporary, path)
+        .with_context(|| format!("publish managed Runtime configuration {}", path.display()))
+}
+
+fn rewrite_toml_key(source: &str, section: &str, key: &str, value: &str) -> Result<String> {
+    let header = format!("[{section}]");
+    let mut output = String::with_capacity(source.len() + key.len() + value.len() + 8);
+    let mut in_section = false;
+    let mut section_found = false;
+    let mut key_written = false;
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed == header {
+            section_found = true;
+            in_section = true;
+            output.push_str(line);
+            continue;
+        }
+        if in_section && trimmed.starts_with('[') {
+            if !key_written {
+                output.push_str(&format!("{key} = {value}\n"));
+                key_written = true;
+            }
+            in_section = false;
+        }
+        if in_section
+            && trimmed
+                .strip_prefix(key)
+                .is_some_and(|suffix| suffix.trim_start().starts_with('='))
+        {
+            output.push_str(&format!("{key} = {value}\n"));
+            key_written = true;
+        } else {
+            output.push_str(line);
+        }
+    }
+    if section_found && in_section && !key_written {
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str(&format!("{key} = {value}\n"));
+    }
+    if !section_found {
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str(&format!("\n[{section}]\n{key} = {value}\n"));
+    }
+    anyhow::ensure!(
+        section_found || output.contains(&header),
+        "could not write managed Runtime configuration section [{section}]"
+    );
+    Ok(output)
 }
 
 #[derive(Clone, Debug)]
@@ -335,5 +478,33 @@ mod tests {
             0o600
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn maintenance_settings_rewriter_preserves_other_runtime_configuration() {
+        let source = "store_path = \"/tmp/context.sqlite3\"\n\n[maintenance]\nenabled = false\nmode = \"observe\"\nstate_path = \"/tmp/maintenance.json\"\n\n[maintenance.worker]\nprovider = \"infer_runtime\"\n";
+        let settings = MaintenanceSettings {
+            enabled: true,
+            mode: MaintenanceMode::Apply,
+            min_new_pages: 8,
+            quiet_period_seconds: 600,
+            max_wait_seconds: 3600,
+        };
+        let rewritten =
+            rewrite_toml_key(source, "maintenance", "enabled", "true").expect("rewrite enabled");
+        let rewritten =
+            rewrite_toml_key(&rewritten, "maintenance", "mode", "\"apply\"").expect("rewrite mode");
+        let rewritten = rewrite_toml_key(
+            &rewritten,
+            "maintenance.write_trigger",
+            "min_new_pages",
+            &settings.min_new_pages.to_string(),
+        )
+        .expect("add trigger minimum");
+        assert!(rewritten.contains("store_path = \"/tmp/context.sqlite3\""));
+        assert!(rewritten.contains("[maintenance.worker]\nprovider = \"infer_runtime\""));
+        assert!(rewritten.contains("enabled = true"));
+        assert!(rewritten.contains("mode = \"apply\""));
+        assert!(rewritten.contains("[maintenance.write_trigger]\nmin_new_pages = 8"));
     }
 }

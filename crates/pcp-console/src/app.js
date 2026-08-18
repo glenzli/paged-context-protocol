@@ -3,13 +3,15 @@ import { describePagePayload, pagePayloadPreviewText } from "/page-content.js?v=
 import { createHealthView } from "/health-view.js?v=20260816.3";
 import { createRetentionView } from "/retention-view.js?v=20260818.1";
 
-const PAGE_LIMIT = 20;
+const DEFAULT_PAGE_LIMIT = 20;
+const PAGE_LIMIT_OPTIONS = new Set([10, 20, 30]);
 const ACCESS_LIMIT = 50;
 // Local summary workers receive one Page at a time so an incomplete response
 // affects only that Page and can be retried independently.
 const SUMMARY_REVIEW_BATCH_SIZE = 1;
 const THEME_STORAGE_KEY = "pcp-console.theme";
 const LANGUAGE_STORAGE_KEY = "pcp-console.language";
+const PAGE_LIMIT_STORAGE_KEY = "pcp-console.pages-per-page";
 const ZH_MESSAGES = {
   "24 hours": "24 小时",
   "7 days": "7 天",
@@ -25,6 +27,36 @@ const ZH_MESSAGES = {
   "Analyze": "分析",
   "Analysis failed": "分析失败",
   "Analysis incomplete": "分析未完成",
+  "Automatic maintenance": "自动维护",
+  "Settings": "设置",
+  "General": "通用",
+  "Settings sections": "设置分区",
+  "Automatic maintenance settings": "自动维护设置",
+  "Changes restart the Runtime. Suggested relations still require review.": "保存后会重启 Runtime；建议关联仍需人工审核。",
+  "Enable automatic maintenance": "启用自动维护",
+  "When disabled, Runtime records no automatic maintenance heartbeat.": "禁用时，Runtime 不会记录自动维护心跳。",
+  "Mode": "模式",
+  "Observe": "观察",
+  "Apply": "应用",
+  "New Pages": "新增页面数",
+  "Quiet period (minutes)": "静默期（分钟）",
+  "Maximum wait (minutes)": "最长等待（分钟）",
+  "Maximum wait must be at least the quiet period, and all values must be positive.": "最长等待必须不小于静默期，且所有值必须为正数。",
+  "Save and restart Runtime": "保存并重启 Runtime",
+  "Runtime-owned write-trigger state. It never makes suggested relations retrievable.": "由 Runtime 持有的写入触发状态；建议关联不会因此参与检索。",
+  "Not started": "尚未开始",
+  "Waiting": "等待写入",
+  "Running": "正在执行",
+  "Failed": "失败",
+  "Stale": "状态过期",
+  "Disabled": "已禁用",
+  "Observed heads": "已观测页面头",
+  "Dirty regions": "待整理范围",
+  "Ready regions": "已就绪范围",
+  "Pending relation review": "待审关联",
+  "Write trigger": "写入触发条件",
+  "Last completed": "最近完成",
+  "Awaiting the first Runtime heartbeat.": "等待 Runtime 首次心跳。",
   "Approve": "批准",
   "Analyzing": "正在分析",
   "Batches completed": "已完成批次",
@@ -263,8 +295,11 @@ const ZH_MESSAGES = {
   "Filter Pages": "筛选页面",
   "Next page": "下一页",
   "Page number": "第",
+  "Page results": "页面结果",
   "Pages pagination": "页面分页",
   "Previous page": "上一页",
+  "Results per page": "每页展示条目",
+  "Changing this reloads the current page list.": "更改后会重新加载当前页面列表。",
   "Sort by": "排序条件",
   "Sort direction": "排序方向",
   "Sort Pages": "排序页面",
@@ -428,6 +463,8 @@ const ZH_MESSAGES = {
 
 let themeSetting = "system";
 let languageSetting = "system";
+let pageLimit = DEFAULT_PAGE_LIMIT;
+let activePreferencesTab = "general";
 let currentLanguage = "en";
 
 function readPreference(key, fallback) {
@@ -436,6 +473,19 @@ function readPreference(key, fallback) {
 
 function writePreference(key, value) {
   try { window.localStorage.setItem(key, value); } catch (_) {}
+}
+
+function normalizedPageLimit(value) {
+  const limit = Number(value);
+  return PAGE_LIMIT_OPTIONS.has(limit) ? limit : DEFAULT_PAGE_LIMIT;
+}
+
+function setPageLimit(value) {
+  pageLimit = normalizedPageLimit(value);
+  writePreference(PAGE_LIMIT_STORAGE_KEY, String(pageLimit));
+  byId("page-limit-setting").value = String(pageLimit);
+  resetPages();
+  if (state.pages.loaded) loadPages().catch(showError);
 }
 
 function resolvedLanguage() {
@@ -544,9 +594,17 @@ function applyPreferences() {
 function initializeConsolePreferences() {
   themeSetting = readPreference(THEME_STORAGE_KEY, "system");
   languageSetting = readPreference(LANGUAGE_STORAGE_KEY, "system");
+  pageLimit = normalizedPageLimit(readPreference(PAGE_LIMIT_STORAGE_KEY, String(DEFAULT_PAGE_LIMIT)));
+  byId("page-limit-setting").value = String(pageLimit);
   applyPreferences();
-  byId("preferences-open").addEventListener("click", () => byId("preferences-dialog").showModal());
+  byId("preferences-open").addEventListener("click", () => openPreferences().catch(showError));
   byId("preferences-close").addEventListener("click", () => byId("preferences-dialog").close());
+  document.querySelectorAll("[data-preferences-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      activePreferencesTab = button.dataset.preferencesTab;
+      renderPreferencesTabs();
+    });
+  });
   document.querySelectorAll("[data-theme-setting]").forEach((button) => {
     button.addEventListener("click", () => {
       themeSetting = button.dataset.themeSetting;
@@ -563,6 +621,7 @@ function initializeConsolePreferences() {
       if (currentLanguage !== wasLanguage) rerenderForLocale();
     });
   });
+  byId("page-limit-setting").addEventListener("change", (event) => setPageLimit(event.target.value));
   window.addEventListener("languagechange", () => {
     if (languageSetting === "system") {
       const wasLanguage = currentLanguage;
@@ -1099,7 +1158,7 @@ function renderPages(data, page) {
   state.pages.cursors.set(page + 1, data.nextCursor || null);
   state.pages.loaded = true;
   byId("pages-status").textContent = `${scopeName(state.pages.scope)} · ${pageOrderLabel(pageOrderValue())}`;
-  const pageCount = Math.max(1, Math.ceil(state.pages.total / PAGE_LIMIT));
+  const pageCount = Math.max(1, Math.ceil(state.pages.total / pageLimit));
   byId("pages-loaded").textContent = `${formatNumber(state.pages.total)} ${t("Pages")}`;
   byId("pages-current").textContent = `${t("Page number")} ${formatNumber(page)} / ${formatNumber(pageCount)} ${t("Pages")}`;
   byId("pages-pager").hidden = pageCount <= 1;
@@ -1167,7 +1226,7 @@ async function loadPages({ page = state.pages.page } = {}) {
   byId("pages-previous").disabled = true;
   byId("pages-next").disabled = true;
   try {
-    const params = new URLSearchParams({ limit: String(PAGE_LIMIT) });
+    const params = new URLSearchParams({ limit: String(pageLimit) });
     const query = byId("query").value.trim();
     const scope = state.pages.scope;
     if (query) {
@@ -1241,7 +1300,115 @@ function resetMaintenanceSession() {
 function renderMaintenanceStatus(status) {
   state.maintenance.status = status;
   state.maintenance.loaded = true;
+  renderAutomationStatus();
   renderMaintenanceSession();
+}
+
+function automationStateLabel(status) {
+  if (!status.enabled) return t("Disabled");
+  const labels = {
+    not_started: "Not started",
+    waiting: "Waiting",
+    running: "Running",
+    failed: "Failed",
+    stale: "Stale",
+  };
+  return t(labels[status.automation?.state] || "Not started");
+}
+
+function automationStateTone(status) {
+  if (!status.enabled || status.automation?.state === "not_started") return "warning";
+  if (["failed", "stale"].includes(status.automation?.state)) return "danger";
+  if (status.automation?.state === "running") return "info";
+  return "positive";
+}
+
+function renderAutomationStatus() {
+  const status = state.maintenance.status;
+  const section = byId("maintenance-automation-status");
+  section.hidden = !status?.available;
+  if (section.hidden) return;
+  const automation = status.automation || {};
+  const trigger = status.writeTrigger || {};
+  const stateNode = byId("maintenance-automation-state");
+  stateNode.textContent = automationStateLabel(status);
+  stateNode.className = `status-pill status-${automationStateTone(status)}`;
+  byId("maintenance-automation-metrics").replaceChildren(
+    metric(t("Observed heads"), formatNumber(automation.observedPageCount)),
+    metric(t("Dirty regions"), formatNumber(automation.dirtyRegionCount), automation.dirtyRegionCount ? "warning" : ""),
+    metric(t("Ready regions"), formatNumber(automation.readyRegionCount), automation.readyRegionCount ? "info" : ""),
+    metric(t("Pending relation review"), formatNumber(automation.pendingRelationReviewCount), automation.pendingRelationReviewCount ? "warning" : ""),
+    metric(t("Write trigger"), `${formatNumber(trigger.minNewPages)} / ${Math.round((trigger.quietPeriodSeconds || 0) / 60)}m / ${Math.round((trigger.maxWaitSeconds || 0) / 60)}m`),
+  );
+  const completed = automation.lastCompletedAt;
+  byId("maintenance-automation-detail").textContent = completed
+    ? `${t("Last completed")}: ${formatTime(completed)}`
+    : t("Awaiting the first Runtime heartbeat.");
+  const error = byId("maintenance-automation-error");
+  error.hidden = !automation.lastError;
+  error.textContent = automation.lastError || "";
+}
+
+function populateMaintenanceSettings() {
+  const status = state.maintenance.status;
+  const configurable = Boolean(status?.configurable);
+  byId("maintenance-settings-section").hidden = !configurable;
+  byId("maintenance-settings-tab").hidden = !configurable;
+  if (!configurable && activePreferencesTab === "maintenance") activePreferencesTab = "general";
+  if (!configurable) return;
+  const trigger = status.writeTrigger || {};
+  byId("maintenance-settings-enabled").checked = Boolean(status.enabled);
+  byId("maintenance-settings-mode").value = status.mode || "observe";
+  byId("maintenance-settings-min-pages").value = trigger.minNewPages || 8;
+  byId("maintenance-settings-quiet").value = Math.max(1, Math.round((trigger.quietPeriodSeconds || 600) / 60));
+  byId("maintenance-settings-max-wait").value = Math.max(1, Math.round((trigger.maxWaitSeconds || 3600) / 60));
+}
+
+function renderPreferencesTabs() {
+  document.querySelectorAll("[data-preferences-tab]").forEach((button) => {
+    const active = button.dataset.preferencesTab === activePreferencesTab && !button.hidden;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  document.querySelectorAll("[data-preferences-panel]").forEach((panel) => {
+    panel.classList.toggle("active", panel.dataset.preferencesPanel === activePreferencesTab && !panel.hidden);
+  });
+}
+
+async function openPreferences() {
+  if (!state.maintenance.loaded) renderMaintenanceStatus(await api("/api/maintenance"));
+  populateMaintenanceSettings();
+  activePreferencesTab = "general";
+  renderPreferencesTabs();
+  byId("preferences-dialog").showModal();
+}
+
+async function saveMaintenanceSettings(event) {
+  event.preventDefault();
+  const minNewPages = Number(byId("maintenance-settings-min-pages").value);
+  const quietPeriodSeconds = Number(byId("maintenance-settings-quiet").value) * 60;
+  const maxWaitSeconds = Number(byId("maintenance-settings-max-wait").value) * 60;
+  if (!Number.isInteger(minNewPages) || minNewPages < 1 || !Number.isInteger(quietPeriodSeconds) || quietPeriodSeconds < 60 || !Number.isInteger(maxWaitSeconds) || maxWaitSeconds < quietPeriodSeconds) {
+    showError(new Error(t("Maximum wait must be at least the quiet period, and all values must be positive.")));
+    return;
+  }
+  const save = byId("maintenance-settings-save");
+  save.disabled = true;
+  try {
+    await maintenanceMutation("/api/maintenance/settings", {
+      enabled: byId("maintenance-settings-enabled").checked,
+      mode: byId("maintenance-settings-mode").value,
+      minNewPages,
+      quietPeriodSeconds,
+      maxWaitSeconds,
+    });
+    byId("preferences-dialog").close();
+    await refresh();
+  } catch (error) {
+    showError(error);
+  } finally {
+    save.disabled = false;
+  }
 }
 
 function compactRelationReviewPreview(value, limit = 220) {
@@ -2261,7 +2428,10 @@ function rerenderForLocale() {
   if (state.overview) renderOverview(state.overview);
   const currentPage = state.pages.pageCache.get(state.pages.page);
   if (currentPage) renderPages(currentPage, state.pages.page);
-  if (state.maintenance.loaded) renderMaintenanceSession();
+  if (state.maintenance.loaded) {
+    renderAutomationStatus();
+    renderMaintenanceSession();
+  }
   healthView.rerender();
   retentionView.rerender();
 }
@@ -2344,9 +2514,15 @@ byId("maintenance-retry-failed").addEventListener("click", () => retryFailedSumm
 byId("maintenance-rescan").addEventListener("click", () => rescanMaintenancePhase().catch(showError));
 byId("maintenance-cancel").addEventListener("click", () => cancelMaintenanceSession().catch(showError));
 byId("maintenance-start-new").addEventListener("click", () => startMaintenanceSession().catch(showError));
+byId("maintenance-settings-form").addEventListener("submit", (event) => saveMaintenanceSettings(event).catch(showError));
 byId("maintenance-select-all").addEventListener("change", toggleMaintenanceSelection);
 byId("access-more").addEventListener("click", () => loadAccess({ append: true }).catch(showError));
 byId("health-window").addEventListener("change", () => healthView.load({ reload: true }).catch(showError));
 refresh();
 loadEnrollment();
 window.setInterval(() => loadEnrollment(), 3000);
+window.setInterval(() => {
+  if (state.activeView === "maintenance" && !state.maintenance.busy) {
+    loadMaintenance({ reload: true }).catch(showError);
+  }
+}, 15_000);

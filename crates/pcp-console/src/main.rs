@@ -28,7 +28,7 @@ use pcp_runtime::{
     AnalyzeMaintenancePacksRequest, AnalyzeMaintenanceRelationRequest,
     AnalyzeMaintenanceSummariesRequest, AnalyzeMaintenanceSummaryRequest,
     ApplyMaintenancePackRequest, ApplyMaintenanceRelationRequest, ApplyMaintenanceSummaryRequest,
-    MaintenanceOperator, RuntimeConfig,
+    MaintenanceMode, MaintenanceOperator, RuntimeConfig, RuntimeMaintainer,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -42,7 +42,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_PAGE_LIMIT: u32 = 20;
 const MAX_PAGE_LIMIT: u32 = 50;
-const PAGE_LIST_PREVIEW_CHARS: u32 = 8_000;
+// The Console offers up to 30 rows at once. Reserve enough preview budget for
+// 30 bounded 700-character snippets so the Store can fulfill that selection.
+const PAGE_LIST_PREVIEW_CHARS: u32 = 32_000;
 const MAX_HISTORY_REVISIONS: usize = 20;
 const MAX_RETENTION_SAMPLE_LIMIT: u32 = 100;
 const MAX_LOCAL_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
@@ -204,6 +206,16 @@ struct RelationReviewDecisionRequest {
     suppress: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MaintenanceSettingsRequest {
+    enabled: bool,
+    mode: MaintenanceMode,
+    min_new_pages: usize,
+    quiet_period_seconds: u64,
+    max_wait_seconds: u64,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let runtime = match managed::ManagedOptions::parse(env::args_os().skip(1))? {
@@ -285,6 +297,10 @@ fn router(state: AppState) -> Router {
         .route("/api/metrics", get(health_metrics))
         .route("/api/retention", get(retention_plan))
         .route("/api/maintenance", get(maintenance_status))
+        .route(
+            "/api/maintenance/settings",
+            post(update_maintenance_settings),
+        )
         .route("/api/maintenance/scan", post(maintenance_scan))
         .route("/api/maintenance/analyze", post(maintenance_analyze))
         .route("/api/maintenance/packs/apply", post(maintenance_apply_pack))
@@ -809,12 +825,20 @@ async fn maintenance_status(State(state): State<AppState>) -> Result<Json<Value>
             "configPath": config_path,
         })));
     };
+    let automation = RuntimeMaintainer::automation_status(&maintenance).await?;
     Ok(Json(json!({
         "available": true,
+        "configurable": state.runtime.is_some(),
         "enabled": maintenance.enabled,
         "mode": maintenance.mode,
         "intervalSeconds": maintenance.interval_seconds,
         "maxJobsPerCycle": maintenance.max_jobs_per_cycle,
+        "writeTrigger": {
+            "minNewPages": maintenance.write_trigger.min_new_pages,
+            "quietPeriodSeconds": maintenance.write_trigger.quiet_period_seconds,
+            "maxWaitSeconds": maintenance.write_trigger.max_wait_seconds,
+        },
+        "automation": automation,
         "packing": {
             "enabled": maintenance.packing.enabled,
             "maxPages": maintenance.packing.max_pages,
@@ -822,6 +846,32 @@ async fn maintenance_status(State(state): State<AppState>) -> Result<Json<Value>
             "analysisWindowPages": maintenance.packing.effective_analysis_window_pages(),
             "routingCharsPerPage": maintenance.packing.routing_chars_per_page,
         },
+    })))
+}
+
+async fn update_maintenance_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<MaintenanceSettingsRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let runtime = state
+        .runtime
+        .as_ref()
+        .context("PCP Console can update maintenance settings only in managed mode")?;
+    let status = runtime
+        .update_maintenance_settings(managed::MaintenanceSettings {
+            enabled: request.enabled,
+            mode: request.mode,
+            min_new_pages: request.min_new_pages,
+            quiet_period_seconds: request.quiet_period_seconds,
+            max_wait_seconds: request.max_wait_seconds,
+        })
+        .await?;
+    Ok(Json(json!({
+        "saved": true,
+        "restarted": true,
+        "pid": status.pid,
     })))
 }
 

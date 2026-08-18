@@ -22,12 +22,12 @@ use super::{
     AnalyzeMaintenancePacksRequest, AnalyzeMaintenanceRelationRequest,
     AnalyzeMaintenanceSummariesRequest, AnalyzeMaintenanceSummaryRequest,
     ApplyMaintenancePackRequest, ApplyMaintenanceRelationRequest, ApplyMaintenanceSummaryRequest,
-    CommandSemanticWorker, MaintenanceConfig, MaintenanceMode, MaintenanceRunAudit,
-    MaintenanceWorkerConfig, MaintenanceWorkerRequest, MaintenanceWorkerResponse,
-    PackingCandidateGroup, PackingMaintenanceConfig, RelationCandidatePage,
-    RelationMaintenanceConfig, RetentionMaintenanceConfig, RetentionMilestone, RuntimeMaintainer,
-    SemanticMaintenanceWorker, SummaryMaintenanceConfig, WriteTriggeredMaintenanceConfig,
-    worker::PackingCandidatePage,
+    CommandSemanticWorker, MaintenanceAutomationState, MaintenanceConfig, MaintenanceMode,
+    MaintenanceRunAudit, MaintenanceWorkerConfig, MaintenanceWorkerRequest,
+    MaintenanceWorkerResponse, PackingCandidateGroup, PackingMaintenanceConfig,
+    RelationCandidatePage, RelationMaintenanceConfig, RetentionMaintenanceConfig,
+    RetentionMilestone, RuntimeMaintainer, SemanticMaintenanceWorker, SummaryMaintenanceConfig,
+    WriteTriggeredMaintenanceConfig, worker::PackingCandidatePage,
 };
 
 struct FakeWorker {
@@ -2234,6 +2234,7 @@ async fn scheduled_relation_waits_for_review_before_it_is_asserted() {
     config.write_trigger.quiet_period_seconds = 0;
     config.write_trigger.max_wait_seconds = 0;
     let state_path = config.state_path.clone();
+    let status_config = config.clone();
     let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
 
     let baseline = maintainer
@@ -2257,6 +2258,21 @@ async fn scheduled_relation_waits_for_review_before_it_is_asserted() {
         .expect("schedule conservative relation review");
     assert_eq!(report.relations_proposed, 1);
     assert_eq!(report.relations_committed, 0);
+    let automation = RuntimeMaintainer::automation_status(&status_config)
+        .await
+        .expect("read persisted automatic maintenance state");
+    assert!(matches!(
+        automation.state,
+        MaintenanceAutomationState::Waiting
+    ));
+    assert_eq!(
+        automation
+            .last_report
+            .expect("scheduled report")
+            .relations_proposed,
+        1
+    );
+    assert_eq!(automation.pending_relation_review_count, 1);
     let reviews = maintainer.pending_relation_reviews();
     assert_eq!(reviews.len(), 1);
     let reviewed_page_ids = reviews[0]

@@ -30,6 +30,7 @@ pub use coordinator::{
 };
 pub use infer_worker::InferRuntimeSemanticWorker;
 pub use ledger::{
+    MaintenanceAutomationState, MaintenanceAutomationStatus, MaintenanceDirtyRegionStatus,
     MaintenanceRelationReviewPage, MaintenanceRelationReviewProposal,
     MaintenanceRelationReviewStatus,
 };

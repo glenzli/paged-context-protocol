@@ -9,7 +9,7 @@ use pcp_store::DurablePageInventoryItem;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::WriteTriggeredMaintenanceConfig;
+use super::{MaintenanceConfig, MaintenanceCycleReport, WriteTriggeredMaintenanceConfig};
 
 const LEDGER_RETENTION_MILLIS: u64 = 30 * 24 * 60 * 60 * 1_000;
 
@@ -22,6 +22,43 @@ pub(crate) struct MaintenanceLedger {
     write_trigger: WriteTriggerLedger,
     #[serde(default)]
     relation_reviews: BTreeMap<String, MaintenanceRelationReviewProposal>,
+    #[serde(default)]
+    scheduler: SchedulerLedger,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaintenanceAutomationState {
+    NotStarted,
+    Waiting,
+    Running,
+    Failed,
+    Stale,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceAutomationStatus {
+    pub state: MaintenanceAutomationState,
+    pub last_started_at: Option<String>,
+    pub last_completed_at: Option<String>,
+    pub last_error: Option<String>,
+    pub last_report: Option<MaintenanceCycleReport>,
+    pub observed_page_count: usize,
+    pub dirty_region_count: usize,
+    pub ready_region_count: usize,
+    pub pending_relation_review_count: usize,
+    pub dirty_regions: Vec<MaintenanceDirtyRegionStatus>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceDirtyRegionStatus {
+    pub region: String,
+    pub new_page_count: usize,
+    pub first_dirty_at: String,
+    pub last_write_at: String,
+    pub ready: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -65,6 +102,15 @@ struct DirtyRegion {
     first_dirty_at_unix_ms: u64,
     last_dirty_at_unix_ms: u64,
     new_page_ids: BTreeSet<String>,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SchedulerLedger {
+    last_started_at_unix_ms: Option<u64>,
+    last_completed_at_unix_ms: Option<u64>,
+    last_error: Option<String>,
+    last_report: Option<MaintenanceCycleReport>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -225,6 +271,78 @@ impl MaintenanceLedger {
         Ok(())
     }
 
+    pub(crate) fn start_scheduled_cycle(&mut self) {
+        self.scheduler.last_started_at_unix_ms = Some(now_unix_ms());
+        self.scheduler.last_error = None;
+    }
+
+    pub(crate) fn complete_scheduled_cycle(&mut self, report: MaintenanceCycleReport) {
+        self.scheduler.last_completed_at_unix_ms = Some(now_unix_ms());
+        self.scheduler.last_error = None;
+        self.scheduler.last_report = Some(report);
+    }
+
+    pub(crate) fn fail_scheduled_cycle(&mut self, error: impl std::fmt::Display) {
+        self.scheduler.last_completed_at_unix_ms = Some(now_unix_ms());
+        self.scheduler.last_error = Some(error.to_string());
+    }
+
+    pub(crate) fn automation_status(
+        &self,
+        config: &MaintenanceConfig,
+    ) -> MaintenanceAutomationStatus {
+        let now = now_unix_ms();
+        let ready_regions = self.ready_regions_at(&config.write_trigger, now);
+        let state = match (
+            self.scheduler.last_started_at_unix_ms,
+            self.scheduler.last_completed_at_unix_ms,
+            self.scheduler.last_error.as_ref(),
+        ) {
+            (None, _, _) => MaintenanceAutomationState::NotStarted,
+            (Some(started), Some(completed), _) if completed < started => {
+                MaintenanceAutomationState::Running
+            }
+            (_, _, Some(_)) => MaintenanceAutomationState::Failed,
+            (_, Some(completed), _)
+                if now.saturating_sub(completed)
+                    > config
+                        .interval_seconds
+                        .saturating_mul(2)
+                        .saturating_mul(1_000) =>
+            {
+                MaintenanceAutomationState::Stale
+            }
+            _ => MaintenanceAutomationState::Waiting,
+        };
+        let dirty_regions = self
+            .write_trigger
+            .dirty_regions
+            .iter()
+            .map(|(region, dirty)| MaintenanceDirtyRegionStatus {
+                region: region.clone(),
+                new_page_count: dirty.new_page_ids.len(),
+                first_dirty_at: timestamp_string(dirty.first_dirty_at_unix_ms),
+                last_write_at: timestamp_string(dirty.last_dirty_at_unix_ms),
+                ready: ready_regions.contains(region),
+            })
+            .collect();
+        MaintenanceAutomationStatus {
+            state,
+            last_started_at: self.scheduler.last_started_at_unix_ms.map(timestamp_string),
+            last_completed_at: self
+                .scheduler
+                .last_completed_at_unix_ms
+                .map(timestamp_string),
+            last_error: self.scheduler.last_error.clone(),
+            last_report: self.scheduler.last_report.clone(),
+            observed_page_count: self.write_trigger.observed_revisions.len(),
+            dirty_region_count: self.write_trigger.dirty_regions.len(),
+            ready_region_count: ready_regions.len(),
+            pending_relation_review_count: self.relation_reviews().len(),
+            dirty_regions,
+        }
+    }
+
     /// Records only current Page-head changes.  The first observation establishes
     /// a watermark; it deliberately does not turn a pre-existing Store backlog
     /// into an automatic semantic-maintenance run.
@@ -380,6 +498,12 @@ fn now_unix_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+fn timestamp_string(unix_ms: u64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(unix_ms as i64)
+        .map(|timestamp| timestamp.to_rfc3339())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

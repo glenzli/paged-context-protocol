@@ -20,9 +20,9 @@ use super::{
     PackingMaintenanceConfig, RelationMaintenanceConfig, RetentionMilestone,
     SemanticMaintenanceWorker,
     ledger::{
-        MaintenanceLedger, MaintenanceRelationReviewPage, MaintenanceRelationReviewProposal,
-        MaintenanceRelationReviewStatus, maintenance_region_key, packing_key, retention_window_key,
-        selection_window_key, summary_key,
+        MaintenanceAutomationStatus, MaintenanceLedger, MaintenanceRelationReviewPage,
+        MaintenanceRelationReviewProposal, MaintenanceRelationReviewStatus, maintenance_region_key,
+        packing_key, retention_window_key, selection_window_key, summary_key,
     },
     worker::{
         MaintenanceDetailPage, MaintenanceRoutingPage, PackingCandidateGroup, PackingCandidatePage,
@@ -444,6 +444,14 @@ impl RuntimeMaintainer {
         }
     }
 
+    pub async fn automation_status(
+        config: &MaintenanceConfig,
+    ) -> Result<MaintenanceAutomationStatus> {
+        Ok(MaintenanceLedger::load(&config.state_path)
+            .await?
+            .automation_status(config))
+    }
+
     pub async fn run_once(&mut self) -> Result<MaintenanceCycleReport> {
         self.run_once_inner(true, self.config.max_jobs_per_cycle, None, false)
             .await
@@ -467,12 +475,29 @@ impl RuntimeMaintainer {
     /// maximum discovery latency for a lightweight inventory watermark; no
     /// semantic worker is called until a dirty region becomes eligible.
     pub(crate) async fn run_scheduled_cycle(&mut self) -> Result<MaintenanceCycleReport> {
+        self.ledger.start_scheduled_cycle();
+        self.ledger.save(&self.config.state_path).await?;
+        let result = self.run_scheduled_cycle_inner().await;
+        match result {
+            Ok(report) => {
+                self.ledger.complete_scheduled_cycle(report.clone());
+                self.ledger.save(&self.config.state_path).await?;
+                Ok(report)
+            }
+            Err(error) => {
+                self.ledger.fail_scheduled_cycle(&error);
+                let _ = self.ledger.save(&self.config.state_path).await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn run_scheduled_cycle_inner(&mut self) -> Result<MaintenanceCycleReport> {
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
         self.ledger
             .observe_writes(&inventory, &self.config.write_trigger);
         let regions = self.ledger.ready_regions(&self.config.write_trigger);
         if regions.is_empty() {
-            self.ledger.save(&self.config.state_path).await?;
             return Ok(MaintenanceCycleReport {
                 inspected_pages: inventory.len(),
                 ..MaintenanceCycleReport::default()
@@ -493,7 +518,6 @@ impl RuntimeMaintainer {
             .observe_writes(&refreshed, &self.config.write_trigger);
         self.ledger
             .acknowledge_unchanged_regions(&expected, &refreshed);
-        self.ledger.save(&self.config.state_path).await?;
         Ok(aggregate)
     }
 
