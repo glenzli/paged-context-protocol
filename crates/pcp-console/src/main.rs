@@ -21,9 +21,10 @@ use axum::{
 use chrono::{DateTime, Utc};
 use pcp_client::{ContentLibraryResult, PcpApi, PcpTenantApi};
 use pcp_core::{
-    Actor, ActorType, BrowseIndexOrder, PackPagesRequest, PagePayload, PageRevisionRef,
-    PlanRevisionRetentionRequest, Projection, ReadPage, ReadPagesRequest, Relation,
-    RetentionPolicy, SearchHit, SourceRef, SourceSpan, UnpackPageRequest,
+    Actor, ActorType, BrowseIndexOrder, IntentEffort, PackPagesRequest, PagePayload,
+    PageRevisionRef, PlanRevisionRetentionRequest, Projection, QueryContextRequest, ReadPage,
+    ReadPagesRequest, Relation, RetentionPolicy, SearchHit, SourceRef, SourceSpan,
+    UnpackPageRequest,
 };
 use pcp_rpc::{EnrollmentAdminClient, EnrollmentAdminResponse, RemotePcpClient};
 use pcp_runtime::{
@@ -54,16 +55,11 @@ const LOCAL_MEDIA_ROOTS_ENV: &str = "PCP_CONSOLE_LOCAL_MEDIA_ROOTS";
 const CONSOLE_STATIC_CACHE_CONTROL: &str = "no-store";
 
 mod graph_view;
-mod intent_match;
 mod managed;
-mod query;
-mod semantic_search;
 
 #[derive(Clone)]
 struct AppState {
     client: Arc<RemotePcpClient>,
-    semantic_search: Option<Arc<query::SemanticSearchProvider>>,
-    intent_match: Option<Arc<intent_match::IntentMatchProvider>>,
     enrollment: EnrollmentAdminClient,
     runtime: Option<Arc<managed::ManagedRuntime>>,
     runtime_config: Option<PathBuf>,
@@ -181,6 +177,20 @@ struct AccessQuery {
     limit: Option<u32>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct IntentQueryRequest {
+    query: String,
+    #[serde(default)]
+    scopes: Vec<String>,
+    #[serde(default)]
+    result_limit: Option<u32>,
+    #[serde(default)]
+    context_budget_chars: Option<u32>,
+    #[serde(default)]
+    intent_effort: IntentEffort,
+}
+
 #[derive(Default, Deserialize)]
 struct GraphQuery {
     depth: Option<usize>,
@@ -262,22 +272,6 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|runtime| runtime.runtime_config().to_path_buf())
         .or_else(|| env::var_os("PCP_RUNTIME_CONFIG").map(PathBuf::from));
-    let query_config = runtime_config
-        .as_ref()
-        .map(RuntimeConfig::load)
-        .transpose()?;
-    let semantic_search = query_config
-        .as_ref()
-        .and_then(|config| config.semantic_search.clone())
-        .map(query::SemanticSearchProvider::new)
-        .transpose()?
-        .map(Arc::new);
-    let intent_match = query_config
-        .as_ref()
-        .and_then(|config| config.intent_match.clone())
-        .map(intent_match::IntentMatchProvider::new)
-        .transpose()?
-        .map(Arc::new);
     let principal_id =
         env::var("PCP_CLIENT_ID").unwrap_or_else(|_| DEFAULT_PRINCIPAL_ID.to_owned());
     let client = connect_runtime(&socket_path, &principal_id).await?;
@@ -302,8 +296,6 @@ async fn main() -> Result<()> {
         listener,
         router(AppState {
             client: Arc::new(client),
-            semantic_search,
-            intent_match,
             enrollment: EnrollmentAdminClient::new(enrollment_socket),
             runtime: runtime.clone(),
             runtime_config,
@@ -336,8 +328,9 @@ fn router(state: AppState) -> Router {
         .route("/api/runtime/restart", post(restart_runtime))
         .route("/api/overview", get(overview))
         .route("/api/pages", get(pages))
-        .route("/api/query/capabilities", get(query_capabilities))
-        .route("/api/query", post(run_query))
+        .route("/api/query/audit", get(query_audit))
+        .route("/api/query/semantic-search", post(run_semantic_search))
+        .route("/api/query/match-intent", post(run_match_intent))
         .route("/api/pages/{page_id}/preview", get(page_preview))
         .route("/api/pages/{page_id}", get(page_detail))
         .route("/api/pages/{page_id}/raw", get(page_raw))
@@ -628,25 +621,31 @@ async fn pages(
     )))
 }
 
-async fn query_capabilities(State(state): State<AppState>) -> Json<query::QueryCapabilities> {
-    Json(query::capabilities(
-        state.semantic_search.as_deref(),
-        state.intent_match.as_deref(),
-    ))
+async fn run_semantic_search(
+    State(state): State<AppState>,
+    Json(request): Json<QueryContextRequest>,
+) -> Result<Json<pcp_core::QueryContextResponse>, ApiError> {
+    Ok(Json(state.client.semantic_search(request).await?))
 }
 
-async fn run_query(
+async fn run_match_intent(
     State(state): State<AppState>,
-    Json(request): Json<query::QueryRequest>,
-) -> Result<Json<query::QueryResponse>, ApiError> {
+    Json(request): Json<IntentQueryRequest>,
+) -> Result<Json<pcp_core::QueryContextResponse>, ApiError> {
+    let effort = request.intent_effort;
     Ok(Json(
-        query::execute(
-            state.client.as_ref(),
-            state.semantic_search.as_deref(),
-            state.intent_match.as_deref(),
-            request,
-        )
-        .await?,
+        state
+            .client
+            .match_intent(
+                QueryContextRequest {
+                    query: request.query,
+                    scopes: request.scopes,
+                    result_limit: request.result_limit,
+                    context_budget_chars: request.context_budget_chars,
+                },
+                effort,
+            )
+            .await?,
     ))
 }
 
@@ -884,6 +883,20 @@ async fn health_metrics(
         )
         .await?;
     Ok(Json(json!(snapshot)))
+}
+
+async fn query_audit(
+    State(state): State<AppState>,
+    Query(query): Query<HealthQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let summary = state
+        .client
+        .query_audit_summary(
+            selected_scopes(state.client.as_ref(), query.scope.as_deref()),
+            query.hours.unwrap_or(24).clamp(1, 24 * 90),
+        )
+        .await?;
+    Ok(Json(json!(summary)))
 }
 
 async fn retention_plan(

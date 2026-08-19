@@ -7,14 +7,15 @@ use anyhow::Context;
 use chrono::{Duration, SecondsFormat, Utc};
 use pcp_client::{EmbeddedPcpClient, PcpApi};
 use pcp_core::{
-    AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    AssessPageValidityRequest, BrowseIndexOrder, CollectRevisionRetentionRequest,
+    AccessDecision, AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor,
+    ActorType, AssessPageValidityRequest, BrowseIndexOrder, CollectRevisionRetentionRequest,
     CreateScopeRequest, GraphEdgeDirection, GraphEdgeKind, LifecycleStatus, LinkPagesRequest,
     PackPagesRequest, PageMutability, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest,
-    Projection, ProvenanceEvent, PutRevisionRetentionLeaseRequest, ReadPagesRequest,
-    RetentionPolicy, RetentionProtectionReason, RevisePageRequest, ScopeGrant, SearchFilters,
-    SearchMode, SearchPagesRequest, SearchTermMatch, SourceRef, SourceSpan, UnpackPageRequest,
-    ValidityStanding, WritePageRequest, WriteSummaryRequest,
+    Projection, ProvenanceEvent, PutRevisionRetentionLeaseRequest, QueryAuditEvent,
+    QueryAuditMethod, ReadPagesRequest, RetentionPolicy, RetentionProtectionReason,
+    RevisePageRequest, RouterTokenUsage, ScopeGrant, SearchFilters, SearchMode, SearchPagesRequest,
+    SearchTermMatch, SourceRef, SourceSpan, UnpackPageRequest, ValidityStanding, WritePageRequest,
+    WriteSummaryRequest,
 };
 use pcp_store::PcpStore;
 use rusqlite::{Connection, params};
@@ -2674,6 +2675,85 @@ async fn content_library_excludes_attached_summaries_without_restricting_page_ki
         summary.content_chars,
         "Original source text.".chars().count() as u64
     );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn query_audit_summarizes_router_usage_without_query_text_or_page_content() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-query-audit-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("pcp.sqlite3"))
+            .await
+            .expect("open Store"),
+    );
+    let namespace = "project:query-audit".to_owned();
+    store
+        .create_scope(CreateScopeRequest {
+            namespace: namespace.clone(),
+            display_name: "Query audit".to_owned(),
+            description: None,
+            parent_namespace: None,
+        })
+        .await
+        .expect("create query audit scope");
+    let principal = principal("operator:query-audit", AccessPrincipalType::Service);
+    store
+        .record_runtime_query_audit(QueryAuditEvent {
+            event_id: "qa_fixture".to_owned(),
+            occurred_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            principal: principal.clone(),
+            session_id: "session:query-audit".to_owned(),
+            method: QueryAuditMethod::MatchIntent,
+            effort: Some(pcp_core::IntentEffort::High),
+            scopes: vec![namespace.clone()],
+            decision: AccessDecision::Allowed,
+            duration_ms: 240,
+            anchor_count: 3,
+            related_count: 1,
+            context_chars: 1_200,
+            semantic_indexed_count: Some(42),
+            semantic_embedded_count: Some(0),
+            router_rounds: Some(2),
+            router_usage: Some(RouterTokenUsage {
+                reported_responses: 2,
+                input_tokens: 100,
+                output_tokens: 25,
+                total_tokens: 125,
+                ..RouterTokenUsage::default()
+            }),
+            failure_kind: None,
+        })
+        .await
+        .expect("record Runtime query audit");
+    let client = pcp_client(
+        Arc::clone(&store),
+        AccessSession::new(
+            principal,
+            "session:query-audit",
+            vec![ScopeGrant {
+                namespace: namespace.clone(),
+                permissions: vec![AccessPermission::Audit],
+            }],
+        ),
+    );
+    let summary = client
+        .query_audit_summary(vec![namespace.clone()], 24)
+        .await
+        .expect("read query audit summary");
+    assert_eq!(summary.calls, 1);
+    assert_eq!(summary.match_intent.calls, 1);
+    assert_eq!(summary.match_intent.context_chars, 1_200);
+    assert_eq!(summary.router_usage.total_tokens, 125);
+    assert_eq!(summary.recent_events.len(), 1);
+    assert!(summary.recent_events[0].failure_kind.is_none());
+    assert!(summary.recent_events[0].scopes.contains(&namespace));
 
     let _ = std::fs::remove_dir_all(root);
 }

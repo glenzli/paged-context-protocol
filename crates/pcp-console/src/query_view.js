@@ -1,39 +1,32 @@
 export function buildQueryRequest({ method, query, scope, topK, intentEffort }) {
-  const payload = { method, query, scope: scope || null, topK: Number(topK) };
+  const payload = { query, scopes: scope ? [scope] : [], resultLimit: Number(topK) };
   if (method === "match_intent") payload.intentEffort = intentEffort;
   return payload;
 }
 
 export function createQueryView({ request, byId, element, showError, t, formatNumber, openPage }) {
-  let capabilities = null;
   let method = "semantic_search";
   let busy = false;
   let busyStartedAt = null;
   let busyTimer = null;
   let scopeOptions = [];
   let result = null;
-
-  function unavailableReason(value) {
-    return capabilities?.unavailableMethods?.find((item) => item.method === value)?.reason || "";
-  }
+  let audit = null;
 
   function renderMethods() {
-    const unavailable = unavailableReason(method);
     const methodSelect = byId("context-query-method");
     methodSelect.value = method;
-    for (const option of methodSelect.options) option.disabled = Boolean(unavailableReason(option.value));
     methodSelect.disabled = busy;
     byId("context-query-effort-control").hidden = method !== "match_intent";
     byId("context-query-effort").disabled = busy;
     byId("context-query-scope").disabled = busy;
     byId("context-query-top-k").disabled = busy;
     byId("context-query-text").disabled = busy;
-    byId("context-query-method-note").textContent = unavailable
-      || (method === "match_intent"
-        ? t("Intent matching lets the Router expand and review bounded candidates before it assembles a context pack.")
-        : t("Semantic retrieval returns independently relevant pages; asserted structure only makes bounded ranking adjustments."));
+    byId("context-query-method-note").textContent = method === "match_intent"
+      ? t("Intent matching lets the Router expand and review bounded candidates before it assembles a context pack.")
+      : t("Semantic retrieval returns independently relevant pages; asserted structure only makes bounded ranking adjustments.");
     const submit = byId("context-query-submit");
-    submit.disabled = Boolean(unavailable) || busy;
+    submit.disabled = busy;
     submit.textContent = busy
       ? t(method === "match_intent" ? "Matching intent…" : "Searching context…")
       : t("Build context pack");
@@ -106,8 +99,69 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
       return;
     }
     preview.hidden = false;
-    byId("context-model-context").textContent = result.modelContext || "";
+    byId("context-model-context").textContent = (result.entries || [])
+      .filter((entry) => entry.content)
+      .map((entry) => entry.content)
+      .join("\n\n");
     byId("context-model-context-status").textContent = `${formatNumber(result.entries?.filter((entry) => entry.content).length || 0)} ${t("context entries")}`;
+  }
+
+  function auditMetric(label, value) {
+    const node = element("div", "context-query-audit-metric");
+    node.append(element("span", "", label), element("strong", "", value));
+    return node;
+  }
+
+  function renderAudit() {
+    const target = byId("context-query-audit");
+    if (!audit) {
+      target.hidden = true;
+      target.replaceChildren();
+      return;
+    }
+    target.hidden = false;
+    const heading = element("div", "context-query-audit-heading");
+    heading.append(
+      element("h3", "", t("Query activity")),
+      element("span", "", `${formatNumber(audit.windowHours || 24)} ${t("hours")} · ${t("privacy-preserving")}`),
+    );
+    const usage = audit.routerUsage || {};
+    const metrics = element("div", "context-query-audit-metrics");
+    metrics.append(
+      auditMetric(t("Calls"), formatNumber(audit.calls || 0)),
+      auditMetric(t("Semantic calls"), formatNumber(audit.semanticSearch?.calls || 0)),
+      auditMetric(t("Intent calls"), formatNumber(audit.matchIntent?.calls || 0)),
+      auditMetric(t("Total Router tokens"), formatNumber(usage.totalTokens || 0)),
+    );
+    target.replaceChildren(heading, metrics);
+    const recent = audit.recentEvents || [];
+    if (recent.length) {
+      const details = element("details", "context-query-audit-recent");
+      const summary = element("summary", "", `${t("Recent query calls")} · ${formatNumber(recent.length)}`);
+      const list = element("ul", "");
+      recent.forEach((event) => {
+        const methodLabel = event.method === "match_intent" ? t("Intent matching") : t("Semantic search");
+        const tokens = event.routerUsage?.totalTokens ? ` · ${formatNumber(event.routerUsage.totalTokens)} ${t("tokens")}` : "";
+        const failure = event.failureKind ? ` · ${event.failureKind}` : "";
+        list.append(element("li", "", `${event.occurredAt} · ${methodLabel} · ${formatNumber(event.durationMs || 0)} ms · ${formatNumber(event.anchorCount || 0)} ${t("anchors")}${tokens}${failure}`));
+      });
+      details.append(summary, list);
+      target.append(details);
+    }
+  }
+
+  async function loadAudit() {
+    const scope = byId("context-query-scope").value;
+    const params = new URLSearchParams({ hours: "24" });
+    if (scope) params.set("scope", scope);
+    try {
+      audit = await request(`/api/query/audit?${params}`);
+    } catch (_) {
+      // Query auditing is diagnostic. A client without Audit may still use
+      // retrieval, and the main query surface must remain usable.
+      audit = null;
+    }
+    renderAudit();
   }
 
   function renderResult() {
@@ -215,26 +269,28 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
 
   function updateStatus() {
     if (!result) return;
-    const visibility = result.visibility === "all_authorized" ? t("All authorized scopes") : result.scope;
+    const visibility = result.visibility === "all_authorized"
+      ? t("All authorized scopes")
+      : (result.scopes || []).join(" · ");
     const semantic = result.semanticIndexedCount == null ? "" : ` · ${formatNumber(result.semanticIndexedCount)} ${t("vector documents")} (${formatNumber(result.semanticEmbeddedCount || 0)} ${t("new")})`;
     const related = Number(result.relatedCount || 0);
     const relationStatus = related ? ` + ${formatNumber(related)} ${t("related")}` : "";
-    byId("query-status").textContent = `${formatNumber(result.anchorCount || 0)} ${t("anchors")}${relationStatus} · ${visibility} · ${formatNumber(result.packBudgetChars)} ${t("char budget")}${semantic}`;
+    byId("query-status").textContent = `${formatNumber(result.anchorCount || 0)} ${t("anchors")}${relationStatus} · ${visibility} · ${formatNumber(result.contextBudgetChars)} ${t("char budget")}${semantic}`;
   }
 
-  async function load({ reload = false } = {}) {
-    if (!capabilities || reload) capabilities = await request("/api/query/capabilities");
+  async function load() {
     renderMethods();
     renderScopes();
     renderResult();
     renderModelContext();
+    await loadAudit();
     updateStatus();
     renderBusyPresentation();
   }
 
   async function submit(event) {
     event.preventDefault();
-    if (busy || unavailableReason(method)) return;
+    if (busy) return;
     const query = byId("context-query-text").value.trim();
     if (!query) return;
     clearQueryError();
@@ -247,7 +303,10 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
         topK: Number(byId("context-query-top-k").value),
         intentEffort: byId("context-query-effort").value,
       });
-      result = await request("/api/query", {
+      const endpoint = method === "match_intent"
+        ? "/api/query/match-intent"
+        : "/api/query/semantic-search";
+      result = await request(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -255,6 +314,7 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
       renderResult();
       renderModelContext();
       updateStatus();
+      await loadAudit();
     } catch (error) {
       showQueryError(error);
       byId("query-status").textContent = t("Query failed");
@@ -269,6 +329,7 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
     clearQueryError();
     renderMethods();
   });
+  byId("context-query-scope").addEventListener("change", () => loadAudit().catch(showError));
   byId("context-query-retry").addEventListener("click", () => {
     byId("context-query-form").requestSubmit();
   });
@@ -276,6 +337,6 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
   return {
     async load(options) { await load(options); },
     setScopes(value) { scopeOptions = value || []; renderScopes(); },
-    rerender() { renderMethods(); renderScopes(); renderResult(); renderModelContext(); updateStatus(); renderBusyPresentation(); },
+    rerender() { renderMethods(); renderScopes(); renderResult(); renderModelContext(); renderAudit(); updateStatus(); renderBusyPresentation(); },
   };
 }

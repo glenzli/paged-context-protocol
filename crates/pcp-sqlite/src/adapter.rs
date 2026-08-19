@@ -7,14 +7,14 @@ use pcp_core::{
     ActorType, AssessPageValidityRequest, Capabilities, CollectRevisionRetentionRequest,
     CreateScopeRequest, IngestPageRequest, LifecycleStatus, LinkPagesRequest, OperationTelemetry,
     PackPagesRequest, PageMutability, PlanRevisionRetentionRequest, Projection, ProvenanceEvent,
-    PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
-    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope,
-    SearchPagesRequest, SearchResult, UnpackPageRequest, WritePageRequest, WriteResult,
+    PutRevisionRetentionLeaseRequest, QueryAuditEvent, ReadPage, ReadPagesRequest, Relation,
+    RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan,
+    Scope, SearchPagesRequest, SearchResult, UnpackPageRequest, WritePageRequest, WriteResult,
     WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::{
     ContentLibraryResult, ContentLibrarySummary, DurablePageInventoryItem, HealthSnapshot,
-    PcpStore, TombstoneCascadeResult, UnpackPageResult,
+    PcpStore, QueryAuditSummary, TombstoneCascadeResult, UnpackPageResult,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -1315,6 +1315,45 @@ impl PcpStore for SqlitePcpStore {
     ) -> Result<(Vec<AccessAuditEvent>, Option<String>)> {
         let scopes = authorize_scopes(access, &[AccessPermission::Audit], &[])?;
         SqlitePcpStore::read_access_log(self, scopes, limit, cursor).await
+    }
+
+    async fn record_runtime_query_audit(&self, event: QueryAuditEvent) -> Result<()> {
+        SqlitePcpStore::record_runtime_query_audit(self, event).await
+    }
+
+    async fn query_audit_summary(
+        &self,
+        access: &AccessSession,
+        requested_scopes: Vec<String>,
+        window_hours: u32,
+    ) -> Result<QueryAuditSummary> {
+        let observation = OperationObservation::start();
+        let scopes = match authorize_scopes(access, &[AccessPermission::Audit], &requested_scopes) {
+            Ok(scopes) => scopes,
+            Err(error) => {
+                return complete(
+                    self,
+                    access,
+                    "query_audit_summary",
+                    requested_scopes,
+                    Err(error),
+                    true,
+                    observation,
+                )
+                .await;
+            }
+        };
+        let result = SqlitePcpStore::query_audit_summary(self, scopes.clone(), window_hours).await;
+        complete(
+            self,
+            access,
+            "query_audit_summary",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
     }
 
     async fn health_snapshot(

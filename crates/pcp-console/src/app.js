@@ -2,7 +2,7 @@ import { createPageInspector } from "/page-inspector.js?v=20260816.3";
 import { describePagePayload, pagePayloadPreviewText, renderPagePreview } from "/page-content.js?v=20260816.3";
 import { createHealthView } from "/health-view.js?v=20260816.3";
 import { createRetentionView } from "/retention-view.js?v=20260818.1";
-import { createQueryView } from "/query-view.js?v=20260819.1";
+import { createQueryView } from "/query-view.js?v=20260819.2";
 
 const DEFAULT_PAGE_LIMIT = 20;
 const PAGE_LIMIT_OPTIONS = new Set([10, 20, 30]);
@@ -84,6 +84,12 @@ const ZH_MESSAGES = {
   "Cancel": "取消",
   "Capabilities": "能力",
   "Calls": "调用",
+  "Query activity": "查询活动",
+  "Semantic calls": "语义调用",
+  "Intent calls": "意图调用",
+  "Total Router tokens": "Router 总 token",
+  "Recent query calls": "最近查询调用",
+  "privacy-preserving": "不保存查询文本或页面内容",
   "Change": "变更",
   "Chinese": "中文",
   "Client access": "客户端访问",

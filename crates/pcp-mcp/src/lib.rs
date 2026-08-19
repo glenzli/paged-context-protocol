@@ -4,11 +4,11 @@ use chrono::{SecondsFormat, Utc};
 use pcp_client::PcpApi;
 use pcp_core::{
     AccessAuditEvent, AccessPermission, AccessSession, Actor, ActorType, AssessPageValidityRequest,
-    BrowseIndexOrder, Capabilities, CreateScopeRequest, IngestPageRequest, LifecycleStatus,
-    LinkPagesRequest, PageMutability, PagePayload, Projection, ProvenanceEvent, ReadPage,
-    ReadPagesRequest, Relation, RevisePageRequest, Scope, SearchFilters, SearchMode,
-    SearchPagesRequest, SearchResult, SearchTermMatch, SourceRef, SourceSpan, ValidityStanding,
-    WritePageRequest, WriteSummaryRequest,
+    BrowseIndexOrder, Capabilities, CreateScopeRequest, ExpandGraphRequest, IngestPageRequest,
+    IntentEffort, LifecycleStatus, LinkPagesRequest, PageMutability, PagePayload, Projection,
+    ProvenanceEvent, QueryContextRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
+    Scope, SearchFilters, SearchMode, SearchPagesRequest, SearchResult, SearchTermMatch, SourceRef,
+    SourceSpan, ValidityStanding, WritePageRequest, WriteSummaryRequest,
 };
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -19,7 +19,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Serialize;
 
-const SERVER_INSTRUCTIONS: &str = "PCP is an identity-scoped durable graph of stable Pages with immutable Revisions. Call pcp_whoami before cross-Scope work. Search or browse current Page heads, then read only useful Pages or exact Revisions. Use pageId for stable identity and Relations; use revisionId for exact evidence and provenance. Ordinary producers should use pcp_ingest_page; maintained interpretations use the advanced write and revise tools.";
+const SERVER_INSTRUCTIONS: &str = "PCP is an identity-scoped durable graph of stable Pages with immutable Revisions. Call pcp_whoami before cross-Scope work. Prefer pcp_semantic_search for conservative semantic retrieval; use pcp_match_intent only when a Router review is justified, and pcp_search_pages only for deterministic inspection. Use pageId for stable identity and Relations; use revisionId for exact evidence and provenance. pcp_expand_graph returns only a bounded, anchored ACL-filtered slice, never the entire graph. Ordinary producers should use pcp_ingest_page; maintained interpretations use the advanced write and revise tools.";
 
 #[derive(Clone)]
 pub struct PcpMcpServer {
@@ -100,6 +100,59 @@ pub struct ReadPagesParams {
     view: Option<String>,
     #[serde(default = "default_max_chars")]
     max_chars: u32,
+}
+
+#[derive(Debug, JsonSchema, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryContextParams {
+    query: String,
+    #[serde(default)]
+    scopes: Vec<String>,
+    #[serde(default = "default_limit")]
+    result_limit: u32,
+    #[serde(default)]
+    context_budget_chars: Option<u32>,
+}
+
+#[derive(Debug, JsonSchema, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntentMatchParams {
+    query: String,
+    #[serde(default)]
+    scopes: Vec<String>,
+    #[serde(default = "default_limit")]
+    result_limit: u32,
+    #[serde(default)]
+    context_budget_chars: Option<u32>,
+    #[serde(default)]
+    effort: IntentEffortParam,
+}
+
+#[derive(Debug, Default, JsonSchema, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentEffortParam {
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
+#[derive(Debug, JsonSchema, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpandGraphParams {
+    anchor_page_ids: Vec<String>,
+    #[serde(default)]
+    scopes: Vec<String>,
+    #[serde(default)]
+    max_depth: Option<u8>,
+    #[serde(default)]
+    max_nodes: Option<u32>,
+    #[serde(default)]
+    max_edges: Option<u32>,
+    #[serde(default)]
+    view: Option<String>,
+    #[serde(default)]
+    max_chars: Option<u32>,
 }
 
 #[derive(Debug, JsonSchema, serde::Deserialize)]
@@ -424,6 +477,105 @@ impl PcpMcpServer {
             .await
             .map(Json)
             .map_err(|error| operation_error("search PCP Pages", error))
+    }
+
+    #[tool(
+        name = "pcp_semantic_search",
+        description = "Assemble a bounded semantic context result through the configured Runtime. It retrieves independently relevant Pages and uses asserted Relations only as conservative rank adjustments.",
+        annotations(
+            title = "Semantic Search PCP Context",
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    pub async fn pcp_semantic_search(
+        &self,
+        Parameters(params): Parameters<QueryContextParams>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        let response = self
+            .client
+            .semantic_search(QueryContextRequest {
+                query: params.query,
+                scopes: params.scopes,
+                result_limit: Some(params.result_limit),
+                context_budget_chars: params.context_budget_chars,
+            })
+            .await
+            .map_err(|error| operation_error("semantic search PCP context", error))?;
+        serde_json::to_value(response)
+            .map(Json)
+            .map_err(|error| operation_error("serialize semantic PCP context", error))
+    }
+
+    #[tool(
+        name = "pcp_match_intent",
+        description = "Ask the configured Runtime Router to expand and review bounded semantic and relation candidates before assembling a context result. Use only when semantic search alone is insufficient.",
+        annotations(
+            title = "Match PCP Intent",
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    pub async fn pcp_match_intent(
+        &self,
+        Parameters(params): Parameters<IntentMatchParams>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        let effort = match params.effort {
+            IntentEffortParam::Low => IntentEffort::Low,
+            IntentEffortParam::Medium => IntentEffort::Medium,
+            IntentEffortParam::High => IntentEffort::High,
+        };
+        let response = self
+            .client
+            .match_intent(
+                QueryContextRequest {
+                    query: params.query,
+                    scopes: params.scopes,
+                    result_limit: Some(params.result_limit),
+                    context_budget_chars: params.context_budget_chars,
+                },
+                effort,
+            )
+            .await
+            .map_err(|error| operation_error("match PCP intent", error))?;
+        serde_json::to_value(response)
+            .map(Json)
+            .map_err(|error| operation_error("serialize PCP intent match", error))
+    }
+
+    #[tool(
+        name = "pcp_expand_graph",
+        description = "Read a bounded ACL-filtered neighborhood around explicit page IDs. This is not an unanchored or whole-graph export; use read view to control node detail.",
+        annotations(
+            title = "Expand PCP Graph Slice",
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    pub async fn pcp_expand_graph(
+        &self,
+        Parameters(params): Parameters<ExpandGraphParams>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        let response = pcp_client::expand_graph(
+            self.client.as_ref(),
+            ExpandGraphRequest {
+                anchor_page_ids: params.anchor_page_ids,
+                scopes: params.scopes,
+                max_depth: params.max_depth,
+                max_nodes: params.max_nodes,
+                max_edges: params.max_edges,
+                projections: read_view(params.view.as_deref().unwrap_or("context"))?,
+                max_chars: params.max_chars,
+            },
+        )
+        .await
+        .map_err(|error| operation_error("expand PCP graph", error))?;
+        serde_json::to_value(response)
+            .map(Json)
+            .map_err(|error| operation_error("serialize PCP graph slice", error))
     }
 
     #[tool(

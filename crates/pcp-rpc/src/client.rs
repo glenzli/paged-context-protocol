@@ -10,17 +10,18 @@ use std::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use pcp_client::{
-    DurablePageInventoryItem, HealthSnapshot, PcpApi, PcpTenantApi, TombstoneCascadeResult,
-    UnpackPageResult,
+    DurablePageInventoryItem, HealthSnapshot, PcpApi, PcpTenantApi, QueryAuditSummary,
+    TombstoneCascadeResult, UnpackPageResult,
 };
 use pcp_core::{
     AccessAuditEvent, AccessSession, AssessPageValidityRequest, Capabilities,
-    CollectRevisionRetentionRequest, CreateScopeRequest, IngestPageRequest, LinkPagesRequest,
-    PackPagesRequest, PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage,
-    ReadPagesRequest, Relation, RevisePageRequest, RevisionCollectionResult,
-    RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult,
-    UnpackPageRequest, WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult,
-    WriteValidityResult,
+    CollectRevisionRetentionRequest, CreateScopeRequest, ExpandGraphRequest, GraphSliceResponse,
+    IngestPageRequest, IntentEffort, LinkPagesRequest, PackPagesRequest,
+    PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, QueryContextRequest,
+    QueryContextResponse, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
+    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope,
+    SearchPagesRequest, SearchResult, UnpackPageRequest, WritePageRequest, WriteResult,
+    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use tokio::net::UnixStream;
 
@@ -80,6 +81,37 @@ impl RemotePcpClient {
     async fn request(&self, operation: RpcOperation) -> Result<RpcValue> {
         let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         request_at(&self.socket_path, id, operation).await
+    }
+
+    async fn semantic_search_rpc(
+        &self,
+        request: QueryContextRequest,
+    ) -> Result<QueryContextResponse> {
+        match self.request(RpcOperation::SemanticSearch(request)).await? {
+            RpcValue::ContextQuery(value) => Ok(value),
+            _ => Err(unexpected("semantic_search")),
+        }
+    }
+
+    async fn match_intent_rpc(
+        &self,
+        request: QueryContextRequest,
+        effort: IntentEffort,
+    ) -> Result<QueryContextResponse> {
+        match self
+            .request(RpcOperation::MatchIntent { request, effort })
+            .await?
+        {
+            RpcValue::ContextQuery(value) => Ok(value),
+            _ => Err(unexpected("match_intent")),
+        }
+    }
+
+    pub async fn expand_graph(&self, request: ExpandGraphRequest) -> Result<GraphSliceResponse> {
+        match self.request(RpcOperation::ExpandGraph(request)).await? {
+            RpcValue::GraphSlice(value) => Ok(value),
+            _ => Err(unexpected("expand_graph")),
+        }
     }
 }
 
@@ -228,6 +260,18 @@ impl PcpTenantApi for RemotePcpClient {
             RpcValue::WriteResult(value) => Ok(value),
             _ => Err(unexpected("ingest_page")),
         }
+    }
+
+    async fn semantic_search(&self, request: QueryContextRequest) -> Result<QueryContextResponse> {
+        self.semantic_search_rpc(request).await
+    }
+
+    async fn match_intent(
+        &self,
+        request: QueryContextRequest,
+        effort: IntentEffort,
+    ) -> Result<QueryContextResponse> {
+        self.match_intent_rpc(request, effort).await
     }
 }
 
@@ -489,6 +533,23 @@ impl PcpApi for RemotePcpClient {
         {
             RpcValue::HealthSnapshot(value) => Ok(value),
             _ => Err(unexpected("health_snapshot")),
+        }
+    }
+
+    async fn query_audit_summary(
+        &self,
+        requested_scopes: Vec<String>,
+        window_hours: u32,
+    ) -> Result<QueryAuditSummary> {
+        match self
+            .request(RpcOperation::QueryAuditSummary {
+                requested_scopes,
+                window_hours,
+            })
+            .await?
+        {
+            RpcValue::QueryAuditSummary(value) => Ok(value),
+            _ => Err(unexpected("query_audit_summary")),
         }
     }
 }

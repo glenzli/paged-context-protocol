@@ -1,4 +1,34 @@
+use pcp_core::{QueryAuditEvent, RouterTokenUsage};
 use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryAuditSummary {
+    pub generated_at: String,
+    pub window_started_at: String,
+    pub window_hours: u32,
+    pub calls: u64,
+    pub allowed: u64,
+    pub failed: u64,
+    pub semantic_search: QueryAuditMethodHealth,
+    pub match_intent: QueryAuditMethodHealth,
+    pub router_usage: RouterTokenUsage,
+    #[serde(default)]
+    pub recent_events: Vec<QueryAuditEvent>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryAuditMethodHealth {
+    pub calls: u64,
+    pub allowed: u64,
+    pub failed: u64,
+    pub anchors: u64,
+    pub related_contexts: u64,
+    pub context_chars: u64,
+    pub p50_duration_ms: Option<u64>,
+    pub p95_duration_ms: Option<u64>,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

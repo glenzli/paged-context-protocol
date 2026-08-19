@@ -1,21 +1,26 @@
-use std::str::FromStr;
 use std::sync::Arc;
+use std::{
+    collections::{BTreeSet, HashSet, VecDeque},
+    str::FromStr,
+};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessPermission, AccessPrincipal, AccessSession, AssessPageValidityRequest,
     BrowseIndexOrder, Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest,
-    IngestPageRequest, LinkPagesRequest, PackPagesRequest, PlanRevisionRetentionRequest,
-    PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
-    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope, ScopeGrant,
-    SearchPagesRequest, SearchResult, UnpackPageRequest, WritePageRequest, WriteResult,
-    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    ExpandGraphRequest, GraphEdgeDirection, GraphSliceEdge, GraphSliceResponse, IngestPageRequest,
+    IntentEffort, LinkPagesRequest, PackPagesRequest, PlanRevisionRetentionRequest, Projection,
+    PutRevisionRetentionLeaseRequest, QueryContextRequest, QueryContextResponse, ReadPage,
+    ReadPagesRequest, Relation, RevisePageRequest, RevisionCollectionResult,
+    RevisionRetentionLease, RevisionRetentionPlan, Scope, ScopeGrant, SearchFilters, SearchMode,
+    SearchPagesRequest, SearchResult, SearchTermMatch, UnpackPageRequest, WritePageRequest,
+    WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::PcpStore;
 pub use pcp_store::{
     ContentLibraryResult, ContentLibraryScope, ContentLibrarySummary, DurablePageInventoryItem,
-    HealthSnapshot, TombstoneCascadeResult, UnpackPageResult,
+    HealthSnapshot, QueryAuditSummary, TombstoneCascadeResult, UnpackPageResult,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -143,6 +148,133 @@ pub trait PcpTenantApi: Send + Sync {
     ) -> Result<ContentLibrarySummary>;
     async fn read_pages(&self, request: ReadPagesRequest) -> Result<Vec<ReadPage>>;
     async fn ingest_page(&self, request: IngestPageRequest) -> Result<WriteResult>;
+
+    /// Context assembly needs Runtime-owned providers; embedded Store clients
+    /// fail closed rather than silently substituting a weaker mode.
+    async fn semantic_search(&self, _request: QueryContextRequest) -> Result<QueryContextResponse> {
+        anyhow::bail!(
+            "semantic_search is unavailable: connect to a Runtime endpoint with an embedding provider configured"
+        )
+    }
+
+    async fn match_intent(
+        &self,
+        _request: QueryContextRequest,
+        _effort: IntentEffort,
+    ) -> Result<QueryContextResponse> {
+        anyhow::bail!(
+            "match_intent is unavailable: connect to a Runtime endpoint with a Router provider configured"
+        )
+    }
+}
+
+/// Read a small, anchored neighborhood through the same tenant API used for
+/// ordinary search/read. Each hop is independently ACL-filtered by the Store.
+pub async fn expand_graph(
+    client: &dyn PcpTenantApi,
+    request: ExpandGraphRequest,
+) -> Result<GraphSliceResponse> {
+    let mut anchors = request.anchor_page_ids;
+    anchors.sort();
+    anchors.dedup();
+    anyhow::ensure!(
+        !anchors.is_empty(),
+        "expand_graph requires at least one anchorPageId"
+    );
+    anyhow::ensure!(
+        anchors.len() <= 16,
+        "expand_graph accepts at most 16 anchors"
+    );
+
+    let max_depth = request.max_depth.unwrap_or(1).clamp(1, 3);
+    let max_nodes = request.max_nodes.unwrap_or(64).clamp(1, 240) as usize;
+    let max_edges = request.max_edges.unwrap_or(128).clamp(1, 480) as usize;
+    anyhow::ensure!(anchors.len() <= max_nodes, "anchorPageIds exceed maxNodes");
+    let max_chars = request.max_chars.unwrap_or(24_000).clamp(1_000, 64_000);
+    let mut projections = request.projections;
+    if projections.is_empty() {
+        projections = vec![
+            Projection::Manifest,
+            Projection::Summary,
+            Projection::Payload,
+        ];
+    }
+
+    let mut seen: BTreeSet<String> = anchors.iter().cloned().collect();
+    let mut frontier: VecDeque<(String, u8)> = anchors.into_iter().map(|id| (id, 0)).collect();
+    let mut edges = Vec::new();
+    let mut edge_keys = HashSet::new();
+    let mut truncated = false;
+
+    while let Some((origin, depth)) = frontier.pop_front() {
+        if depth >= max_depth || edges.len() >= max_edges {
+            truncated |= depth < max_depth;
+            continue;
+        }
+        let result = client
+            .search_pages(SearchPagesRequest {
+                query: origin.clone(),
+                scopes: request.scopes.clone(),
+                mode: SearchMode::Graph,
+                term_match: SearchTermMatch::All,
+                projections: vec![Projection::Manifest],
+                filters: SearchFilters::default(),
+                limit: 64,
+                cursor: None,
+            })
+            .await?;
+        truncated |= result.next_cursor.is_some();
+        for hit in result.hits {
+            let neighbor = hit.page_id;
+            for edge in hit.graph_edges {
+                if edges.len() >= max_edges {
+                    truncated = true;
+                    break;
+                }
+                let (from_page_id, to_page_id) = match edge.direction {
+                    GraphEdgeDirection::Outgoing => (origin.clone(), neighbor.clone()),
+                    GraphEdgeDirection::Incoming => (neighbor.clone(), origin.clone()),
+                };
+                let key = format!(
+                    "{}|{}|{}|{:?}|{:?}",
+                    from_page_id, to_page_id, edge.relation_type, edge.edge_kind, edge.direction
+                );
+                if !edge_keys.insert(key) {
+                    continue;
+                }
+                if !seen.contains(&neighbor) && seen.len() >= max_nodes {
+                    truncated = true;
+                    continue;
+                }
+                let is_new = seen.insert(neighbor.clone());
+                edges.push(GraphSliceEdge {
+                    from_page_id,
+                    to_page_id,
+                    relation_type: edge.relation_type,
+                    edge_kind: edge.edge_kind,
+                    direction_from_origin: edge.direction,
+                    basis_revision_ids: edge.basis_revision_ids,
+                });
+                if is_new && depth + 1 < max_depth {
+                    frontier.push_back((neighbor.clone(), depth + 1));
+                }
+            }
+        }
+    }
+
+    let nodes = client
+        .read_pages(ReadPagesRequest {
+            page_ids: seen.into_iter().collect(),
+            revision_ids: Vec::new(),
+            projections,
+            max_chars,
+        })
+        .await?;
+    Ok(GraphSliceResponse {
+        nodes,
+        edges,
+        truncated,
+    })
 }
 
 /// Privileged Runtime, maintainer, and operator surface.
@@ -214,6 +346,11 @@ pub trait PcpApi: PcpTenantApi {
         requested_scopes: Vec<String>,
         window_hours: u32,
     ) -> Result<HealthSnapshot>;
+    async fn query_audit_summary(
+        &self,
+        requested_scopes: Vec<String>,
+        window_hours: u32,
+    ) -> Result<QueryAuditSummary>;
 }
 
 #[derive(Clone)]
@@ -467,6 +604,16 @@ impl PcpApi for EmbeddedPcpClient {
     ) -> Result<HealthSnapshot> {
         self.store
             .health_snapshot(&self.access, requested_scopes, window_hours)
+            .await
+    }
+
+    async fn query_audit_summary(
+        &self,
+        requested_scopes: Vec<String>,
+        window_hours: u32,
+    ) -> Result<QueryAuditSummary> {
+        self.store
+            .query_audit_summary(&self.access, requested_scopes, window_hours)
             .await
     }
 }

@@ -107,6 +107,9 @@ normative. Conformance is defined by [`PROTOCOL-en.md`](PROTOCOL-en.md).
 - Stable Pages, immutable Revisions, `sealed`/`revisioned` behavior, and CAS updates.
 - Head-only default retrieval, `auto`, `exact`, `text`, `graph`, and `temporal`
   modes, plus bounded Projection reads.
+- Runtime-RPC `semantic_search` and budgeted `match_intent` context queries. Results are
+  structured Page/Revision entries; callers assemble their own prompts without a fixed Context Pack prefix.
+- Stable-`pageId` anchored graph slices with bounded depth, nodes, and edges, ACL-filtered at every hop; no whole-store graph export.
 - Summary, Validity, Relation, Provenance, lossless sealed-Page packing, and access audit.
 - Allowed access events are committed in bounded batches of at most 512 events or
   one second, with at least 500 ms between automatic commits; overload applies
@@ -132,10 +135,11 @@ maintenance is also still pending.
 
 ### Implementation Boundary
 
-The official implementation intentionally does not embed a fixed semantic model or
-Router. Runtime owns maintenance tasks, budgets, validation, and commit authority;
-deployments may configure local or remote inference providers without assigning
-long-term maintenance authority to a tenant.
+The official implementation does not put a fixed semantic model or Router in the Store
+contract. Runtime owns semantic-query and intent-match providers, budgets, validation,
+and commit authority. If a required provider is absent, the method is explicitly unavailable
+rather than silently falling back to keyword search. Console is a debugging and review client
+of this same RPC contract, not another holder of provider credentials.
 
 ## Quick Start
 
@@ -288,6 +292,9 @@ maintainers and local administration tools. `observe` can read aggregate Health
 only; it cannot list or read Pages, search, read raw audit events, or invoke
 maintenance actions. Cross-Scope derivation always requires a separate opt-in.
 `pcp_whoami` reports the server-injected Principal and grants.
+When connected to Runtime, MCP also provides `pcp_semantic_search` (semantic retrieval), `pcp_match_intent` (Router
+intent matching), and `pcp_expand_graph` (an explicit-anchor bounded graph slice). Embedded Store
+mode does not pretend to provide those Runtime-owned inference capabilities.
 
 ### Console
 
@@ -297,6 +304,8 @@ views; control-plane actions approve, reject, or revoke local client
 registrations, plus Runtime restart when Console owns that Runtime. Health presents storage shape, activity, recall, packing,
 graph, and operations separately rather than as an opaque score. Operational
 telemetry excludes query text and Page content.
+Its query page renders the Runtime RPC's structured result and only builds a local inspection
+preview; it does not carry a second retrieval implementation.
 
 ```bash
 cargo build --release -p pcp-console

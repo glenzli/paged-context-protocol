@@ -7,11 +7,10 @@ use anyhow::{Context, Result, ensure};
 use infer_runtime_client::{Client, ResponsesRequest, ResponsesResult};
 use pcp_client::PcpTenantApi;
 use pcp_core::{
-    BrowseIndexOrder, GraphEdgeDirection, GraphEdgeKind, Projection, ReadPagesRequest,
-    SearchFilters, SearchHit, SearchMode, SearchPagesRequest, SearchTermMatch,
+    BrowseIndexOrder, GraphEdgeDirection, GraphEdgeKind, IntentEffort, IntentMatchAudit,
+    Projection, ReadPagesRequest, RouterTokenUsage, SearchFilters, SearchHit, SearchMode,
+    SearchPagesRequest, SearchTermMatch,
 };
-use pcp_rpc::RemotePcpClient;
-use pcp_runtime::IntentMatchConfig;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep, timeout};
@@ -25,88 +24,44 @@ const MAX_CONSULT_CHARS: usize = 1_600;
 const MAX_EXACT_HITS_PER_TERM: u32 = 12;
 const MAX_GRAPH_NEIGHBORS_PER_SEED: u32 = 16;
 
-/// The bounded amount of iterative reasoning that intent matching may spend.
-/// `semantic_search` intentionally has no effort setting: it is always one
-/// vector pass. These levels apply only to the Router-controlled path.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IntentEffort {
-    Low,
-    #[default]
-    Medium,
-    High,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct IntentMatchAudit {
-    pub effort: IntentEffort,
-    pub router_rounds: usize,
-    pub router_usage: RouterTokenUsage,
-    pub semantic_probes: Vec<String>,
-    pub exact_terms: Vec<String>,
-    pub candidate_count: usize,
-    pub relation_candidates_considered: usize,
-    pub consulted_count: usize,
-    pub catalog_pages_considered: usize,
-    pub stopped_reason: String,
-}
-
-/// Token counts reported by the Router provider for a single intent-match run.
-/// Semantic embedding calls are intentionally excluded: they are a distinct
-/// service path, and an absent provider report must never become an estimate.
-#[derive(Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RouterTokenUsage {
-    pub reported_responses: usize,
-    pub unreported_responses: usize,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub total_tokens: u64,
-    pub cached_input_tokens: u64,
-    pub reasoning_tokens: u64,
-}
-
-impl RouterTokenUsage {
-    fn record(&mut self, response: &ResponsesResult) {
-        let Some(usage) = response.extra.get("usage").and_then(Value::as_object) else {
-            self.unreported_responses += 1;
-            return;
-        };
-        let Some(input_tokens) = usage.get("input_tokens").and_then(Value::as_u64) else {
-            self.unreported_responses += 1;
-            return;
-        };
-        let Some(output_tokens) = usage.get("output_tokens").and_then(Value::as_u64) else {
-            self.unreported_responses += 1;
-            return;
-        };
-        self.reported_responses += 1;
-        self.input_tokens = self.input_tokens.saturating_add(input_tokens);
-        self.output_tokens = self.output_tokens.saturating_add(output_tokens);
-        self.total_tokens = self.total_tokens.saturating_add(
-            usage
-                .get("total_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or_else(|| input_tokens.saturating_add(output_tokens)),
-        );
-        self.cached_input_tokens = self.cached_input_tokens.saturating_add(
-            usage
-                .get("input_tokens_details")
-                .and_then(Value::as_object)
-                .and_then(|details| details.get("cached_tokens"))
-                .and_then(Value::as_u64)
-                .unwrap_or_default(),
-        );
-        self.reasoning_tokens = self.reasoning_tokens.saturating_add(
-            usage
-                .get("output_tokens_details")
-                .and_then(Value::as_object)
-                .and_then(|details| details.get("reasoning_tokens"))
-                .and_then(Value::as_u64)
-                .unwrap_or_default(),
-        );
-    }
+fn record_usage(tally: &mut RouterTokenUsage, response: &ResponsesResult) {
+    let Some(reported) = response.extra.get("usage").and_then(Value::as_object) else {
+        tally.unreported_responses += 1;
+        return;
+    };
+    let Some(input_tokens) = reported.get("input_tokens").and_then(Value::as_u64) else {
+        tally.unreported_responses += 1;
+        return;
+    };
+    let Some(output_tokens) = reported.get("output_tokens").and_then(Value::as_u64) else {
+        tally.unreported_responses += 1;
+        return;
+    };
+    tally.reported_responses += 1;
+    tally.input_tokens = tally.input_tokens.saturating_add(input_tokens);
+    tally.output_tokens = tally.output_tokens.saturating_add(output_tokens);
+    tally.total_tokens = tally.total_tokens.saturating_add(
+        reported
+            .get("total_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| input_tokens.saturating_add(output_tokens)),
+    );
+    tally.cached_input_tokens = tally.cached_input_tokens.saturating_add(
+        reported
+            .get("input_tokens_details")
+            .and_then(Value::as_object)
+            .and_then(|details| details.get("cached_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+    );
+    tally.reasoning_tokens = tally.reasoning_tokens.saturating_add(
+        reported
+            .get("output_tokens_details")
+            .and_then(Value::as_object)
+            .and_then(|details| details.get("reasoning_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+    );
 }
 
 pub struct IntentMatchResult {
@@ -129,7 +84,7 @@ pub struct IntentMatchProvider {
 }
 
 impl IntentMatchProvider {
-    pub fn new(config: IntentMatchConfig) -> Result<Self> {
+    pub fn new(config: crate::IntentMatchConfig) -> Result<Self> {
         Ok(Self {
             client: Client::builder()
                 .credential_file(config.credential_file)
@@ -142,7 +97,7 @@ impl IntentMatchProvider {
 
     pub async fn search(
         &self,
-        client: &RemotePcpClient,
+        client: &dyn PcpTenantApi,
         semantic_search: &SemanticSearchProvider,
         query: &str,
         scopes: &[String],
@@ -355,7 +310,7 @@ impl IntentMatchProvider {
 
     async fn add_relation_candidates(
         &self,
-        client: &RemotePcpClient,
+        client: &dyn PcpTenantApi,
         pool: &mut CandidatePool,
         scopes: &[String],
         seed_limit: usize,
@@ -407,7 +362,7 @@ impl IntentMatchProvider {
 
     async fn add_catalog_candidates(
         &self,
-        client: &RemotePcpClient,
+        client: &dyn PcpTenantApi,
         pool: &mut CandidatePool,
         scopes: &[String],
     ) -> Result<usize> {
@@ -444,7 +399,7 @@ impl IntentMatchProvider {
 
     async fn consult_cards(
         &self,
-        client: &RemotePcpClient,
+        client: &dyn PcpTenantApi,
         page_ids: &[String],
     ) -> Result<Vec<ConsultCard>> {
         if page_ids.is_empty() {
@@ -491,7 +446,7 @@ impl IntentMatchProvider {
             .response(input, instructions, effort)
             .await
             .context("run PCP intent Router")?;
-        usage.record(&response);
+        record_usage(usage, &response);
         let output = extract_output_text(&response)?;
         serde_json::from_str(&output).context("decode PCP intent Router JSON")
     }
@@ -945,8 +900,8 @@ mod tests {
             extra: BTreeMap::new(),
         };
         let mut usage = RouterTokenUsage::default();
-        usage.record(&response);
-        usage.record(&missing);
+        record_usage(&mut usage, &response);
+        record_usage(&mut usage, &missing);
         assert_eq!(usage.reported_responses, 1);
         assert_eq!(usage.unreported_responses, 1);
         assert_eq!(usage.input_tokens, 100);

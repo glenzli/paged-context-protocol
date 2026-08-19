@@ -6,17 +6,18 @@ use pcp_core::{
     AccessAuditEvent, AccessSession, AssessPageValidityRequest, BrowseIndexOrder, Capabilities,
     CollectRevisionRetentionRequest, CreateScopeRequest, IngestPageRequest, LinkPagesRequest,
     PackPagesRequest, PageMutability, PlanRevisionRetentionRequest,
-    PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
-    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchHit,
-    SearchPagesRequest, SearchResult, SourceSpan, UnpackPageRequest, WritePageRequest, WriteResult,
-    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    PutRevisionRetentionLeaseRequest, QueryAuditEvent, ReadPage, ReadPagesRequest, Relation,
+    RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan,
+    Scope, SearchHit, SearchPagesRequest, SearchResult, SourceSpan, UnpackPageRequest,
+    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use health::{
     ActivityHealth, GraphHealth, HealthSnapshot, HealthTimelineBucket, NamedCount, OperationHealth,
-    PackingHealth, RecallHealth, ScopeHealth, StorageHealth,
+    PackingHealth, QueryAuditMethodHealth, QueryAuditSummary, RecallHealth, ScopeHealth,
+    StorageHealth,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -244,6 +245,16 @@ pub trait PcpStore: Send + Sync {
         limit: u32,
         cursor: Option<String>,
     ) -> Result<(Vec<AccessAuditEvent>, Option<String>)>;
+    /// Runtime-owned, content-free query observability. This is intentionally
+    /// separate from tenant operations: the Runtime writes it after an actual
+    /// provider query has completed.
+    async fn record_runtime_query_audit(&self, event: QueryAuditEvent) -> Result<()>;
+    async fn query_audit_summary(
+        &self,
+        access: &AccessSession,
+        requested_scopes: Vec<String>,
+        window_hours: u32,
+    ) -> Result<QueryAuditSummary>;
     async fn health_snapshot(
         &self,
         access: &AccessSession,

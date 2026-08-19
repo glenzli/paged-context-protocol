@@ -247,6 +247,26 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 telemetry_json TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS pcp_query_audit (
+                event_id TEXT PRIMARY KEY,
+                occurred_at TEXT NOT NULL,
+                principal_json TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                method TEXT NOT NULL,
+                effort TEXT,
+                scopes_json TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                anchor_count INTEGER NOT NULL,
+                related_count INTEGER NOT NULL,
+                context_chars INTEGER NOT NULL,
+                semantic_indexed_count INTEGER,
+                semantic_embedded_count INTEGER,
+                router_rounds INTEGER,
+                router_usage_json TEXT,
+                failure_kind TEXT
+            );
+
             CREATE VIRTUAL TABLE IF NOT EXISTS pcp_revision_fts USING fts5(
                 revision_id UNINDEXED,
                 page_id UNINDEXED,
@@ -298,6 +318,8 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 WHERE json_extract(facets_json, '$.standing') IS NOT NULL;
             CREATE INDEX IF NOT EXISTS pcp_access_log_time
                 ON pcp_access_log(occurred_at DESC, event_id DESC);
+            CREATE INDEX IF NOT EXISTS pcp_query_audit_time
+                ON pcp_query_audit(occurred_at DESC, event_id DESC);
 
             "#,
         )

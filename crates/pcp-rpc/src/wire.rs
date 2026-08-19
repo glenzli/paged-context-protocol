@@ -1,19 +1,21 @@
 use anyhow::{Context, Result};
 use pcp_client::{
     ContentLibraryResult, ContentLibrarySummary, DurablePageInventoryItem, HealthSnapshot,
-    TombstoneCascadeResult, UnpackPageResult,
+    QueryAuditSummary, TombstoneCascadeResult, UnpackPageResult,
 };
 use pcp_core::{
     AccessAuditEvent, AccessSession, Actor, AssessPageValidityRequest, BrowseIndexOrder,
-    Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest, IngestPageRequest,
-    LinkPagesRequest, PackPagesRequest, PlanRevisionRetentionRequest,
-    PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
-    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope,
-    SearchPagesRequest, SearchResult, UnpackPageRequest, WritePageRequest, WriteResult,
-    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest, ExpandGraphRequest,
+    GraphSliceResponse, IngestPageRequest, LinkPagesRequest, PackPagesRequest,
+    PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest,
+    Relation, RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease,
+    RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult, UnpackPageRequest,
+    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+use pcp_core::{IntentEffort, QueryContextRequest, QueryContextResponse};
 
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
@@ -49,6 +51,12 @@ pub(crate) enum RpcOperation {
         cursor: Option<String>,
     },
     SearchPages(SearchPagesRequest),
+    ExpandGraph(ExpandGraphRequest),
+    SemanticSearch(QueryContextRequest),
+    MatchIntent {
+        request: QueryContextRequest,
+        effort: IntentEffort,
+    },
     BrowseIndex {
         scopes: Vec<String>,
         excluded_page_kinds: Vec<String>,
@@ -117,6 +125,10 @@ pub(crate) enum RpcOperation {
         requested_scopes: Vec<String>,
         window_hours: u32,
     },
+    QueryAuditSummary {
+        requested_scopes: Vec<String>,
+        window_hours: u32,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -144,6 +156,8 @@ pub(crate) enum RpcValue {
         next_cursor: Option<String>,
     },
     SearchResult(SearchResult),
+    GraphSlice(GraphSliceResponse),
+    ContextQuery(QueryContextResponse),
     ContentLibraryResult(ContentLibraryResult),
     ContentLibrarySummary(ContentLibrarySummary),
     Pages(Vec<ReadPage>),
@@ -167,6 +181,7 @@ pub(crate) enum RpcValue {
         next_cursor: Option<String>,
     },
     HealthSnapshot(HealthSnapshot),
+    QueryAuditSummary(QueryAuditSummary),
 }
 
 pub(crate) async fn write_frame<T>(writer: &mut (impl AsyncWrite + Unpin), value: &T) -> Result<()>

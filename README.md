@@ -84,6 +84,9 @@ PCP 仍是开放协议，允许独立实现。“官方”表示该实现由 PCP
 
 - 稳定 Page、不可变 Revision、`sealed`/`revisioned` 与 CAS 修订。
 - head-only 默认检索，`auto`、`exact`、`text`、`graph`、`temporal` 模式，以及有界 Projection 读取。
+- Runtime RPC 的 `semantic_search` 与分预算 `match_intent` Context 查询；结果以结构化 Page/Revision
+  条目返回，由调用方决定提示词组装，不内置固定 Context Pack 前缀。
+- 以稳定 `pageId` 为锚点、深度/节点/边数受限且 ACL 逐跳过滤的图切片；不提供全库图导出。
 - Summary、Validity、Relation、Provenance、无损 sealed-Page packing 与访问审计。
 - allowed 访问事件以最多 512 条或 1 秒的有界批次写入，自动提交至少间隔 500 ms；队列过载时
   反压而不静默丢弃。denied/failed 进入 writer 后使用最多 100 ms 的安全合并窗口，并在调用返回前
@@ -100,8 +103,9 @@ Durable Page deletion 当前不会出现在 Capabilities 的 `features` 中；co
 
 ### 实现边界
 
-官方实现有意不内置固定语义模型或 Router。Runtime 拥有维护任务、预算、校验和提交权，部署方可以为
-它配置本地或远端推理 Provider，而不把长期维护权交给某个租户。
+官方实现不把固定语义模型或 Router 写入 Store 契约。Runtime 拥有语义检索/意图匹配的 Provider、预算、
+校验和提交权；未配置对应 Provider 时查询会明确不可用，绝不静默降级为关键词搜索。Console 只是同一 RPC
+查询协议的调试和审阅客户端，不保存或私有持有 Provider 凭据。
 
 ## 快速开始
 
@@ -229,6 +233,8 @@ codex mcp add pcp \
 pack。`write` 与 `admin` 是 Runtime 维护器和本机管理工具的特权模式。`observe` 只允许读取聚合 Health，
 不能列出或读取 Page、搜索、读取原始审计或执行维护动作。跨 Scope 派生始终需要单独启用。
 `pcp_whoami` 用于检查服务端注入的 Principal 与授权范围。
+连接 Runtime 时，MCP 还提供 `pcp_semantic_search`（默认语义搜索）、`pcp_match_intent`（Router 意图匹配）与
+`pcp_expand_graph`（显式锚点的有界图切片）。embedded Store 模式不会伪造这些 Runtime Provider 能力。
 
 ### Console
 
@@ -236,6 +242,7 @@ Console 应连接一个独立的 `audit` 端点。其 Store Inspector 只读，�
 Retention 和 Health 视图；控制面动作为批准、拒绝或撤销本机客户端注册，以及在 Console 自己托管 Runtime
 时重启该 Runtime。Health 将存储形态、
 活动、召回、pack、关系与运行状况分开呈现，不合成为不透明总分；操作遥测不保存查询文本或 Page 内容。
+查询页通过 Runtime RPC 展示结构化返回值，并将预览作为 Console 的本地展示，而不是另一套检索实现。
 
 ```bash
 cargo build --release -p pcp-console

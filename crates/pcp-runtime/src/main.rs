@@ -11,7 +11,7 @@ use pcp_core::{AccessPrincipal, AccessPrincipalType};
 use pcp_rpc::{RuntimeEndpoint, serve_unix, serve_unix_endpoints};
 use pcp_runtime::{
     EnrollmentConfig, MaintenanceMode, MaintenanceRunAudit, ObserverConfig, ObserverService,
-    RuntimeConfig, RuntimeMaintainer, build_semantic_worker, persist_audit,
+    QueryRuntime, RuntimeConfig, RuntimeMaintainer, build_semantic_worker, persist_audit,
 };
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
@@ -284,6 +284,11 @@ async fn run_broker(config_path: PathBuf) -> Result<()> {
     );
     let identity_id = store.identity_id().to_owned();
     let store: Arc<dyn PcpStore> = store;
+    let query_service = Arc::new(QueryRuntime::from_config(
+        Arc::clone(&store),
+        config.semantic_search.clone(),
+        config.intent_match.clone(),
+    )?);
     let endpoints = config
         .endpoints
         .iter()
@@ -294,6 +299,9 @@ async fn run_broker(config_path: PathBuf) -> Result<()> {
                 client: EmbeddedPcpClient::shared(
                     Arc::clone(&store),
                     endpoint.access_session(&identity_id, index)?,
+                ),
+                query_service: Some(
+                    Arc::clone(&query_service) as Arc<dyn pcp_rpc::RuntimeQueryService>
                 ),
             })
         })

@@ -13,6 +13,7 @@ use pcp_client::PcpApi;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::{JoinHandle, JoinSet};
 
+use crate::RuntimeQueryService;
 use crate::wire::{
     PcpDescriptor, RpcOperation, RpcOutcome, RpcRequest, RpcResponse, RpcValue, read_frame,
     write_frame,
@@ -31,6 +32,7 @@ static SERVER_STARTED_AT_UNIX_MS: LazyLock<u64> = LazyLock::new(|| {
 pub struct RuntimeEndpoint {
     pub socket_path: PathBuf,
     pub client: Arc<dyn PcpApi>,
+    pub query_service: Option<Arc<dyn RuntimeQueryService>>,
 }
 
 pub struct RunningRuntimeEndpoint {
@@ -53,7 +55,7 @@ impl RunningRuntimeEndpoint {
     ) -> Self {
         let socket_path = socket_path.as_ref().to_path_buf();
         let task = tokio::spawn(async move {
-            if let Err(error) = serve_listener(listener, client).await {
+            if let Err(error) = serve_listener(listener, client, None).await {
                 eprintln!("PCP runtime endpoint failed: {error:#}");
             }
         });
@@ -95,7 +97,11 @@ pub async fn serve_unix_endpoints(endpoints: Vec<RuntimeEndpoint>) -> Result<()>
     );
     let mut tasks = JoinSet::new();
     for endpoint in endpoints {
-        tasks.spawn(serve_unix(endpoint.socket_path, endpoint.client));
+        tasks.spawn(serve_unix_with_query(
+            endpoint.socket_path,
+            endpoint.client,
+            endpoint.query_service,
+        ));
     }
     let outcome = tasks
         .join_next()
@@ -110,10 +116,18 @@ pub async fn serve_unix_endpoints(endpoints: Vec<RuntimeEndpoint>) -> Result<()>
 }
 
 pub async fn serve_unix(socket_path: impl AsRef<Path>, client: Arc<dyn PcpApi>) -> Result<()> {
+    serve_unix_with_query(socket_path, client, None).await
+}
+
+pub async fn serve_unix_with_query(
+    socket_path: impl AsRef<Path>,
+    client: Arc<dyn PcpApi>,
+    query_service: Option<Arc<dyn RuntimeQueryService>>,
+) -> Result<()> {
     let socket_path = socket_path.as_ref().to_path_buf();
     let listener = bind_unix(&socket_path).await?;
     let _guard = SocketGuard(socket_path);
-    serve_listener(listener, client).await
+    serve_listener(listener, client, query_service).await
 }
 
 async fn bind_unix(socket_path: &Path) -> Result<UnixListener> {
@@ -125,14 +139,19 @@ async fn bind_unix(socket_path: &Path) -> Result<UnixListener> {
     Ok(listener)
 }
 
-async fn serve_listener(listener: UnixListener, client: Arc<dyn PcpApi>) -> Result<()> {
+async fn serve_listener(
+    listener: UnixListener,
+    client: Arc<dyn PcpApi>,
+    query_service: Option<Arc<dyn RuntimeQueryService>>,
+) -> Result<()> {
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, _) = accepted.context("accept PCP RPC client")?;
                 let client = Arc::clone(&client);
-                connections.spawn(handle_connection(stream, client));
+                let query_service = query_service.clone();
+                connections.spawn(handle_connection(stream, client, query_service));
             }
             Some(result) = connections.join_next(), if !connections.is_empty() => {
                 match result {
@@ -171,16 +190,21 @@ async fn prepare_socket_path(socket_path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn handle_connection(mut stream: UnixStream, client: Arc<dyn PcpApi>) -> Result<()> {
+async fn handle_connection(
+    mut stream: UnixStream,
+    client: Arc<dyn PcpApi>,
+    query_service: Option<Arc<dyn RuntimeQueryService>>,
+) -> Result<()> {
     verify_peer_user(&stream)?;
     while let Some(request) = read_frame::<RpcRequest>(&mut stream).await? {
         let id = request.id;
-        let outcome = match dispatch(client.as_ref(), request.operation).await {
-            Ok(value) => RpcOutcome::Ok(Box::new(value)),
-            Err(error) => RpcOutcome::Error {
-                message: format!("{error:#}"),
-            },
-        };
+        let outcome =
+            match dispatch(client.as_ref(), query_service.as_deref(), request.operation).await {
+                Ok(value) => RpcOutcome::Ok(Box::new(value)),
+                Err(error) => RpcOutcome::Error {
+                    message: format!("{error:#}"),
+                },
+            };
         write_frame(&mut stream, &RpcResponse { id, outcome }).await?;
     }
     Ok(())
@@ -245,7 +269,11 @@ fn current_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
-async fn dispatch(client: &dyn PcpApi, operation: RpcOperation) -> Result<RpcValue> {
+async fn dispatch(
+    client: &dyn PcpApi,
+    query_service: Option<&dyn RuntimeQueryService>,
+    operation: RpcOperation,
+) -> Result<RpcValue> {
     let value = match operation {
         RpcOperation::Describe => RpcValue::Descriptor(PcpDescriptor {
             identity_id: client.identity_id().to_owned(),
@@ -275,6 +303,21 @@ async fn dispatch(client: &dyn PcpApi, operation: RpcOperation) -> Result<RpcVal
         }
         RpcOperation::SearchPages(request) => {
             RpcValue::SearchResult(client.search_pages(request).await?)
+        }
+        RpcOperation::ExpandGraph(request) => {
+            RpcValue::GraphSlice(pcp_client::expand_graph(client, request).await?)
+        }
+        RpcOperation::SemanticSearch(request) => {
+            let service = query_service.context(
+                "semantic_search is unavailable: this Runtime endpoint has no configured query service",
+            )?;
+            RpcValue::ContextQuery(service.semantic_search(client, request).await?)
+        }
+        RpcOperation::MatchIntent { request, effort } => {
+            let service = query_service.context(
+                "match_intent is unavailable: this Runtime endpoint has no configured query service",
+            )?;
+            RpcValue::ContextQuery(service.match_intent(client, request, effort).await?)
         }
         RpcOperation::BrowseIndex {
             scopes,
@@ -395,6 +438,14 @@ async fn dispatch(client: &dyn PcpApi, operation: RpcOperation) -> Result<RpcVal
         } => RpcValue::HealthSnapshot(
             client
                 .health_snapshot(requested_scopes, window_hours)
+                .await?,
+        ),
+        RpcOperation::QueryAuditSummary {
+            requested_scopes,
+            window_hours,
+        } => RpcValue::QueryAuditSummary(
+            client
+                .query_audit_summary(requested_scopes, window_hours)
                 .await?,
         ),
     };

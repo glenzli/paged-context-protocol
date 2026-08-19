@@ -12,7 +12,7 @@ test("semantic retrieval omits Router-only effort instead of serializing null", 
       topK: "6",
       intentEffort: "medium",
     }),
-    { method: "semantic_search", query: "PCP", scope: null, topK: 6 },
+    { query: "PCP", scopes: [], resultLimit: 6 },
   );
 });
 
@@ -26,10 +26,9 @@ test("intent matching carries its selected Router effort", () => {
       intentEffort: "high",
     }),
     {
-      method: "match_intent",
       query: "蒸馏的安全边界",
-      scope: "project:symbiont-d",
-      topK: 12,
+      scopes: ["project:symbiont-d"],
+      resultLimit: 12,
       intentEffort: "high",
     },
   );

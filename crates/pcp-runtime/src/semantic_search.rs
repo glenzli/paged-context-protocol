@@ -12,12 +12,13 @@ use infer_runtime_client::{
 };
 use pcp_client::PcpTenantApi;
 use pcp_core::{BrowseIndexOrder, Projection, ReadPage, ReadPagesRequest, SearchHit};
-use pcp_rpc::RemotePcpClient;
-use pcp_runtime::SemanticSearchConfig;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::Mutex, time::timeout};
 
-use crate::query::{model_projection, projection_was_truncated, truncate_chars};
+use crate::{
+    SemanticSearchConfig,
+    query::{model_projection, projection_was_truncated, truncate_chars},
+};
 
 const CACHE_SCHEMA: u32 = 1;
 const DOCUMENT_BATCH_SIZE: usize = 8;
@@ -91,7 +92,7 @@ impl SemanticSearchProvider {
 
     pub async fn search(
         &self,
-        client: &RemotePcpClient,
+        client: &dyn PcpTenantApi,
         query: &str,
         scopes: &[String],
         limit: usize,
@@ -258,7 +259,7 @@ impl SemanticSearchProvider {
 
     async fn collect_documents(
         &self,
-        client: &RemotePcpClient,
+        client: &dyn PcpTenantApi,
         scopes: &[String],
     ) -> Result<Vec<SemanticDocument>> {
         let mut cursor = None;

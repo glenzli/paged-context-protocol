@@ -238,10 +238,12 @@ async fn broker_isolates_multiple_principals_on_one_store() {
         RuntimeEndpoint {
             socket_path: socket_a.clone(),
             client: client_a,
+            query_service: None,
         },
         RuntimeEndpoint {
             socket_path: socket_b.clone(),
             client: client_b,
+            query_service: None,
         },
     ]));
     let remote_a = connect_when_ready(&socket_a).await;

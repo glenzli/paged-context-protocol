@@ -21,6 +21,7 @@ const OBSERVABILITY_OPERATIONS: &[&str] = &[
     "health_snapshot",
     "list_scopes",
     "page_count",
+    "query_audit_summary",
 ];
 
 #[derive(Debug)]

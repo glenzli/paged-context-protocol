@@ -1,5 +1,6 @@
 mod access;
 mod model;
+mod query;
 mod request;
 mod retention;
 
@@ -13,6 +14,11 @@ pub use model::{
     PageRevision, PageSummary, PageValidity, PageValidityHint, Projection, ProvenanceEvent,
     ReadPage, Relation, Revision, Scope, SearchHit, SearchMode, SearchResult, SearchTermMatch,
     SourceRef, SourceSpan, ValidityStanding, WriteResult, WriteSummaryResult, WriteValidityResult,
+};
+pub use query::{
+    ContextDetail, ContextPackEntry, ExpandGraphRequest, GraphSliceEdge, GraphSliceResponse,
+    IntentEffort, IntentMatchAudit, QueryAuditEvent, QueryAuditMethod, QueryContextRequest,
+    QueryContextResponse, QueryRelation, QueryVisibility, RouterTokenUsage,
 };
 pub use request::{
     AssessPageValidityRequest, CreateScopeRequest, IngestPageRequest, InitialRelation,

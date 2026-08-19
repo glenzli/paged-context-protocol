@@ -1,8 +1,11 @@
 mod config;
 mod enrollment;
 mod infra_socket;
+mod intent_match;
 mod maintenance;
 mod observer;
+mod query;
+mod semantic_search;
 
 pub use config::{IntentMatchConfig, RuntimeConfig, RuntimeEndpointConfig, SemanticSearchConfig};
 pub use enrollment::{EnrollmentConfig, EnrollmentManager};
@@ -29,6 +32,7 @@ pub use maintenance::{
     build_semantic_worker, persist_audit,
 };
 pub use observer::{ObserverConfig, ObserverService};
+pub use query::QueryRuntime;
 
 #[cfg(test)]
 mod tests;

@@ -206,6 +206,9 @@ Relation 组织。时间邻近和主题连续性由 Runtime 的语义判断选�
 - `ingest_page(namespace, kind, payload?, source_refs?, observed_at?, source_span?, facets?, external_event_id?)`
 - `search_pages(query, scopes, strategy?, limit?, cursor?)`
 - `read_pages(page_ids, revision_ids?, view?, max_chars?)`
+- `semantic_search(query, scopes?, result_limit?, context_budget_chars?)`
+- `match_intent(query, scopes?, result_limit?, context_budget_chars?, intent_effort?)`
+- `expand_graph(anchor_page_ids, scopes?, max_depth?, max_nodes?, max_edges?, view?, max_chars?)`
 - 可选 `browse_index(scopes?, view?, limit?, cursor?)`
 
 `ingest_page` 是租户唯一的持久写入口。Identity 由所连接的 Runtime 决定，不在 Page、Revision、Scope 或
@@ -217,6 +220,17 @@ Search 返回候选而不是真值，并必须有界、可分页、标明命中�
 Validity、provenance 与 SourceRef 可以作为被授权的读取投影返回；租户不需要对应的直接写接口。持有精确
 Revision ID 的调用方可以按授权读取历史证据，但历史 Revision 不应重新进入默认搜索结果；原始访问审计与
 历史枚举仍属于 audit/operator 面。模型决定当前任务需要查询和读取什么，并把结果组装进当前工作上下文。
+
+`search_pages` 是确定性候选和调试接口，不应被作为模型的默认“智能检索”工具。`semantic_search` 是 Runtime
+拥有 Provider、预算和组装策略的保守语义入口：它只返回独立相关的 Page，并仅以已断言 Relation 做保守的排序加权。
+`match_intent` 可在 `low`、`medium`、`high` 预算内由 Router 扩展意图、审阅候选和关系线索。两者都返回带
+`pageId`、`revisionId`、纳入理由、审计与投影内容的结构化条目，**不**返回固定提示词包装；调用方决定如何把这些条目
+放入自己的模型上下文。空 `scopes` 表示当前会话的全部授权范围，所有最终读取仍须逐页经过 Store ACL。每个入口未配置
+所需 Provider 时必须直接报出对应方法不可用及恢复条件，不得退化为关键词搜索。
+
+`expand_graph` 必须从显式 `anchor_page_ids` 开始，并同时受最大深度（实现上限 3）、节点数和边数约束。它
+只返回每一跳均已授权的 Relation/provenance 边与节点；不提供无锚点的全图导出，也不把 Console 的来源流
+虚拟边伪装成协议 Relation。`pageId` 是稳定对象身份和图锚点，`revisionId` 是可复核的历史证据定位符。
 
 ### 3.2 Runtime 维护面
 

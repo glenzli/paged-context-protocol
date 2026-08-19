@@ -1,18 +1,23 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use anyhow::{Context, Result, ensure};
+use async_trait::async_trait;
+use chrono::{SecondsFormat, Utc};
 use pcp_client::PcpTenantApi;
 use pcp_core::{
-    GraphEdgeDirection, GraphEdgeKind, Projection, ReadPage, ReadPagesRequest, SearchFilters,
-    SearchHit, SearchMode, SearchPagesRequest, SearchTermMatch, SourceSpan,
+    AccessDecision, ContextDetail, ContextPackEntry, GraphEdgeDirection, GraphEdgeKind,
+    IntentEffort, Projection, QueryAuditEvent, QueryAuditMethod, QueryContextRequest,
+    QueryContextResponse, QueryRelation, QueryVisibility, ReadPage, ReadPagesRequest,
+    SearchFilters, SearchHit, SearchMode, SearchPagesRequest, SearchTermMatch,
 };
-use pcp_rpc::RemotePcpClient;
-use serde::{Deserialize, Serialize};
+use pcp_store::PcpStore;
 use serde_json::Value;
+use uuid::Uuid;
 
-use crate::intent_match::{IntentEffort, IntentMatchAudit, IntentMatchProvider};
+use pcp_rpc::RuntimeQueryService;
 
-pub use crate::semantic_search::SemanticSearchProvider;
+use crate::{IntentMatchConfig, SemanticSearchConfig};
+use crate::{intent_match::IntentMatchProvider, semantic_search::SemanticSearchProvider};
 
 const DEFAULT_TOP_K: u32 = 6;
 const MAX_TOP_K: u32 = 20;
@@ -34,102 +39,6 @@ const MAX_RELATED_ENTRY_CHARS: usize = 1_600;
 const MAX_QUERY_READ_CHARS: u32 = 64_000;
 const PROJECTION_TRUNCATION_MARKER: &str = "[projection truncated by host budget]";
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QueryMethod {
-    #[default]
-    SemanticSearch,
-    MatchIntent,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueryRequest {
-    pub query: String,
-    #[serde(default)]
-    pub method: QueryMethod,
-    #[serde(default)]
-    pub scope: Option<String>,
-    #[serde(default)]
-    pub top_k: Option<u32>,
-    #[serde(default)]
-    pub pack_budget_chars: Option<u32>,
-    #[serde(default)]
-    pub intent_effort: IntentEffort,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueryCapabilities {
-    pub available_methods: Vec<QueryMethod>,
-    pub unavailable_methods: Vec<UnavailableQueryMethod>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UnavailableQueryMethod {
-    pub method: QueryMethod,
-    pub reason: &'static str,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueryResponse {
-    pub method: QueryMethod,
-    pub scope: Option<String>,
-    pub visibility: &'static str,
-    pub top_k: u32,
-    pub pack_budget_chars: u32,
-    pub anchor_count: usize,
-    pub related_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub semantic_indexed_count: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub semantic_embedded_count: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub intent_match: Option<IntentMatchAudit>,
-    pub entries: Vec<QueryPackEntry>,
-    pub model_context: String,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueryPackEntry {
-    pub rank: usize,
-    pub anchor_rank: usize,
-    pub page_id: String,
-    pub revision_id: String,
-    pub namespace: String,
-    pub kind: String,
-    pub matched_by: String,
-    pub matched_projection: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub semantic_score: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub structural_boost: Option<f32>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub structural_relations: Vec<QueryRelation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub intent_reason: Option<String>,
-    pub detail: QueryDetail,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub relation: Option<QueryRelation>,
-    pub source_projection_truncated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_span: Option<SourceSpan>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub provenance_revision_ids: Vec<String>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueryRelation {
-    pub relation_type: String,
-    pub direction: &'static str,
-}
-
 #[derive(Clone)]
 struct PlannedHit {
     hit: SearchHit,
@@ -150,63 +59,136 @@ struct RankedHit {
     intent_reason: Option<String>,
 }
 
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QueryDetail {
-    Payload,
-    Excerpt,
-    Summary,
-    Reference,
+type QueryPackEntry = ContextPackEntry;
+type QueryDetail = ContextDetail;
+
+#[derive(Clone, Copy)]
+enum QueryMethod {
+    SemanticSearch,
+    MatchIntent,
 }
 
-pub fn capabilities(
-    semantic_search: Option<&SemanticSearchProvider>,
-    intent_match: Option<&IntentMatchProvider>,
-) -> QueryCapabilities {
-    let mut available_methods = Vec::new();
-    let mut unavailable_methods = Vec::new();
-    if semantic_search.is_some() {
-        available_methods.push(QueryMethod::SemanticSearch);
-    } else {
-        unavailable_methods.push(UnavailableQueryMethod {
-            method: QueryMethod::SemanticSearch,
-            reason: "No vector retrieval provider is configured for this Runtime.",
-        });
-    }
-    if semantic_search.is_some() && intent_match.is_some() {
-        available_methods.push(QueryMethod::MatchIntent);
-    } else {
-        unavailable_methods.push(UnavailableQueryMethod {
-            method: QueryMethod::MatchIntent,
-            reason: "Intent matching is unavailable: it requires both semantic retrieval and a configured query intent Router.",
-        });
-    }
-    QueryCapabilities {
-        available_methods,
-        unavailable_methods,
+/// Runtime-owned retrieval composition. It is deliberately separate from the
+/// Store client: provider credentials, vector caches, and Router budgets are
+/// runtime policy, while every Page read still runs through the caller's ACL.
+pub struct QueryRuntime {
+    semantic_search: Option<SemanticSearchProvider>,
+    intent_match: Option<IntentMatchProvider>,
+    audit_store: Arc<dyn PcpStore>,
+}
+
+impl QueryRuntime {
+    pub fn from_config(
+        audit_store: Arc<dyn PcpStore>,
+        semantic_search: Option<SemanticSearchConfig>,
+        intent_match: Option<IntentMatchConfig>,
+    ) -> Result<Self> {
+        Ok(Self {
+            semantic_search: semantic_search
+                .map(SemanticSearchProvider::new)
+                .transpose()?,
+            intent_match: intent_match.map(IntentMatchProvider::new).transpose()?,
+            audit_store,
+        })
     }
 }
 
-pub async fn execute(
-    client: &RemotePcpClient,
+#[async_trait]
+impl RuntimeQueryService for QueryRuntime {
+    async fn semantic_search(
+        &self,
+        client: &dyn PcpTenantApi,
+        request: QueryContextRequest,
+    ) -> Result<QueryContextResponse> {
+        execute(
+            client,
+            self.audit_store.as_ref(),
+            self.semantic_search.as_ref(),
+            self.intent_match.as_ref(),
+            request,
+            QueryMethod::SemanticSearch,
+            IntentEffort::Medium,
+        )
+        .await
+    }
+
+    async fn match_intent(
+        &self,
+        client: &dyn PcpTenantApi,
+        request: QueryContextRequest,
+        effort: IntentEffort,
+    ) -> Result<QueryContextResponse> {
+        execute(
+            client,
+            self.audit_store.as_ref(),
+            self.semantic_search.as_ref(),
+            self.intent_match.as_ref(),
+            request,
+            QueryMethod::MatchIntent,
+            effort,
+        )
+        .await
+    }
+}
+
+async fn execute(
+    client: &dyn PcpTenantApi,
+    audit_store: &dyn PcpStore,
     semantic_search: Option<&SemanticSearchProvider>,
     intent_match: Option<&IntentMatchProvider>,
-    request: QueryRequest,
-) -> Result<QueryResponse> {
+    request: QueryContextRequest,
+    method: QueryMethod,
+    intent_effort: IntentEffort,
+) -> Result<QueryContextResponse> {
+    let started = Instant::now();
+    let audit_scopes = audit_scopes(client, &request.scopes);
+    let result = execute_inner(
+        client,
+        semantic_search,
+        intent_match,
+        request,
+        method,
+        intent_effort,
+    )
+    .await;
+    let event = query_audit_event(
+        client,
+        audit_scopes,
+        method,
+        intent_effort,
+        started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        &result,
+    );
+    if let Err(error) = audit_store.record_runtime_query_audit(event).await {
+        // Observability must never turn an otherwise usable context pack into
+        // a failure. The Runtime still reports this local persistence problem.
+        eprintln!("PCP query audit write failed: {error:#}");
+    }
+    result
+}
+
+async fn execute_inner(
+    client: &dyn PcpTenantApi,
+    semantic_search: Option<&SemanticSearchProvider>,
+    intent_match: Option<&IntentMatchProvider>,
+    request: QueryContextRequest,
+    method: QueryMethod,
+    intent_effort: IntentEffort,
+) -> Result<QueryContextResponse> {
     let query = request.query.trim();
     ensure!(!query.is_empty(), "A query is required");
-    let scope = request.scope.and_then(normalized_scope);
-    let top_k = request.top_k.unwrap_or(DEFAULT_TOP_K).clamp(1, MAX_TOP_K);
+    let scopes = normalized_scopes(request.scopes);
+    let top_k = request
+        .result_limit
+        .unwrap_or(DEFAULT_TOP_K)
+        .clamp(1, MAX_TOP_K);
     let pack_budget_chars = request
-        .pack_budget_chars
+        .context_budget_chars
         .unwrap_or(DEFAULT_PACK_BUDGET_CHARS)
         .clamp(MIN_PACK_BUDGET_CHARS, MAX_PACK_BUDGET_CHARS);
-    let scopes = scope.iter().cloned().collect::<Vec<_>>();
-    let (anchors, semantic_indexed_count, semantic_embedded_count, intent_audit) = match request
-        .method
-    {
+    let (anchors, semantic_indexed_count, semantic_embedded_count, intent_audit) = match method {
         QueryMethod::SemanticSearch => {
-            let provider = semantic_search.context(unavailable_reason(&request.method))?;
+            let provider = semantic_search.context(unavailable_reason(&method))?;
             let candidate_limit = semantic_candidate_limit(top_k);
             let result = provider
                 .search(client, query, &scopes, candidate_limit)
@@ -233,15 +215,15 @@ pub async fn execute(
             )
         }
         QueryMethod::MatchIntent => {
-            let semantic_search = semantic_search.context(unavailable_reason(&request.method))?;
-            let intent_match = intent_match.context(unavailable_reason(&request.method))?;
+            let semantic_search = semantic_search.context(unavailable_reason(&method))?;
+            let intent_match = intent_match.context(unavailable_reason(&method))?;
             let result = intent_match
                 .search(
                     client,
                     semantic_search,
                     query,
                     &scopes,
-                    request.intent_effort,
+                    intent_effort,
                     top_k as usize,
                 )
                 .await
@@ -285,16 +267,15 @@ pub async fn execute(
             pack_entry(index + 1, candidate, detail, &mut remaining_chars)
         })
         .collect::<Vec<_>>();
-    Ok(QueryResponse {
-        method: request.method,
-        visibility: if scope.is_some() {
-            "scoped"
+    Ok(QueryContextResponse {
+        visibility: if scopes.is_empty() {
+            QueryVisibility::AllAuthorized
         } else {
-            "all_authorized"
+            QueryVisibility::Scoped
         },
-        scope,
-        top_k,
-        pack_budget_chars,
+        scopes,
+        result_limit: top_k,
+        context_budget_chars: pack_budget_chars,
         anchor_count,
         related_count: entries
             .iter()
@@ -303,9 +284,120 @@ pub async fn execute(
         semantic_indexed_count,
         semantic_embedded_count,
         intent_match: intent_audit,
-        model_context: model_context(&entries),
         entries,
     })
+}
+
+fn audit_scopes(client: &dyn PcpTenantApi, requested_scopes: &[String]) -> Vec<String> {
+    let mut scopes = if requested_scopes.is_empty() {
+        client
+            .access()
+            .grants
+            .iter()
+            .map(|grant| grant.namespace.clone())
+            .collect::<Vec<_>>()
+    } else {
+        requested_scopes.to_vec()
+    };
+    scopes.sort();
+    scopes.dedup();
+    scopes
+}
+
+fn query_audit_event(
+    client: &dyn PcpTenantApi,
+    scopes: Vec<String>,
+    method: QueryMethod,
+    intent_effort: IntentEffort,
+    duration_ms: u64,
+    result: &Result<QueryContextResponse>,
+) -> QueryAuditEvent {
+    let access = client.access();
+    let (
+        decision,
+        anchor_count,
+        related_count,
+        context_chars,
+        semantic_indexed_count,
+        semantic_embedded_count,
+        router_rounds,
+        router_usage,
+        failure_kind,
+    ) = match result {
+        Ok(response) => (
+            AccessDecision::Allowed,
+            response.anchor_count.try_into().unwrap_or(u64::MAX),
+            response.related_count.try_into().unwrap_or(u64::MAX),
+            response
+                .entries
+                .iter()
+                .filter_map(|entry| entry.content.as_deref())
+                .map(|content| content.chars().count() as u64)
+                .sum(),
+            response.semantic_indexed_count.map(|value| value as u64),
+            response.semantic_embedded_count.map(|value| value as u64),
+            response
+                .intent_match
+                .as_ref()
+                .map(|audit| audit.router_rounds as u64),
+            response
+                .intent_match
+                .as_ref()
+                .map(|audit| audit.router_usage.clone()),
+            None,
+        ),
+        Err(error) => (
+            AccessDecision::Failed,
+            0,
+            0,
+            0,
+            None,
+            None,
+            None,
+            None,
+            Some(query_failure_kind(error)),
+        ),
+    };
+    QueryAuditEvent {
+        event_id: format!("qa_{}", Uuid::new_v4().simple()),
+        occurred_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        principal: access.principal.clone(),
+        session_id: access.session_id.clone(),
+        method: match method {
+            QueryMethod::SemanticSearch => QueryAuditMethod::SemanticSearch,
+            QueryMethod::MatchIntent => QueryAuditMethod::MatchIntent,
+        },
+        effort: matches!(method, QueryMethod::MatchIntent).then_some(intent_effort),
+        scopes,
+        decision,
+        duration_ms,
+        anchor_count,
+        related_count,
+        context_chars,
+        semantic_indexed_count,
+        semantic_embedded_count,
+        router_rounds,
+        router_usage,
+        failure_kind,
+    }
+}
+
+fn query_failure_kind(error: &anyhow::Error) -> String {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("a query is required") {
+        "invalid_request".to_owned()
+    } else if message.contains("unavailable") {
+        "provider_unavailable".to_owned()
+    } else if message.contains("not authorized") || message.contains("permission") {
+        "access_denied".to_owned()
+    } else if message.contains("provider")
+        || message.contains("embedding")
+        || message.contains("router")
+    {
+        "provider_failed".to_owned()
+    } else {
+        "failed".to_owned()
+    }
 }
 
 fn semantic_candidate_limit(top_k: u32) -> usize {
@@ -314,7 +406,7 @@ fn semantic_candidate_limit(top_k: u32) -> usize {
 }
 
 async fn read_planned_pages(
-    client: &RemotePcpClient,
+    client: &dyn PcpTenantApi,
     planned: &[PlannedHit],
 ) -> Result<HashMap<String, ReadPage>> {
     let mut pages = HashMap::with_capacity(planned.len());
@@ -346,7 +438,7 @@ async fn read_planned_pages(
 /// placed in the candidate pool; it never introduces a new anchor, follows
 /// more than one hop, or uses provenance as if it were a semantic assertion.
 async fn rerank_semantic_with_relations(
-    client: &RemotePcpClient,
+    client: &dyn PcpTenantApi,
     anchors: &mut Vec<RankedHit>,
     scopes: &[String],
 ) -> Result<()> {
@@ -461,7 +553,7 @@ fn can_reinforce_semantic_candidate(
 fn structural_relation(edge: &pcp_core::GraphSearchEdge) -> Option<QueryRelation> {
     (edge.edge_kind == GraphEdgeKind::Relation).then(|| QueryRelation {
         relation_type: edge.relation_type.clone(),
-        direction: graph_direction(&edge.direction),
+        direction: graph_direction(&edge.direction).to_owned(),
     })
 }
 
@@ -500,18 +592,24 @@ fn graph_direction(direction: &GraphEdgeDirection) -> &'static str {
     }
 }
 
-fn normalized_scope(scope: String) -> Option<String> {
-    let scope = scope.trim();
-    (!scope.is_empty()).then(|| scope.to_owned())
+fn normalized_scopes(scopes: Vec<String>) -> Vec<String> {
+    let mut normalized = scopes
+        .into_iter()
+        .map(|scope| scope.trim().to_owned())
+        .filter(|scope| !scope.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
 }
 
 fn unavailable_reason(method: &QueryMethod) -> &'static str {
     match method {
         QueryMethod::SemanticSearch => {
-            "Semantic search is unavailable: no vector retrieval provider is configured."
+            "semantic_search is unavailable: configure a vector retrieval provider for this Runtime."
         }
         QueryMethod::MatchIntent => {
-            "Intent matching is unavailable: no query intent router is configured."
+            "match_intent is unavailable: configure a query intent Router for this Runtime."
         }
     }
 }
@@ -726,45 +824,6 @@ fn display_conversation_role(role: &str) -> &'static str {
     }
 }
 
-fn model_context(entries: &[QueryPackEntry]) -> String {
-    let mut blocks = Vec::new();
-    for entry in entries {
-        let Some(content) = entry.content.as_deref() else {
-            continue;
-        };
-        if projection_was_truncated(content) {
-            continue;
-        }
-        let role = match &entry.relation {
-            Some(relation) => format!(
-                "related to anchor #{} via {} ({})",
-                entry.anchor_rank, relation.relation_type, relation.direction
-            ),
-            None => format!("anchor #{}", entry.anchor_rank),
-        };
-        let context_rank = blocks.len() + 1;
-        blocks.push(format!(
-            "[Context {} | {} | {} | {} | {}]\n{}\n[/Context]",
-            context_rank,
-            role,
-            detail_name(entry.detail),
-            entry.kind,
-            entry.namespace,
-            content
-        ));
-    }
-    blocks.join("\n\n")
-}
-
-fn detail_name(detail: QueryDetail) -> &'static str {
-    match detail {
-        QueryDetail::Payload => "payload",
-        QueryDetail::Excerpt => "excerpt",
-        QueryDetail::Summary => "summary",
-        QueryDetail::Reference => "reference",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -782,16 +841,14 @@ mod tests {
     }
 
     #[test]
-    fn query_defaults_to_semantic_retrieval_and_rejects_literal_search() {
-        let default_request = serde_json::from_str::<QueryRequest>(r#"{"query":"OET 是什么"}"#)
-            .expect("decode default query request");
-        assert!(matches!(
-            default_request.method,
-            QueryMethod::SemanticSearch
-        ));
+    fn query_request_has_no_method_discriminator() {
+        serde_json::from_str::<QueryContextRequest>(r#"{"query":"OET 是什么"}"#)
+            .expect("decode query request");
         assert!(
-            serde_json::from_str::<QueryRequest>(r#"{"query":"OET 是什么","method":"search"}"#)
-                .is_err()
+            serde_json::from_str::<QueryContextRequest>(
+                r#"{"query":"OET 是什么","method":"semantic_search"}"#
+            )
+            .is_err()
         );
     }
 
@@ -820,81 +877,6 @@ mod tests {
             12
         ));
         assert!(!can_reinforce_semantic_candidate(Some(0.72), None, 1));
-    }
-
-    #[test]
-    fn model_context_includes_related_content_without_internal_page_ids() {
-        let related = QueryPackEntry {
-            rank: 2,
-            anchor_rank: 1,
-            page_id: "pg_internal".to_owned(),
-            revision_id: "rev_internal".to_owned(),
-            namespace: "conversation:example".to_owned(),
-            kind: "note".to_owned(),
-            matched_by: "graph".to_owned(),
-            matched_projection: "relations".to_owned(),
-            semantic_score: None,
-            structural_boost: None,
-            structural_relations: Vec::new(),
-            intent_reason: None,
-            detail: QueryDetail::Summary,
-            relation: Some(QueryRelation {
-                relation_type: "depends_on".to_owned(),
-                direction: "outgoing",
-            }),
-            source_projection_truncated: false,
-            content: Some("required background".to_owned()),
-            source_span: None,
-            provenance_revision_ids: Vec::new(),
-        };
-        let reference = QueryPackEntry {
-            content: None,
-            detail: QueryDetail::Reference,
-            relation: None,
-            ..related.clone()
-        };
-        let later = QueryPackEntry {
-            rank: 11,
-            content: Some("later evidence".to_owned()),
-            relation: None,
-            ..related.clone()
-        };
-
-        let context = model_context(&[related, reference, later]);
-        assert!(context.starts_with("[Context 1 |"));
-        assert!(context.contains("[Context 2 |"));
-        assert!(!context.contains("[Context 11 |"));
-        assert!(context.contains("related to anchor #1 via depends_on (outgoing)"));
-        assert!(context.contains("required background"));
-        assert!(!context.contains("pg_internal"));
-        assert!(!context.contains("rev_internal"));
-    }
-
-    #[test]
-    fn model_context_rejects_host_truncation_marker() {
-        let truncated = QueryPackEntry {
-            rank: 1,
-            anchor_rank: 1,
-            page_id: "pg_internal".to_owned(),
-            revision_id: "rev_internal".to_owned(),
-            namespace: "conversation:example".to_owned(),
-            kind: "note".to_owned(),
-            matched_by: "text".to_owned(),
-            matched_projection: "payload".to_owned(),
-            semantic_score: None,
-            structural_boost: None,
-            structural_relations: Vec::new(),
-            intent_reason: None,
-            detail: QueryDetail::Excerpt,
-            relation: None,
-            source_projection_truncated: true,
-            content: Some(format!("partial\n{PROJECTION_TRUNCATION_MARKER}")),
-            source_span: None,
-            provenance_revision_ids: Vec::new(),
-        };
-
-        let context = model_context(&[truncated]);
-        assert!(context.is_empty());
     }
 
     #[test]

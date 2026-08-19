@@ -5,6 +5,7 @@ mod health;
 mod inventory;
 mod migration;
 mod pack;
+mod query_audit;
 mod read;
 mod retention;
 mod retention_collection;
