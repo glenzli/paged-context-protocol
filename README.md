@@ -36,8 +36,8 @@
   注入的访问身份约束。
 - **Relation 与 Provenance**：Relation 连接稳定 Page；关系依据和来源链引用精确 Revision。
   时间相邻或文本相似不会自动成为领域关系。
-- **Summary 与 Validity**：Summary 是可选、稀疏、可追溯的派生 Page，不是每条内容的强制层级；
-  Validity 记录内容当前是否仍适用。
+- **Summary、Topic 与 Validity**：Summary 是可选、稀疏、可追溯的派生 Page；跨多个 Page 的长期主题可
+  逻辑提取为独立 Topic Page，作为默认检索入口而不删除源证据；Validity 记录内容当前是否仍适用。
 - **Search、Read 与 Projection**：检索先返回可识别候选，再按需读取 Summary、Payload、Sources、
   Relations、History 等投影；模型或 Host 决定查询路径和进入注意力的时机。
 - **Pack 与 Retention**：来源连续、尚未被引用的细粒度 sealed Page 可以无损 pack 为一个 Page；历史
@@ -46,7 +46,7 @@
   可检索语义表示；原件不可用时必须显式降级，不能静默丢失上下文。
 
 PCP 不规定固定 Router、Intent Focus、四级变焦、Chain-of-Thought、XML 流程或模型状态机。消费模型
-决定当前任务查询、读取和物化什么；Runtime 负责 Identity 范围内的长期 Summary、Validity、Relation、
+决定当前任务查询、读取和物化什么；Runtime 负责 Identity 范围内的长期 Summary、Topic、Validity、Relation、
 无损 pack 与 retention 维护，并可调用可替换的模型作为语义判断 Provider。
 
 ## 当前状态
@@ -87,7 +87,7 @@ PCP 仍是开放协议，允许独立实现。“官方”表示该实现由 PCP
 - Runtime RPC 的 `semantic_search` 与分预算 `match_intent` Context 查询；结果以结构化 Page/Revision
   条目返回，由调用方决定提示词组装，不内置固定 Context Pack 前缀。
 - 以稳定 `pageId` 为锚点、深度/节点/边数受限且 ACL 逐跳过滤的图切片；不提供全库图导出。
-- Summary、Validity、Relation、Provenance、无损 sealed-Page packing 与访问审计。
+- Summary、Topic 逻辑提取、Validity、Relation、Provenance、无损 sealed-Page packing 与访问审计。
 - allowed 访问事件以最多 512 条或 1 秒的有界批次写入，自动提交至少间隔 500 ms；队列过载时
   反压而不静默丢弃。denied/failed 进入 writer 后使用最多 100 ms 的安全合并窗口，并在调用返回前
   持久化。原始 allowed 日志保留 30 天、每批最多清理 5,000 条；安全相关事件不会被该策略自动清理。
@@ -129,7 +129,7 @@ Revision ID。
 
 `PcpTenantApi` 是普通租户边界，只提供 descriptor、授权 Scope、`ingest_page`、Search、Read 与可选
 browse。`PcpApi` 是 Runtime maintainer 和本机管理工具使用的特权超集，包含高级写入、Relation、Summary、
-Validity、pack、retention 与审计。Host 可以嵌入 Store，也可以通过 Runtime 使用独立生命周期和服务端注入
+Topic 逻辑提取、Validity、pack、retention 与审计。Host 可以嵌入 Store，也可以通过 Runtime 使用独立生命周期和服务端注入
 身份；两种部署形态不改变租户接口。
 
 ```text

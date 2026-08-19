@@ -9,13 +9,13 @@ use pcp_client::{EmbeddedPcpClient, PcpApi};
 use pcp_core::{
     AccessDecision, AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor,
     ActorType, AssessPageValidityRequest, BrowseIndexOrder, CollectRevisionRetentionRequest,
-    CreateScopeRequest, GraphEdgeDirection, GraphEdgeKind, LifecycleStatus, LinkPagesRequest,
-    PackPagesRequest, PageMutability, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest,
-    Projection, ProvenanceEvent, PutRevisionRetentionLeaseRequest, QueryAuditEvent,
-    QueryAuditMethod, ReadPagesRequest, RetentionPolicy, RetentionProtectionReason,
-    RevisePageRequest, RouterTokenUsage, ScopeGrant, SearchFilters, SearchMode, SearchPagesRequest,
-    SearchTermMatch, SourceRef, SourceSpan, UnpackPageRequest, ValidityStanding, WritePageRequest,
-    WriteSummaryRequest,
+    CreateScopeRequest, ExtractTopicRequest, GraphEdgeDirection, GraphEdgeKind, LifecycleStatus,
+    LinkPagesRequest, PackPagesRequest, PageMutability, PagePayload, PageRevisionRef,
+    PlanRevisionRetentionRequest, Projection, ProvenanceEvent, PutRevisionRetentionLeaseRequest,
+    QueryAuditEvent, QueryAuditMethod, ReadPagesRequest, RetentionPolicy,
+    RetentionProtectionReason, RevisePageRequest, RouterTokenUsage, ScopeGrant, SearchFilters,
+    SearchMode, SearchPagesRequest, SearchTermMatch, SourceRef, SourceSpan, UnpackPageRequest,
+    ValidityStanding, WritePageRequest, WriteSummaryRequest,
 };
 use pcp_store::PcpStore;
 use rusqlite::{Connection, params};
@@ -105,6 +105,172 @@ async fn stores_minimal_external_source_references() {
 }
 
 #[tokio::test]
+async fn topic_extraction_preserves_sources_but_routes_retrieval_through_topic_page() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-sqlite-topic-extraction-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
+        .await
+        .expect("open topic Store");
+    let identity_id = store.identity_id().to_owned();
+    let namespace = "conversation:topic-extraction".to_owned();
+    store
+        .create_scope(CreateScopeRequest {
+            namespace: namespace.clone(),
+            display_name: "Topic extraction".to_owned(),
+            description: None,
+            parent_namespace: None,
+        })
+        .await
+        .expect("create topic scope");
+    let actor = Actor {
+        actor_type: ActorType::Model,
+        actor_id: "model:topic-extraction".to_owned(),
+    };
+    let first = store
+        .write_page(
+            write_request(
+                &identity_id,
+                &namespace,
+                actor.clone(),
+                "The first portion of a long topic establishes its definition.",
+                "topic:first",
+            ),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write first topic source");
+    let second = store
+        .write_page(
+            write_request(
+                &identity_id,
+                &namespace,
+                actor.clone(),
+                "The second portion records the decision and unresolved boundary.",
+                "topic:second",
+            ),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write second topic source");
+    let unrelated = store
+        .write_page(
+            write_request(
+                &identity_id,
+                &namespace,
+                actor.clone(),
+                "An independent topic remains directly discoverable.",
+                "topic:unrelated",
+            ),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write unrelated Page");
+
+    let topic = store
+        .extract_topic(
+            ExtractTopicRequest {
+                source_pages: vec![
+                    PageRevisionRef {
+                        page_id: first.page_id.clone(),
+                        revision_id: first.revision_id.clone(),
+                    },
+                    PageRevisionRef {
+                        page_id: second.page_id.clone(),
+                        revision_id: second.revision_id.clone(),
+                    },
+                ],
+                title: "A long-lived topic".to_owned(),
+                content: "This front-door topic summary joins the definition, decision, and unresolved boundary.".to_owned(),
+                created_by: actor,
+                tool_or_model: Some("topic-extraction-test".to_owned()),
+                provenance: Vec::new(),
+                idempotency_key: Some("topic:extract".to_owned()),
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("extract topic");
+
+    let library = store
+        .browse_content_pages(
+            vec![namespace.clone()],
+            None,
+            BrowseIndexOrder::Recent,
+            10,
+            None,
+            10_000,
+        )
+        .await
+        .expect("browse complete content library");
+    assert!(library.hits.iter().any(|hit| hit.page_id == first.page_id));
+    assert!(library.hits.iter().any(|hit| hit.page_id == second.page_id));
+    assert!(
+        library
+            .hits
+            .iter()
+            .any(|hit| hit.page_id == unrelated.page_id)
+    );
+    assert!(library.hits.iter().any(|hit| hit.page_id == topic.page_id));
+
+    let retrieval = store
+        .browse_retrieval_pages(
+            vec![namespace.clone()],
+            None,
+            BrowseIndexOrder::Recent,
+            10,
+            None,
+            10_000,
+        )
+        .await
+        .expect("browse default retrieval surface");
+    assert!(
+        retrieval
+            .hits
+            .iter()
+            .any(|hit| hit.page_id == topic.page_id)
+    );
+    assert!(
+        retrieval
+            .hits
+            .iter()
+            .any(|hit| hit.page_id == unrelated.page_id)
+    );
+    assert!(
+        !retrieval
+            .hits
+            .iter()
+            .any(|hit| hit.page_id == first.page_id)
+    );
+    assert!(
+        !retrieval
+            .hits
+            .iter()
+            .any(|hit| hit.page_id == second.page_id)
+    );
+
+    let sources = store
+        .read_pages(
+            ReadPagesRequest {
+                page_ids: Vec::new(),
+                revision_ids: vec![first.revision_id, second.revision_id],
+                projections: vec![Projection::Payload],
+                max_chars: 1_000,
+            },
+            vec![namespace],
+        )
+        .await
+        .expect("read retained exact source revisions");
+    assert_eq!(sources.len(), 2);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn rejects_pre_v08_stores_instead_of_migrating_them() {
     let root = std::env::temp_dir().join(format!(
         "pcp-sqlite-old-schema-{}",
@@ -125,6 +291,63 @@ async fn rejects_pre_v08_stores_instead_of_migrating_them() {
         .err()
         .expect("reject old Store");
     assert!(error.to_string().contains("requires a new Store"));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn migrates_clean_association_store_to_topic_extraction_schema() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-sqlite-topic-schema-migration-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let path = root.join("pcp.sqlite3");
+    let store = SqlitePcpStore::open(path.clone())
+        .await
+        .expect("open current topic Store");
+    drop(store);
+
+    let connection = Connection::open(&path).expect("open topic migration fixture");
+    connection
+        .execute_batch(
+            "
+            DROP INDEX pcp_topic_extraction_members_source;
+            DROP TABLE pcp_topic_extraction_members;
+            DROP TABLE pcp_topic_extractions;
+            UPDATE pcp_metadata
+            SET value = '0.8.0-clean.1'
+            WHERE key = 'schema_version';
+            ",
+        )
+        .expect("downgrade topic migration fixture");
+    drop(connection);
+
+    let reopened = SqlitePcpStore::open(path.clone())
+        .await
+        .expect("migrate topic extraction schema");
+    drop(reopened);
+    let connection = Connection::open(&path).expect("inspect migrated topic Store");
+    let version: String = connection
+        .query_row(
+            "SELECT value FROM pcp_metadata WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read topic Store schema version");
+    assert_eq!(version, "0.8.0-clean.2");
+    let table_count: u32 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name IN
+                ('pcp_topic_extractions', 'pcp_topic_extraction_members')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count migrated topic tables");
+    assert_eq!(table_count, 2);
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -259,7 +482,7 @@ async fn migrates_draft_store_to_minimal_clean_schema() {
             |row| row.get(0),
         )
         .expect("read migrated version");
-    assert_eq!(version, "0.8.0-clean.1");
+    assert_eq!(version, "0.8.0-clean.2");
     for (table, removed_column) in [
         ("pcp_relations", "from_revision_id"),
         ("pcp_summaries", "content"),
@@ -500,7 +723,7 @@ async fn migrates_clean_store_associations_without_erasing_exact_inputs() {
                 |row| row.get::<_, String>(0),
             )
             .expect("read cleaned Store version"),
-        "0.8.0-clean.1"
+        "0.8.0-clean.2"
     );
     assert_eq!(
         connection

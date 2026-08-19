@@ -104,6 +104,49 @@ pub(crate) fn migrate_clean_associations(
     Ok(())
 }
 
+pub(crate) fn migrate_clean_topic_extractions(
+    connection: &mut Connection,
+    target_version: &str,
+) -> Result<()> {
+    let transaction = connection
+        .transaction()
+        .context("start PCP topic extraction schema migration")?;
+    transaction
+        .execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS pcp_topic_extractions (
+                topic_revision_id TEXT PRIMARY KEY REFERENCES pcp_revisions(revision_id),
+                topic_page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
+                namespace TEXT NOT NULL REFERENCES pcp_scopes(namespace),
+                title TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS pcp_topic_extraction_members (
+                topic_revision_id TEXT NOT NULL REFERENCES pcp_topic_extractions(topic_revision_id),
+                topic_page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
+                source_revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+                source_page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
+                position INTEGER NOT NULL,
+                PRIMARY KEY (topic_revision_id, source_revision_id),
+                UNIQUE (topic_revision_id, position)
+            );
+            CREATE INDEX IF NOT EXISTS pcp_topic_extraction_members_source
+                ON pcp_topic_extraction_members(source_page_id, source_revision_id);
+            ",
+        )
+        .context("create PCP topic extraction tables")?;
+    transaction
+        .execute(
+            "UPDATE pcp_metadata SET value = ?1 WHERE key = 'schema_version'",
+            [target_version],
+        )
+        .context("publish PCP topic extraction schema version")?;
+    transaction
+        .commit()
+        .context("commit PCP topic extraction schema migration")?;
+    Ok(())
+}
+
 fn clean_legacy_context_exposure(transaction: &Transaction<'_>) -> Result<()> {
     let mut statement = transaction
         .prepare(

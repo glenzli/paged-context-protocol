@@ -21,10 +21,10 @@ pub use query::{
     QueryContextResponse, QueryRelation, QueryVisibility, RouterTokenUsage,
 };
 pub use request::{
-    AssessPageValidityRequest, CreateScopeRequest, IngestPageRequest, InitialRelation,
-    LinkPagesRequest, PackPagesRequest, PageRevisionRef, ReadPagesRequest, RevisePageRequest,
-    SearchFilters, SearchPagesRequest, UnpackPageRequest, WritePageRequest, WriteSummaryRequest,
-    default_search_projections,
+    AssessPageValidityRequest, CreateScopeRequest, ExtractTopicRequest, IngestPageRequest,
+    InitialRelation, LinkPagesRequest, PackPagesRequest, PageRevisionRef, ReadPagesRequest,
+    RevisePageRequest, SearchFilters, SearchPagesRequest, UnpackPageRequest, WritePageRequest,
+    WriteSummaryRequest, default_search_projections,
 };
 pub use retention::{
     CollectRevisionRetentionRequest, PlanRevisionRetentionRequest, ProtectedRevisionSample,

@@ -4,8 +4,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessSession, AssessPageValidityRequest, BrowseIndexOrder, Capabilities,
-    CollectRevisionRetentionRequest, CreateScopeRequest, IngestPageRequest, LinkPagesRequest,
-    PackPagesRequest, PageMutability, PlanRevisionRetentionRequest,
+    CollectRevisionRetentionRequest, CreateScopeRequest, ExtractTopicRequest, IngestPageRequest,
+    LinkPagesRequest, PackPagesRequest, PageMutability, PlanRevisionRetentionRequest,
     PutRevisionRetentionLeaseRequest, QueryAuditEvent, ReadPage, ReadPagesRequest, Relation,
     RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan,
     Scope, SearchHit, SearchPagesRequest, SearchResult, SourceSpan, UnpackPageRequest,
@@ -133,6 +133,18 @@ pub trait PcpStore: Send + Sync {
         cursor: Option<String>,
         max_chars: u32,
     ) -> Result<ContentLibraryResult>;
+    /// Browse the default retrieval surface. A current extracted topic Page
+    /// stands in front of its retained source Pages here.
+    async fn browse_retrieval_pages(
+        &self,
+        access: &AccessSession,
+        scopes: Vec<String>,
+        query: Option<String>,
+        order: BrowseIndexOrder,
+        limit: u32,
+        cursor: Option<String>,
+        max_chars: u32,
+    ) -> Result<ContentLibraryResult>;
     async fn content_library_summary(
         &self,
         access: &AccessSession,
@@ -210,6 +222,11 @@ pub trait PcpStore: Send + Sync {
         access: &AccessSession,
         request: WriteSummaryRequest,
     ) -> Result<WriteSummaryResult>;
+    async fn extract_topic(
+        &self,
+        access: &AccessSession,
+        request: ExtractTopicRequest,
+    ) -> Result<WriteResult>;
     async fn next_summary_candidate(
         &self,
         access: &AccessSession,

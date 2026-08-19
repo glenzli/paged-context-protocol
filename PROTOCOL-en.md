@@ -70,6 +70,17 @@ Provenance belongs to a Revision and references the exact input Revision IDs act
 
 A Summary is an ordinary revisioned Page connected to its target by `summarizes`. Only long, dense, or future-useful content needs one. A better Summary publishes a new Revision of the same Summary Page instead of creating another Page.
 
+When a long-lived topic spans several Pages, a Runtime maintainer may execute
+`extract_topic(sourcePages[{pageId, revisionId}], title, content)`. It creates a separate revisioned
+Topic Page with `kind = topic_summary`, retains exact provenance for every input, and writes a
+`summarizes` Relation from the Topic to every source Page. Inputs MUST be 2-64 distinct, active,
+current Revisions in one Scope; a Topic cannot be a Topic input. This is **logical extraction**:
+source Pages and exact Revisions are not deleted, remain readable by ID, and may return as evidence
+through high-relevance Relation expansion. Only the default candidate surface for `semantic_search`
+and `match_intent` is represented by the current Topic Page. A Topic update publishes a new Revision;
+it suppresses a source from default candidates only while that current Revision still lists the same
+source Revision.
+
 Typical recall is:
 
 ```text
@@ -89,7 +100,10 @@ Without an anchor, Store creates a revisioned Page. With an anchor, Store CAS-pu
 
 v0.8 does not merge two existing packed Pages or pack across a `sourceSpan` gap. Such content remains separate and may be organized with `related_to`, `about`, Topics, or another Relation. Runtime may use temporal proximity and semantic continuity to select candidates, but model judgment cannot weaken Store invariants.
 
-Deleting original detail after a Summary or other representation matures is lossy condensation. It requires separate quality, recovery, confirmation, and audit semantics and is deferred beyond v0.8. `pack_pages` MUST NOT implement it.
+Physically deleting original detail after a Summary, Topic, or other representation matures is lossy
+condensation. It requires separate quality, recovery, confirmation, and audit semantics and is
+deferred beyond v0.8. `extract_topic` changes only default routing, and `pack_pages` MUST NOT
+implement physical condensation.
 
 ## 3. Interface semantics
 
@@ -107,7 +121,7 @@ Search returns bounded candidates rather than truth, is paginated, and identifie
 
 ### 3.2 Runtime maintenance surface
 
-Runtime maintainers and local administration tools may use the complete Core operations: advanced sealed or revisioned Page writes, CAS revision, atomic `pack_pages(pages[{page_id, revision_id}], idempotency_key?)`, Summary and validity writes, Page Relations, Scope management, audit, bounded retention planning, explicit collection, and finite idempotent Revision retention leases. These implement Identity-wide maintenance policy and are not part of the ordinary tenant contract.
+Runtime maintainers and local administration tools may use the complete Core operations: advanced sealed or revisioned Page writes, CAS revision, atomic `pack_pages(pages[{page_id, revision_id}], idempotency_key?)`, logical `extract_topic(source_pages[{page_id, revision_id}], title, content)`, Summary and validity writes, Page Relations, Scope management, audit, bounded retention planning, explicit collection, and finite idempotent Revision retention leases. These implement Identity-wide maintenance policy and are not part of the ordinary tenant contract.
 
 An implementation may carry both operation sets over one RPC transport, but it MUST enforce the boundary through session permissions and an operation allowlist. The interface split does not require another socket or deployment unit.
 

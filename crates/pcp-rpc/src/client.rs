@@ -15,8 +15,8 @@ use pcp_client::{
 };
 use pcp_core::{
     AccessAuditEvent, AccessSession, AssessPageValidityRequest, Capabilities,
-    CollectRevisionRetentionRequest, CreateScopeRequest, ExpandGraphRequest, GraphSliceResponse,
-    IngestPageRequest, IntentEffort, LinkPagesRequest, PackPagesRequest,
+    CollectRevisionRetentionRequest, CreateScopeRequest, ExpandGraphRequest, ExtractTopicRequest,
+    GraphSliceResponse, IngestPageRequest, IntentEffort, LinkPagesRequest, PackPagesRequest,
     PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, QueryContextRequest,
     QueryContextResponse, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
     RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope,
@@ -235,6 +235,31 @@ impl PcpTenantApi for RemotePcpClient {
         }
     }
 
+    async fn browse_retrieval_pages(
+        &self,
+        scopes: Vec<String>,
+        query: Option<String>,
+        order: pcp_core::BrowseIndexOrder,
+        limit: u32,
+        cursor: Option<String>,
+        max_chars: u32,
+    ) -> Result<pcp_client::ContentLibraryResult> {
+        match self
+            .request(RpcOperation::BrowseRetrievalPages {
+                scopes,
+                query,
+                order,
+                limit,
+                cursor,
+                max_chars,
+            })
+            .await?
+        {
+            RpcValue::ContentLibraryResult(value) => Ok(value),
+            _ => Err(unexpected("browse_retrieval_pages")),
+        }
+    }
+
     async fn content_library_summary(
         &self,
         requested_scopes: Vec<String>,
@@ -418,6 +443,13 @@ impl PcpApi for RemotePcpClient {
         match self.request(RpcOperation::WriteSummary(request)).await? {
             RpcValue::SummaryResult(value) => Ok(value),
             _ => Err(unexpected("write_summary")),
+        }
+    }
+
+    async fn extract_topic(&self, request: ExtractTopicRequest) -> Result<WriteResult> {
+        match self.request(RpcOperation::ExtractTopic(request)).await? {
+            RpcValue::TopicExtractionResult(value) => Ok(value),
+            _ => Err(unexpected("extract_topic")),
         }
     }
 

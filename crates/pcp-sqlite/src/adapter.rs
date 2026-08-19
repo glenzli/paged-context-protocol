@@ -5,12 +5,12 @@ use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessDecision, AccessPermission, AccessPrincipalType, AccessSession, Actor,
     ActorType, AssessPageValidityRequest, Capabilities, CollectRevisionRetentionRequest,
-    CreateScopeRequest, IngestPageRequest, LifecycleStatus, LinkPagesRequest, OperationTelemetry,
-    PackPagesRequest, PageMutability, PlanRevisionRetentionRequest, Projection, ProvenanceEvent,
-    PutRevisionRetentionLeaseRequest, QueryAuditEvent, ReadPage, ReadPagesRequest, Relation,
-    RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan,
-    Scope, SearchPagesRequest, SearchResult, UnpackPageRequest, WritePageRequest, WriteResult,
-    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    CreateScopeRequest, ExtractTopicRequest, IngestPageRequest, LifecycleStatus, LinkPagesRequest,
+    OperationTelemetry, PackPagesRequest, PageMutability, PlanRevisionRetentionRequest, Projection,
+    ProvenanceEvent, PutRevisionRetentionLeaseRequest, QueryAuditEvent, ReadPage, ReadPagesRequest,
+    Relation, RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease,
+    RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult, UnpackPageRequest,
+    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::{
     ContentLibraryResult, ContentLibrarySummary, DurablePageInventoryItem, HealthSnapshot,
@@ -268,6 +268,62 @@ impl PcpStore for SqlitePcpStore {
             self,
             access,
             "browse_content_pages",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
+    }
+
+    async fn browse_retrieval_pages(
+        &self,
+        access: &AccessSession,
+        requested_scopes: Vec<String>,
+        query: Option<String>,
+        order: pcp_core::BrowseIndexOrder,
+        limit: u32,
+        cursor: Option<String>,
+        max_chars: u32,
+    ) -> Result<ContentLibraryResult> {
+        let observation = OperationObservation::start();
+        let scopes = match authorize_scopes(
+            access,
+            &[
+                AccessPermission::Search,
+                AccessPermission::ReadSummary,
+                AccessPermission::ReadDetail,
+            ],
+            &requested_scopes,
+        ) {
+            Ok(scopes) => scopes,
+            Err(error) => {
+                return complete(
+                    self,
+                    access,
+                    "browse_retrieval_pages",
+                    requested_scopes,
+                    Err(error),
+                    true,
+                    observation,
+                )
+                .await;
+            }
+        };
+        let result = SqlitePcpStore::browse_retrieval_pages(
+            self,
+            scopes.clone(),
+            query,
+            order,
+            limit,
+            cursor,
+            max_chars,
+        )
+        .await;
+        complete(
+            self,
+            access,
+            "browse_retrieval_pages",
             scopes,
             result,
             false,
@@ -1058,6 +1114,82 @@ impl PcpStore for SqlitePcpStore {
             self,
             access,
             "write_summary",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
+    }
+
+    async fn extract_topic(
+        &self,
+        access: &AccessSession,
+        request: ExtractTopicRequest,
+    ) -> Result<WriteResult> {
+        let observation = OperationObservation::start().with_input_count(
+            request.source_pages.len()
+                + request
+                    .provenance
+                    .iter()
+                    .map(|event| event.input_revision_ids.len())
+                    .sum::<usize>(),
+        );
+        let source_revision_ids = request
+            .source_pages
+            .iter()
+            .map(|source| source.revision_id.clone())
+            .collect::<Vec<_>>();
+        let mut scopes = match self.revision_namespaces(source_revision_ids).await {
+            Ok(scopes) => scopes,
+            Err(error) => {
+                return complete(
+                    self,
+                    access,
+                    "extract_topic",
+                    Vec::new(),
+                    Err(error),
+                    false,
+                    observation,
+                )
+                .await;
+            }
+        };
+        let authorization = async {
+            anyhow::ensure!(
+                scopes.len() == 1,
+                "topic extraction sources must belong to one Scope"
+            );
+            let scope = scopes
+                .first()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("topic extraction requires source Revisions"))?;
+            authorize_exact(access, &scope, AccessPermission::Summarize)?;
+            authorize_exact(access, &scope, AccessPermission::Link)?;
+            authorize_exact(access, &scope, AccessPermission::ReadDetail)?;
+            let provenance_scopes =
+                authorize_provenance(self, access, &scope, &request.provenance).await?;
+            extend_unique(&mut scopes, provenance_scopes);
+            Ok(())
+        }
+        .await;
+        if let Err(error) = authorization {
+            return complete(
+                self,
+                access,
+                "extract_topic",
+                scopes,
+                Err(error),
+                true,
+                observation,
+            )
+            .await;
+        }
+        let result = SqlitePcpStore::extract_topic(self, request, scopes.clone()).await;
+        complete(
+            self,
+            access,
+            "extract_topic",
             scopes,
             result,
             false,

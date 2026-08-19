@@ -1,6 +1,7 @@
 mod access;
 mod adapter;
 mod audit_writer;
+mod extraction;
 mod health;
 mod inventory;
 mod migration;

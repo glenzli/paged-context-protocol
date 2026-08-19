@@ -6,7 +6,7 @@ use pcp_client::{
 use pcp_core::{
     AccessAuditEvent, AccessSession, Actor, AssessPageValidityRequest, BrowseIndexOrder,
     Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest, ExpandGraphRequest,
-    GraphSliceResponse, IngestPageRequest, LinkPagesRequest, PackPagesRequest,
+    ExtractTopicRequest, GraphSliceResponse, IngestPageRequest, LinkPagesRequest, PackPagesRequest,
     PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest,
     Relation, RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease,
     RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult, UnpackPageRequest,
@@ -73,6 +73,14 @@ pub(crate) enum RpcOperation {
         cursor: Option<String>,
         max_chars: u32,
     },
+    BrowseRetrievalPages {
+        scopes: Vec<String>,
+        query: Option<String>,
+        order: BrowseIndexOrder,
+        limit: u32,
+        cursor: Option<String>,
+        max_chars: u32,
+    },
     ContentLibrarySummary {
         requested_scopes: Vec<String>,
     },
@@ -100,6 +108,7 @@ pub(crate) enum RpcOperation {
     UnpackPage(UnpackPageRequest),
     LinkPages(LinkPagesRequest),
     WriteSummary(WriteSummaryRequest),
+    ExtractTopic(ExtractTopicRequest),
     NextSummaryCandidate {
         minimum_chars: usize,
         excluded_page_kinds: Vec<String>,
@@ -172,6 +181,7 @@ pub(crate) enum RpcValue {
     UnpackPageResult(UnpackPageResult),
     Relation(Relation),
     SummaryResult(WriteSummaryResult),
+    TopicExtractionResult(WriteResult),
     SummaryCandidate(Option<String>),
     ValidityResult(WriteValidityResult),
     TombstoneCascade(TombstoneCascadeResult),

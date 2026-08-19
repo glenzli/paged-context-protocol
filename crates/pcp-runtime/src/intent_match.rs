@@ -129,7 +129,7 @@ impl IntentMatchProvider {
         let exact_terms = deduplicate_strings(plan.exact_terms, budget.exact_term_limit);
         for term in &exact_terms {
             let result = client
-                .browse_content_pages(
+                .browse_retrieval_pages(
                     scopes.to_vec(),
                     Some(term.clone()),
                     BrowseIndexOrder::Recent,
@@ -370,7 +370,7 @@ impl IntentMatchProvider {
         let mut total = 0;
         while total < self.max_catalog_pages {
             let result = client
-                .browse_content_pages(
+                .browse_retrieval_pages(
                     scopes.to_vec(),
                     None,
                     BrowseIndexOrder::Recent,

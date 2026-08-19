@@ -4,11 +4,12 @@ use chrono::{SecondsFormat, Utc};
 use pcp_client::PcpApi;
 use pcp_core::{
     AccessAuditEvent, AccessPermission, AccessSession, Actor, ActorType, AssessPageValidityRequest,
-    BrowseIndexOrder, Capabilities, CreateScopeRequest, ExpandGraphRequest, IngestPageRequest,
-    IntentEffort, LifecycleStatus, LinkPagesRequest, PageMutability, PagePayload, Projection,
-    ProvenanceEvent, QueryContextRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
-    Scope, SearchFilters, SearchMode, SearchPagesRequest, SearchResult, SearchTermMatch, SourceRef,
-    SourceSpan, ValidityStanding, WritePageRequest, WriteSummaryRequest,
+    BrowseIndexOrder, Capabilities, CreateScopeRequest, ExpandGraphRequest, ExtractTopicRequest,
+    IngestPageRequest, IntentEffort, LifecycleStatus, LinkPagesRequest, PageMutability,
+    PagePayload, PageRevisionRef, Projection, ProvenanceEvent, QueryContextRequest, ReadPage,
+    ReadPagesRequest, Relation, RevisePageRequest, Scope, SearchFilters, SearchMode,
+    SearchPagesRequest, SearchResult, SearchTermMatch, SourceRef, SourceSpan, ValidityStanding,
+    WritePageRequest, WriteSummaryRequest,
 };
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -200,6 +201,17 @@ pub struct WriteSummaryParams {
 
 #[derive(Debug, JsonSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ExtractTopicParams {
+    /// Ordered exact current source Page/revision pairs from one Scope.
+    source_pages: Vec<PageRevisionRef>,
+    title: String,
+    content: String,
+    #[serde(default)]
+    based_on_revision_ids: Vec<String>,
+}
+
+#[derive(Debug, JsonSchema, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AssessPageParams {
     target_page_id: String,
     target_revision_id: String,
@@ -256,6 +268,14 @@ pub struct SummaryWriteResult {
     target_revision_id: String,
     summary_page_id: String,
     summary_revision_id: String,
+    created: bool,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicExtractionResult {
+    topic_page_id: String,
+    topic_revision_id: String,
     created: bool,
 }
 
@@ -835,6 +855,73 @@ impl PcpMcpServer {
             target_revision_id: written.target_revision_id,
             summary_page_id: written.summary_page_id,
             summary_revision_id: written.summary_revision_id,
+            created: written.created,
+        }))
+    }
+
+    #[tool(
+        name = "pcp_extract_topic",
+        description = "Create a revisioned topic front-door Page from two or more exact source Revisions in one Scope. This is logical, reversible routing compaction: sources remain readable evidence, but semantic and intent retrieval will prefer the topic Page until it is superseded.",
+        annotations(
+            title = "Extract PCP Topic",
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    pub async fn pcp_extract_topic(
+        &self,
+        Parameters(params): Parameters<ExtractTopicParams>,
+    ) -> Result<Json<TopicExtractionResult>, McpError> {
+        if params.source_pages.len() < 2 {
+            return Err(operation_error(
+                "extract PCP topic",
+                "sourcePages requires at least two exact source Pages",
+            ));
+        }
+        let actor = session_actor(self.client.as_ref());
+        let source_revision_ids = params
+            .source_pages
+            .iter()
+            .map(|source| source.revision_id.clone())
+            .collect::<Vec<_>>();
+        let sources = self
+            .read_exact_revisions(source_revision_ids.clone())
+            .await?;
+        if sources.len() != params.source_pages.len()
+            || sources
+                .iter()
+                .zip(&params.source_pages)
+                .any(|(source, requested)| {
+                    source.page.page_id != requested.page_id
+                        || source.revision.revision_id != requested.revision_id
+                })
+        {
+            return Err(operation_error(
+                "extract PCP topic",
+                "every sourcePages entry must identify one readable exact Page Revision",
+            ));
+        }
+        let mut inputs = source_revision_ids;
+        inputs.extend(params.based_on_revision_ids);
+        inputs.sort();
+        inputs.dedup();
+        let written = self
+            .client
+            .extract_topic(ExtractTopicRequest {
+                source_pages: params.source_pages,
+                title: params.title,
+                content: params.content,
+                created_by: actor.clone(),
+                tool_or_model: Some(actor.actor_id.clone()),
+                provenance: vec![provenance("extract_topic", &actor, inputs)],
+                idempotency_key: None,
+            })
+            .await
+            .map_err(|error| operation_error("extract PCP topic", error))?;
+        Ok(Json(TopicExtractionResult {
+            topic_page_id: written.page_id,
+            topic_revision_id: written.revision_id,
             created: written.created,
         }))
     }

@@ -153,6 +153,15 @@ Summary 是普通的 `revisioned` Page，通过 `summarizes` 指向目标 Page�
 Summary；只有内容足够长、密集或未来值得路由时才创建。更好的 Summary 更新同一个 Summary
 Page，产生新 Revision，而不是制造新 Page。
 
+当一个长期主题跨越多个 Page 时，Runtime maintainer 可以执行
+`extract_topic(sourcePages[{pageId, revisionId}], title, content)`。它创建独立的、`kind =
+topic_summary` 的 revisioned Topic Page，并为每个输入保留精确 provenance 与从 Topic 到源 Page 的
+`summarizes` Relation。输入必须是同一 Scope 内 2–64 个互异、active 的当前 Revision；Topic 不能再作为
+Topic 输入。此操作是**逻辑提取**：源 Page 和精确 Revision 不会被删除，仍可通过 ID 读取并在高相关的
+Relation 展开中作为证据返回；只是默认 `semantic_search` 和 `match_intent` 的候选面由当前 Topic Page
+代表这些源 Page。Topic 更新必须发布新 Revision；只有其当前 Revision 仍列出同一源 Revision 时才继续
+压住对应默认候选。
+
 典型召回路径是：
 
 ```text
@@ -192,8 +201,8 @@ Relation 端点及 basis、provenance 输入则改指 packed Page/Revision。两
 中直接合并；跨越 sourceSpan 间隙的相关内容应保持独立，并通过 `related_to`、`about`、Topic 或其他
 Relation 组织。时间邻近和主题连续性由 Runtime 的语义判断选择，不能削弱 Store 的机械约束。
 
-基于成熟 Summary 或其他表示删除原始细节属于有损凝炼。它需要独立的质量、恢复、确认和审计语义，
-不属于 v0.8；`pack_pages` 不得被实现成这种操作。
+基于成熟 Summary、Topic 或其他表示**物理删除**原始细节属于有损凝炼。它需要独立的质量、恢复、确认和
+审计语义，不属于 v0.8；`extract_topic` 仅改变默认路由，`pack_pages` 也不得被实现成这种操作。
 
 ## 3. 接口语义
 
@@ -239,6 +248,7 @@ Runtime maintainer 与本机管理工具可以使用完整 Core 接口：
 - `write_page(kind, mutability, content, scope?, based_on_revision_ids?)`
 - `revise_page(page_id, expected_revision_id, content, based_on_revision_ids?)`
 - `pack_pages(pages[{page_id, revision_id}], idempotency_key?)`
+- `extract_topic(source_pages[{page_id, revision_id}], title, content)`
 - `write_summary(target_page_id, target_revision_id, content)`
 - `assess_validity(target_page_id, target_revision_id, standing, evidence_revision_ids)`
 - `relate_pages(from_page_id, relation_type, to_page_id, basis_revision_ids?)`

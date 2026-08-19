@@ -121,6 +121,38 @@ impl SqlitePcpStore {
                 offset,
                 limit,
                 max_chars,
+                false,
+            )
+        })
+        .await
+    }
+
+    pub async fn browse_retrieval_pages(
+        &self,
+        scopes: Vec<String>,
+        query: Option<String>,
+        order: BrowseIndexOrder,
+        limit: u32,
+        cursor: Option<String>,
+        max_chars: u32,
+    ) -> Result<ContentLibraryResult> {
+        if scopes.is_empty() {
+            anyhow::bail!("PCP retrieval browse requires at least one authorized scope");
+        }
+        let limit = limit.clamp(1, crate::store::MAX_SEARCH_RESULTS) as usize;
+        let offset = parse_cursor(cursor.as_deref())?;
+        let max_chars = max_chars.clamp(1_000, 32_000) as usize;
+        let query = query.filter(|value| !value.trim().is_empty());
+        self.run("retrieval browse", move |connection| {
+            browse_content_pages_once(
+                &connection,
+                &scopes,
+                query.as_deref(),
+                &order,
+                offset,
+                limit,
+                max_chars,
+                true,
             )
         })
         .await
@@ -279,9 +311,10 @@ fn browse_content_pages_once(
     offset: usize,
     limit: usize,
     max_chars: usize,
+    retrieval_only: bool,
 ) -> Result<ContentLibraryResult> {
     let (total_pages, total_content_chars) =
-        content_library_totals_once(connection, scopes, query)?;
+        content_library_totals_once(connection, scopes, query, retrieval_only)?;
     let mut values = scopes
         .iter()
         .cloned()
@@ -324,6 +357,9 @@ fn browse_content_pages_once(
     push_placeholders(&mut sql, scopes.len());
     sql.push(')');
     append_current_content_page_filter(&mut sql);
+    if retrieval_only {
+        append_topic_front_door_filter(&mut sql);
+    }
     append_content_library_query_filter(&mut sql, &mut values, query);
     sql.push_str(" ORDER BY ");
     sql.push_str(browse_index_order_by(order));
@@ -444,6 +480,7 @@ fn content_library_totals_once(
     connection: &Connection,
     scopes: &[String],
     query: Option<&str>,
+    retrieval_only: bool,
 ) -> Result<(u64, u64)> {
     let mut values = scopes
         .iter()
@@ -466,6 +503,9 @@ fn content_library_totals_once(
     push_placeholders(&mut sql, scopes.len());
     sql.push(')');
     append_current_content_page_filter(&mut sql);
+    if retrieval_only {
+        append_topic_front_door_filter(&mut sql);
+    }
     append_content_library_query_filter(&mut sql, &mut values, query);
     let (page_count, content_chars) = connection
         .query_row(&sql, params_from_iter(values.iter()), |row| {
@@ -486,6 +526,27 @@ fn append_current_content_page_filter(sql: &mut String) {
         " AND NOT EXISTS (
             SELECT 1 FROM pcp_page_summary_heads summary_page_head
             WHERE summary_page_head.summary_page_id = p.page_id
+        )",
+    );
+}
+
+/// A topic extraction changes default retrieval routing, not source retention:
+/// its active current topic Page is the front door while the exact member
+/// revisions remain readable by ID and traversable through `summarizes`.
+fn append_topic_front_door_filter(sql: &mut String) {
+    sql.push_str(
+        " AND NOT EXISTS (
+            SELECT 1
+            FROM pcp_topic_extraction_members extraction_member
+            JOIN pcp_pages topic_page
+              ON topic_page.page_id = extraction_member.topic_page_id
+            JOIN pcp_revisions topic_revision
+              ON topic_revision.revision_id = topic_page.current_revision_id
+            WHERE extraction_member.source_page_id = p.page_id
+              AND extraction_member.source_revision_id = r.revision_id
+              AND extraction_member.topic_revision_id = topic_page.current_revision_id
+              AND topic_page.lifecycle_status = 'active'
+              AND topic_revision.lifecycle_status = 'active'
         )",
     );
 }

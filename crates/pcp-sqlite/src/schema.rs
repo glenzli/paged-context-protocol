@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 
-const STORE_SCHEMA_VERSION: &str = "0.8.0-clean.1";
+const STORE_SCHEMA_VERSION: &str = "0.8.0-clean.2";
 const LEGACY_DRAFT_SCHEMA_VERSION: &str = "0.8.0-draft";
 const LEGACY_CLEAN_SCHEMA_VERSION: &str = "0.8.0-clean";
+const LEGACY_CLEAN_ASSOCIATIONS_SCHEMA_VERSION: &str = "0.8.0-clean.1";
 
 pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
     connection
@@ -33,6 +34,9 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
         }
         Some(version) if version == LEGACY_CLEAN_SCHEMA_VERSION => {
             crate::migration::migrate_clean_associations(connection, STORE_SCHEMA_VERSION)?;
+        }
+        Some(version) if version == LEGACY_CLEAN_ASSOCIATIONS_SCHEMA_VERSION => {
+            crate::migration::migrate_clean_topic_extractions(connection, STORE_SCHEMA_VERSION)?;
         }
         Some(version) => {
             anyhow::bail!("unsupported PCP Store schema {version}; expected {STORE_SCHEMA_VERSION}")
@@ -166,6 +170,24 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 outcome TEXT NOT NULL,
                 assessed_at TEXT NOT NULL,
                 tool_or_model TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS pcp_topic_extractions (
+                topic_revision_id TEXT PRIMARY KEY REFERENCES pcp_revisions(revision_id),
+                topic_page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
+                namespace TEXT NOT NULL REFERENCES pcp_scopes(namespace),
+                title TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS pcp_topic_extraction_members (
+                topic_revision_id TEXT NOT NULL REFERENCES pcp_topic_extractions(topic_revision_id),
+                topic_page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
+                source_revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+                source_page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
+                position INTEGER NOT NULL,
+                PRIMARY KEY (topic_revision_id, source_revision_id),
+                UNIQUE (topic_revision_id, position)
             );
 
             CREATE TABLE IF NOT EXISTS pcp_validity_assessments (
@@ -303,6 +325,8 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 ON pcp_summaries(target_revision_id, summary_revision_id);
             CREATE INDEX IF NOT EXISTS pcp_summary_assessments_policy
                 ON pcp_summary_assessments(policy_version, assessed_at DESC);
+            CREATE INDEX IF NOT EXISTS pcp_topic_extraction_members_source
+                ON pcp_topic_extraction_members(source_page_id, source_revision_id);
             CREATE INDEX IF NOT EXISTS pcp_validity_target
                 ON pcp_validity_assessments(target_revision_id, assessment_revision_id);
             CREATE INDEX IF NOT EXISTS pcp_retention_leases_revision

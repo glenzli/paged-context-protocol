@@ -9,13 +9,14 @@ use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessPermission, AccessPrincipal, AccessSession, AssessPageValidityRequest,
     BrowseIndexOrder, Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest,
-    ExpandGraphRequest, GraphEdgeDirection, GraphSliceEdge, GraphSliceResponse, IngestPageRequest,
-    IntentEffort, LinkPagesRequest, PackPagesRequest, PlanRevisionRetentionRequest, Projection,
-    PutRevisionRetentionLeaseRequest, QueryContextRequest, QueryContextResponse, ReadPage,
-    ReadPagesRequest, Relation, RevisePageRequest, RevisionCollectionResult,
-    RevisionRetentionLease, RevisionRetentionPlan, Scope, ScopeGrant, SearchFilters, SearchMode,
-    SearchPagesRequest, SearchResult, SearchTermMatch, UnpackPageRequest, WritePageRequest,
-    WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    ExpandGraphRequest, ExtractTopicRequest, GraphEdgeDirection, GraphSliceEdge,
+    GraphSliceResponse, IngestPageRequest, IntentEffort, LinkPagesRequest, PackPagesRequest,
+    PlanRevisionRetentionRequest, Projection, PutRevisionRetentionLeaseRequest,
+    QueryContextRequest, QueryContextResponse, ReadPage, ReadPagesRequest, Relation,
+    RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan,
+    Scope, ScopeGrant, SearchFilters, SearchMode, SearchPagesRequest, SearchResult,
+    SearchTermMatch, UnpackPageRequest, WritePageRequest, WriteResult, WriteSummaryRequest,
+    WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::PcpStore;
 pub use pcp_store::{
@@ -134,6 +135,17 @@ pub trait PcpTenantApi: Send + Sync {
         max_chars: u32,
     ) -> Result<SearchResult>;
     async fn browse_content_pages(
+        &self,
+        scopes: Vec<String>,
+        query: Option<String>,
+        order: BrowseIndexOrder,
+        limit: u32,
+        cursor: Option<String>,
+        max_chars: u32,
+    ) -> Result<ContentLibraryResult>;
+    /// Browse the default retrieval surface, where topic extractions stand in
+    /// front of their retained source Pages.
+    async fn browse_retrieval_pages(
         &self,
         scopes: Vec<String>,
         query: Option<String>,
@@ -312,6 +324,7 @@ pub trait PcpApi: PcpTenantApi {
     async fn unpack_page(&self, request: UnpackPageRequest) -> Result<UnpackPageResult>;
     async fn link_pages(&self, request: LinkPagesRequest) -> Result<Relation>;
     async fn write_summary(&self, request: WriteSummaryRequest) -> Result<WriteSummaryResult>;
+    async fn extract_topic(&self, request: ExtractTopicRequest) -> Result<WriteResult>;
     async fn next_summary_candidate(
         &self,
         minimum_chars: usize,
@@ -439,6 +452,20 @@ impl PcpTenantApi for EmbeddedPcpClient {
             .await
     }
 
+    async fn browse_retrieval_pages(
+        &self,
+        scopes: Vec<String>,
+        query: Option<String>,
+        order: BrowseIndexOrder,
+        limit: u32,
+        cursor: Option<String>,
+        max_chars: u32,
+    ) -> Result<ContentLibraryResult> {
+        self.store
+            .browse_retrieval_pages(&self.access, scopes, query, order, limit, cursor, max_chars)
+            .await
+    }
+
     async fn content_library_summary(
         &self,
         requested_scopes: Vec<String>,
@@ -540,6 +567,10 @@ impl PcpApi for EmbeddedPcpClient {
 
     async fn write_summary(&self, request: WriteSummaryRequest) -> Result<WriteSummaryResult> {
         self.store.write_summary(&self.access, request).await
+    }
+
+    async fn extract_topic(&self, request: ExtractTopicRequest) -> Result<WriteResult> {
+        self.store.extract_topic(&self.access, request).await
     }
 
     async fn next_summary_candidate(

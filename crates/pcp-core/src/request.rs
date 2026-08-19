@@ -200,6 +200,26 @@ pub struct WriteSummaryRequest {
     pub idempotency_key: Option<String>,
 }
 
+/// Create one revisioned front-door Page for a bounded, explicitly selected
+/// topic. Source Pages remain addressable evidence; retrieval merely prefers
+/// this Page while every source Revision stays current.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractTopicRequest {
+    /// Ordered exact source Revisions. They must be current, active Pages in
+    /// one Scope at the time the extraction is committed.
+    pub source_pages: Vec<PageRevisionRef>,
+    pub title: String,
+    pub content: String,
+    pub created_by: Actor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_or_model: Option<String>,
+    #[serde(default)]
+    pub provenance: Vec<ProvenanceEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssessPageValidityRequest {

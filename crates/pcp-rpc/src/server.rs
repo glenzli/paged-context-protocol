@@ -343,6 +343,18 @@ async fn dispatch(
                 .browse_content_pages(scopes, query, order, limit, cursor, max_chars)
                 .await?,
         ),
+        RpcOperation::BrowseRetrievalPages {
+            scopes,
+            query,
+            order,
+            limit,
+            cursor,
+            max_chars,
+        } => RpcValue::ContentLibraryResult(
+            client
+                .browse_retrieval_pages(scopes, query, order, limit, cursor, max_chars)
+                .await?,
+        ),
         RpcOperation::ContentLibrarySummary { requested_scopes } => {
             RpcValue::ContentLibrarySummary(client.content_library_summary(requested_scopes).await?)
         }
@@ -392,6 +404,9 @@ async fn dispatch(
         RpcOperation::LinkPages(request) => RpcValue::Relation(client.link_pages(request).await?),
         RpcOperation::WriteSummary(request) => {
             RpcValue::SummaryResult(client.write_summary(request).await?)
+        }
+        RpcOperation::ExtractTopic(request) => {
+            RpcValue::TopicExtractionResult(client.extract_topic(request).await?)
         }
         RpcOperation::NextSummaryCandidate {
             minimum_chars,

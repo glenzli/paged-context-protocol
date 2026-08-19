@@ -266,7 +266,7 @@ impl SemanticSearchProvider {
         let mut hits = Vec::new();
         while hits.len() < self.max_indexed_pages {
             let page = client
-                .browse_content_pages(
+                .browse_retrieval_pages(
                     scopes.to_vec(),
                     None,
                     BrowseIndexOrder::Recent,

@@ -45,9 +45,10 @@ Multi-tenant Source / Event
 - **Relation and Provenance**: Relations connect stable Pages, while relation
   evidence and provenance refer to exact Revisions. Temporal adjacency or textual
   similarity does not automatically become a domain edge.
-- **Summary and Validity**: Summaries are optional, sparse, traceable derived Pages
-  rather than a mandatory tier for every item. Validity records whether information
-  remains applicable.
+- **Summary, Topic, and Validity**: Summaries are optional, sparse, traceable derived
+  Pages. A long-lived topic spanning several Pages can be logically extracted as a
+  separate Topic Page that fronts default retrieval without deleting source evidence.
+  Validity records whether information remains applicable.
 - **Search, Read, and Projection**: Retrieval returns identifiable candidates before
   selected projections such as Summary, Payload, Sources, Relations, or History are
   read. The model or Host chooses the query path and admission timing.
@@ -61,7 +62,7 @@ Multi-tenant Source / Event
 PCP does not prescribe a fixed Router, Intent Focus, zoom hierarchy,
 Chain-of-Thought, XML flow, or model state machine. A consuming model chooses what
 the current task queries, reads, and materializes. Runtime owns Identity-wide
-Summary, Validity, Relation, lossless packing, and retention maintenance and may call
+Summary, Topic, Validity, Relation, lossless packing, and retention maintenance and may call
 a replaceable model as a semantic inference provider.
 
 ## Current Status
@@ -110,7 +111,7 @@ normative. Conformance is defined by [`PROTOCOL-en.md`](PROTOCOL-en.md).
 - Runtime-RPC `semantic_search` and budgeted `match_intent` context queries. Results are
   structured Page/Revision entries; callers assemble their own prompts without a fixed Context Pack prefix.
 - Stable-`pageId` anchored graph slices with bounded depth, nodes, and edges, ACL-filtered at every hop; no whole-store graph export.
-- Summary, Validity, Relation, Provenance, lossless sealed-Page packing, and access audit.
+- Summary, logical Topic extraction, Validity, Relation, Provenance, lossless sealed-Page packing, and access audit.
 - Allowed access events are committed in bounded batches of at most 512 events or
   one second, with at least 500 ms between automatic commits; overload applies
   backpressure instead of silently dropping events. Denied and failed events use a
@@ -165,7 +166,7 @@ before submission.
 `PcpTenantApi` is the ordinary tenant boundary and exposes the descriptor,
 authorized Scopes, `ingest_page`, Search, Read, and optional browse. `PcpApi` is
 the privileged superset used by Runtime maintainers and local administration
-tools; it includes advanced writes, Relations, Summaries, Validity, packing,
+tools; it includes advanced writes, Relations, Summaries, logical Topic extraction, Validity, packing,
 retention, and audit. A Host may embed a Store or use Runtime for an independent
 lifecycle and server-injected identity. The tenant surface is the same in both
 deployment shapes.
