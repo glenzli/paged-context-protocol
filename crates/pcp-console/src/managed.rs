@@ -117,10 +117,9 @@ impl ManagedRuntime {
 
     pub(super) async fn restart(&self) -> Result<ManagedRuntimeStatus> {
         let mut child = self.child.lock().await;
-        let previous = child
-            .take()
-            .context("PCP Console cannot restart a Runtime it did not start")?;
-        stop_child(previous).await?;
+        if let Some(previous) = child.take() {
+            stop_child(previous).await?;
+        }
         self.start_locked(&mut child).await?;
         Ok(self.status_locked(&child))
     }

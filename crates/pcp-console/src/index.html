@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PCP Console</title>
-  <link rel="stylesheet" href="/styles.css?v=20260818.8">
+  <link rel="stylesheet" href="/styles.css?v=20260820.2">
   <link rel="stylesheet" href="/page-content.css?v=20260816.3">
 </head>
 <body>
@@ -57,14 +57,20 @@
           <tbody id="scope-rows"></tbody>
         </table>
       </div>
-      <div class="section-heading">
-        <h2 data-i18n="Endpoint">Endpoint</h2>
+      <div class="overview-secondary-grid">
+        <section>
+          <div class="section-heading">
+            <h2 data-i18n="Endpoint">Endpoint</h2>
+          </div>
+          <dl id="endpoint-details" class="details-grid"></dl>
+        </section>
+        <section>
+          <div class="section-heading">
+            <h2 data-i18n="Capabilities">Capabilities</h2>
+          </div>
+          <dl id="capability-details" class="details-grid"></dl>
+        </section>
       </div>
-      <dl id="endpoint-details" class="details-grid"></dl>
-      <div class="section-heading">
-        <h2 data-i18n="Capabilities">Capabilities</h2>
-      </div>
-      <dl id="capability-details" class="details-grid"></dl>
     </section>
 
     <section id="view-pages" class="view">
@@ -178,12 +184,29 @@
       </section>
 
       <section id="maintenance-workflow" hidden>
-        <ol id="maintenance-steps" class="maintenance-steps" aria-label="Maintenance phases">
-          <li id="maintenance-step-scan"><span>1</span><div><strong data-i18n="Scan candidates">Scan candidates</strong><small id="maintenance-step-scan-status" data-i18n="Not started">Not started</small></div></li>
-          <li id="maintenance-step-analyze"><span>2</span><div><strong data-i18n="Analyze suggestions">Analyze suggestions</strong><small id="maintenance-step-analyze-status" data-i18n="Waiting">Waiting</small></div></li>
-          <li id="maintenance-step-review"><span>3</span><div><strong data-i18n="Review and apply">Review and apply</strong><small id="maintenance-step-review-status" data-i18n="Waiting">Waiting</small></div></li>
-          <li id="maintenance-step-report"><span>4</span><div><strong data-i18n="Maintenance report">Maintenance report</strong><small id="maintenance-step-report-status" data-i18n="Waiting">Waiting</small></div></li>
-        </ol>
+        <section class="maintenance-flow-overview" aria-labelledby="maintenance-flow-title">
+          <div class="maintenance-flow-heading">
+            <span class="maintenance-eyebrow" id="maintenance-flow-kicker"></span>
+            <h3 id="maintenance-flow-title"></h3>
+            <p id="maintenance-flow-description"></p>
+          </div>
+          <ol id="maintenance-pass-steps" class="maintenance-pass-steps" aria-label="Maintenance passes">
+            <li id="maintenance-pass-pack"><span>1</span><div><strong id="maintenance-pass-pack-title"></strong><small id="maintenance-pass-pack-detail"></small><em id="maintenance-pass-pack-status"></em></div></li>
+            <li id="maintenance-pass-semantic"><span>2</span><div><strong id="maintenance-pass-semantic-title"></strong><small id="maintenance-pass-semantic-detail"></small><em id="maintenance-pass-semantic-status"></em></div></li>
+          </ol>
+        </section>
+
+        <section class="maintenance-stage-section" aria-labelledby="maintenance-stage-track-title">
+          <div class="maintenance-stage-track-heading">
+            <div><span class="maintenance-eyebrow" id="maintenance-stage-track-kicker"></span><h3 id="maintenance-stage-track-title"></h3></div>
+            <span id="maintenance-stage-track-status" class="muted" aria-live="polite"></span>
+          </div>
+          <ol id="maintenance-steps" class="maintenance-steps" aria-label="Maintenance stage">
+            <li id="maintenance-step-scan"><span>1</span><div><strong data-i18n="Scan candidates">Scan candidates</strong><small id="maintenance-step-scan-status" data-i18n="Not started">Not started</small></div></li>
+            <li id="maintenance-step-analyze"><span>2</span><div><strong data-i18n="Analyze suggestions">Analyze suggestions</strong><small id="maintenance-step-analyze-status" data-i18n="Waiting">Waiting</small></div></li>
+            <li id="maintenance-step-review"><span>3</span><div><strong data-i18n="Review and apply">Review and apply</strong><small id="maintenance-step-review-status" data-i18n="Waiting">Waiting</small></div></li>
+          </ol>
+        </section>
 
         <section class="maintenance-stage-panel" aria-labelledby="maintenance-phase-title">
           <div class="maintenance-stage-heading">

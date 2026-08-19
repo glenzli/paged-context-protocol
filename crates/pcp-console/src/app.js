@@ -1032,16 +1032,17 @@ function renderOverview(data) {
 
   byId("metrics").replaceChildren(
     metric(t("Integrity"), data.integrity, connected ? "positive" : "danger"),
-    metric(t("Protocol"), data.capabilities.protocolVersion, "info"),
+    metric(t("Protocol"), data.capabilities.protocolVersion),
     metric(t("Runtime PID"), data.runtime.pid || "-"),
     metric(t("Runtime started"), formatTime(data.runtime.startedAtUnixMs)),
   );
 
   byId("scope-rows").replaceChildren(...orderedScopes([...data.scopes]).map(({ scope, depth }) => {
     const row = document.createElement("tr");
-    const open = element("button", "quiet-button", t("Open"));
+    const open = element("button", "quiet-button", "↗");
     open.type = "button";
-    open.title = `Browse ${scope.displayName || scope.namespace}`;
+    open.title = t("Open");
+    open.setAttribute("aria-label", t("Open"));
     open.addEventListener("click", () => openScope(scope.namespace));
     const action = element("td", "action-cell");
     action.append(open);
@@ -1052,7 +1053,11 @@ function renderOverview(data) {
       element("strong", "", scope.displayName || scope.namespace),
       element("span", "mono muted", scope.namespace),
     );
-    if (scope.description) scopeCell.append(element("span", "scope-description", scope.description));
+    if (scope.description) {
+      const description = element("span", "scope-description", scope.description);
+      description.title = scope.description;
+      scopeCell.append(description);
+    }
     identity.append(scopeCell);
     row.append(
       identity,
@@ -1974,10 +1979,57 @@ function renderMaintenanceSteps() {
           : t("Waiting");
     byId(`maintenance-step-${stage}-status`).textContent = status;
   }
-  const report = byId("maintenance-step-report");
-  report.classList.toggle("active", maintenanceSessionComplete());
-  report.classList.toggle("completed", maintenanceSessionComplete());
-  byId("maintenance-step-report-status").textContent = maintenanceSessionComplete() ? t("Completed") : t("Waiting");
+}
+
+function renderMaintenancePasses() {
+  const currentPass = maintenancePass();
+  const currentConfig = maintenancePassConfig();
+  const sessionComplete = maintenanceSessionComplete();
+  const active = maintenanceSessionActive();
+
+  byId("maintenance-flow-kicker").textContent = currentLanguage === "zh"
+    ? "维护会话 · 两段式流程"
+    : "Maintenance session · two-pass flow";
+  byId("maintenance-flow-title").textContent = currentLanguage === "zh"
+    ? "先确定上下文边界，再维护语义结构"
+    : "Set context boundaries before maintaining semantic structure";
+  byId("maintenance-flow-description").textContent = currentLanguage === "zh"
+    ? "第二段只会基于第一段应用或跳过后刷新得到的库存运行；关系建议仍须人工批准后才可参与检索。"
+    : "The second pass runs only on inventory refreshed after the first pass is applied or skipped. Suggested relations remain unavailable to retrieval until approved.";
+
+  for (const [pass, config] of Object.entries(MAINTENANCE_PASSES)) {
+    const item = byId(`maintenance-pass-${pass}`);
+    const title = byId(`maintenance-pass-${pass}-title`);
+    const detail = byId(`maintenance-pass-${pass}-detail`);
+    const status = byId(`maintenance-pass-${pass}-status`);
+    const completed = sessionComplete || (active && config.order < currentConfig.order);
+    const isActive = active && pass === currentPass;
+    const waiting = !completed && !isActive;
+    item.classList.toggle("active", isActive);
+    item.classList.toggle("completed", completed);
+    item.classList.toggle("waiting", waiting);
+    title.textContent = t(config.label);
+    detail.textContent = currentLanguage === "zh"
+      ? (pass === "pack" ? "Pack 边界与合并" : "摘要与关系建议")
+      : (pass === "pack" ? "Pack boundaries and merges" : "Summary and relation proposals");
+    status.textContent = completed
+      ? t("Completed")
+      : isActive && state.maintenance.busy
+        ? (currentLanguage === "zh" ? "处理中" : "Working")
+        : isActive
+          ? (currentLanguage === "zh" ? "当前阶段" : "Current pass")
+          : t("Waiting");
+  }
+
+  byId("maintenance-stage-track-kicker").textContent = currentLanguage === "zh"
+    ? `第 ${currentConfig.order} 段 · 当前工作流`
+    : `Pass ${currentConfig.order} · current workflow`;
+  byId("maintenance-stage-track-title").textContent = t(currentConfig.label);
+  byId("maintenance-stage-track-status").textContent = sessionComplete
+    ? t("Completed")
+    : state.maintenance.busy
+      ? (currentLanguage === "zh" ? "处理中" : "Working")
+      : `${maintenanceStageConfig().order} / 3`;
 }
 
 function renderMaintenanceWorkflow() {
@@ -2000,6 +2052,7 @@ function renderMaintenanceWorkflow() {
   const candidates = maintenanceCandidates();
   const selectedCount = candidates.filter((candidate) => state.maintenance.selected.has(candidate.candidateId)).length;
 
+  renderMaintenancePasses();
   renderMaintenanceSteps();
   byId("maintenance-phase-order").textContent = currentLanguage === "zh"
     ? `第 ${passConfig.order} 段 · ${t(passConfig.label)} · 第 ${stageConfig.order} 步，共 3 步`
@@ -2079,7 +2132,7 @@ function renderMaintenanceWorkflow() {
 }
 
 function renderMaintenanceReport() {
-  renderMaintenanceSteps();
+  renderMaintenancePasses();
   const outcomes = state.maintenance.session.outcomes;
   const totalCalls = Object.values(outcomes).reduce((sum, outcome) => sum + outcome.modelCalls, 0);
   const totalSkipped = Object.values(outcomes).reduce((sum, outcome) => sum + outcome.skipped, 0);
