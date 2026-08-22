@@ -68,6 +68,7 @@ impl SqlitePcpStore {
                 recall: RecallHealth::default(),
                 packing: PackingHealth::default(),
                 graph: GraphHealth::default(),
+                model_usage: pcp_store::RuntimeModelUsageHealth::default(),
                 operations: Vec::new(),
                 scopes: Vec::new(),
                 timeline: Vec::new(),
@@ -76,6 +77,11 @@ impl SqlitePcpStore {
 
         self.run("health snapshot", move |connection| {
             let mut scopes = storage_by_scope(&connection, &allowed_scopes, &window_started_at)?;
+            let model_usage = SqlitePcpStore::runtime_usage_health(
+                &connection,
+                &allowed_scopes,
+                &window_started_at,
+            )?;
             let (relations, isolated_current_pages, relation_types) =
                 graph_health(&connection, &allowed_scopes)?;
             let events = operation_events(&connection, &allowed_scopes, &window_started_at)?;
@@ -233,6 +239,7 @@ impl SqlitePcpStore {
                     average_relations_per_page,
                     relation_types,
                 },
+                model_usage,
                 operations,
                 scopes: scopes.into_values().collect(),
                 timeline: timeline.into_values().collect(),

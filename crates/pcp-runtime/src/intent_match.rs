@@ -68,6 +68,7 @@ pub struct IntentMatchResult {
     pub hits: Vec<IntentMatchedHit>,
     pub indexed_count: usize,
     pub embedded_count: usize,
+    pub semantic_model_calls: usize,
     pub audit: IntentMatchAudit,
 }
 
@@ -79,6 +80,9 @@ pub struct IntentMatchedHit {
 
 pub struct IntentMatchProvider {
     client: Client,
+    // This is the total wall-clock budget for one intent-match request, not a
+    // per-Router-call allowance. Planning, review, expansion, and final
+    // selection must share it so a high-effort request remains bounded.
     timeout: Duration,
     max_catalog_pages: usize,
 }
@@ -105,8 +109,11 @@ impl IntentMatchProvider {
         top_k: usize,
     ) -> Result<IntentMatchResult> {
         let budget = IntentBudget::for_effort(effort);
+        let deadline = IntentDeadline::start(self.timeout);
         let mut router_usage = RouterTokenUsage::default();
-        let plan = self.plan(query, budget, &mut router_usage).await?;
+        let plan = self
+            .plan(query, budget, &deadline, &mut router_usage)
+            .await?;
         let mut router_rounds = 1;
         let mut candidate_pool = CandidatePool::default();
         let mut semantic_probes = vec![query.to_owned()];
@@ -115,6 +122,7 @@ impl IntentMatchProvider {
 
         let mut indexed_count: usize = 0;
         let mut embedded_count: usize = 0;
+        let mut semantic_model_calls: usize = 0;
         for probe in &semantic_probes {
             let result = semantic_search
                 .search(client, probe, scopes, budget.semantic_candidates_per_probe)
@@ -124,6 +132,7 @@ impl IntentMatchProvider {
                 })?;
             indexed_count = indexed_count.max(result.indexed_count);
             embedded_count = embedded_count.saturating_add(result.embedded_count);
+            semantic_model_calls = semantic_model_calls.saturating_add(result.model_calls);
             candidate_pool.add_semantic_hits(result.hits, probe);
         }
         let exact_terms = deduplicate_strings(plan.exact_terms, budget.exact_term_limit);
@@ -167,6 +176,7 @@ impl IntentMatchProvider {
                         .saturating_mul(budget.expansion_probe_limit),
                     budget.consult_limit,
                     budget.effort,
+                    &deadline,
                     &mut router_usage,
                 )
                 .await?;
@@ -193,6 +203,7 @@ impl IntentMatchProvider {
                     .with_context(|| format!("semantic expansion for intent probe {probe:?}"))?;
                 indexed_count = indexed_count.max(result.indexed_count);
                 embedded_count = embedded_count.saturating_add(result.embedded_count);
+                semantic_model_calls = semantic_model_calls.saturating_add(result.model_calls);
                 candidate_pool.add_semantic_hits(result.hits, &probe);
                 semantic_probes.push(probe);
             }
@@ -210,7 +221,14 @@ impl IntentMatchProvider {
         let consult = candidate_pool.valid_page_ids(consult, budget.consult_limit);
         let consulted = self.consult_cards(client, &consult).await?;
         let selection = self
-            .finalize(query, &consulted, top_k, budget.effort, &mut router_usage)
+            .finalize(
+                query,
+                &consulted,
+                top_k,
+                budget.effort,
+                &deadline,
+                &mut router_usage,
+            )
             .await?;
         router_rounds += 1;
         let selected = candidate_pool.valid_page_ids(selection.page_ids, top_k);
@@ -234,6 +252,7 @@ impl IntentMatchProvider {
             hits,
             indexed_count,
             embedded_count,
+            semantic_model_calls,
             audit: IntentMatchAudit {
                 effort,
                 router_rounds,
@@ -253,6 +272,7 @@ impl IntentMatchProvider {
         &self,
         query: &str,
         budget: IntentBudget,
+        deadline: &IntentDeadline,
         usage: &mut RouterTokenUsage,
     ) -> Result<RouterPlan> {
         self.call_json(
@@ -262,6 +282,7 @@ impl IntentMatchProvider {
             ),
             "Plan only; output strict JSON without markdown.",
             budget.effort,
+            deadline,
             usage,
         )
         .await
@@ -274,6 +295,7 @@ impl IntentMatchProvider {
         expansion_probe_limit: usize,
         consult_limit: usize,
         effort: IntentEffort,
+        deadline: &IntentDeadline,
         usage: &mut RouterTokenUsage,
     ) -> Result<RouterReview> {
         let input = json!({"intent": query, "candidates": candidates});
@@ -283,6 +305,7 @@ impl IntentMatchProvider {
                 "You are PCP's logical relevance reviewer. Given the intent and candidate Page cards, identify Pages worth consulting before final Context Pack selection. A relation is only a lead: it is not evidence of relevance on its own. Select at most {consult_limit} candidate pageIds. You may ask for up to {expansion_probe_limit} targeted semantic expansion probes only when the current cards reveal a concrete missing interpretation, bridge, prerequisite, counterexample, or unresolved conflict. Do not answer the intent and do not fabricate pageIds. Return exactly JSON: {{\"consultPageIds\":[\"pg_...\"],\"expansionProbes\":[\"...\"]}}."
             ),
             effort,
+            deadline,
             usage,
         )
         .await
@@ -294,6 +317,7 @@ impl IntentMatchProvider {
         consulted: &[ConsultCard],
         top_k: usize,
         effort: IntentEffort,
+        deadline: &IntentDeadline,
         usage: &mut RouterTokenUsage,
     ) -> Result<RouterSelection> {
         let input = json!({"intent": query, "consultedPages": consulted});
@@ -303,6 +327,7 @@ impl IntentMatchProvider {
                 "You are PCP's final intent-match judge. Select only consulted Pages that directly help answer, verify, qualify, or act on the requested intent. Prefer decisive evidence and necessary context over broad analogy. Do not select a Page merely because it is related to another selected Page. Return exactly JSON: {{\"pageIds\":[\"pg_...\"]}} with at most {top_k} IDs, in usefulness order."
             ),
             effort,
+            deadline,
             usage,
         )
         .await
@@ -440,10 +465,11 @@ impl IntentMatchProvider {
         input: String,
         instructions: &str,
         effort: IntentEffort,
+        deadline: &IntentDeadline,
         usage: &mut RouterTokenUsage,
     ) -> Result<T> {
         let response = self
-            .response(input, instructions, effort)
+            .response(input, instructions, effort, deadline)
             .await
             .context("run PCP intent Router")?;
         record_usage(usage, &response);
@@ -456,8 +482,10 @@ impl IntentMatchProvider {
         input: String,
         instructions: &str,
         effort: IntentEffort,
+        deadline: &IntentDeadline,
     ) -> Result<ResponsesResult> {
-        let deadline_ms = self.timeout.as_millis().clamp(1, u128::from(u64::MAX));
+        let submission_budget = deadline.remaining("submit the intent Router request")?;
+        let deadline_ms = submission_budget.as_millis().clamp(1, u128::from(u64::MAX));
         let request = ResponsesRequest {
             model: "reasoning.solve".to_owned(),
             input: Value::String(input),
@@ -481,8 +509,7 @@ impl IntentMatchProvider {
             reasoning: Some(json!({"effort": effort_name(effort)})),
             max_output_tokens: None,
         };
-        let started = Instant::now();
-        let mut response = timeout(self.timeout, self.client.create_response(&request))
+        let mut response = timeout(submission_budget, self.client.create_response(&request))
             .await
             .context("PCP intent Router submission timed out")??;
         loop {
@@ -499,15 +526,52 @@ impl IntentMatchProvider {
                     response.id
                 ),
             }
-            let Some(remaining) = self.timeout.checked_sub(started.elapsed()) else {
-                let _ = self.client.cancel_response(&response.id).await;
-                anyhow::bail!("PCP intent Router timed out");
+            let remaining = match deadline.remaining("wait for the intent Router response") {
+                Ok(remaining) => remaining,
+                Err(error) => {
+                    let _ = self.client.cancel_response(&response.id).await;
+                    return Err(error);
+                }
             };
             sleep(POLL_INTERVAL.min(remaining)).await;
+            let remaining = match deadline.remaining("poll the intent Router response") {
+                Ok(remaining) => remaining,
+                Err(error) => {
+                    let _ = self.client.cancel_response(&response.id).await;
+                    return Err(error);
+                }
+            };
             response = timeout(remaining, self.client.get_response(&response.id))
                 .await
                 .context("PCP intent Router polling timed out")??;
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct IntentDeadline {
+    started: Instant,
+    budget: Duration,
+}
+
+impl IntentDeadline {
+    fn start(budget: Duration) -> Self {
+        Self {
+            started: Instant::now(),
+            budget,
+        }
+    }
+
+    fn remaining(&self, stage: &str) -> Result<Duration> {
+        self.budget
+            .checked_sub(self.started.elapsed())
+            .filter(|remaining| !remaining.is_zero())
+            .with_context(|| {
+                format!(
+                    "PCP intent Router exhausted its {} second end-to-end budget before it could {stage}",
+                    self.budget.as_secs()
+                )
+            })
     }
 }
 
@@ -837,6 +901,22 @@ mod tests {
             low.consult_limit < medium.consult_limit && medium.consult_limit < high.consult_limit
         );
         assert!(high.include_catalog);
+    }
+
+    #[test]
+    fn router_deadline_is_one_shared_end_to_end_budget() {
+        let deadline = IntentDeadline {
+            started: Instant::now() - Duration::from_secs(2),
+            budget: Duration::from_secs(1),
+        };
+        let error = deadline
+            .remaining("review candidates")
+            .expect_err("expired total budget must reject another Router stage");
+        assert!(
+            error
+                .to_string()
+                .contains("1 second end-to-end budget before it could review candidates")
+        );
     }
 
     #[test]

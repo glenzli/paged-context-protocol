@@ -106,6 +106,30 @@ pub struct RevisePageRequest {
     pub idempotency_key: Option<String>,
 }
 
+/// Reversibly remove a Page from the default retrieval and graph surface.
+///
+/// Archival is content governance rather than a content revision: the current
+/// revision and its asserted relations remain addressable for audit and can be
+/// restored without reconstructing historical content.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivePageRequest {
+    pub page_id: String,
+    pub expected_revision_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Restore an archived Page to the default retrieval and graph surface.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreArchivedPageRequest {
+    pub page_id: String,
+    pub expected_revision_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageRevisionRef {

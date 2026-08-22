@@ -8,13 +8,14 @@ use chrono::{Duration, SecondsFormat, Utc};
 use pcp_client::{EmbeddedPcpClient, PcpApi};
 use pcp_core::{
     AccessDecision, AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor,
-    ActorType, AssessPageValidityRequest, BrowseIndexOrder, CollectRevisionRetentionRequest,
-    CreateScopeRequest, ExtractTopicRequest, GraphEdgeDirection, GraphEdgeKind, LifecycleStatus,
-    LinkPagesRequest, PackPagesRequest, PageMutability, PagePayload, PageRevisionRef,
-    PlanRevisionRetentionRequest, Projection, ProvenanceEvent, PutRevisionRetentionLeaseRequest,
-    QueryAuditEvent, QueryAuditMethod, ReadPagesRequest, RetentionPolicy,
-    RetentionProtectionReason, RevisePageRequest, RouterTokenUsage, ScopeGrant, SearchFilters,
-    SearchMode, SearchPagesRequest, SearchTermMatch, SourceRef, SourceSpan, UnpackPageRequest,
+    ActorType, ArchivePageRequest, AssessPageValidityRequest, BrowseIndexOrder,
+    CollectRevisionRetentionRequest, CreateScopeRequest, ExtractTopicRequest, GraphEdgeDirection,
+    GraphEdgeKind, LifecycleStatus, LinkPagesRequest, ModelTokenUsage, PackPagesRequest,
+    PageMutability, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest, Projection,
+    ProvenanceEvent, PutRevisionRetentionLeaseRequest, QueryAuditEvent, QueryAuditMethod,
+    ReadPagesRequest, RestoreArchivedPageRequest, RetentionPolicy, RetentionProtectionReason,
+    RevisePageRequest, RouterTokenUsage, RuntimeUsageEvent, ScopeGrant, SearchFilters, SearchMode,
+    SearchPagesRequest, SearchTermMatch, SourceRef, SourceSpan, UnpackPageRequest,
     ValidityStanding, WritePageRequest, WriteSummaryRequest,
 };
 use pcp_store::PcpStore;
@@ -100,6 +101,159 @@ async fn stores_minimal_external_source_references() {
     );
     rejected.source_refs = vec![malformed];
     assert!(store.write_page(rejected, vec![namespace]).await.is_err());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn content_governance_archives_without_deleting_and_can_restore() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-sqlite-content-governance-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("pcp.sqlite3"))
+            .await
+            .expect("open content governance Store"),
+    );
+    let identity_id = store.identity_id().to_owned();
+    let namespace = "project:content-governance".to_owned();
+    let client = pcp_client(
+        Arc::clone(&store),
+        AccessSession::full_control(
+            principal("host:content-governance", AccessPrincipalType::Host),
+            "session:content-governance",
+            vec![namespace.clone()],
+        ),
+    );
+    client
+        .create_scope(CreateScopeRequest {
+            namespace: namespace.clone(),
+            display_name: "Content governance".to_owned(),
+            description: None,
+            parent_namespace: None,
+        })
+        .await
+        .expect("create content governance scope");
+    let written = client
+        .write_page(write_request(
+            &identity_id,
+            &namespace,
+            Actor {
+                actor_type: ActorType::Tool,
+                actor_id: "tool:content-governance-test".to_owned(),
+            },
+            "A historical note retained for direct audit but excluded from routine recall.",
+            "content-governance:page",
+        ))
+        .await
+        .expect("write Page");
+
+    let archived = client
+        .archive_page(ArchivePageRequest {
+            page_id: written.page_id.clone(),
+            expected_revision_id: written.revision_id.clone(),
+            reason: Some("Low long-term value after review".to_owned()),
+        })
+        .await
+        .expect("archive Page");
+    assert_eq!(archived.lifecycle_status, LifecycleStatus::Archived);
+
+    let default_search = client
+        .search_pages(SearchPagesRequest {
+            query: String::new(),
+            scopes: vec![namespace.clone()],
+            mode: SearchMode::Temporal,
+            term_match: SearchTermMatch::All,
+            projections: pcp_core::default_search_projections(),
+            filters: SearchFilters::default(),
+            limit: 20,
+            cursor: None,
+        })
+        .await
+        .expect("search default retrieval surface");
+    assert!(
+        default_search
+            .hits
+            .iter()
+            .all(|hit| hit.page_id != written.page_id)
+    );
+
+    let archived_search = client
+        .search_pages(SearchPagesRequest {
+            query: String::new(),
+            scopes: vec![namespace.clone()],
+            mode: SearchMode::Temporal,
+            term_match: SearchTermMatch::All,
+            projections: pcp_core::default_search_projections(),
+            filters: SearchFilters {
+                lifecycle_status: vec![LifecycleStatus::Archived],
+                ..Default::default()
+            },
+            limit: 20,
+            cursor: None,
+        })
+        .await
+        .expect("search archived Pages for governance");
+    assert!(
+        archived_search
+            .hits
+            .iter()
+            .any(|hit| hit.page_id == written.page_id)
+    );
+
+    let retained = client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![written.page_id.clone()],
+            revision_ids: Vec::new(),
+            projections: vec![Projection::Manifest, Projection::Payload],
+            max_chars: 1_000,
+        })
+        .await
+        .expect("read archived Page directly");
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].page.lifecycle_status, LifecycleStatus::Archived);
+    assert_eq!(
+        retained[0]
+            .revision
+            .payload
+            .as_ref()
+            .expect("payload")
+            .content,
+        "A historical note retained for direct audit but excluded from routine recall."
+    );
+
+    let restored = client
+        .restore_archived_page(RestoreArchivedPageRequest {
+            page_id: written.page_id.clone(),
+            expected_revision_id: written.revision_id.clone(),
+            reason: Some("Needed for an active review".to_owned()),
+        })
+        .await
+        .expect("restore archived Page");
+    assert_eq!(restored.lifecycle_status, LifecycleStatus::Active);
+    let restored_search = client
+        .search_pages(SearchPagesRequest {
+            query: String::new(),
+            scopes: vec![namespace],
+            mode: SearchMode::Temporal,
+            term_match: SearchTermMatch::All,
+            projections: pcp_core::default_search_projections(),
+            filters: SearchFilters::default(),
+            limit: 20,
+            cursor: None,
+        })
+        .await
+        .expect("search restored retrieval surface");
+    assert!(
+        restored_search
+            .hits
+            .iter()
+            .any(|hit| hit.page_id == written.page_id)
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -337,7 +491,7 @@ async fn migrates_clean_association_store_to_topic_extraction_schema() {
             |row| row.get(0),
         )
         .expect("read topic Store schema version");
-    assert_eq!(version, "0.8.0-clean.2");
+    assert_eq!(version, "0.8.0-clean.3");
     let table_count: u32 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master
@@ -482,7 +636,7 @@ async fn migrates_draft_store_to_minimal_clean_schema() {
             |row| row.get(0),
         )
         .expect("read migrated version");
-    assert_eq!(version, "0.8.0-clean.2");
+    assert_eq!(version, "0.8.0-clean.3");
     for (table, removed_column) in [
         ("pcp_relations", "from_revision_id"),
         ("pcp_summaries", "content"),
@@ -723,7 +877,7 @@ async fn migrates_clean_store_associations_without_erasing_exact_inputs() {
                 |row| row.get::<_, String>(0),
             )
             .expect("read cleaned Store version"),
-        "0.8.0-clean.2"
+        "0.8.0-clean.3"
     );
     assert_eq!(
         connection
@@ -2977,6 +3131,92 @@ async fn query_audit_summarizes_router_usage_without_query_text_or_page_content(
     assert_eq!(summary.recent_events.len(), 1);
     assert!(summary.recent_events[0].failure_kind.is_none());
     assert!(summary.recent_events[0].scopes.contains(&namespace));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn health_snapshot_aggregates_content_free_runtime_model_usage() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-runtime-usage-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("pcp.sqlite3"))
+            .await
+            .expect("open Store"),
+    );
+    let namespace = "project:runtime-usage".to_owned();
+    store
+        .create_scope(CreateScopeRequest {
+            namespace: namespace.clone(),
+            display_name: "Runtime usage".to_owned(),
+            description: None,
+            parent_namespace: None,
+        })
+        .await
+        .expect("create runtime usage scope");
+    let principal = principal("operator:runtime-usage", AccessPrincipalType::Service);
+    store
+        .record_runtime_usage(RuntimeUsageEvent {
+            event_id: "ru_reported".to_owned(),
+            occurred_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            principal: principal.clone(),
+            session_id: "session:runtime-usage".to_owned(),
+            source: "manual_maintenance".to_owned(),
+            operation: "summarize_page".to_owned(),
+            scopes: vec![namespace.clone()],
+            duration_ms: 250,
+            usage: Some(ModelTokenUsage {
+                reported_responses: 1,
+                input_tokens: 100,
+                output_tokens: 25,
+                total_tokens: 125,
+                ..ModelTokenUsage::default()
+            }),
+            failure_kind: None,
+        })
+        .await
+        .expect("record reported model usage");
+    store
+        .record_runtime_usage(RuntimeUsageEvent {
+            event_id: "ru_unreported".to_owned(),
+            occurred_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            principal: principal.clone(),
+            session_id: "session:runtime-usage".to_owned(),
+            source: "automatic_maintenance".to_owned(),
+            operation: "select_relation".to_owned(),
+            scopes: vec![namespace.clone()],
+            duration_ms: 90,
+            usage: None,
+            failure_kind: None,
+        })
+        .await
+        .expect("record unreported model usage");
+    let client = pcp_client(
+        Arc::clone(&store),
+        AccessSession::new(
+            principal,
+            "session:runtime-usage",
+            vec![ScopeGrant {
+                namespace: namespace.clone(),
+                permissions: vec![AccessPermission::Audit],
+            }],
+        ),
+    );
+    let health = client
+        .health_snapshot(vec![namespace], 24)
+        .await
+        .expect("read Runtime usage health");
+    assert_eq!(health.model_usage.operations, 2);
+    assert_eq!(health.model_usage.model_calls, 2);
+    assert_eq!(health.model_usage.reported_model_calls, 1);
+    assert_eq!(health.model_usage.unreported_model_calls, 1);
+    assert_eq!(health.model_usage.usage.total_tokens, 125);
+    assert_eq!(health.model_usage.sources.len(), 2);
 
     let _ = std::fs::remove_dir_all(root);
 }

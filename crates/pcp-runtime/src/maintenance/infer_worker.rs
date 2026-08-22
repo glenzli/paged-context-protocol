@@ -3,11 +3,14 @@ use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use infer_runtime_client::{Client, ResponsesRequest, ResponsesResult};
-use pcp_core::PACKED_PAGE_MEDIA_TYPE;
+use pcp_core::{ModelTokenUsage, PACKED_PAGE_MEDIA_TYPE};
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep, timeout};
 
-use super::{MaintenanceWorkerRequest, MaintenanceWorkerResponse, SemanticMaintenanceWorker};
+use super::{
+    MaintenanceWorkerOutcome, MaintenanceWorkerRequest, MaintenanceWorkerResponse,
+    SemanticMaintenanceWorker,
+};
 
 const MAX_INFER_OUTPUT_BYTES: usize = 1024 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -55,7 +58,7 @@ impl InferRuntimeSemanticWorker {
         &self,
         request: &MaintenanceWorkerRequest,
         additional_instructions: Option<&str>,
-    ) -> Result<MaintenanceWorkerResponse> {
+    ) -> Result<MaintenanceWorkerOutcome> {
         let mut infer_request = infer_request(
             request,
             self.timeout,
@@ -81,7 +84,12 @@ impl InferRuntimeSemanticWorker {
 
         loop {
             match response.status.as_str() {
-                "completed" => return decode_response(&response, request),
+                "completed" => {
+                    return Ok(MaintenanceWorkerOutcome {
+                        response: decode_response(&response, request)?,
+                        usage: Some(response_usage(&response)),
+                    });
+                }
                 "queued" | "in_progress" => {}
                 "failed" | "cancelled" | "incomplete" => {
                     anyhow::bail!(
@@ -130,20 +138,38 @@ impl SemanticMaintenanceWorker for InferRuntimeSemanticWorker {
         &self,
         request: MaintenanceWorkerRequest,
     ) -> Result<MaintenanceWorkerResponse> {
-        let response = self.evaluate_inner(&request, None).await?;
-        let Some(repair_instructions) = summary_language_repair_instructions(&request, &response)
+        Ok(self.evaluate_with_usage(request).await?.response)
+    }
+
+    async fn evaluate_with_usage(
+        &self,
+        request: MaintenanceWorkerRequest,
+    ) -> Result<MaintenanceWorkerOutcome> {
+        let initial = self.evaluate_inner(&request, None).await?;
+        let Some(repair_instructions) =
+            summary_language_repair_instructions(&request, &initial.response)
         else {
-            return Ok(response);
+            return Ok(initial);
         };
 
         let repaired = self
             .evaluate_inner(&request, Some(repair_instructions))
             .await?;
-        if summary_language_repair_instructions(&request, &repaired).is_none() {
-            Ok(repaired)
+        let mut usage = initial.usage.unwrap_or_default();
+        if let Some(repaired_usage) = repaired.usage.as_ref() {
+            usage.add_assign(repaired_usage);
+        }
+        if summary_language_repair_instructions(&request, &repaired.response).is_none() {
+            Ok(MaintenanceWorkerOutcome {
+                response: repaired.response,
+                usage: Some(usage),
+            })
         } else {
             // A wrong-language routing summary is worse than an absent one: it poisons recall.
-            Ok(MaintenanceWorkerResponse::Defer)
+            Ok(MaintenanceWorkerOutcome {
+                response: MaintenanceWorkerResponse::Defer,
+                usage: Some(usage),
+            })
         }
     }
 
@@ -151,8 +177,58 @@ impl SemanticMaintenanceWorker for InferRuntimeSemanticWorker {
         &self,
         request: MaintenanceWorkerRequest,
     ) -> Result<MaintenanceWorkerResponse> {
+        Ok(self
+            .repair_packing_analysis_overlap_with_usage(request)
+            .await?
+            .response)
+    }
+
+    async fn repair_packing_analysis_overlap_with_usage(
+        &self,
+        request: MaintenanceWorkerRequest,
+    ) -> Result<MaintenanceWorkerOutcome> {
         self.evaluate_inner(&request, Some(PACKING_OVERLAP_REPAIR_INSTRUCTIONS))
             .await
+    }
+}
+
+fn response_usage(response: &ResponsesResult) -> ModelTokenUsage {
+    let Some(reported) = response.extra.get("usage").and_then(Value::as_object) else {
+        return ModelTokenUsage {
+            unreported_responses: 1,
+            ..ModelTokenUsage::default()
+        };
+    };
+    let (Some(input_tokens), Some(output_tokens)) = (
+        reported.get("input_tokens").and_then(Value::as_u64),
+        reported.get("output_tokens").and_then(Value::as_u64),
+    ) else {
+        return ModelTokenUsage {
+            unreported_responses: 1,
+            ..ModelTokenUsage::default()
+        };
+    };
+    ModelTokenUsage {
+        reported_responses: 1,
+        input_tokens,
+        output_tokens,
+        total_tokens: reported
+            .get("total_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| input_tokens.saturating_add(output_tokens)),
+        cached_input_tokens: reported
+            .get("input_tokens_details")
+            .and_then(Value::as_object)
+            .and_then(|details| details.get("cached_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        reasoning_tokens: reported
+            .get("output_tokens_details")
+            .and_then(Value::as_object)
+            .and_then(|details| details.get("reasoning_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        unreported_responses: 0,
     }
 }
 
@@ -189,6 +265,8 @@ fn infer_request(
         }
         MaintenanceWorkerRequest::SelectPacking { .. }
         | MaintenanceWorkerRequest::AnalyzePacking { .. }
+        | MaintenanceWorkerRequest::ExtractTopic { .. }
+        | MaintenanceWorkerRequest::AssessArchive { .. }
         | MaintenanceWorkerRequest::SelectRelation { .. }
         | MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => {
             let deployment_id = match request {
@@ -241,6 +319,8 @@ fn intent_for(request: &MaintenanceWorkerRequest) -> &'static str {
         | MaintenanceWorkerRequest::SummarizePages { .. } => "language.respond",
         MaintenanceWorkerRequest::SelectPacking { .. }
         | MaintenanceWorkerRequest::AnalyzePacking { .. }
+        | MaintenanceWorkerRequest::ExtractTopic { .. }
+        | MaintenanceWorkerRequest::AssessArchive { .. }
         | MaintenanceWorkerRequest::SelectRelation { .. }
         | MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => "reasoning.solve",
     }
@@ -261,8 +341,16 @@ fn instructions_for(request: &MaintenanceWorkerRequest) -> String {
             "Return exactly one JSON object and no markdown. Use either {\"decision\":\"packing_candidates\",\"candidates\":[[\"pg_...\",\"pg_...\"]]}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Analyze every supplied group and return every maximal useful ordered, contiguous, non-overlapping segment for lossless physical packing, with at least two Pages and no more than max_pages_per_candidate. Candidates must form a disjoint partition within each group: every page_id may occur in zero or one candidate only. Before responding, verify no page_id repeats anywhere in candidates. Pages need not state the same fact: keep coherent local episodes together, including questions, answers, corrections, qualifications, and short reasoning transitions. Split only at a clear independent subject or event boundary; temporal adjacency alone is not enough, but do not require semantic equivalence. Never combine Pages from different groups. A candidate may merge up to two Pages marked packed=true only when they form one continuous topic; adjacency alone is insufficient."
                 .to_owned()
         }
+        MaintenanceWorkerRequest::ExtractTopic { .. } => {
+            "Return exactly one JSON object and no markdown. Use either {\"decision\":\"extract_topic\",\"page_ids\":[\"pg_...\",\"pg_...\"],\"title\":\"...\",\"content\":\"...\"}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. A Topic Page is a durable front door, not a chronological digest or a replacement for sources. Select 2..=max_source_pages supplied Pages only when they establish one narrow, stable subject that a future query should reach before expanding evidence. Temporal adjacency, a shared Scope, broad AI/tool/workspace themes, or superficial keyword overlap are insufficient. When selecting sources, write a specific 120-4000 Unicode-character Topic Page body grounded only in them and a concise title (1-160 chars). Preserve qualifications, uncertainty, and disagreement; do not invent missing connective claims. Return no_candidate when the window contains no clearly bounded subject."
+                .to_owned()
+        }
+        MaintenanceWorkerRequest::AssessArchive { .. } => {
+            "Return exactly one JSON object and no markdown: {\"decision\":\"archive_review\",\"outcome\":\"archive\",\"reason\":\"...\"}, {\"decision\":\"archive_review\",\"outcome\":\"retain\",\"reason\":\"...\"}, or {\"decision\":\"archive_review\",\"outcome\":\"defer\",\"reason\":\"...\"}. This is a human-reviewed content-governance decision: you never delete anything and you do not apply lifecycle changes. Treat candidate_signals only as reasons to inspect, never as a value score. Recommend archive for a low-durability transient record, routine status update, greeting, duplicate observation, or resolved conversational turn that adds no independent reusable evidence, decision, definition, unresolved question, source material, or useful retrieval entry point. Existing summaries and explicit relations are review context, not retention proof by themselves: a Page may still be archived when those links do not rely on its detail. Retain any Page with durable evidence, a specific decision, a stable concept, a useful counterexample, source material, or plausible future value. Defer when the evidence is ambiguous. Your reason must be one concise, grounded sentence naming the Page's actual role; never cite age, lack of visits, lexical similarity, an existing summary, or a relation as sufficient evidence by itself."
+                .to_owned()
+        }
         MaintenanceWorkerRequest::SelectRelation { .. } => {
-            "Return exactly one JSON object and no markdown. Use either {\"decision\":\"relate\",\"page_ids\":[\"pg_...\",\"pg_...\"]}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Select exactly two supplied Pages only when each directly helps understand, verify, or act on the same stable subject or evidence chain, and never select a pair listed in excluded_page_pairs. Temporal adjacency, shared Scope, co-retrieval, lexical similarity, broad analogy, or merely both discussing AI, tools, infrastructure, harnesses, runtimes, or workspaces are insufficient. Return no_candidate when no pair meets this bar."
+            "Return exactly one JSON object and no markdown. Use either {\"decision\":\"relate\",\"page_ids\":[\"pg_...\",\"pg_...\"],\"reason\":\"...\"}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Select exactly two supplied Pages only when each directly helps understand, verify, or act on the same stable subject or evidence chain, and never select a pair listed in excluded_page_pairs. With relate, reason must be one concise, grounded sentence that names the shared subject or evidence chain and what the two Pages contribute; it is review evidence, not a generic statement of similarity. Temporal adjacency, shared Scope, co-retrieval, lexical similarity, broad analogy, or merely both discussing AI, tools, infrastructure, harnesses, runtimes, or workspaces are insufficient. Return no_candidate when no pair meets this bar."
                 .to_owned()
         }
         MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => {
@@ -697,6 +785,51 @@ mod tests {
     }
 
     #[test]
+    fn topic_extraction_is_a_reasoning_decision_with_explicit_sources() {
+        let request = MaintenanceWorkerRequest::ExtractTopic {
+            pages: vec![RelationCandidatePage {
+                page_id: "pg_1".to_owned(),
+                namespace: "project:one".to_owned(),
+                kind: "document".to_owned(),
+                created_at: "2026-08-15T00:00:00Z".to_owned(),
+                observed_at: None,
+                routing_text: "PCP topics preserve source Pages as evidence.".to_owned(),
+                facets: None,
+                relation_types: Vec::new(),
+            }],
+            max_source_pages: 8,
+        };
+        let infer = infer_request(
+            &request,
+            Duration::from_secs(12),
+            "codex_gpt_5_6_luna",
+            "codex_gpt_5_6_luna",
+            None,
+        )
+        .expect("build Topic extraction request");
+        assert_eq!(infer.model, "reasoning.solve");
+        assert_eq!(infer.metadata["infer.deployment_ids"], "codex_gpt_5_6_luna");
+        assert!(
+            infer
+                .instructions
+                .as_ref()
+                .and_then(Value::as_str)
+                .is_some_and(|instructions| instructions.contains("durable front door")
+                    && instructions.contains("2..=max_source_pages")
+                    && instructions.contains("Temporal adjacency"))
+        );
+        let decoded = decode_response(
+            &result("{\"decision\":\"extract_topic\",\"page_ids\":[\"pg_1\",\"pg_2\"],\"title\":\"PCP topic\",\"content\":\"A durable, source-grounded Topic Page for PCP retrieval.\"}"),
+            &request,
+        )
+        .expect("decode Topic extraction response");
+        assert!(matches!(
+            decoded,
+            MaintenanceWorkerResponse::ExtractTopic { .. }
+        ));
+    }
+
+    #[test]
     fn non_summary_output_requires_exact_json_without_markdown_fences() {
         let request = MaintenanceWorkerRequest::SelectRetentionMilestones {
             pages: Vec::new(),
@@ -770,8 +903,35 @@ mod tests {
         };
         assert!(
             decode_response(&result(
-                "{\"decision\":\"relate\",\"page_ids\":[\"pg_1\",\"pg_2\"],\"relation_type\":\"summarizes\"}"
+                "{\"decision\":\"relate\",\"page_ids\":[\"pg_1\",\"pg_2\"],\"reason\":\"The two pages establish one durable subject.\",\"relation_type\":\"summarizes\"}"
             ), &request)
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn relation_output_requires_grounded_review_evidence() {
+        let request = MaintenanceWorkerRequest::SelectRelation {
+            pages: Vec::new(),
+            excluded_page_pairs: Vec::new(),
+        };
+        let decoded = decode_response(
+            &result(
+                "{\"decision\":\"relate\",\"page_ids\":[\"pg_1\",\"pg_2\"],\"reason\":\"The two Pages establish the same bounded evidence chain.\"}",
+            ),
+            &request,
+        )
+        .expect("decode relation evidence");
+        assert!(matches!(
+            decoded,
+            MaintenanceWorkerResponse::Relate { reason, .. }
+                if reason == "The two Pages establish the same bounded evidence chain."
+        ));
+        assert!(
+            decode_response(
+                &result("{\"decision\":\"relate\",\"page_ids\":[\"pg_1\",\"pg_2\"]}"),
+                &request,
+            )
             .is_err()
         );
     }

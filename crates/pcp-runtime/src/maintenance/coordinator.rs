@@ -8,12 +8,15 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use pcp_client::PcpApi;
 use pcp_core::{
-    LinkPagesRequest, PACKED_PAGE_MEDIA_TYPE, PackPagesRequest, PageMutability, PageRevisionRef,
-    PlanRevisionRetentionRequest, Projection, PutRevisionRetentionLeaseRequest, ReadPagesRequest,
-    RetentionPolicy, SourceSpan, WriteResult, WriteSummaryRequest,
+    AccessSession, ExtractTopicRequest, LinkPagesRequest, PACKED_PAGE_MEDIA_TYPE, PackPagesRequest,
+    PageMutability, PageRevisionRef, PlanRevisionRetentionRequest, Projection,
+    PutRevisionRetentionLeaseRequest, ReadPagesRequest, RetentionPolicy, RuntimeUsageEvent,
+    SourceSpan, WriteResult, WriteSummaryRequest,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::time::Instant;
+use uuid::Uuid;
 
 use super::{
     MaintenanceConfig, MaintenanceMode, MaintenanceWorkerRequest, MaintenanceWorkerResponse,
@@ -25,8 +28,8 @@ use super::{
         packing_key, retention_window_key, selection_window_key, summary_key,
     },
     worker::{
-        MaintenanceDetailPage, MaintenanceRoutingPage, PackingCandidateGroup, PackingCandidatePage,
-        RelationCandidatePage,
+        ArchiveCandidatePage, ArchiveWorkerDecision, MaintenanceDetailPage, MaintenanceRoutingPage,
+        PackingCandidateGroup, PackingCandidatePage, RelationCandidatePage,
     },
 };
 
@@ -108,7 +111,77 @@ pub struct MaintenanceWorkScan {
     pub inspected_pages: usize,
     pub packing: MaintenancePackScan,
     pub summary: MaintenanceSummaryScan,
+    pub topic: MaintenanceTopicScan,
     pub relation: MaintenanceRelationScan,
+}
+
+/// A separate, manual-only content-governance scan.  Unlike ordinary
+/// maintenance it is never included in scheduled cycles: the structural
+/// signals merely identify Pages that merit a human-reviewed archive decision.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceArchiveScan {
+    pub captured_at: String,
+    pub scan_id: String,
+    pub inspected_pages: usize,
+    pub eligible_pages: usize,
+    pub estimated_model_calls: usize,
+    pub pages: Vec<MaintenanceArchiveScanPage>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceArchiveScanPage {
+    pub page_id: String,
+    pub revision_id: String,
+    pub namespace: String,
+    pub kind: String,
+    pub observed_at: String,
+    pub content_chars: u64,
+    pub preview: String,
+    /// Structural reasons to inspect, not a claim that the Page is low value.
+    pub candidate_signals: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnalyzeMaintenanceArchiveRequest {
+    pub scan_id: String,
+    pub page_id: String,
+    pub revision_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaintenanceArchiveDecision {
+    Archive,
+    Retain,
+    Defer,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceArchiveAnalysis {
+    pub analyzed_at: String,
+    pub decision: MaintenanceArchiveDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<MaintenanceArchiveCandidate>,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceArchiveCandidate {
+    pub candidate_id: String,
+    pub page_id: String,
+    pub revision_id: String,
+    pub namespace: String,
+    pub kind: String,
+    pub observed_at: String,
+    pub content_chars: u64,
+    pub preview: String,
+    pub candidate_signals: Vec<String>,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -139,6 +212,27 @@ pub struct MaintenanceRelationScan {
     pub candidate_group_count: usize,
     pub estimated_model_calls: usize,
     pub groups: Vec<MaintenanceRelationScanGroup>,
+}
+
+/// A structural candidate window for a topic front door.  The window is only
+/// a bounded reading set: it does not assert that the contained Pages share a
+/// topic.  The semantic worker must explicitly select its sources.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceTopicScan {
+    pub scan_id: String,
+    pub inspected_pages: usize,
+    pub eligible_pages: usize,
+    pub candidate_group_count: usize,
+    pub estimated_model_calls: usize,
+    pub groups: Vec<MaintenanceTopicScanGroup>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceTopicScanGroup {
+    pub group_id: String,
+    pub page_count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -312,6 +406,8 @@ pub struct MaintenanceRelationCandidate {
     pub candidate_id: String,
     pub namespace: String,
     pub pages: [MaintenanceRelationInput; 2],
+    #[serde(default)]
+    pub relation_reason: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -329,6 +425,49 @@ pub struct ApplyMaintenanceRelationRequest {
     pub pages: [PageRevisionRef; 2],
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnalyzeMaintenanceTopicRequest {
+    pub scan_id: String,
+    pub group_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceTopicAnalysis {
+    pub analyzed_at: String,
+    pub decision: MaintenanceReviewDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<MaintenanceTopicCandidate>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceTopicCandidate {
+    pub candidate_id: String,
+    pub namespace: String,
+    pub title: String,
+    pub content: String,
+    pub pages: Vec<MaintenanceTopicInput>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceTopicInput {
+    pub page_id: String,
+    pub revision_id: String,
+    pub preview: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplyMaintenanceTopicRequest {
+    pub candidate_id: String,
+    pub title: String,
+    pub content: String,
+    pub pages: Vec<PageRevisionRef>,
+}
+
 const PACKING_PREVIEW_CHARS: usize = 480;
 // A full analysis window already contains enough context for one routing decision.
 // Keep requests independent so each result has a single, inspectable source window.
@@ -342,12 +481,16 @@ const SUMMARY_REVIEW_PAGES_PER_MODEL_CALL: usize = 1;
 // Keep each local-worker decision page-local, while bounding the request-wide read.
 const MAX_SUMMARY_REVIEW_INPUT_CHARS: u32 = 24_000;
 const MAX_SUMMARY_REVIEW_PAGES_PER_REQUEST: usize = 16;
+const ARCHIVE_MINIMUM_AGE_DAYS: i64 = 14;
+const MAX_ARCHIVE_CANDIDATES: usize = 40;
+const MAX_ARCHIVE_REVIEW_INPUT_CHARS: u32 = 24_000;
 
 pub struct RuntimeMaintainer {
     client: Arc<dyn PcpApi>,
     worker: Arc<dyn SemanticMaintenanceWorker>,
     config: MaintenanceConfig,
     ledger: MaintenanceLedger,
+    usage_source: &'static str,
 }
 
 impl RuntimeMaintainer {
@@ -356,6 +499,15 @@ impl RuntimeMaintainer {
         worker: Arc<dyn SemanticMaintenanceWorker>,
         config: MaintenanceConfig,
     ) -> Result<Self> {
+        Self::load_with_usage_source(client, worker, config, "automatic_maintenance").await
+    }
+
+    pub async fn load_with_usage_source(
+        client: Arc<dyn PcpApi>,
+        worker: Arc<dyn SemanticMaintenanceWorker>,
+        config: MaintenanceConfig,
+        usage_source: &'static str,
+    ) -> Result<Self> {
         config.validate()?;
         let ledger = MaintenanceLedger::load(&config.state_path).await?;
         Ok(Self {
@@ -363,6 +515,7 @@ impl RuntimeMaintainer {
             worker,
             config,
             ledger,
+            usage_source,
         })
     }
 
@@ -383,6 +536,7 @@ impl RuntimeMaintainer {
             config,
             // An operator smoke run must not be blocked by, or mutate, the normal cadence.
             ledger: MaintenanceLedger::default(),
+            usage_source: "manual_maintenance",
         })
     }
 
@@ -397,7 +551,73 @@ impl RuntimeMaintainer {
             worker,
             config,
             ledger: MaintenanceLedger::default(),
+            usage_source: "test_maintenance",
         }
+    }
+
+    async fn evaluate_worker(
+        &self,
+        request: MaintenanceWorkerRequest,
+    ) -> Result<MaintenanceWorkerResponse> {
+        let operation = worker_operation(&request).to_owned();
+        let scopes = worker_scopes(&request, self.client.access());
+        let started = Instant::now();
+        let outcome = self.worker.evaluate_with_usage(request).await;
+        let duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+        let (usage, failure_kind) = match &outcome {
+            Ok(outcome) => (outcome.usage.clone(), None),
+            Err(_) => (None, Some("worker_failed".to_owned())),
+        };
+        let event = RuntimeUsageEvent {
+            event_id: format!("ru_{}", Uuid::new_v4().simple()),
+            occurred_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            principal: self.client.access().principal.clone(),
+            session_id: self.client.access().session_id.clone(),
+            source: self.usage_source.to_owned(),
+            operation,
+            scopes,
+            duration_ms,
+            usage,
+            failure_kind,
+        };
+        if let Err(error) = self.client.record_runtime_usage(event).await {
+            eprintln!("PCP maintenance model usage write failed: {error:#}");
+        }
+        outcome.map(|outcome| outcome.response)
+    }
+
+    async fn repair_packing_overlap_worker(
+        &self,
+        request: MaintenanceWorkerRequest,
+    ) -> Result<MaintenanceWorkerResponse> {
+        let operation = format!("{}_repair", worker_operation(&request));
+        let scopes = worker_scopes(&request, self.client.access());
+        let started = Instant::now();
+        let outcome = self
+            .worker
+            .repair_packing_analysis_overlap_with_usage(request)
+            .await;
+        let duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+        let (usage, failure_kind) = match &outcome {
+            Ok(outcome) => (outcome.usage.clone(), None),
+            Err(_) => (None, Some("worker_failed".to_owned())),
+        };
+        let event = RuntimeUsageEvent {
+            event_id: format!("ru_{}", Uuid::new_v4().simple()),
+            occurred_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            principal: self.client.access().principal.clone(),
+            session_id: self.client.access().session_id.clone(),
+            source: self.usage_source.to_owned(),
+            operation,
+            scopes,
+            duration_ms,
+            usage,
+            failure_kind,
+        };
+        if let Err(error) = self.client.record_runtime_usage(event).await {
+            eprintln!("PCP maintenance model usage write failed: {error:#}");
+        }
+        outcome.map(|outcome| outcome.response)
     }
 
     pub async fn run_forever(mut self) -> Result<()> {
@@ -552,6 +772,89 @@ impl RuntimeMaintainer {
         ))
     }
 
+    /// Scans for conservative archive-review candidates. This is deliberately
+    /// outside normal maintenance and scheduled cycles: it only produces a
+    /// bounded review set and does not call a model or change any Page.
+    pub async fn scan_archive_candidates(&self) -> Result<MaintenanceArchiveScan> {
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        Ok(archive_scan_from_inventory(&inventory, Utc::now()))
+    }
+
+    /// Asks the semantic worker to assess one current candidate. The response
+    /// is still only a proposal; archive application remains an explicit
+    /// human-controlled lifecycle operation at the Console boundary.
+    pub async fn analyze_archive_candidate(
+        &self,
+        request: AnalyzeMaintenanceArchiveRequest,
+    ) -> Result<MaintenanceArchiveAnalysis> {
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        let scan = archive_scan_from_inventory(&inventory, Utc::now());
+        anyhow::ensure!(
+            request.scan_id == scan.scan_id,
+            "content-governance archive scan is stale; scan the Store again"
+        );
+        let scan_page = scan
+            .pages
+            .iter()
+            .find(|page| page.page_id == request.page_id)
+            .context("content-governance archive candidate no longer exists")?;
+        anyhow::ensure!(
+            scan_page.revision_id == request.revision_id,
+            "content-governance archive candidate revision changed after scan"
+        );
+
+        let mut pages = self
+            .read_detail_pages(
+                vec![scan_page.revision_id.clone()],
+                MAX_ARCHIVE_REVIEW_INPUT_CHARS,
+            )
+            .await?;
+        let page = pages
+            .pop()
+            .context("content-governance archive candidate disappeared")?;
+        let response = self
+            .evaluate_worker(MaintenanceWorkerRequest::AssessArchive {
+                page: ArchiveCandidatePage {
+                    page,
+                    candidate_signals: scan_page.candidate_signals.clone(),
+                },
+            })
+            .await?;
+        let (decision, candidate, reason) = match response {
+            MaintenanceWorkerResponse::ArchiveReview { outcome, reason } => {
+                let reason = validate_archive_reason(reason)?;
+                match outcome {
+                    ArchiveWorkerDecision::Archive => (
+                        MaintenanceArchiveDecision::Archive,
+                        Some(build_archive_candidate(scan_page, reason.clone())),
+                        reason,
+                    ),
+                    ArchiveWorkerDecision::Retain => {
+                        (MaintenanceArchiveDecision::Retain, None, reason)
+                    }
+                    ArchiveWorkerDecision::Defer => {
+                        (MaintenanceArchiveDecision::Defer, None, reason)
+                    }
+                }
+            }
+            MaintenanceWorkerResponse::Defer => (
+                MaintenanceArchiveDecision::Defer,
+                None,
+                "The semantic worker deferred this archive review.".to_owned(),
+            ),
+            other => anyhow::bail!(
+                "semantic worker returned {} for an assess_archive request",
+                response_name(&other)
+            ),
+        };
+        Ok(MaintenanceArchiveAnalysis {
+            analyzed_at: maintenance_review_timestamp(),
+            decision,
+            candidate,
+            reason,
+        })
+    }
+
     pub fn pending_relation_reviews(&self) -> Vec<MaintenanceRelationReviewProposal> {
         self.ledger.relation_reviews()
     }
@@ -643,11 +946,14 @@ impl RuntimeMaintainer {
             &self.config.relation,
             &active_packing_page_ids,
         );
+        let topic =
+            topic_scan_from_inventory(&inventory, &self.config.relation, &active_packing_page_ids);
         Ok(MaintenanceWorkScan {
             captured_at,
             inspected_pages: inventory.len(),
             packing,
             summary,
+            topic,
             relation,
         })
     }
@@ -702,15 +1008,13 @@ impl RuntimeMaintainer {
             groups,
             max_pages_per_candidate: self.config.packing.max_pages,
         };
-        let initial_response = self.worker.evaluate(worker_request.clone()).await;
+        let initial_response = self.evaluate_worker(worker_request.clone()).await;
         let (response, worker_calls, overlap_retries) = match initial_response {
             Ok(MaintenanceWorkerResponse::PackingCandidates { candidates })
                 if packing_candidates_overlap(&candidates) =>
             {
                 (
-                    self.worker
-                        .repair_packing_analysis_overlap(worker_request)
-                        .await,
+                    self.repair_packing_overlap_worker(worker_request).await,
                     2,
                     1,
                 )
@@ -835,8 +1139,7 @@ impl RuntimeMaintainer {
             .context("maintenance Summary Page disappeared")?;
         let source_text = page.content.clone().unwrap_or_default();
         let response = self
-            .worker
-            .evaluate(MaintenanceWorkerRequest::SummarizePage {
+            .evaluate_worker(MaintenanceWorkerRequest::SummarizePage {
                 page: Box::new(page),
             })
             .await?;
@@ -942,8 +1245,7 @@ impl RuntimeMaintainer {
             analysis.worker_calls = analysis.worker_calls.saturating_add(1);
             let source_text = detail.content.clone().unwrap_or_default();
             let response = self
-                .worker
-                .evaluate(MaintenanceWorkerRequest::SummarizePage {
+                .evaluate_worker(MaintenanceWorkerRequest::SummarizePage {
                     page: Box::new(detail),
                 })
                 .await;
@@ -1075,8 +1377,7 @@ impl RuntimeMaintainer {
         let relation_edges = self.existing_related_pairs(&window).await?;
         let excluded_page_pairs = connected_relation_pairs(&offered_page_ids, &relation_edges);
         let response = self
-            .worker
-            .evaluate(MaintenanceWorkerRequest::SelectRelation {
+            .evaluate_worker(MaintenanceWorkerRequest::SelectRelation {
                 pages: window
                     .iter()
                     .map(|page| {
@@ -1089,8 +1390,10 @@ impl RuntimeMaintainer {
                 excluded_page_pairs: excluded_page_pairs.clone(),
             })
             .await?;
-        let mut page_ids = match response {
-            MaintenanceWorkerResponse::Relate { page_ids } => page_ids,
+        let (mut page_ids, relation_reason) = match response {
+            MaintenanceWorkerResponse::Relate { page_ids, reason } => {
+                (page_ids, validate_relation_reason(reason)?)
+            }
             MaintenanceWorkerResponse::NoCandidate => {
                 return Ok(MaintenanceRelationAnalysis::no_candidate());
             }
@@ -1118,9 +1421,9 @@ impl RuntimeMaintainer {
                     .expect("offered relation Page exists")
             })
             .collect::<Vec<_>>();
-        Ok(MaintenanceRelationAnalysis::candidate(
-            build_relation_candidate(&selected),
-        ))
+        let mut candidate = build_relation_candidate(&selected);
+        candidate.relation_reason = relation_reason;
+        Ok(MaintenanceRelationAnalysis::candidate(candidate))
     }
 
     pub async fn apply_relation_candidate(
@@ -1185,6 +1488,130 @@ impl RuntimeMaintainer {
                     "maintenance:related:{}:{}",
                     revision_ids[0], revision_ids[1]
                 )),
+            })
+            .await
+    }
+
+    pub async fn analyze_topic_candidate(
+        &self,
+        request: AnalyzeMaintenanceTopicRequest,
+    ) -> Result<MaintenanceTopicAnalysis> {
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        let active_packing_page_ids = self.active_packing_page_ids();
+        let scan =
+            topic_scan_from_inventory(&inventory, &self.config.relation, &active_packing_page_ids);
+        anyhow::ensure!(
+            request.scan_id == scan.scan_id,
+            "maintenance Topic scan is stale; scan the Store again"
+        );
+        let windows =
+            topic_candidate_windows(&inventory, &self.config.relation, &active_packing_page_ids);
+        let Some(window) = windows
+            .into_iter()
+            .find(|window| topic_scan_group_id(window) == request.group_id)
+        else {
+            return Ok(MaintenanceTopicAnalysis::no_candidate());
+        };
+        let offered = window
+            .iter()
+            .map(|page| page.page_id.clone())
+            .collect::<BTreeSet<_>>();
+        let response = self
+            .evaluate_worker(MaintenanceWorkerRequest::ExtractTopic {
+                pages: window
+                    .iter()
+                    .map(|page| {
+                        RelationCandidatePage::from_inventory(
+                            page,
+                            self.config.relation.routing_chars_per_page,
+                        )
+                    })
+                    .collect(),
+                max_source_pages: 8,
+            })
+            .await?;
+        let MaintenanceWorkerResponse::ExtractTopic {
+            page_ids,
+            title,
+            content,
+        } = response
+        else {
+            return match response {
+                MaintenanceWorkerResponse::NoCandidate => {
+                    Ok(MaintenanceTopicAnalysis::no_candidate())
+                }
+                MaintenanceWorkerResponse::Defer => Ok(MaintenanceTopicAnalysis::defer()),
+                other => anyhow::bail!(
+                    "semantic worker returned {} for an extract_topic review request",
+                    response_name(&other)
+                ),
+            };
+        };
+        anyhow::ensure!(
+            (2..=8).contains(&page_ids.len())
+                && page_ids.iter().collect::<BTreeSet<_>>().len() == page_ids.len()
+                && page_ids.iter().all(|page_id| offered.contains(page_id)),
+            "semantic worker selected invalid Topic sources for the reviewed window"
+        );
+        let selected = page_ids
+            .iter()
+            .map(|page_id| {
+                window
+                    .iter()
+                    .find(|page| page.page_id == *page_id)
+                    .expect("offered Topic Page exists")
+            })
+            .collect::<Vec<_>>();
+        Ok(MaintenanceTopicAnalysis::candidate(build_topic_candidate(
+            &selected, title, content,
+        )?))
+    }
+
+    pub async fn apply_topic_candidate(
+        &self,
+        request: ApplyMaintenanceTopicRequest,
+    ) -> Result<WriteResult> {
+        anyhow::ensure!(
+            self.config.mode == MaintenanceMode::Apply,
+            "maintenance Topic extraction requires apply mode"
+        );
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        anyhow::ensure!(
+            (2..=64).contains(&request.pages.len()),
+            "maintenance Topic candidate needs 2..=64 current source Pages"
+        );
+        let mut selected = Vec::with_capacity(request.pages.len());
+        let mut ids = BTreeSet::new();
+        for source in &request.pages {
+            anyhow::ensure!(
+                ids.insert(source.page_id.as_str()),
+                "maintenance Topic candidate has duplicate Pages"
+            );
+            let current = inventory
+                .iter()
+                .find(|page| page.page_id == source.page_id)
+                .context("maintenance Topic candidate is stale or unavailable")?;
+            anyhow::ensure!(
+                current.revision_id == source.revision_id && current.kind != "topic_summary",
+                "maintenance Topic candidate is stale or unavailable"
+            );
+            selected.push(current);
+        }
+        let candidate =
+            build_topic_candidate(&selected, request.title.clone(), request.content.clone())?;
+        anyhow::ensure!(
+            candidate.candidate_id == request.candidate_id,
+            "maintenance Topic candidate identity no longer matches the reviewed Pages"
+        );
+        self.client
+            .extract_topic(ExtractTopicRequest {
+                source_pages: request.pages,
+                title: candidate.title,
+                content: candidate.content,
+                created_by: self.config.worker_actor(),
+                tool_or_model: Some(self.config.worker.actor_id().to_owned()),
+                provenance: Vec::new(),
+                idempotency_key: Some(format!("maintenance:topic:{}", candidate.candidate_id)),
             })
             .await
     }
@@ -1308,8 +1735,7 @@ impl RuntimeMaintainer {
         let source_text = page.content.clone().unwrap_or_default();
         report.worker_calls += 1;
         match self
-            .worker
-            .evaluate(MaintenanceWorkerRequest::SummarizePage {
+            .evaluate_worker(MaintenanceWorkerRequest::SummarizePage {
                 page: Box::new(page),
             })
             .await?
@@ -1431,8 +1857,7 @@ impl RuntimeMaintainer {
 
         report.worker_calls += 1;
         let response = self
-            .worker
-            .evaluate(MaintenanceWorkerRequest::SelectRelation {
+            .evaluate_worker(MaintenanceWorkerRequest::SelectRelation {
                 pages: candidates
                     .iter()
                     .map(|page| {
@@ -1445,8 +1870,10 @@ impl RuntimeMaintainer {
                 excluded_page_pairs: excluded_page_pairs.clone(),
             })
             .await?;
-        let mut page_ids = match response {
-            MaintenanceWorkerResponse::Relate { page_ids } => page_ids,
+        let (mut page_ids, relation_reason) = match response {
+            MaintenanceWorkerResponse::Relate { page_ids, reason } => {
+                (page_ids, validate_relation_reason(reason)?)
+            }
             MaintenanceWorkerResponse::NoCandidate => {
                 self.ledger.record(
                     window_key,
@@ -1536,6 +1963,7 @@ impl RuntimeMaintainer {
             self.ledger.propose_relation_review(
                 candidates[0].namespace.clone(),
                 [selected[0].clone(), selected[1].clone()],
+                relation_reason,
             );
             report.relations_proposed += 1;
         } else if self.config.applies_changes() {
@@ -1634,8 +2062,7 @@ impl RuntimeMaintainer {
         let excluded_candidate_sets = self.ledger.active_packing_sets();
         report.worker_calls += 1;
         let selection = self
-            .worker
-            .evaluate(MaintenanceWorkerRequest::SelectPacking {
+            .evaluate_worker(MaintenanceWorkerRequest::SelectPacking {
                 pages: routing_pages,
                 excluded_candidate_sets: excluded_candidate_sets.clone(),
             })
@@ -1792,8 +2219,7 @@ impl RuntimeMaintainer {
             .collect::<HashMap<_, _>>();
         report.worker_calls += 1;
         match self
-            .worker
-            .evaluate(MaintenanceWorkerRequest::SelectRetentionMilestones {
+            .evaluate_worker(MaintenanceWorkerRequest::SelectRetentionMilestones {
                 pages: routing_pages,
                 max_revisions: self.config.retention.max_revisions_per_cycle,
                 lease_days: self.config.retention.lease_days,
@@ -2304,6 +2730,95 @@ fn summary_scan_from_inventory(
     }
 }
 
+fn archive_scan_from_inventory(
+    inventory: &[pcp_store::DurablePageInventoryItem],
+    now: DateTime<Utc>,
+) -> MaintenanceArchiveScan {
+    let minimum_observed_at = now - ChronoDuration::days(ARCHIVE_MINIMUM_AGE_DAYS);
+    let mut pages = inventory
+        .iter()
+        .filter_map(|page| archive_scan_page(page, minimum_observed_at))
+        .collect::<Vec<_>>();
+    pages.sort_by(|left, right| {
+        left.observed_at
+            .cmp(&right.observed_at)
+            .then_with(|| left.page_id.cmp(&right.page_id))
+    });
+    pages.truncate(MAX_ARCHIVE_CANDIDATES);
+    let scan_id = archive_scan_id(&pages);
+    MaintenanceArchiveScan {
+        captured_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+        scan_id,
+        inspected_pages: inventory.len(),
+        eligible_pages: pages.len(),
+        estimated_model_calls: pages.len(),
+        pages,
+    }
+}
+
+fn archive_scan_page(
+    page: &pcp_store::DurablePageInventoryItem,
+    minimum_observed_at: DateTime<Utc>,
+) -> Option<MaintenanceArchiveScanPage> {
+    // Packing and Topic Pages are structural routing objects, not archive
+    // candidates. Other links and summaries are review evidence, not an
+    // automatic retention veto: an old transient Page can still be safely
+    // archived after the worker and a human inspect that evidence.
+    // PCP has no per-Page read metrics, so eligibility must never imply a
+    // measurement of real-world usage or value.
+    if page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE)
+        || page.kind == "topic_summary"
+        || page.packing_protected
+    {
+        return None;
+    }
+    let observed_at = page.observed_at.as_deref().unwrap_or(&page.created_at);
+    let observed_at = DateTime::parse_from_rfc3339(observed_at)
+        .ok()?
+        .with_timezone(&Utc);
+    if observed_at > minimum_observed_at {
+        return None;
+    }
+    let mut candidate_signals = vec![format!("older_than_{ARCHIVE_MINIMUM_AGE_DAYS}_days")];
+    if page.summary_target_revision_id.as_deref() == Some(page.revision_id.as_str()) {
+        candidate_signals.push("has_current_routing_summary".to_owned());
+    } else {
+        candidate_signals.push("no_current_routing_summary".to_owned());
+    }
+    if page.relation_types.is_empty() {
+        candidate_signals.push("no_explicit_relations".to_owned());
+    } else {
+        candidate_signals.push(format!(
+            "explicit_relations:{}",
+            page.relation_types.join(",")
+        ));
+    }
+    Some(MaintenanceArchiveScanPage {
+        page_id: page.page_id.clone(),
+        revision_id: page.revision_id.clone(),
+        namespace: page.namespace.clone(),
+        kind: page.kind.clone(),
+        observed_at: observed_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+        content_chars: page.content_chars,
+        preview: page.snippet.chars().take(PACKING_PREVIEW_CHARS).collect(),
+        candidate_signals,
+    })
+}
+
+fn archive_scan_id(pages: &[MaintenanceArchiveScanPage]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"content-governance-archive-v1");
+    digest.update(ARCHIVE_MINIMUM_AGE_DAYS.to_le_bytes());
+    for page in pages {
+        digest.update(page.page_id.as_bytes());
+        digest.update([0]);
+        digest.update(page.revision_id.as_bytes());
+        digest.update([0]);
+    }
+    let encoded = format!("{:x}", digest.finalize());
+    format!("mar_{}", &encoded[..24])
+}
+
 fn relation_scan_from_inventory(
     inventory: &[pcp_store::DurablePageInventoryItem],
     config: &RelationMaintenanceConfig,
@@ -2345,6 +2860,89 @@ fn relation_scan_from_inventory(
         estimated_model_calls: groups.len(),
         groups,
     }
+}
+
+fn topic_scan_from_inventory(
+    inventory: &[pcp_store::DurablePageInventoryItem],
+    config: &RelationMaintenanceConfig,
+    active_packing_page_ids: &BTreeSet<String>,
+) -> MaintenanceTopicScan {
+    let windows = if config.enabled {
+        topic_candidate_windows(inventory, config, active_packing_page_ids)
+    } else {
+        Vec::new()
+    };
+    let groups = windows
+        .iter()
+        .map(|window| MaintenanceTopicScanGroup {
+            group_id: topic_scan_group_id(window),
+            page_count: window.len(),
+        })
+        .collect::<Vec<_>>();
+    let eligible_pages = if config.enabled {
+        inventory
+            .iter()
+            .filter(|page| {
+                !active_packing_page_ids.contains(&page.page_id)
+                    && relation_page_eligible(page, config)
+                    && page.kind != "topic_summary"
+            })
+            .count()
+    } else {
+        0
+    };
+    MaintenanceTopicScan {
+        scan_id: topic_scan_id(&groups),
+        inspected_pages: inventory.len(),
+        eligible_pages,
+        candidate_group_count: groups.len(),
+        estimated_model_calls: groups.len(),
+        groups,
+    }
+}
+
+fn topic_candidate_windows(
+    inventory: &[pcp_store::DurablePageInventoryItem],
+    config: &RelationMaintenanceConfig,
+    active_packing_page_ids: &BTreeSet<String>,
+) -> Vec<Vec<pcp_store::DurablePageInventoryItem>> {
+    // Reuse namespace-local structural windows, but make them deliberately
+    // smaller than relation reviews. They are prompts for semantic judgment,
+    // never a claim that adjacent Pages constitute a Topic.
+    let mut seen = BTreeSet::new();
+    relation_candidate_windows(inventory, config, active_packing_page_ids)
+        .into_iter()
+        .filter_map(|window| {
+            let pages = window
+                .into_iter()
+                .filter(|page| page.kind != "topic_summary")
+                .take(8)
+                .collect::<Vec<_>>();
+            (pages.len() >= 2 && seen.insert(topic_scan_group_id(&pages))).then_some(pages)
+        })
+        .collect()
+}
+
+fn topic_scan_group_id(window: &[pcp_store::DurablePageInventoryItem]) -> String {
+    let mut digest = Sha256::new();
+    for page in window {
+        digest.update(page.page_id.as_bytes());
+        digest.update([0]);
+        digest.update(page.revision_id.as_bytes());
+        digest.update([0]);
+    }
+    let encoded = format!("{:x}", digest.finalize());
+    format!("mtg_{}", &encoded[..24])
+}
+
+fn topic_scan_id(groups: &[MaintenanceTopicScanGroup]) -> String {
+    let mut digest = Sha256::new();
+    for group in groups {
+        digest.update(group.group_id.as_bytes());
+        digest.update([0]);
+    }
+    let encoded = format!("{:x}", digest.finalize());
+    format!("mts_{}", &encoded[..24])
 }
 
 fn summary_scan_id(
@@ -2898,6 +3496,32 @@ impl MaintenanceRelationAnalysis {
     }
 }
 
+impl MaintenanceTopicAnalysis {
+    fn candidate(candidate: MaintenanceTopicCandidate) -> Self {
+        Self {
+            analyzed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            decision: MaintenanceReviewDecision::Candidate,
+            candidate: Some(candidate),
+        }
+    }
+
+    fn no_candidate() -> Self {
+        Self {
+            analyzed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            decision: MaintenanceReviewDecision::NoCandidate,
+            candidate: None,
+        }
+    }
+
+    fn defer() -> Self {
+        Self {
+            analyzed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            decision: MaintenanceReviewDecision::Defer,
+            candidate: None,
+        }
+    }
+}
+
 fn maintenance_review_timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
@@ -2985,7 +3609,114 @@ fn build_relation_candidate(
         pages: inputs
             .try_into()
             .expect("relation candidate has exactly two inputs"),
+        relation_reason: String::new(),
     }
+}
+
+fn build_archive_candidate(
+    page: &MaintenanceArchiveScanPage,
+    reason: String,
+) -> MaintenanceArchiveCandidate {
+    let mut digest = Sha256::new();
+    digest.update(page.page_id.as_bytes());
+    digest.update([0]);
+    digest.update(page.revision_id.as_bytes());
+    digest.update([0]);
+    digest.update(reason.as_bytes());
+    let encoded = format!("{:x}", digest.finalize());
+    MaintenanceArchiveCandidate {
+        candidate_id: format!("marc_{}", &encoded[..24]),
+        page_id: page.page_id.clone(),
+        revision_id: page.revision_id.clone(),
+        namespace: page.namespace.clone(),
+        kind: page.kind.clone(),
+        observed_at: page.observed_at.clone(),
+        content_chars: page.content_chars,
+        preview: page.preview.clone(),
+        candidate_signals: page.candidate_signals.clone(),
+        reason,
+    }
+}
+
+fn validate_archive_reason(reason: String) -> Result<String> {
+    let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    anyhow::ensure!(
+        reason.chars().count() >= 12,
+        "semantic worker archive review reason is too short"
+    );
+    anyhow::ensure!(
+        reason.chars().count() <= 600,
+        "semantic worker archive review reason exceeds 600 characters"
+    );
+    Ok(reason)
+}
+
+fn validate_relation_reason(reason: String) -> Result<String> {
+    let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    anyhow::ensure!(
+        !reason.is_empty(),
+        "semantic worker selected a relation without review evidence"
+    );
+    anyhow::ensure!(
+        reason.chars().count() <= 480,
+        "semantic worker relation review evidence exceeds 480 characters"
+    );
+    Ok(reason)
+}
+
+fn build_topic_candidate(
+    pages: &[&pcp_store::DurablePageInventoryItem],
+    title: String,
+    content: String,
+) -> Result<MaintenanceTopicCandidate> {
+    let title = title.trim().to_owned();
+    let content = content.trim().to_owned();
+    anyhow::ensure!(
+        !title.is_empty() && title.chars().count() <= 160,
+        "semantic maintenance worker returned an invalid Topic title"
+    );
+    anyhow::ensure!(
+        content.chars().count() >= 120 && content.chars().count() <= 4_000,
+        "semantic maintenance worker returned an invalid Topic content"
+    );
+    anyhow::ensure!(
+        (2..=64).contains(&pages.len())
+            && pages
+                .iter()
+                .all(|page| page.namespace == pages[0].namespace),
+        "maintenance Topic sources must be 2..=64 Pages in one Scope"
+    );
+    let mut digest = Sha256::new();
+    for page in pages {
+        digest.update(page.page_id.as_bytes());
+        digest.update([0]);
+        digest.update(page.revision_id.as_bytes());
+        digest.update([0]);
+    }
+    digest.update(title.as_bytes());
+    digest.update([0]);
+    digest.update(content.as_bytes());
+    let encoded = format!("{:x}", digest.finalize());
+    Ok(MaintenanceTopicCandidate {
+        candidate_id: format!("mtp_{}", &encoded[..24]),
+        namespace: pages[0].namespace.clone(),
+        title,
+        content,
+        pages: pages
+            .iter()
+            .map(|page| MaintenanceTopicInput {
+                page_id: page.page_id.clone(),
+                revision_id: page.revision_id.clone(),
+                preview: page
+                    .summary
+                    .as_deref()
+                    .unwrap_or(&page.snippet)
+                    .chars()
+                    .take(PACKING_PREVIEW_CHARS)
+                    .collect(),
+            })
+            .collect(),
+    })
 }
 
 fn normalize_worker_summary(content: String, source_text: &str) -> Result<String> {
@@ -3109,6 +3840,48 @@ fn levenshtein_distance(left: &str, right: &str) -> usize {
     previous[right.len()]
 }
 
+fn worker_operation(request: &MaintenanceWorkerRequest) -> &'static str {
+    match request {
+        MaintenanceWorkerRequest::SummarizePage { .. } => "summarize_page",
+        MaintenanceWorkerRequest::SummarizePages { .. } => "summarize_pages",
+        MaintenanceWorkerRequest::SelectPacking { .. } => "select_packing",
+        MaintenanceWorkerRequest::AnalyzePacking { .. } => "analyze_packing",
+        MaintenanceWorkerRequest::SelectRelation { .. } => "select_relation",
+        MaintenanceWorkerRequest::ExtractTopic { .. } => "extract_topic",
+        MaintenanceWorkerRequest::AssessArchive { .. } => "assess_archive",
+        MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => "select_retention_milestones",
+    }
+}
+
+fn worker_scopes(request: &MaintenanceWorkerRequest, access: &AccessSession) -> Vec<String> {
+    let mut scopes = match request {
+        MaintenanceWorkerRequest::SummarizePage { page } => vec![page.namespace.clone()],
+        MaintenanceWorkerRequest::SummarizePages { pages } => {
+            pages.iter().map(|page| page.namespace.clone()).collect()
+        }
+        MaintenanceWorkerRequest::AssessArchive { page } => vec![page.page.namespace.clone()],
+        MaintenanceWorkerRequest::SelectRelation { pages, .. }
+        | MaintenanceWorkerRequest::ExtractTopic { pages, .. } => {
+            pages.iter().map(|page| page.namespace.clone()).collect()
+        }
+        MaintenanceWorkerRequest::SelectRetentionMilestones { pages, .. } => {
+            pages.iter().map(|page| page.namespace.clone()).collect()
+        }
+        // Packing candidates intentionally carry no Page content or namespace.
+        // Attribute those model calls to the scopes the maintenance session may
+        // actually operate on, preserving ACL-filtered Runtime reporting.
+        MaintenanceWorkerRequest::SelectPacking { .. }
+        | MaintenanceWorkerRequest::AnalyzePacking { .. } => access
+            .grants
+            .iter()
+            .map(|grant| grant.namespace.clone())
+            .collect(),
+    };
+    scopes.sort();
+    scopes.dedup();
+    scopes
+}
+
 fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
     match response {
         MaintenanceWorkerResponse::WriteSummary { .. } => "write_summary",
@@ -3116,6 +3889,8 @@ fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
         MaintenanceWorkerResponse::Candidate { .. } => "candidate",
         MaintenanceWorkerResponse::PackingCandidates { .. } => "packing_candidates",
         MaintenanceWorkerResponse::Relate { .. } => "relate",
+        MaintenanceWorkerResponse::ExtractTopic { .. } => "extract_topic",
+        MaintenanceWorkerResponse::ArchiveReview { .. } => "archive_review",
         MaintenanceWorkerResponse::Retain { .. } => "retain",
         MaintenanceWorkerResponse::NoCandidate => "no_candidate",
         MaintenanceWorkerResponse::Defer => "defer",
@@ -3126,12 +3901,13 @@ fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
 mod relation_window_tests {
     use std::collections::{BTreeMap, BTreeSet};
 
+    use chrono::{TimeZone, Utc};
     use pcp_core::{PACKED_PAGE_MEDIA_TYPE, PageMutability, SourceSpan};
     use pcp_store::DurablePageInventoryItem;
 
     use super::{
-        PackingMaintenanceConfig, RelationMaintenanceConfig, packing_candidate_windows,
-        relation_candidate_windows, source_boundary_relation_windows,
+        PackingMaintenanceConfig, RelationMaintenanceConfig, archive_scan_from_inventory,
+        packing_candidate_windows, relation_candidate_windows, source_boundary_relation_windows,
     };
 
     fn page(namespace: &str, page_id: &str) -> DurablePageInventoryItem {
@@ -3256,6 +4032,59 @@ mod relation_window_tests {
                 .map(|page| page.page_id.as_str())
                 .collect::<Vec<_>>(),
             vec![first.page_id.as_str(), second.page_id.as_str()]
+        );
+    }
+
+    #[test]
+    fn archive_scan_offers_old_non_structural_pages_for_human_review() {
+        let eligible = page("conversation:alpha", "old-isolated");
+        let mut related = page("conversation:alpha", "old-related");
+        related.relation_types = vec!["related_to".to_owned()];
+        let mut summarized = page("conversation:alpha", "old-summarized");
+        summarized.summary_target_revision_id = Some(summarized.revision_id.clone());
+        let mut packed = page("conversation:alpha", "old-packed");
+        packed.media_type = Some(PACKED_PAGE_MEDIA_TYPE.to_owned());
+        let mut recent = page("conversation:alpha", "recent-isolated");
+        recent.observed_at = Some("2026-08-21T00:00:00Z".to_owned());
+
+        let scan = archive_scan_from_inventory(
+            &[eligible, related, summarized, packed, recent],
+            Utc.with_ymd_and_hms(2026, 9, 2, 0, 0, 0).unwrap(),
+        );
+
+        assert_eq!(scan.inspected_pages, 5);
+        assert_eq!(scan.eligible_pages, 3);
+        assert_eq!(scan.estimated_model_calls, 3);
+        assert_eq!(
+            scan.pages
+                .iter()
+                .map(|page| page.page_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["old-isolated", "old-related", "old-summarized"]
+        );
+        assert_eq!(
+            scan.pages[0].candidate_signals,
+            vec![
+                "older_than_14_days".to_owned(),
+                "no_current_routing_summary".to_owned(),
+                "no_explicit_relations".to_owned(),
+            ]
+        );
+        assert_eq!(
+            scan.pages[1].candidate_signals,
+            vec![
+                "older_than_14_days".to_owned(),
+                "no_current_routing_summary".to_owned(),
+                "explicit_relations:related_to".to_owned(),
+            ]
+        );
+        assert_eq!(
+            scan.pages[2].candidate_signals,
+            vec![
+                "older_than_14_days".to_owned(),
+                "has_current_routing_summary".to_owned(),
+                "no_explicit_relations".to_owned(),
+            ]
         );
     }
 }

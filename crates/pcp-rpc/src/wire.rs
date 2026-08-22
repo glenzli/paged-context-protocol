@@ -4,13 +4,15 @@ use pcp_client::{
     QueryAuditSummary, TombstoneCascadeResult, UnpackPageResult,
 };
 use pcp_core::{
-    AccessAuditEvent, AccessSession, Actor, AssessPageValidityRequest, BrowseIndexOrder,
-    Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest, ExpandGraphRequest,
-    ExtractTopicRequest, GraphSliceResponse, IngestPageRequest, LinkPagesRequest, PackPagesRequest,
+    AccessAuditEvent, AccessSession, Actor, ArchivePageRequest, AssessPageValidityRequest,
+    BrowseIndexOrder, Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest,
+    ExpandGraphRequest, ExtractTopicRequest, GraphSliceResponse, IngestPageRequest,
+    LinkPagesRequest, PackPagesRequest, PageLifecycleTransitionResult,
     PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest,
-    Relation, RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease,
-    RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult, UnpackPageRequest,
-    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    Relation, RestoreArchivedPageRequest, RevisePageRequest, RevisionCollectionResult,
+    RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult,
+    UnpackPageRequest, WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult,
+    WriteValidityResult,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -104,6 +106,8 @@ pub(crate) enum RpcOperation {
     IngestPage(IngestPageRequest),
     WritePage(WritePageRequest),
     RevisePage(RevisePageRequest),
+    ArchivePage(ArchivePageRequest),
+    RestoreArchivedPage(RestoreArchivedPageRequest),
     PackPages(PackPagesRequest),
     UnpackPage(UnpackPageRequest),
     LinkPages(LinkPagesRequest),
@@ -178,6 +182,7 @@ pub(crate) enum RpcValue {
     RevisionRetentionLease(RevisionRetentionLease),
     RevisionRetentionLeases(Vec<RevisionRetentionLease>),
     WriteResult(WriteResult),
+    LifecycleTransition(PageLifecycleTransitionResult),
     UnpackPageResult(UnpackPageResult),
     Relation(Relation),
     SummaryResult(WriteSummaryResult),

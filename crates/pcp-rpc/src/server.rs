@@ -395,6 +395,12 @@ async fn dispatch(
         RpcOperation::RevisePage(request) => {
             RpcValue::WriteResult(client.revise_page(request).await?)
         }
+        RpcOperation::ArchivePage(request) => {
+            RpcValue::LifecycleTransition(client.archive_page(request).await?)
+        }
+        RpcOperation::RestoreArchivedPage(request) => {
+            RpcValue::LifecycleTransition(client.restore_archived_page(request).await?)
+        }
         RpcOperation::PackPages(request) => {
             RpcValue::WriteResult(client.pack_pages(request).await?)
         }

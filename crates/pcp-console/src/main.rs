@@ -21,16 +21,18 @@ use axum::{
 use chrono::{DateTime, Utc};
 use pcp_client::{ContentLibraryResult, PcpApi, PcpTenantApi};
 use pcp_core::{
-    Actor, ActorType, BrowseIndexOrder, IntentEffort, PackPagesRequest, PagePayload,
-    PageRevisionRef, PlanRevisionRetentionRequest, Projection, QueryContextRequest, ReadPage,
-    ReadPagesRequest, Relation, RetentionPolicy, SearchHit, SourceRef, SourceSpan,
-    UnpackPageRequest,
+    Actor, ActorType, ArchivePageRequest, BrowseIndexOrder, IntentEffort, LifecycleStatus,
+    PackPagesRequest, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest, Projection,
+    QueryContextRequest, ReadPage, ReadPagesRequest, Relation, RestoreArchivedPageRequest,
+    RetentionPolicy, SearchFilters, SearchHit, SearchMode, SearchPagesRequest, SourceRef,
+    SourceSpan, UnpackPageRequest,
 };
 use pcp_rpc::{EnrollmentAdminClient, EnrollmentAdminResponse, RemotePcpClient};
 use pcp_runtime::{
-    AnalyzeMaintenancePacksRequest, AnalyzeMaintenanceRelationRequest,
-    AnalyzeMaintenanceSummariesRequest, AnalyzeMaintenanceSummaryRequest,
-    ApplyMaintenancePackRequest, ApplyMaintenanceRelationRequest, ApplyMaintenanceSummaryRequest,
+    AnalyzeMaintenanceArchiveRequest, AnalyzeMaintenancePacksRequest,
+    AnalyzeMaintenanceRelationRequest, AnalyzeMaintenanceSummariesRequest,
+    AnalyzeMaintenanceSummaryRequest, AnalyzeMaintenanceTopicRequest, ApplyMaintenancePackRequest,
+    ApplyMaintenanceRelationRequest, ApplyMaintenanceSummaryRequest, ApplyMaintenanceTopicRequest,
     MaintenanceMode, MaintenanceOperator, RuntimeConfig, RuntimeMaintainer,
 };
 use serde::{Deserialize, Serialize};
@@ -97,6 +99,22 @@ struct PageQuery {
     order: Option<String>,
     cursor: Option<String>,
     limit: Option<u32>,
+}
+
+#[derive(Default, Deserialize)]
+struct GovernancePageQuery {
+    scope: Option<String>,
+    cursor: Option<String>,
+    limit: Option<u32>,
+    status: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GovernanceMutationRequest {
+    page_id: String,
+    expected_revision_id: String,
+    reason: String,
 }
 
 #[derive(Serialize)]
@@ -328,6 +346,9 @@ fn router(state: AppState) -> Router {
         .route("/api/runtime/restart", post(restart_runtime))
         .route("/api/overview", get(overview))
         .route("/api/pages", get(pages))
+        .route("/api/governance/pages", get(governance_pages))
+        .route("/api/governance/archive", post(archive_governance_page))
+        .route("/api/governance/restore", post(restore_governance_page))
         .route("/api/query/audit", get(query_audit))
         .route("/api/query/semantic-search", post(run_semantic_search))
         .route("/api/query/match-intent", post(run_match_intent))
@@ -346,6 +367,18 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/maintenance/scan", post(maintenance_scan))
         .route("/api/maintenance/analyze", post(maintenance_analyze))
+        .route(
+            "/api/maintenance/archive/scan",
+            post(maintenance_archive_scan),
+        )
+        .route(
+            "/api/maintenance/archive/analyze",
+            post(maintenance_archive_analyze),
+        )
+        .route(
+            "/api/maintenance/archive/apply",
+            post(maintenance_archive_apply),
+        )
         .route("/api/maintenance/packs/apply", post(maintenance_apply_pack))
         .route(
             "/api/maintenance/packs/repair-split",
@@ -378,6 +411,14 @@ fn router(state: AppState) -> Router {
         .route(
             "/api/maintenance/relations/apply",
             post(maintenance_apply_relation),
+        )
+        .route(
+            "/api/maintenance/topics/analyze",
+            post(maintenance_analyze_topic),
+        )
+        .route(
+            "/api/maintenance/topics/apply",
+            post(maintenance_apply_topic),
         )
         .route(
             "/api/maintenance/relation-reviews",
@@ -619,6 +660,100 @@ async fn pages(
     Ok(Json(json!(
         console_page_result(state.client.as_ref(), result).await?
     )))
+}
+
+async fn governance_pages(
+    State(state): State<AppState>,
+    Query(query): Query<GovernancePageQuery>,
+) -> Result<Json<pcp_core::SearchResult>, ApiError> {
+    let lifecycle_status = match query.status.as_deref().unwrap_or("active") {
+        "active" => LifecycleStatus::Active,
+        "archived" => LifecycleStatus::Archived,
+        _ => {
+            return Err(ApiError(anyhow::anyhow!(
+                "unsupported governance Page status"
+            )));
+        }
+    };
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_PAGE_LIMIT)
+        .clamp(1, MAX_PAGE_LIMIT);
+    let scopes = selected_scopes(state.client.as_ref(), query.scope.as_deref());
+    Ok(Json(
+        state
+            .client
+            .search_pages(SearchPagesRequest {
+                query: String::new(),
+                scopes,
+                mode: SearchMode::Temporal,
+                term_match: Default::default(),
+                projections: vec![
+                    Projection::Manifest,
+                    Projection::Payload,
+                    Projection::Facets,
+                ],
+                filters: SearchFilters {
+                    lifecycle_status: vec![lifecycle_status],
+                    ..Default::default()
+                },
+                limit,
+                cursor: query.cursor,
+            })
+            .await?,
+    ))
+}
+
+async fn archive_governance_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<GovernanceMutationRequest>,
+) -> Result<Json<pcp_core::PageLifecycleTransitionResult>, ApiError> {
+    archive_page_for_governance(&state, &headers, request).await
+}
+
+async fn archive_page_for_governance(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: GovernanceMutationRequest,
+) -> Result<Json<pcp_core::PageLifecycleTransitionResult>, ApiError> {
+    require_console_mutation(headers)?;
+    let reason = request.reason.trim();
+    if reason.is_empty() {
+        return Err(ApiError(anyhow::anyhow!("an archive reason is required")));
+    }
+    Ok(Json(
+        state
+            .client
+            .archive_page(ArchivePageRequest {
+                page_id: request.page_id,
+                expected_revision_id: request.expected_revision_id,
+                reason: Some(reason.to_owned()),
+            })
+            .await?,
+    ))
+}
+
+async fn restore_governance_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<GovernanceMutationRequest>,
+) -> Result<Json<pcp_core::PageLifecycleTransitionResult>, ApiError> {
+    require_console_mutation(&headers)?;
+    let reason = request.reason.trim();
+    if reason.is_empty() {
+        return Err(ApiError(anyhow::anyhow!("a restore reason is required")));
+    }
+    Ok(Json(
+        state
+            .client
+            .restore_archived_page(RestoreArchivedPageRequest {
+                page_id: request.page_id,
+                expected_revision_id: request.expected_revision_id,
+                reason: Some(reason.to_owned()),
+            })
+            .await?,
+    ))
 }
 
 async fn run_semantic_search(
@@ -1000,6 +1135,34 @@ async fn maintenance_scan(
     Ok(Json(json!(scan)))
 }
 
+async fn maintenance_archive_scan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(_request): Json<MaintenanceScanRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let operator = maintenance_operator_for_console(&state).await?;
+    Ok(Json(json!(operator.scan_archive_candidates().await?)))
+}
+
+async fn maintenance_archive_analyze(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<AnalyzeMaintenanceArchiveRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let operator = maintenance_operator_for_console(&state).await?;
+    Ok(Json(json!(operator.analyze_archive(request).await?)))
+}
+
+async fn maintenance_archive_apply(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<GovernanceMutationRequest>,
+) -> Result<Json<pcp_core::PageLifecycleTransitionResult>, ApiError> {
+    archive_page_for_governance(&state, &headers, request).await
+}
+
 async fn maintenance_analyze(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1280,6 +1443,28 @@ async fn maintenance_apply_relation(
     let operator = maintenance_operator_for_console(&state).await?;
     let result = operator.apply_relation(request).await?;
     Ok(Json(json!({"optimized": true, "result": result})))
+}
+
+async fn maintenance_analyze_topic(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<AnalyzeMaintenanceTopicRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let operator = maintenance_operator_for_console(&state).await?;
+    Ok(Json(json!(operator.analyze_topic(request).await?)))
+}
+
+async fn maintenance_apply_topic(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ApplyMaintenanceTopicRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let operator = maintenance_operator_for_console(&state).await?;
+    Ok(Json(
+        json!({"optimized": true, "result": operator.apply_topic(request).await?}),
+    ))
 }
 
 async fn maintenance_relation_reviews(

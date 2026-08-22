@@ -9,11 +9,13 @@ use pcp_store::{TombstoneCascadeResult, UnpackPageResult};
 use crate::{RuntimeConfig, build_semantic_worker};
 
 use super::{
-    AnalyzeMaintenancePacksRequest, AnalyzeMaintenanceRelationRequest,
-    AnalyzeMaintenanceSummariesRequest, AnalyzeMaintenanceSummaryRequest,
-    ApplyMaintenancePackRequest, ApplyMaintenanceRelationRequest, ApplyMaintenanceSummaryRequest,
-    MaintenanceMode, MaintenancePackAnalysis, MaintenancePackScan, MaintenanceRelationAnalysis,
-    MaintenanceRelationReviewProposal, MaintenanceSummaryAnalysis, MaintenanceSummaryBatchAnalysis,
+    AnalyzeMaintenanceArchiveRequest, AnalyzeMaintenancePacksRequest,
+    AnalyzeMaintenanceRelationRequest, AnalyzeMaintenanceSummariesRequest,
+    AnalyzeMaintenanceSummaryRequest, AnalyzeMaintenanceTopicRequest, ApplyMaintenancePackRequest,
+    ApplyMaintenanceRelationRequest, ApplyMaintenanceSummaryRequest, ApplyMaintenanceTopicRequest,
+    MaintenanceArchiveAnalysis, MaintenanceArchiveScan, MaintenanceMode, MaintenancePackAnalysis,
+    MaintenancePackScan, MaintenanceRelationAnalysis, MaintenanceRelationReviewProposal,
+    MaintenanceSummaryAnalysis, MaintenanceSummaryBatchAnalysis, MaintenanceTopicAnalysis,
     MaintenanceWorkScan, RuntimeMaintainer,
 };
 
@@ -52,7 +54,13 @@ impl MaintenanceOperator {
             maintenance.repair_access_session(&identity_id),
         );
         let worker = build_semantic_worker(&maintenance.worker)?;
-        let maintainer = RuntimeMaintainer::load(client, worker, maintenance).await?;
+        let maintainer = RuntimeMaintainer::load_with_usage_source(
+            client,
+            worker,
+            maintenance,
+            "manual_maintenance",
+        )
+        .await?;
         Ok(Self {
             identity_id,
             maintainer,
@@ -70,6 +78,17 @@ impl MaintenanceOperator {
 
     pub async fn scan_maintenance_work(&self) -> Result<MaintenanceWorkScan> {
         self.maintainer.scan_maintenance_work().await
+    }
+
+    pub async fn scan_archive_candidates(&self) -> Result<MaintenanceArchiveScan> {
+        self.maintainer.scan_archive_candidates().await
+    }
+
+    pub async fn analyze_archive(
+        &self,
+        request: AnalyzeMaintenanceArchiveRequest,
+    ) -> Result<MaintenanceArchiveAnalysis> {
+        self.maintainer.analyze_archive_candidate(request).await
     }
 
     pub async fn analyze_packing(
@@ -137,6 +156,20 @@ impl MaintenanceOperator {
         request: ApplyMaintenanceRelationRequest,
     ) -> Result<pcp_core::Relation> {
         self.maintainer.apply_relation_candidate(request).await
+    }
+
+    pub async fn analyze_topic(
+        &self,
+        request: AnalyzeMaintenanceTopicRequest,
+    ) -> Result<MaintenanceTopicAnalysis> {
+        self.maintainer.analyze_topic_candidate(request).await
+    }
+
+    pub async fn apply_topic(
+        &self,
+        request: ApplyMaintenanceTopicRequest,
+    ) -> Result<pcp_core::WriteResult> {
+        self.maintainer.apply_topic_candidate(request).await
     }
 
     pub fn pending_relation_reviews(&self) -> Vec<MaintenanceRelationReviewProposal> {

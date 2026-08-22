@@ -15,7 +15,7 @@
     </div>
     <div class="topbar-end">
       <div class="headline" aria-live="polite">
-        <span><b id="headline-pages">-</b> <span data-i18n="pages">pages</span></span>
+        <span><b id="headline-pages">-</b> <span data-i18n="retrievable pages">retrievable pages</span></span>
         <span><b id="headline-content">-</b> <span data-i18n="content">content</span></span>
       </div>
       <div class="topbar-actions" role="toolbar" data-i18n-aria-label="Console controls" aria-label="Console controls">
@@ -157,12 +157,12 @@
       <div class="view-heading">
         <div class="view-heading-copy">
           <div><h2 data-i18n="Memory maintenance">Memory maintenance</h2><span id="maintenance-status" class="muted" aria-live="polite" data-i18n="Not loaded">Not loaded</span></div>
-          <p class="view-description" data-i18n="Each maintenance type first scans structural candidates, then analyzes them with a model, then waits for your explicit application. Suggested links are never retrievable before approval.">Each maintenance type first scans structural candidates, then analyzes them with a model, then waits for your explicit application. Suggested links are never retrievable before approval.</p>
+          <p class="view-description" data-i18n="Maintain Pack boundaries, semantic structure, then topic Pages in order. Suggested links are never retrievable before approval.">Maintain Pack boundaries, semantic structure, then topic Pages in order. Suggested links are never retrievable before approval.</p>
         </div>
       </div>
       <section id="maintenance-automation-status" class="maintenance-automation-status" hidden>
         <div class="section-heading section-heading-copy">
-          <div><div class="maintenance-automation-title"><h3 data-i18n="Automatic maintenance">Automatic maintenance</h3><span id="maintenance-automation-state" class="status-pill"></span></div><p data-i18n="Runtime-owned write-trigger state. It never makes suggested relations retrievable.">Runtime-owned write-trigger state. It never makes suggested relations retrievable.</p></div>
+          <div><div class="maintenance-automation-title"><h3 data-i18n="Automatic maintenance">Automatic maintenance</h3><span id="maintenance-automation-state" class="status-pill"></span></div><p data-i18n="Runtime updates this status; relation proposals still require approval.">Runtime updates this status; relation proposals still require approval.</p></div>
         </div>
         <div id="maintenance-automation-metrics" class="metrics maintenance-automation-metrics"></div>
         <p id="maintenance-automation-detail" class="muted"></p>
@@ -178,7 +178,7 @@
       <section id="maintenance-idle" class="maintenance-empty-state">
         <div>
           <h3 data-i18n="Start a maintenance session">Start a maintenance session</h3>
-          <p data-i18n="Maintenance runs in two passes: first Pack boundaries, then summaries and relations on the refreshed inventory. Each pass scans candidates, analyzes suggestions, then waits for your explicit application. Suggested links are never retrievable before approval.">Maintenance runs in two passes: first Pack boundaries, then summaries and relations on the refreshed inventory. Each pass scans candidates, analyzes suggestions, then waits for your explicit application. Suggested links are never retrievable before approval.</p>
+          <p data-i18n="Maintenance proceeds from Pack boundaries, through summaries and relations, to Topic Pages on the refreshed inventory. Each stage scans candidates, analyzes suggestions, then waits for your explicit application.">Maintenance proceeds from Pack boundaries, through summaries and relations, to Topic Pages on the refreshed inventory. Each stage scans candidates, analyzes suggestions, then waits for your explicit application.</p>
         </div>
         <button id="maintenance-start" class="primary-button" type="button" disabled data-i18n="Start maintenance">Start maintenance</button>
       </section>
@@ -193,6 +193,7 @@
           <ol id="maintenance-pass-steps" class="maintenance-pass-steps" aria-label="Maintenance passes">
             <li id="maintenance-pass-pack"><span>1</span><div><strong id="maintenance-pass-pack-title"></strong><small id="maintenance-pass-pack-detail"></small><em id="maintenance-pass-pack-status"></em></div></li>
             <li id="maintenance-pass-semantic"><span>2</span><div><strong id="maintenance-pass-semantic-title"></strong><small id="maintenance-pass-semantic-detail"></small><em id="maintenance-pass-semantic-status"></em></div></li>
+            <li id="maintenance-pass-topic"><span>3</span><div><strong id="maintenance-pass-topic-title"></strong><small id="maintenance-pass-topic-detail"></small><em id="maintenance-pass-topic-status"></em></div></li>
           </ol>
         </section>
 
@@ -251,13 +252,70 @@
         <button id="maintenance-start-new" class="primary-button" type="button" data-i18n="Start maintenance">Start maintenance</button>
       </section>
 
+      <section id="maintenance-archive" class="maintenance-archive">
+        <div class="section-heading section-heading-copy">
+          <div>
+            <h3 data-i18n="Content governance">Content governance</h3>
+            <p data-i18n="Archive is a manual, reviewable lifecycle action. It removes a Page from default retrieval and graph expansion without deleting it.">Archive is a manual, reviewable lifecycle action. It removes a Page from default retrieval and graph expansion without deleting it.</p>
+          </div>
+          <span id="archive-status" class="muted" aria-live="polite"></span>
+        </div>
+        <section id="archive-idle" class="maintenance-empty-state maintenance-archive-start">
+          <div>
+            <h4 data-i18n="Review archive candidates">Review archive candidates</h4>
+            <p data-i18n="Candidates are conservatively identified from current structural evidence. PCP does not store per-Page access metrics, so no usage value is invented.">Candidates are conservatively identified from current structural evidence. PCP does not store per-Page access metrics, so no usage value is invented.</p>
+          </div>
+          <button id="archive-start" class="compact-button" type="button" data-i18n="Scan candidates">Scan candidates</button>
+        </section>
+        <section id="archive-workflow" class="maintenance-archive-workflow" hidden>
+          <ol id="archive-steps" class="maintenance-steps maintenance-archive-steps" aria-label="Archive review stages">
+            <li id="archive-step-scan"><span>1</span><div><strong data-i18n="Scan candidates">Scan candidates</strong><small id="archive-step-scan-status"></small></div></li>
+            <li id="archive-step-analyze"><span>2</span><div><strong data-i18n="Analyze suggestions">Analyze suggestions</strong><small id="archive-step-analyze-status"></small></div></li>
+            <li id="archive-step-review"><span>3</span><div><strong data-i18n="Review and apply">Review and apply</strong><small id="archive-step-review-status"></small></div></li>
+          </ol>
+          <div id="archive-scan-metrics" class="metrics maintenance-stage-metrics"></div>
+          <p id="archive-issue" class="maintenance-issue" hidden></p>
+          <div class="maintenance-actions">
+            <button id="archive-analyze" class="primary-button" type="button" disabled data-i18n="Analyze suggestions">Analyze suggestions</button>
+            <button id="archive-apply" type="button" disabled data-i18n="Archive selected">Archive selected</button>
+            <button id="archive-rescan" type="button" disabled data-i18n="Rescan this stage">Rescan this stage</button>
+            <button id="archive-finish" type="button" disabled data-i18n="End session">End session</button>
+          </div>
+          <section id="archive-proposals" hidden>
+            <div class="section-heading section-heading-copy">
+              <label class="maintenance-select-all-label"><input id="archive-select-all" type="checkbox" aria-label="Select all archive candidates" data-i18n-aria-label="Select all archive candidates"><span data-i18n="Archive proposals">Archive proposals</span></label>
+              <span id="archive-selection-status" class="muted"></span>
+            </div>
+            <div id="archive-cards" class="archive-cards"></div>
+          </section>
+        </section>
+        <section id="archive-report" class="maintenance-report" hidden>
+          <div class="section-heading section-heading-copy">
+            <h4 data-i18n="Archive review complete">Archive review complete</h4>
+            <span id="archive-report-status" class="muted" aria-live="polite"></span>
+          </div>
+          <div id="archive-report-metrics" class="metrics"></div>
+          <button id="archive-start-new" class="compact-button" type="button" data-i18n="Review archive candidates">Review archive candidates</button>
+        </section>
+        <details id="maintenance-archive-library" class="maintenance-archive-library">
+          <summary><span data-i18n="Archived Pages">Archived Pages</span><span id="governance-status" class="muted" aria-live="polite"></span></summary>
+          <div class="governance-controls">
+            <label class="governance-scope-control"><span data-i18n="Scope">Scope</span><select id="governance-scope"><option value="" data-i18n="All authorized scopes">All authorized scopes</option></select></label>
+            <button id="governance-refresh" type="button" class="compact-button" data-i18n="Refresh">Refresh</button>
+          </div>
+          <p class="control-note" data-i18n="Archive is reversible and auditable. It does not delete content, summaries, provenance, or asserted relations.">Archive is reversible and auditable. It does not delete content, summaries, provenance, or asserted relations.</p>
+          <div id="governance-results" class="governance-results" aria-live="polite"></div>
+          <div class="list-footer"><button id="governance-more" type="button" class="compact-button" hidden data-i18n="Load more">Load more</button></div>
+        </details>
+      </section>
+
     </section>
 
     <section id="view-health" class="view">
       <div class="view-heading">
         <div class="view-heading-copy">
           <div><h2 data-i18n="Runtime activity">Runtime activity</h2><span id="health-status" class="muted" aria-live="polite" data-i18n="Not loaded">Not loaded</span></div>
-          <p class="view-description" data-i18n="Observed client activity, response performance, and telemetry coverage. This view does not evaluate recall relevance.">Observed client activity, response performance, and telemetry coverage. This view does not evaluate recall relevance.</p>
+          <p class="view-description" data-i18n="Observed client activity, latency, and telemetry coverage.">Observed client activity, latency, and telemetry coverage.</p>
         </div>
         <label class="window-control"><span data-i18n="Window">Window</span>
           <select id="health-window" aria-label="Health analysis window" data-i18n-aria-label="Health analysis window">
@@ -269,12 +327,12 @@
         </label>
       </div>
       <div id="health-metrics" class="metrics"></div>
-      <div id="health-signals" class="health-signals"></div>
+      <div id="health-signals" class="health-signals" hidden></div>
 
-      <div class="section-heading section-heading-copy">
-        <h2 data-i18n="Request activity">Request activity</h2>
-        <span class="muted" data-i18n="Observed retrieval and revision traffic. Counts describe use, not recall quality.">Observed retrieval and revision traffic. Counts describe use, not recall quality.</span>
-      </div>
+      <div class="section-heading"><h2 data-i18n="Model usage">Model usage</h2></div>
+      <div id="health-model-usage" class="aggregate-grid"></div>
+
+      <div class="section-heading"><h2 data-i18n="Request activity">Request activity</h2></div>
       <div id="health-flows" class="aggregate-grid"></div>
 
       <div class="section-heading"><h2 data-i18n="Activity trend">Activity trend</h2></div>

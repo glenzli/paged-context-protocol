@@ -44,6 +44,7 @@ pub struct SemanticSearchResult {
     pub hits: Vec<SemanticSearchHit>,
     pub indexed_count: usize,
     pub embedded_count: usize,
+    pub model_calls: usize,
 }
 
 pub struct SemanticSearchHit {
@@ -98,6 +99,7 @@ impl SemanticSearchProvider {
         limit: usize,
     ) -> Result<SemanticSearchResult> {
         let query_vector = self.embed_query(query).await?;
+        let mut model_calls = 1;
         let query_space = validate_embedding(&query_vector, "query")?.to_owned();
         let documents = self.collect_documents(client, scopes).await?;
         let indexed_count = documents.len();
@@ -106,6 +108,7 @@ impl SemanticSearchProvider {
                 hits: Vec::new(),
                 indexed_count,
                 embedded_count: 0,
+                model_calls,
             });
         }
 
@@ -124,7 +127,9 @@ impl SemanticSearchProvider {
         };
         let embedded_count = missing.len();
         if !missing.is_empty() {
-            let new_embeddings = self.embed_documents(&missing, &query_space).await?;
+            let (new_embeddings, document_model_calls) =
+                self.embed_documents(&missing, &query_space).await?;
+            model_calls = model_calls.saturating_add(document_model_calls);
             let mut index = self.index.lock().await;
             index.entries.extend(new_embeddings);
             index.schema = CACHE_SCHEMA;
@@ -157,6 +162,7 @@ impl SemanticSearchProvider {
             hits,
             indexed_count,
             embedded_count,
+            model_calls,
         })
     }
 
@@ -196,8 +202,9 @@ impl SemanticSearchProvider {
         &self,
         documents: &[SemanticDocument],
         query_space: &str,
-    ) -> Result<BTreeMap<String, CachedEmbedding>> {
+    ) -> Result<(BTreeMap<String, CachedEmbedding>, usize)> {
         let mut entries = BTreeMap::new();
+        let mut model_calls = 0usize;
         for batch in documents.chunks(EMBEDDING_BATCH_SIZE) {
             let request_inputs = batch
                 .iter()
@@ -217,6 +224,7 @@ impl SemanticSearchProvider {
             )
             .await
             .context("PCP semantic document embedding timed out")??;
+            model_calls = model_calls.saturating_add(1);
             ensure!(
                 response.status == "completed",
                 "Infer Runtime returned semantic document status {}",
@@ -254,7 +262,7 @@ impl SemanticSearchProvider {
                 );
             }
         }
-        Ok(entries)
+        Ok((entries, model_calls))
     }
 
     async fn collect_documents(

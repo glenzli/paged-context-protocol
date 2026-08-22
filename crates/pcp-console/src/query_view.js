@@ -131,7 +131,7 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
       auditMetric(t("Calls"), formatNumber(audit.calls || 0)),
       auditMetric(t("Semantic calls"), formatNumber(audit.semanticSearch?.calls || 0)),
       auditMetric(t("Intent calls"), formatNumber(audit.matchIntent?.calls || 0)),
-      auditMetric(t("Total Router tokens"), formatNumber(usage.totalTokens || 0)),
+      auditMetric(t("Query Router tokens"), formatNumber(usage.totalTokens || 0)),
     );
     target.replaceChildren(heading, metrics);
     const recent = audit.recentEvents || [];

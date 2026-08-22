@@ -4,13 +4,15 @@ use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessDecision, AccessPermission, AccessPrincipalType, AccessSession, Actor,
-    ActorType, AssessPageValidityRequest, Capabilities, CollectRevisionRetentionRequest,
-    CreateScopeRequest, ExtractTopicRequest, IngestPageRequest, LifecycleStatus, LinkPagesRequest,
-    OperationTelemetry, PackPagesRequest, PageMutability, PlanRevisionRetentionRequest, Projection,
+    ActorType, ArchivePageRequest, AssessPageValidityRequest, Capabilities,
+    CollectRevisionRetentionRequest, CreateScopeRequest, ExtractTopicRequest, IngestPageRequest,
+    LifecycleStatus, LinkPagesRequest, OperationTelemetry, PackPagesRequest,
+    PageLifecycleTransitionResult, PageMutability, PlanRevisionRetentionRequest, Projection,
     ProvenanceEvent, PutRevisionRetentionLeaseRequest, QueryAuditEvent, ReadPage, ReadPagesRequest,
-    Relation, RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease,
-    RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult, UnpackPageRequest,
-    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    Relation, RestoreArchivedPageRequest, RevisePageRequest, RevisionCollectionResult,
+    RevisionRetentionLease, RevisionRetentionPlan, RuntimeUsageEvent, Scope, SearchPagesRequest,
+    SearchResult, UnpackPageRequest, WritePageRequest, WriteResult, WriteSummaryRequest,
+    WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::{
     ContentLibraryResult, ContentLibrarySummary, DurablePageInventoryItem, HealthSnapshot,
@@ -23,6 +25,95 @@ use crate::{
     SqlitePcpStore,
     access::{authorize_exact, authorize_scopes, authorize_scopes_any},
 };
+
+impl SqlitePcpStore {
+    async fn manage_page_lifecycle(
+        &self,
+        access: &AccessSession,
+        page_id: String,
+        expected_revision_id: String,
+        reason: Option<String>,
+        archive: bool,
+    ) -> Result<PageLifecycleTransitionResult> {
+        let operation = if archive {
+            "archive_page"
+        } else {
+            "restore_archived_page"
+        };
+        let observation = OperationObservation::start().with_input_count(1);
+        let scope = match self.page_namespace(page_id.clone()).await {
+            Ok(scope) => scope,
+            Err(error) => {
+                return complete(
+                    self,
+                    access,
+                    operation,
+                    Vec::new(),
+                    Err(error),
+                    false,
+                    observation,
+                )
+                .await;
+            }
+        };
+        if let Err(error) = authorize_exact(access, &scope, AccessPermission::ManageLifecycle) {
+            return complete(
+                self,
+                access,
+                operation,
+                vec![scope],
+                Err(error),
+                true,
+                observation,
+            )
+            .await;
+        }
+        let actor = Actor {
+            actor_type: match access.principal.principal_type {
+                AccessPrincipalType::ModelClient => ActorType::Model,
+                AccessPrincipalType::Host
+                | AccessPrincipalType::Cli
+                | AccessPrincipalType::Service => ActorType::Tool,
+            },
+            actor_id: access.principal.principal_id.clone(),
+        };
+        let result = if archive {
+            SqlitePcpStore::archive_page(
+                self,
+                ArchivePageRequest {
+                    page_id,
+                    expected_revision_id,
+                    reason,
+                },
+                actor,
+                vec![scope.clone()],
+            )
+            .await
+        } else {
+            SqlitePcpStore::restore_archived_page(
+                self,
+                RestoreArchivedPageRequest {
+                    page_id,
+                    expected_revision_id,
+                    reason,
+                },
+                actor,
+                vec![scope.clone()],
+            )
+            .await
+        };
+        complete(
+            self,
+            access,
+            operation,
+            vec![scope],
+            result,
+            false,
+            observation,
+        )
+        .await
+    }
+}
 
 #[async_trait]
 impl PcpStore for SqlitePcpStore {
@@ -871,6 +962,36 @@ impl PcpStore for SqlitePcpStore {
         .await
     }
 
+    async fn archive_page(
+        &self,
+        access: &AccessSession,
+        request: ArchivePageRequest,
+    ) -> Result<PageLifecycleTransitionResult> {
+        self.manage_page_lifecycle(
+            access,
+            request.page_id,
+            request.expected_revision_id,
+            request.reason,
+            true,
+        )
+        .await
+    }
+
+    async fn restore_archived_page(
+        &self,
+        access: &AccessSession,
+        request: RestoreArchivedPageRequest,
+    ) -> Result<PageLifecycleTransitionResult> {
+        self.manage_page_lifecycle(
+            access,
+            request.page_id,
+            request.expected_revision_id,
+            request.reason,
+            false,
+        )
+        .await
+    }
+
     async fn pack_pages(
         &self,
         access: &AccessSession,
@@ -1451,6 +1572,10 @@ impl PcpStore for SqlitePcpStore {
 
     async fn record_runtime_query_audit(&self, event: QueryAuditEvent) -> Result<()> {
         SqlitePcpStore::record_runtime_query_audit(self, event).await
+    }
+
+    async fn record_runtime_usage(&self, event: RuntimeUsageEvent) -> Result<()> {
+        SqlitePcpStore::record_runtime_usage(self, event).await
     }
 
     async fn query_audit_summary(

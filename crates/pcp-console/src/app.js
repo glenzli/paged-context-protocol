@@ -48,14 +48,16 @@ const ZH_MESSAGES = {
   "Maximum wait (minutes)": "最长等待（分钟）",
   "Maximum wait must be at least the quiet period, and all values must be positive.": "最长等待必须不小于静默期，且所有值必须为正数。",
   "Save and restart Runtime": "保存并重启 Runtime",
-  "Runtime-owned write-trigger state. It never makes suggested relations retrievable.": "由 Runtime 持有的写入触发状态；建议关联不会因此参与检索。",
+  "Runtime updates this status; relation proposals still require approval.": "状态由 Runtime 更新；关联提案仍需批准。",
+  "Maintain Pack boundaries, semantic structure, then topic Pages in order. Suggested links are never retrievable before approval.": "按顺序维护 Pack 边界、语义结构与主题页；建议关联仍需批准后才会参与检索。",
   "Not started": "尚未开始",
   "Waiting": "等待写入",
   "Running": "正在执行",
   "Failed": "失败",
   "Stale": "状态过期",
   "Disabled": "已禁用",
-  "Observed heads": "已观测页面头",
+  "Maintenance inventory": "维护库存页",
+  "Includes retained superseded Pages for maintenance review.": "包含仍保留供维护核查的已替代页面。",
   "Dirty regions": "待整理范围",
   "Ready regions": "已就绪范围",
   "Pending relation review": "待审关联",
@@ -88,6 +90,16 @@ const ZH_MESSAGES = {
   "Semantic calls": "语义调用",
   "Intent calls": "意图调用",
   "Total Router tokens": "Router 总 token",
+  "Query Router tokens": "查询 Router Token",
+  "Model usage": "模型用量",
+  "Model calls": "模型调用",
+  "Token reporting": "Token 报告覆盖",
+  "Reported tokens": "已报告 Token",
+  "By workflow": "按工作流",
+  "Intent matching": "意图匹配",
+  "Manual maintenance": "手动维护",
+  "Automatic maintenance": "自动维护",
+  "No model usage was observed in this window": "此时间范围内未记录模型用量",
   "Recent query calls": "最近查询调用",
   "privacy-preserving": "不保存查询文本或页面内容",
   "Change": "变更",
@@ -102,6 +114,44 @@ const ZH_MESSAGES = {
   "Console views": "控制台视图",
   "content": "内容",
   "Content": "内容",
+  "Content governance": "内容治理",
+  "Content governance state": "内容治理状态",
+  "Archive removes a Page from default retrieval and graph expansion without deleting it. Direct reads remain available for review and restoration.": "归档会将页面从默认检索和图扩展中移除，但不会删除内容；仍可按 ID 审阅与恢复。",
+  "Archive is a manual, reviewable lifecycle action. It removes a Page from default retrieval and graph expansion without deleting it.": "归档是手动、可审阅的生命周期操作：它会从默认检索和图扩展中移除页面，但不会删除内容。",
+  "Review archive candidates": "审阅归档候选",
+  "Candidates are conservatively identified from current structural evidence. PCP does not store per-Page access metrics, so no usage value is invented.": "候选项只根据当前结构证据保守识别。PCP 不保存逐页面访问数据，因此不会虚构使用价值判断。",
+  "Archive review stages": "归档审阅阶段",
+  "Archive selected": "归档所选",
+  "Archive proposals": "归档提案",
+  "Archive review complete": "归档审阅完成",
+  "Select all archive candidates": "选择全部归档候选",
+  "Select archive candidate": "选择归档候选",
+  "Available after maintenance": "将在当前维护会话结束后可用",
+  "Continue analysis": "继续分析",
+  "No archive proposals": "没有归档提案",
+  "Archived": "已归档",
+  "Retained": "保留",
+  "Deferred": "延后",
+  "Analyzed": "已分析",
+  "Working": "处理中",
+  "Scanning candidates": "正在扫描候选",
+  "Archive selected Pages?": "归档所选页面？",
+  "Archiving removes the selected Pages from default retrieval, graph expansion, and ordinary maintenance. It does not delete them; they remain available for direct review and restoration.": "归档会将所选页面从默认检索、图扩展和常规维护中移除，但不会删除；仍可直接审阅和恢复。",
+  "Human-approved archive review": "人工批准的归档审阅",
+  "Archiving": "正在归档",
+  "Archive is reversible and auditable. It does not delete content, summaries, provenance, or asserted relations.": "归档可恢复且可审计；不会删除内容、摘要、溯源或已确认关联。",
+  "Active Pages": "活跃页面",
+  "Archived Pages": "已归档页面",
+  "Archive": "归档",
+  "Restore": "恢复",
+  "Archive reason": "归档理由",
+  "Restore reason": "恢复理由",
+  "An archive reason is required": "请填写归档理由",
+  "A restore reason is required": "请填写恢复理由",
+  "Archive this Page?": "归档此页面？",
+  "Restore this Page?": "恢复此页面？",
+  "Archiving excludes this Page from default retrieval, graph expansion, and maintenance without deleting it.": "归档会将此页面排除在默认检索、图扩展和维护之外，但不会删除它。",
+  "Restoring makes this Page eligible for default retrieval and graph expansion again.": "恢复后，此页面会重新参与默认检索和图扩展。",
   "Continue": "继续",
   "Created": "创建时间",
   "Current": "当前",
@@ -112,6 +162,7 @@ const ZH_MESSAGES = {
   "Decisions": "决策",
   "Degraded": "降级",
   "Eligible historical Revisions": "可处理的历史修订",
+  "Eligible Pages": "可处理页面",
   "Eligibility requires both age and absence of every protection root. Preview rows only limits the tables below.": "候选项必须同时满足年龄条件且不存在任何保护根。预览行数只限制下方表格。",
   "English": "English",
   "Endpoint": "端点",
@@ -180,6 +231,7 @@ const ZH_MESSAGES = {
   "Scope and source": "范围与源",
   "Page views": "页面视图",
   "Pages": "页面",
+  "retrievable pages": "可检索页",
   "Query": "查询",
   "Query failed": "查询失败",
   "No query yet": "尚未查询",
@@ -320,16 +372,22 @@ const ZH_MESSAGES = {
   "Completed": "已完成",
   "Ready to analyze": "可开始分析",
   "Ready to apply": "可应用提案",
+  "In progress": "进行中",
+  "Selected": "已选",
   "Ready to continue": "可继续",
   "Scan complete": "扫描完成",
   "Scan candidates": "扫描候选",
   "Review and apply": "审阅应用",
   "Analyze Pack": "分析打包",
   "Analyze Summary": "分析摘要",
+  "Extract Topic Page": "凝练新页",
+  "Topic Page": "主题页",
+  "Topic proposal": "凝练新页提案",
   "Analyze Relations": "分析关联",
   "Apply selected": "应用所选",
   "Continue to Summary": "继续到摘要",
   "Continue to Relations": "继续到关联",
+  "Continue to Topic Page extraction": "继续到凝练新页",
   "Complete maintenance": "完成维护",
   "Rescan this stage": "重新扫描本阶段",
   "End session": "结束会话",
@@ -347,6 +405,7 @@ const ZH_MESSAGES = {
   "Retry failed batches": "重试失败批次",
   "Retry failed pages": "重试失败页面",
   "Open page": "打开页面",
+  "Relation evidence": "关联理由",
   "Summary proposal": "摘要提案",
   "Diagnostics are separate from the current maintenance step and do not start model work.": "诊断与当前维护步骤分离，不会发起模型工作。",
   "Current stage": "当前阶段",
@@ -356,7 +415,7 @@ const ZH_MESSAGES = {
   "No additional Page writes will occur. Unapplied proposals remain unapplied.": "不会再写入页面；未应用的提案将保持未应用。",
   "Maintenance session started": "维护会话已开始",
   "Maintenance session completed": "维护会话已完成",
-  "Maintenance runs in two passes: first Pack boundaries, then summaries and relations on the refreshed inventory. Each pass scans candidates, analyzes suggestions, then waits for your explicit application. Suggested links are never retrievable before approval.": "维护分为两段：先处理 Pack 边界，再基于刷新后的库存处理摘要与关联。每段都会扫描候选、分析建议，并等待你明确应用；建议关联在批准前绝不参与检索。",
+  "Maintenance proceeds from Pack boundaries, through summaries and relations, to Topic Pages on the refreshed inventory. Each stage scans candidates, analyzes suggestions, then waits for your explicit application.": "维护依次处理 Pack 边界、摘要与关联，最后在刷新后的库存上凝练新页。每一段都会扫描候选、分析建议，并等待你明确应用。",
   "Scope": "范围",
   "Scopes": "范围",
   "Search": "搜索",
@@ -472,7 +531,7 @@ const ZH_MESSAGES = {
   "No workload calls were observed in this window. Telemetry begins with the upgraded runtime.": "此时间范围内未观测到工作负载调用。遥测从升级后的运行时开始记录。",
   "No workload operations in this window": "此时间范围内没有工作负载操作",
   "Observed calls": "观测到的调用",
-  "Observed client activity, response performance, and telemetry coverage. This view does not evaluate recall relevance.": "观测客户端活动、响应性能和遥测覆盖率。本视图不评估召回相关性。",
+  "Observed client activity, latency, and telemetry coverage.": "客户端活动、延迟与遥测覆盖。",
   "Observed retrieval and revision traffic. Counts describe use, not recall quality.": "观测到的检索与修订流量。计数描述使用情况，不描述召回质量。",
   "Observed telemetry coverage and response latency.": "观测到的遥测覆盖率与响应延迟。",
   "of calls in this window include detailed telemetry.": "的调用包含详细遥测。",
@@ -505,7 +564,6 @@ const ZH_MESSAGES = {
   "Runtime": "运行时",
   "Runtime activity": "运行时活动",
   "Runtime failures and authorization denials": "运行时失败和授权拒绝",
-  "Runtime metrics use operation metadata. They do not evaluate whether returned content is relevant.": "运行时指标使用操作元数据，不评估返回内容是否相关。",
   "Runtime service": "运行时服务",
   "search": "搜索",
   "search/read calls per hour at": "次搜索/读取调用，平均每次搜索",
@@ -753,6 +811,14 @@ const state = {
     previewFallbacks: new Map(),
     previewGeneration: 0,
   },
+  governance: {
+    loaded: false,
+    busy: false,
+    status: "archived",
+    scope: "",
+    hits: [],
+    cursor: null,
+  },
   maintenance: {
     loaded: false,
     busy: false,
@@ -765,6 +831,7 @@ const state = {
       outcomes: {
         pack: null,
         summary: null,
+        topic: null,
         relation: null,
       },
     },
@@ -772,10 +839,23 @@ const state = {
     pass: "pack",
     workflowStage: "scan",
     phase: "pack",
-    analyses: { pack: null, summary: null, relation: null },
+    analyses: { pack: null, summary: null, topic: null, relation: null },
     pendingCandidates: [],
     selected: new Set(),
     relationReviews: [],
+  },
+  archive: {
+    state: "idle",
+    busy: false,
+    activity: null,
+    scan: null,
+    analyses: [],
+    selected: new Set(),
+    applied: 0,
+    retained: 0,
+    deferred: 0,
+    completedAt: null,
+    issue: null,
   },
   access: { loaded: false, busy: false, cursor: null, count: 0, events: [] },
   enrollment: { available: false, seenPending: new Set() },
@@ -785,6 +865,16 @@ function element(tag, className, text) {
   if (className) node.className = className;
   if (text !== undefined && text !== null) node.textContent = String(text);
   return node;
+}
+
+function openPageIcon() {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M5 19 19 5M8 5h11v11");
+  svg.append(path);
+  return svg;
 }
 
 function formatNumber(value) {
@@ -842,6 +932,14 @@ async function enrollmentMutation(path) {
 }
 
 async function maintenanceMutation(path, body) {
+  return api(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-PCP-Console": "1" },
+    body: JSON.stringify(body),
+  });
+}
+
+async function governanceMutation(path, body) {
   return api(path, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-PCP-Console": "1" },
@@ -975,9 +1073,30 @@ const retentionView = createRetentionView({
   t,
 });
 
-function metric(label, value, tone = "") {
+function metric(label, value, tone = "", note = "") {
   const node = element("div", `metric${tone ? ` tone-${tone}` : ""}`);
   node.append(element("div", "metric-label", label), element("div", "metric-value", value));
+  if (note) node.append(element("div", "metric-note", note));
+  return node;
+}
+
+function protocolMetric(version) {
+  const node = element("div", "metric protocol-metric");
+  node.append(element("div", "metric-label", t("Protocol")));
+  const value = element("div", "metric-value");
+  const raw = String(version || "-");
+  const separator = raw.indexOf("-");
+  if (separator < 1 || separator === raw.length - 1) {
+    value.textContent = raw;
+  } else {
+    value.append(
+      element("span", "protocol-version-number", raw.slice(0, separator)),
+      element("span", "protocol-version-channel", raw.slice(separator + 1)),
+    );
+    value.title = raw;
+    value.setAttribute("aria-label", raw);
+  }
+  node.append(value);
   return node;
 }
 
@@ -1032,7 +1151,7 @@ function renderOverview(data) {
 
   byId("metrics").replaceChildren(
     metric(t("Integrity"), data.integrity, connected ? "positive" : "danger"),
-    metric(t("Protocol"), data.capabilities.protocolVersion),
+    protocolMetric(data.capabilities.protocolVersion),
     metric(t("Runtime PID"), data.runtime.pid || "-"),
     metric(t("Runtime started"), formatTime(data.runtime.startedAtUnixMs)),
   );
@@ -1096,6 +1215,7 @@ function renderOverview(data) {
 
   renderPageScopeOptions(data.scopes);
   renderPageSortOptions();
+  renderGovernanceScopeOptions(data.scopes);
 }
 
 function aggregatePanel(label, entries) {
@@ -1366,6 +1486,390 @@ async function loadPages({ page = state.pages.page } = {}) {
   }
 }
 
+function renderGovernanceScopeOptions(scopes = state.overview?.scopes || []) {
+  const select = byId("governance-scope");
+  if (!select) return;
+  const selected = state.governance.scope;
+  select.replaceChildren(
+    new Option(t("All authorized scopes"), ""),
+    ...orderedScopes([...scopes]).map(({ scope, depth }) => (
+      new Option(`${"  ".repeat(depth)}${scope.displayName || scope.namespace}`, scope.namespace)
+    )),
+  );
+  select.value = selected;
+}
+
+function governanceMeta(hit) {
+  const meta = element("div", "governance-page-meta");
+  meta.append(
+    element("span", "", `${t("Kind")}: ${hit.kind}`),
+    element("span", "", `${t("Scope")}: ${scopeName(hit.namespace)}`),
+    element("span", "", `${t("Observed")}: ${formatTime(hit.observedAt || hit.createdAt)}`),
+  );
+  return meta;
+}
+
+function governanceCard(hit) {
+  const archived = state.governance.status === "archived";
+  const card = element("article", "governance-page");
+  const heading = element("div", "governance-page-heading");
+  const copy = element("div", "governance-page-copy");
+  copy.append(element("strong", "governance-page-title", pageSnippet(hit)), governanceMeta(hit));
+  const open = element("button", "quiet-button icon-button");
+  open.type = "button";
+  open.title = t("Open in inspector");
+  open.setAttribute("aria-label", t("Open in inspector"));
+  open.append(openPageIcon());
+  open.addEventListener("click", () => pageInspector.open(hit.pageId));
+  heading.append(copy, open);
+
+  const reason = document.createElement("input");
+  reason.type = "text";
+  reason.maxLength = 1200;
+  reason.className = "governance-reason";
+  reason.placeholder = archived ? t("Restore reason") : t("Archive reason");
+  reason.setAttribute("aria-label", reason.placeholder);
+
+  const action = element("button", archived ? "compact-button" : "danger-button", archived ? t("Restore") : t("Archive"));
+  action.type = "button";
+  action.addEventListener("click", async () => {
+    const reasonText = reason.value.trim();
+    if (!reasonText) {
+      reason.focus();
+      showError(new Error(archived ? t("A restore reason is required") : t("An archive reason is required")));
+      return;
+    }
+    const title = archived ? t("Restore this Page?") : t("Archive this Page?");
+    const description = archived
+      ? t("Restoring makes this Page eligible for default retrieval and graph expansion again.")
+      : t("Archiving excludes this Page from default retrieval, graph expansion, and maintenance without deleting it.");
+    if (!await confirmAction({ title, description, confirmLabel: archived ? t("Restore") : t("Archive") })) return;
+    action.disabled = true;
+    try {
+      await governanceMutation(archived ? "/api/governance/restore" : "/api/governance/archive", {
+        pageId: hit.pageId,
+        expectedRevisionId: hit.revisionId,
+        reason: reasonText,
+      });
+      await loadGovernance({ reload: true });
+    } catch (error) {
+      action.disabled = false;
+      showError(error);
+    }
+  });
+  const actions = element("div", "governance-page-actions");
+  actions.append(reason, action);
+  card.append(heading, actions);
+  return card;
+}
+
+function renderGovernance(data, { append = false } = {}) {
+  const hits = data.hits || [];
+  state.governance.hits = append ? state.governance.hits.concat(hits) : hits;
+  state.governance.cursor = data.nextCursor || null;
+  state.governance.loaded = true;
+  byId("governance-status").textContent = `${scopeName(state.governance.scope)} · ${t(state.governance.status === "archived" ? "Archived Pages" : "Active Pages")}`;
+  byId("governance-archived")?.classList.toggle("active", state.governance.status === "archived");
+  byId("governance-more").hidden = !state.governance.cursor;
+  byId("governance-results").replaceChildren(
+    ...(state.governance.hits.length
+      ? state.governance.hits.map(governanceCard)
+      : [element("div", "empty", t("No pages"))]),
+  );
+}
+
+async function loadGovernance({ append = false, reload = false } = {}) {
+  if (state.governance.busy) return;
+  if (!reload && !append && state.governance.loaded) return;
+  state.governance.busy = true;
+  byId("governance-status").textContent = append ? t("Loading more") : t("Loading");
+  byId("governance-more").disabled = true;
+  try {
+    const params = new URLSearchParams({ status: state.governance.status, limit: String(DEFAULT_PAGE_LIMIT) });
+    if (state.governance.scope) params.set("scope", state.governance.scope);
+    if (append && state.governance.cursor) params.set("cursor", state.governance.cursor);
+    renderGovernance(await api(`/api/governance/pages?${params}`), { append });
+  } catch (error) {
+    showError(error);
+    byId("governance-status").textContent = t("Load failed");
+  } finally {
+    state.governance.busy = false;
+    byId("governance-more").disabled = false;
+  }
+}
+
+function resetGovernance({ status = state.governance.status, scope = state.governance.scope } = {}) {
+  state.governance.status = status;
+  state.governance.scope = scope;
+  state.governance.loaded = false;
+  state.governance.hits = [];
+  state.governance.cursor = null;
+}
+
+function archiveSessionActive() {
+  return state.archive.state === "active";
+}
+
+function archiveSessionComplete() {
+  return state.archive.state === "complete";
+}
+
+function resetArchiveSession() {
+  state.archive.state = "idle";
+  state.archive.busy = false;
+  state.archive.activity = null;
+  state.archive.scan = null;
+  state.archive.analyses = [];
+  state.archive.selected.clear();
+  state.archive.applied = 0;
+  state.archive.retained = 0;
+  state.archive.deferred = 0;
+  state.archive.completedAt = null;
+  state.archive.issue = null;
+}
+
+function archiveCandidates() {
+  return state.archive.analyses
+    .map(({ scanPage, analysis, applied }) => !applied && analysis.candidate ? { ...analysis.candidate, scanPage } : null)
+    .filter(Boolean);
+}
+
+function renderArchiveSteps(stage, { scanning = false } = {}) {
+  const states = {
+    scan: [t("Completed"), t("Waiting"), t("Waiting")],
+    analyze: [t("Completed"), t("In progress"), t("Waiting")],
+    review: [t("Completed"), t("Completed"), t("Ready to apply")],
+  };
+  if (scanning) states.scan[0] = t("In progress");
+  const steps = ["scan", "analyze", "review"];
+  steps.forEach((name, index) => {
+    const node = byId(`archive-step-${name}`);
+    node.classList.toggle("active", name === stage);
+    node.classList.toggle("completed", !scanning && index < steps.indexOf(stage));
+    byId(`archive-step-${name}-status`).textContent = states[stage][index];
+  });
+}
+
+function archiveProposalCard(candidate) {
+  const card = element("article", "archive-candidate-card");
+  const heading = element("div", "archive-candidate-heading");
+  const select = document.createElement("input");
+  select.type = "checkbox";
+  select.checked = state.archive.selected.has(candidate.candidateId);
+  select.disabled = state.archive.busy;
+  select.setAttribute("aria-label", t("Select archive candidate"));
+  select.addEventListener("change", () => {
+    if (select.checked) state.archive.selected.add(candidate.candidateId);
+    else state.archive.selected.delete(candidate.candidateId);
+    renderArchiveSession();
+  });
+  const copy = element("div", "archive-candidate-copy");
+  copy.append(
+    element("strong", "", `${candidate.kind} · ${scopeName(candidate.namespace)}`),
+    element("span", "muted", `${formatTime(candidate.observedAt)} · ${formatSize(candidate.contentChars)}`),
+  );
+  const open = element("button", "quiet-button icon-button");
+  open.type = "button";
+  open.title = t("Open in inspector");
+  open.setAttribute("aria-label", t("Open in inspector"));
+  open.append(openPageIcon());
+  open.addEventListener("click", () => pageInspector.open(candidate.pageId));
+  heading.append(select, copy, open);
+  const preview = element("p", "archive-candidate-preview", candidate.preview);
+  const reason = element("p", "archive-candidate-reason", candidate.reason);
+  const signals = element("div", "archive-candidate-signals");
+  candidate.candidateSignals.forEach((signal) => signals.append(element("span", "status-pill", signal)));
+  card.append(heading, preview, reason, signals);
+  return card;
+}
+
+function renderArchiveWorkflow() {
+  const scan = state.archive.scan;
+  const analyzed = state.archive.analyses.length;
+  const total = scan?.pages?.length || 0;
+  const candidates = archiveCandidates();
+  const stage = !scan ? "scan" : analyzed < total ? "analyze" : "review";
+  const scanning = state.archive.busy && !scan;
+  const selectedCount = candidates.filter((candidate) => state.archive.selected.has(candidate.candidateId)).length;
+  renderArchiveSteps(stage, { scanning });
+  byId("archive-scan-metrics").replaceChildren(
+    metric(t("Candidates"), scanning ? "—" : formatNumber(total)),
+    metric(t("Eligible Pages"), scanning ? "—" : formatNumber(scan?.eligiblePages || 0)),
+    metric(t("Model calls"), `${formatNumber(analyzed)} / ${formatNumber(scan?.estimatedModelCalls || 0)}`, analyzed ? "info" : ""),
+    metric(t("Archive proposals"), formatNumber(candidates.length), candidates.length ? "warning" : "", stage === "review" ? `${formatNumber(state.archive.retained)} ${t("Retained")} · ${formatNumber(state.archive.deferred)} ${t("Deferred")}` : ""),
+  );
+  const issue = byId("archive-issue");
+  issue.hidden = !state.archive.issue;
+  issue.textContent = state.archive.issue || "";
+  byId("archive-status").textContent = state.archive.busy
+    ? state.archive.activity || t("Working")
+    : stage === "review"
+      ? `${formatNumber(candidates.length)} ${t("Archive proposals")}`
+      : scanning
+        ? t("Scanning candidates")
+        : `${formatNumber(analyzed)} / ${formatNumber(total)} ${t("Analyzed")}`;
+  const analyze = byId("archive-analyze");
+  analyze.disabled = state.archive.busy || !scan || analyzed >= total;
+  analyze.textContent = analyzed ? t("Continue analysis") : t("Analyze suggestions");
+  const apply = byId("archive-apply");
+  apply.disabled = state.archive.busy || selectedCount === 0;
+  apply.textContent = `${t("Archive selected")} (${formatNumber(selectedCount)})`;
+  const rescan = byId("archive-rescan");
+  rescan.disabled = state.archive.busy;
+  const finish = byId("archive-finish");
+  finish.disabled = state.archive.busy || stage !== "review";
+  const proposals = byId("archive-proposals");
+  proposals.hidden = stage !== "review";
+  if (stage === "review") {
+    byId("archive-selection-status").textContent = `${t("Selected")} ${formatNumber(selectedCount)} / ${formatNumber(candidates.length)}`;
+    const selectAll = byId("archive-select-all");
+    selectAll.checked = candidates.length > 0 && selectedCount === candidates.length;
+    selectAll.indeterminate = selectedCount > 0 && selectedCount < candidates.length;
+    selectAll.disabled = state.archive.busy || candidates.length === 0;
+    byId("archive-cards").replaceChildren(
+      ...(candidates.length ? candidates.map(archiveProposalCard) : [element("div", "empty", t("No archive proposals"))]),
+    );
+  }
+}
+
+function renderArchiveReport() {
+  byId("archive-status").textContent = t("Archive review complete");
+  byId("archive-report-status").textContent = formatTime(state.archive.completedAt);
+  byId("archive-report-metrics").replaceChildren(
+    metric(t("Archived"), formatNumber(state.archive.applied), state.archive.applied ? "positive" : ""),
+    metric(t("Retained"), formatNumber(state.archive.retained)),
+    metric(t("Deferred"), formatNumber(state.archive.deferred), state.archive.deferred ? "warning" : ""),
+  );
+}
+
+function renderArchiveSession() {
+  byId("archive-idle").hidden = !(!archiveSessionActive() && !archiveSessionComplete());
+  byId("archive-workflow").hidden = !archiveSessionActive();
+  byId("archive-report").hidden = !archiveSessionComplete();
+  byId("archive-start").disabled = state.archive.busy || maintenanceSessionActive();
+  if (!archiveSessionActive() && !archiveSessionComplete()) {
+    byId("archive-status").textContent = maintenanceSessionActive() ? t("Available after maintenance") : "";
+  }
+  if (archiveSessionActive()) renderArchiveWorkflow();
+  if (archiveSessionComplete()) renderArchiveReport();
+}
+
+async function scanArchiveCandidates() {
+  if (state.archive.busy) return;
+  state.archive.busy = true;
+  state.archive.activity = t("Scanning candidates");
+  state.archive.issue = null;
+  renderArchiveSession();
+  try {
+    const scan = await maintenanceMutation("/api/maintenance/archive/scan", {});
+    state.archive.scan = scan;
+    state.archive.analyses = [];
+    state.archive.selected.clear();
+    state.archive.retained = 0;
+    state.archive.deferred = 0;
+    if (!(scan.pages || []).length) {
+      state.archive.state = "complete";
+      state.archive.completedAt = new Date().toISOString();
+    }
+  } catch (error) {
+    state.archive.issue = error.message || String(error);
+    showError(error);
+  } finally {
+    state.archive.busy = false;
+    state.archive.activity = null;
+    renderArchiveSession();
+  }
+}
+
+async function startArchiveSession() {
+  if (state.archive.busy || maintenanceSessionActive()) return;
+  resetArchiveSession();
+  state.archive.state = "active";
+  renderArchiveSession();
+  await scanArchiveCandidates();
+}
+
+async function analyzeArchiveCandidates() {
+  const scan = state.archive.scan;
+  if (!archiveSessionActive() || state.archive.busy || !scan) return;
+  const pending = scan.pages.filter((page) => !state.archive.analyses.some(({ scanPage }) => scanPage.pageId === page.pageId));
+  if (!pending.length) return;
+  state.archive.busy = true;
+  state.archive.issue = null;
+  try {
+    for (const [index, page] of pending.entries()) {
+      state.archive.activity = `${t("Analyzing")} ${formatNumber(index + 1)} / ${formatNumber(pending.length)}`;
+      renderArchiveSession();
+      const analysis = await maintenanceMutation("/api/maintenance/archive/analyze", {
+        scanId: scan.scanId,
+        pageId: page.pageId,
+        revisionId: page.revisionId,
+      });
+      state.archive.analyses.push({ scanPage: page, analysis });
+      if (analysis.decision === "retain") state.archive.retained += 1;
+      if (analysis.decision === "defer") state.archive.deferred += 1;
+    }
+  } catch (error) {
+    state.archive.issue = error.message || String(error);
+    showError(error);
+  } finally {
+    state.archive.busy = false;
+    state.archive.activity = null;
+    renderArchiveSession();
+  }
+}
+
+function toggleArchiveSelection() {
+  const candidates = archiveCandidates();
+  const allSelected = candidates.length > 0 && candidates.every((candidate) => state.archive.selected.has(candidate.candidateId));
+  state.archive.selected.clear();
+  if (!allSelected) candidates.forEach((candidate) => state.archive.selected.add(candidate.candidateId));
+  renderArchiveSession();
+}
+
+async function applyArchiveSelection() {
+  const selected = archiveCandidates().filter((candidate) => state.archive.selected.has(candidate.candidateId));
+  if (!selected.length || state.archive.busy) return;
+  const confirmed = await confirmAction({
+    title: t("Archive selected Pages?"),
+    description: t("Archiving removes the selected Pages from default retrieval, graph expansion, and ordinary maintenance. It does not delete them; they remain available for direct review and restoration."),
+    confirmLabel: t("Archive"),
+  });
+  if (!confirmed) return;
+  state.archive.busy = true;
+  state.archive.issue = null;
+  try {
+    for (const [index, candidate] of selected.entries()) {
+      state.archive.activity = `${t("Archiving")} ${formatNumber(index + 1)} / ${formatNumber(selected.length)}`;
+      renderArchiveSession();
+      await maintenanceMutation("/api/maintenance/archive/apply", {
+        pageId: candidate.pageId,
+        expectedRevisionId: candidate.revisionId,
+        reason: `${t("Human-approved archive review")}: ${candidate.reason}`,
+      });
+      state.archive.applied += 1;
+      const record = state.archive.analyses.find(({ analysis }) => analysis.candidate?.candidateId === candidate.candidateId);
+      if (record) record.applied = true;
+      state.archive.selected.delete(candidate.candidateId);
+    }
+    resetGovernance({ status: "archived", scope: state.governance.scope });
+  } catch (error) {
+    state.archive.issue = error.message || String(error);
+    showError(error);
+  } finally {
+    state.archive.busy = false;
+    state.archive.activity = null;
+    renderArchiveSession();
+  }
+}
+
+function finishArchiveSession() {
+  if (!archiveSessionActive() || state.archive.busy) return;
+  state.archive.state = "complete";
+  state.archive.completedAt = new Date().toISOString();
+  renderArchiveSession();
+}
+
 async function loadAccess({ append = false } = {}) {
   if (state.access.busy) return;
   state.access.busy = true;
@@ -1406,6 +1910,7 @@ function resetMaintenanceSession() {
     outcomes: {
       pack: emptyMaintenanceOutcome(),
       summary: emptyMaintenanceOutcome(),
+      topic: emptyMaintenanceOutcome(),
       relation: emptyMaintenanceOutcome(),
     },
   };
@@ -1413,7 +1918,7 @@ function resetMaintenanceSession() {
   state.maintenance.workflowStage = "scan";
   state.maintenance.phase = "pack";
   state.maintenance.scan = null;
-  state.maintenance.analyses = { pack: null, summary: null, relation: null };
+  state.maintenance.analyses = { pack: null, summary: null, topic: null, relation: null };
   state.maintenance.pendingCandidates = [];
   state.maintenance.selected.clear();
 }
@@ -1450,16 +1955,19 @@ function renderAutomationStatus() {
   section.hidden = !status?.available;
   if (section.hidden) return;
   const automation = status.automation || {};
-  const trigger = status.writeTrigger || {};
   const stateNode = byId("maintenance-automation-state");
   stateNode.textContent = automationStateLabel(status);
   stateNode.className = `status-pill status-${automationStateTone(status)}`;
   byId("maintenance-automation-metrics").replaceChildren(
-    metric(t("Observed heads"), formatNumber(automation.observedPageCount)),
+    metric(
+      t("Maintenance inventory"),
+      formatNumber(automation.observedPageCount),
+      "",
+      t("Includes retained superseded Pages for maintenance review."),
+    ),
     metric(t("Dirty regions"), formatNumber(automation.dirtyRegionCount), automation.dirtyRegionCount ? "warning" : ""),
     metric(t("Ready regions"), formatNumber(automation.readyRegionCount), automation.readyRegionCount ? "info" : ""),
     metric(t("Pending relation review"), formatNumber(automation.pendingRelationReviewCount), automation.pendingRelationReviewCount ? "warning" : ""),
-    metric(t("Write trigger"), `${formatNumber(trigger.minNewPages)} / ${Math.round((trigger.quietPeriodSeconds || 0) / 60)}m / ${Math.round((trigger.maxWaitSeconds || 0) / 60)}m`),
   );
   const completed = automation.lastCompletedAt;
   byId("maintenance-automation-detail").textContent = completed
@@ -1576,13 +2084,22 @@ function revisionBoundPageExpansion(page) {
 function relationReviewCard(proposal) {
   const card = element("article", "maintenance-relation-review-card");
   const heading = element("div", "maintenance-relation-review-card-heading");
+  const annotations = [];
   heading.append(
     element("strong", "", t("Review evidence")),
     element("span", "maintenance-relation-review-risk", t("Manual approval required")),
     element("span", "muted", formatTime(proposal.proposedAt)),
   );
+  if (proposal.relationReason) {
+    const evidence = element("div", "maintenance-relation-evidence");
+    evidence.append(
+      element("span", "maintenance-relation-evidence-label", t("Relation evidence")),
+      element("span", "", proposal.relationReason),
+    );
+    annotations.push(evidence);
+  }
   if (proposal.reviewReason) {
-    card.append(element("p", "maintenance-relation-review-reason muted", proposal.reviewReason));
+    annotations.push(element("p", "maintenance-relation-review-reason muted", proposal.reviewReason));
   }
   const pages = element("div", "maintenance-relation-review-pages");
   proposal.pages.forEach((page, index) => {
@@ -1609,7 +2126,7 @@ function relationReviewCard(proposal) {
   reject.addEventListener("click", () => resolveRelationReview(proposal.candidateId, "reject"));
   suppress.addEventListener("click", () => resolveRelationReview(proposal.candidateId, "suppress"));
   actions.append(approve, reject, suppress);
-  card.append(heading, pages, actions);
+  card.append(heading, ...annotations, pages, actions);
   return card;
 }
 
@@ -1661,7 +2178,8 @@ function maintenanceAvailable() {
 const MAINTENANCE_PHASES = {
   pack: { label: "Pack", scanKey: "packing", operation: "pack", next: "summary", order: 1 },
   summary: { label: "Summary", scanKey: "summary", operation: "summary", next: "relation", order: 2 },
-  relation: { label: "Relations", scanKey: "relation", operation: "relation", next: null, order: 3 },
+  relation: { label: "Relations", scanKey: "relation", operation: "relation", next: "topic", order: 3 },
+  topic: { label: "Extract Topic Page", scanKey: "topic", operation: "topic", next: null, order: 4 },
 };
 
 const MAINTENANCE_STAGES = {
@@ -1673,6 +2191,7 @@ const MAINTENANCE_STAGES = {
 const MAINTENANCE_PASSES = {
   pack: { label: "Pack maintenance", phases: ["pack"], order: 1 },
   semantic: { label: "Semantic maintenance", phases: ["summary", "relation"], order: 2 },
+  topic: { label: "Extract Topic Page", phases: ["topic"], order: 3 },
 };
 
 function maintenancePass() {
@@ -1725,6 +2244,11 @@ function maintenanceWorkCount(phase = maintenancePhase()) {
   if (!scan) return 0;
   if (phase === "summary") return scan.eligiblePages || 0;
   return scan.candidateGroupCount || 0;
+}
+
+function maintenancePassWorkCount(pass = maintenancePass()) {
+  return maintenancePassPhases(pass)
+    .reduce((total, phase) => total + maintenanceWorkCount(phase), 0);
 }
 
 function maintenanceWorkLabel(phase = maintenancePhase()) {
@@ -1790,6 +2314,25 @@ function maintenanceCandidateRow(candidate) {
     );
     inputs.append(item);
     content.append(element("span", "maintenance-preview", compactPreview(candidate.content, 240)));
+  } else if (candidate.operation === "topic") {
+    source.append(
+      element("strong", "", candidate.namespace),
+      element("span", "muted", `${candidate.pages.length} ${t("Pages")}`),
+    );
+    change.append(
+      element("strong", "", t("Extract Topic Page")),
+      element("span", "muted", candidate.title),
+    );
+    for (const page of candidate.pages) {
+      const item = element("div", "maintenance-input");
+      item.append(
+        element("span", "mono muted", page.pageId),
+        element("span", "maintenance-preview", compactPreview(page.preview || t("No preview"))),
+        revisionBoundPageExpansion(page),
+      );
+      inputs.append(item);
+    }
+    content.append(element("span", "maintenance-preview", compactPreview(candidate.content, 240)));
   } else if (candidate.operation === "relation") {
     source.append(
       element("strong", "", candidate.namespace),
@@ -1809,6 +2352,14 @@ function maintenanceCandidateRow(candidate) {
       inputs.append(item);
     }
     content.append(element("strong", "", "related_to"));
+    if (candidate.relationReason) {
+      const evidence = element("div", "maintenance-relation-evidence");
+      evidence.append(
+        element("span", "maintenance-relation-evidence-label", t("Relation evidence")),
+        element("span", "", candidate.relationReason),
+      );
+      content.append(evidence);
+    }
   } else {
     const mergesPacks = candidate.pages.length === 2
       && candidate.pages.every((page) => page.mediaType === "application/vnd.pcp.packed-page+json");
@@ -1856,8 +2407,11 @@ function summaryProposalCard(candidate) {
     element("strong", "", candidate.namespace),
     element("span", "mono muted", candidate.pageId),
   );
-  const open = element("button", "compact-button", t("Open page"));
+  const open = element("button", "compact-button compact-icon-button");
   open.type = "button";
+  open.title = t("Open page");
+  open.setAttribute("aria-label", t("Open page"));
+  open.append(openPageIcon());
   open.addEventListener("click", () => pageInspector.open(candidate.pageId));
   heading.append(selection, source, open);
   const metadata = element("div", "maintenance-summary-metadata");
@@ -1912,10 +2466,19 @@ function maintenancePhaseDescription() {
   if (!scan) return currentLanguage === "zh"
     ? "正在等待扫描完整的可处理库存。"
     : "Waiting to scan the full eligible inventory.";
-  if (!analysis && maintenanceWorkCount() === 0) return t("No eligible work");
+  if (!analysis && maintenanceWorkCount() === 0) {
+    const next = maintenancePassConfig().order < Object.keys(MAINTENANCE_PASSES).length;
+    return currentLanguage === "zh"
+      ? (next
+        ? "没有发现候选；无需调用模型，可直接继续下一维护段。"
+        : "没有发现候选；无需调用模型，可直接完成维护。")
+      : (next
+        ? "No candidates found. No model call is needed; continue directly to the next pass."
+        : "No candidates found. No model call is needed; complete maintenance directly.");
+  }
   if (!analysis) return currentLanguage === "zh"
-    ? `扫描已发现 ${formatNumber(maintenanceWorkCount())} 个结构候选。它们不是已建议的变更；点击分析后才会调用模型判断是否应合并、摘要或关联。`
-    : `The scan found ${formatNumber(maintenanceWorkCount())} structural candidates. They are not recommendations yet: analysis calls a model to decide whether to pack, summarize, or relate them.`;
+      ? `扫描已发现 ${formatNumber(maintenanceWorkCount())} 个结构候选。它们不是已建议的变更；点击分析后才会调用模型判断是否应合并、摘要、凝练新页或关联。`
+      : `The scan found ${formatNumber(maintenanceWorkCount())} structural candidates. They are not recommendations yet: analysis calls a model to decide whether to pack, summarize, extract a Topic Page, or relate them.`;
   const failedBatches = phase === "summary" ? summaryFailedBatches() : [];
   if (failedBatches.length) return currentLanguage === "zh"
     ? `${formatNumber(failedBatches.length)} 个摘要页面未完成。已完成的提案仍可应用；请重试失败页面，或重新扫描本阶段。`
@@ -1943,7 +2506,9 @@ function maintenancePrimaryLabel(action = currentMaintenanceAction()) {
     const count = maintenanceCandidates().filter((candidate) => state.maintenance.selected.has(candidate.candidateId)).length;
     return `${t("Apply selected")} (${formatNumber(count)})`;
   }
-  return maintenancePass() === "pack" ? t("Continue to semantic maintenance") : t("Complete maintenance");
+  if (maintenancePass() === "pack") return t("Continue to semantic maintenance");
+  if (maintenancePass() === "semantic") return t("Continue to Topic Page extraction");
+  return t("Complete maintenance");
 }
 
 function phaseIssue(phase) {
@@ -1988,14 +2553,14 @@ function renderMaintenancePasses() {
   const active = maintenanceSessionActive();
 
   byId("maintenance-flow-kicker").textContent = currentLanguage === "zh"
-    ? "维护会话 · 两段式流程"
-    : "Maintenance session · two-pass flow";
+    ? "维护会话 · 三段流程"
+    : "Maintenance session · three-stage flow";
   byId("maintenance-flow-title").textContent = currentLanguage === "zh"
-    ? "先确定上下文边界，再维护语义结构"
-    : "Set context boundaries before maintaining semantic structure";
+    ? "先确定边界，再建立语义，最后凝练主题页"
+    : "Set boundaries, establish semantics, then extract Topic Pages";
   byId("maintenance-flow-description").textContent = currentLanguage === "zh"
-    ? "第二段只会基于第一段应用或跳过后刷新得到的库存运行；关系建议仍须人工批准后才可参与检索。"
-    : "The second pass runs only on inventory refreshed after the first pass is applied or skipped. Suggested relations remain unavailable to retrieval until approved.";
+    ? "每一段都会在上一段应用或跳过后重新扫描；凝练新页因此使用已经确认的关系结构。"
+    : "Each stage rescans after the prior stage is applied or skipped, so Topic Pages use the confirmed relation structure.";
 
   for (const [pass, config] of Object.entries(MAINTENANCE_PASSES)) {
     const item = byId(`maintenance-pass-${pass}`);
@@ -2010,8 +2575,16 @@ function renderMaintenancePasses() {
     item.classList.toggle("waiting", waiting);
     title.textContent = t(config.label);
     detail.textContent = currentLanguage === "zh"
-      ? (pass === "pack" ? "Pack 边界与合并" : "摘要与关系建议")
-      : (pass === "pack" ? "Pack boundaries and merges" : "Summary and relation proposals");
+      ? (pass === "pack"
+        ? "Pack 边界与合并"
+        : pass === "semantic"
+          ? "摘要与关系建议"
+          : "基于已确认关系凝练主题页")
+      : (pass === "pack"
+        ? "Pack boundaries and merges"
+        : pass === "semantic"
+          ? "Summary and relation proposals"
+          : "Extract from confirmed relations");
     status.textContent = completed
       ? t("Completed")
       : isActive && state.maintenance.busy
@@ -2066,10 +2639,18 @@ function renderMaintenanceWorkflow() {
       ? (currentLanguage === "zh"
         ? "只分析 Pack 合并建议；不会分析摘要或关联。应用或跳过本段后，才会基于刷新后的库存启动语义维护。"
         : "Analyze only Pack merge proposals. Summary and relation analysis wait until this pass is applied or skipped and the inventory is refreshed.")
+    : stage === "analyze" && pass === "semantic"
+      ? (currentLanguage === "zh"
+        ? "模型评估摘要与关联候选，只提出建议；不会写入页面。应用或跳过本段后，凝练新页会在刷新后的关系结构上运行。"
+        : "The model evaluates summary and relation candidates without writing Pages. Topic extraction runs on the refreshed relation structure after this stage is applied or skipped.")
     : stage === "analyze"
       ? (currentLanguage === "zh"
-        ? "模型评估摘要与关联候选，只提出建议；不会写入页面。"
-        : "The model evaluates summary and relation candidates and only proposes changes; it writes nothing.")
+        ? "模型基于已确认的关系结构评估凝练新页提案；只在你勾选后创建页面。"
+        : "The model evaluates Topic Page proposals from the confirmed relation structure; a Page is created only after you select it.")
+      : stage === "review" && candidates.length === 0
+        ? (currentLanguage === "zh"
+          ? "扫描未发现可处理候选，无需调用模型或审阅提案；可直接继续下一维护段。"
+          : "The scan found no eligible candidates. No model call or proposal review is needed; continue directly to the next pass.")
       : (currentLanguage === "zh"
         ? "统一审阅所有建议。只会应用你勾选的项目，每项写入前都会重新校验当前版本。"
         : "Review every suggestion together. Only selected items are applied, and each write revalidates the current revision.");
@@ -2114,7 +2695,7 @@ function renderMaintenanceWorkflow() {
   const rescan = byId("maintenance-rescan");
   rescan.disabled = state.maintenance.busy;
   const skip = byId("maintenance-skip");
-  skip.hidden = stage !== "review";
+  skip.hidden = stage !== "review" || candidates.length === 0;
   skip.disabled = state.maintenance.busy;
   const retryFailed = byId("maintenance-retry-failed");
   retryFailed.hidden = true;
@@ -2127,7 +2708,7 @@ function renderMaintenanceWorkflow() {
   selectAll.indeterminate = selectedCount > 0 && selectedCount < candidates.length;
 
   if (!state.maintenance.busy) {
-    byId("maintenance-status").textContent = `${t(stageConfig.label)} · ${stage === "review" ? t("Ready to apply") : t("Ready to continue")}`;
+    byId("maintenance-status").textContent = `${t(stageConfig.label)} · ${stage === "review" && candidates.length ? t("Ready to apply") : t("Ready to continue")}`;
   }
 }
 
@@ -2141,6 +2722,7 @@ function renderMaintenanceReport() {
     metric(t("Pack"), `${formatNumber(outcomes.pack.applied)} ${t("Applied")}`, outcomes.pack.applied ? "positive" : ""),
     metric(t("Summary"), `${formatNumber(outcomes.summary.applied)} ${t("Applied")}`, outcomes.summary.applied ? "positive" : ""),
     metric(t("Relations"), `${formatNumber(outcomes.relation.applied)} ${t("Applied")}`, outcomes.relation.applied ? "positive" : ""),
+    metric(t("Extract Topic Page"), `${formatNumber(outcomes.topic.applied)} ${t("Applied")}`, outcomes.topic.applied ? "positive" : ""),
     metric(t("Model calls"), formatNumber(totalCalls), totalCalls ? "info" : ""),
     metric(t("Skipped"), formatNumber(totalSkipped), totalSkipped ? "warning" : ""),
   );
@@ -2152,7 +2734,7 @@ function renderMaintenanceSession() {
   byId("maintenance-idle").hidden = !idle;
   byId("maintenance-workflow").hidden = !maintenanceSessionActive();
   byId("maintenance-report").hidden = !maintenanceSessionComplete();
-  byId("maintenance-start").disabled = !maintenanceAvailable() || state.maintenance.busy;
+  byId("maintenance-start").disabled = !maintenanceAvailable() || state.maintenance.busy || archiveSessionActive();
   if (idle) {
     byId("maintenance-status").textContent = maintenanceAvailable()
       ? (currentLanguage === "zh" ? "准备开始可审阅的维护会话" : "Ready to start a reviewable maintenance session")
@@ -2196,6 +2778,7 @@ function appendMaintenanceAnalysisBatch(analysis, batch) {
 async function loadMaintenance({ reload = false } = {}) {
   if (!state.maintenance.loaded || reload) renderMaintenanceStatus(await api("/api/maintenance"));
   else renderMaintenanceSession();
+  renderArchiveSession();
   await loadRelationReviews();
 }
 
@@ -2221,6 +2804,13 @@ async function applyMaintenanceCandidates(candidates, onProgress) {
       } else if (candidate.operation === "relation") {
         await maintenanceMutation("/api/maintenance/relations/apply", {
           candidateId: candidate.candidateId,
+          pages: candidate.pages.map((page) => ({ pageId: page.pageId, revisionId: page.revisionId })),
+        });
+      } else if (candidate.operation === "topic") {
+        await maintenanceMutation("/api/maintenance/topics/apply", {
+          candidateId: candidate.candidateId,
+          title: candidate.title,
+          content: candidate.content,
           pages: candidate.pages.map((page) => ({ pageId: page.pageId, revisionId: page.revisionId })),
         });
       } else {
@@ -2306,9 +2896,21 @@ function emptyRelationAnalysis(scan) {
   };
 }
 
+function emptyTopicAnalysis(scan) {
+  return {
+    analyzedAt: null,
+    batchCount: scan.estimatedModelCalls,
+    batchesCompleted: 0,
+    workerCalls: 0,
+    noCandidateGroups: 0,
+    deferredGroups: 0,
+    issues: [],
+  };
+}
+
 function resetCurrentMaintenanceWork() {
   state.maintenance.scan = null;
-  state.maintenance.analyses = { pack: null, summary: null, relation: null };
+  state.maintenance.analyses = { pack: null, summary: null, topic: null, relation: null };
   state.maintenance.pendingCandidates = [];
   state.maintenance.selected.clear();
 }
@@ -2330,7 +2932,7 @@ async function scanMaintenance() {
       outcome.workItems = maintenanceWorkCount(phase);
     }
     state.maintenance.phase = maintenancePassPhases()[0];
-    state.maintenance.workflowStage = "analyze";
+    state.maintenance.workflowStage = maintenancePassWorkCount() ? "analyze" : "review";
     byId("maintenance-status").textContent = `${t("Scan complete")} · ${formatTime(scan.capturedAt)}`;
   } catch (error) {
     byId("maintenance-status").textContent = `${t("Scan failed")}: ${error.message || String(error)}`;
@@ -2439,6 +3041,33 @@ async function analyzeRelationPhase(scan) {
   }
 }
 
+async function analyzeTopicPhase(scan) {
+  const analysis = emptyTopicAnalysis(scan);
+  state.maintenance.analyses.topic = analysis;
+  for (const [index, group] of scan.groups.entries()) {
+    state.maintenance.activity.current += 1;
+    byId("maintenance-status").textContent = `${t("Analyzing")} ${t("Extract Topic Page")} ${formatNumber(index + 1)} / ${formatNumber(scan.groups.length)}`;
+    renderMaintenanceSession();
+    try {
+      const result = await maintenanceMutation("/api/maintenance/topics/analyze", {
+        scanId: scan.scanId,
+        groupId: group.groupId,
+      });
+      analysis.analyzedAt = result.analyzedAt;
+      analysis.workerCalls += 1;
+      if (result.candidate) appendMaintenanceCandidates("topic", [result.candidate]);
+      else if (result.decision === "defer") analysis.deferredGroups += 1;
+      else analysis.noCandidateGroups += 1;
+    } catch (error) {
+      analysis.workerCalls += 1;
+      analysis.deferredGroups += 1;
+      analysis.issues.push({ batchIndex: index, message: error.message || String(error) });
+    }
+    analysis.batchesCompleted += 1;
+    renderMaintenanceSession();
+  }
+}
+
 async function analyzeMaintenance() {
   if (state.maintenance.busy || !state.maintenance.scan || maintenanceWorkflowStage() !== "analyze") return;
   state.maintenance.busy = true;
@@ -2454,6 +3083,7 @@ async function analyzeMaintenance() {
       if (!scan || maintenanceWorkCount(phase) === 0) continue;
       if (phase === "pack") await analyzePackingPhase(scan);
       else if (phase === "summary") await analyzeSummaryPhase(scan);
+      else if (phase === "topic") await analyzeTopicPhase(scan);
       else await analyzeRelationPhase(scan);
       const analysis = state.maintenance.analyses[phase];
       const outcome = maintenanceOutcome(phase);
@@ -2586,7 +3216,7 @@ function toggleMaintenanceSelection() {
 }
 
 async function startMaintenanceSession() {
-  if (state.maintenance.busy || !maintenanceAvailable()) return;
+  if (state.maintenance.busy || !maintenanceAvailable() || archiveSessionActive()) return;
   resetMaintenanceSession();
   state.maintenance.session.state = "active";
   state.maintenance.session.startedAt = new Date().toISOString();
@@ -2637,9 +3267,12 @@ async function completeMaintenancePhase({ skippedProposals = 0 } = {}) {
     outcome.skipped += skippedByOperation.get(phase) || 0;
     outcome.completed = true;
   }
-  if (maintenancePass() === "pack") {
-    state.maintenance.pass = "semantic";
-    state.maintenance.phase = "summary";
+  const passOrder = maintenancePassConfig().order;
+  const nextPass = Object.entries(MAINTENANCE_PASSES)
+    .find(([, config]) => config.order === passOrder + 1)?.[0];
+  if (nextPass) {
+    state.maintenance.pass = nextPass;
+    state.maintenance.phase = maintenancePassPhases(nextPass)[0];
     state.maintenance.workflowStage = "scan";
     resetCurrentMaintenanceWork();
     renderMaintenanceSession();
@@ -2732,11 +3365,13 @@ function rerenderForLocale() {
   if (state.overview) renderOverview(state.overview);
   const currentPage = state.pages.pageCache.get(state.pages.page);
   if (currentPage) renderPages(currentPage, state.pages.page);
+  if (state.governance.loaded) renderGovernance({ hits: state.governance.hits, nextCursor: state.governance.cursor });
   queryView.rerender();
   if (state.maintenance.loaded) {
     renderAutomationStatus();
     renderMaintenanceSession();
   }
+  renderArchiveSession();
   healthView.rerender();
   retentionView.rerender();
 }
@@ -2807,6 +3442,15 @@ byId("page-sort-options-list").addEventListener("click", (event) => {
   resetPages();
   loadPages().catch(showError);
 });
+byId("governance-scope").addEventListener("change", (event) => {
+  resetGovernance({ status: "archived", scope: event.target.value });
+  loadGovernance().catch(showError);
+});
+byId("governance-refresh").addEventListener("click", () => loadGovernance({ reload: true }).catch(showError));
+byId("governance-more").addEventListener("click", () => loadGovernance({ append: true }).catch(showError));
+byId("maintenance-archive-library").addEventListener("toggle", (event) => {
+  if (event.target.open) loadGovernance().catch(showError);
+});
 document.addEventListener("click", (event) => {
   if (!event.target.closest(".page-control-menu")) closePageMenus();
 });
@@ -2819,6 +3463,13 @@ byId("maintenance-retry-failed").addEventListener("click", () => retryFailedSumm
 byId("maintenance-rescan").addEventListener("click", () => rescanMaintenancePhase().catch(showError));
 byId("maintenance-cancel").addEventListener("click", () => cancelMaintenanceSession().catch(showError));
 byId("maintenance-start-new").addEventListener("click", () => startMaintenanceSession().catch(showError));
+byId("archive-start").addEventListener("click", () => startArchiveSession().catch(showError));
+byId("archive-analyze").addEventListener("click", () => analyzeArchiveCandidates().catch(showError));
+byId("archive-apply").addEventListener("click", () => applyArchiveSelection().catch(showError));
+byId("archive-rescan").addEventListener("click", () => scanArchiveCandidates().catch(showError));
+byId("archive-finish").addEventListener("click", finishArchiveSession);
+byId("archive-start-new").addEventListener("click", () => startArchiveSession().catch(showError));
+byId("archive-select-all").addEventListener("change", toggleArchiveSelection);
 byId("maintenance-settings-form").addEventListener("submit", (event) => saveMaintenanceSettings(event).catch(showError));
 byId("maintenance-select-all").addEventListener("change", toggleMaintenanceSelection);
 byId("access-more").addEventListener("click", () => loadAccess({ append: true }).catch(showError));

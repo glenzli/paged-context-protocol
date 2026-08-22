@@ -3,21 +3,23 @@ mod health;
 use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
-    AccessAuditEvent, AccessSession, AssessPageValidityRequest, BrowseIndexOrder, Capabilities,
-    CollectRevisionRetentionRequest, CreateScopeRequest, ExtractTopicRequest, IngestPageRequest,
-    LinkPagesRequest, PackPagesRequest, PageMutability, PlanRevisionRetentionRequest,
+    AccessAuditEvent, AccessSession, ArchivePageRequest, AssessPageValidityRequest,
+    BrowseIndexOrder, Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest,
+    ExtractTopicRequest, IngestPageRequest, LinkPagesRequest, PackPagesRequest,
+    PageLifecycleTransitionResult, PageMutability, PlanRevisionRetentionRequest,
     PutRevisionRetentionLeaseRequest, QueryAuditEvent, ReadPage, ReadPagesRequest, Relation,
-    RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan,
-    Scope, SearchHit, SearchPagesRequest, SearchResult, SourceSpan, UnpackPageRequest,
-    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    RestoreArchivedPageRequest, RevisePageRequest, RevisionCollectionResult,
+    RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchHit, SearchPagesRequest,
+    SearchResult, SourceSpan, UnpackPageRequest, WritePageRequest, WriteResult,
+    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use health::{
     ActivityHealth, GraphHealth, HealthSnapshot, HealthTimelineBucket, NamedCount, OperationHealth,
-    PackingHealth, QueryAuditMethodHealth, QueryAuditSummary, RecallHealth, ScopeHealth,
-    StorageHealth,
+    PackingHealth, QueryAuditMethodHealth, QueryAuditSummary, RecallHealth,
+    RuntimeModelUsageHealth, RuntimeModelUsageSourceHealth, ScopeHealth, StorageHealth,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -202,6 +204,16 @@ pub trait PcpStore: Send + Sync {
         access: &AccessSession,
         request: RevisePageRequest,
     ) -> Result<WriteResult>;
+    async fn archive_page(
+        &self,
+        access: &AccessSession,
+        request: ArchivePageRequest,
+    ) -> Result<PageLifecycleTransitionResult>;
+    async fn restore_archived_page(
+        &self,
+        access: &AccessSession,
+        request: RestoreArchivedPageRequest,
+    ) -> Result<PageLifecycleTransitionResult>;
     async fn pack_pages(
         &self,
         access: &AccessSession,
@@ -266,6 +278,9 @@ pub trait PcpStore: Send + Sync {
     /// separate from tenant operations: the Runtime writes it after an actual
     /// provider query has completed.
     async fn record_runtime_query_audit(&self, event: QueryAuditEvent) -> Result<()>;
+    /// Content-free model usage emitted by Runtime query and maintenance
+    /// workers. This must never contain prompts, Page content, or output text.
+    async fn record_runtime_usage(&self, event: pcp_core::RuntimeUsageEvent) -> Result<()>;
     async fn query_audit_summary(
         &self,
         access: &AccessSession,

@@ -1,4 +1,4 @@
-use pcp_core::{QueryAuditEvent, RouterTokenUsage};
+use pcp_core::{ModelTokenUsage, QueryAuditEvent, RouterTokenUsage};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -41,9 +41,36 @@ pub struct HealthSnapshot {
     pub recall: RecallHealth,
     pub packing: PackingHealth,
     pub graph: GraphHealth,
+    pub model_usage: RuntimeModelUsageHealth,
     pub operations: Vec<OperationHealth>,
     pub scopes: Vec<ScopeHealth>,
     pub timeline: Vec<HealthTimelineBucket>,
+}
+
+/// Aggregate Runtime model accounting. It is deliberately independent from
+/// request telemetry because a model operation can span multiple provider
+/// responses and providers do not always report usage.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeModelUsageHealth {
+    pub operations: u64,
+    pub model_calls: u64,
+    pub reported_model_calls: u64,
+    pub unreported_model_calls: u64,
+    pub usage: ModelTokenUsage,
+    pub sources: Vec<RuntimeModelUsageSourceHealth>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeModelUsageSourceHealth {
+    pub source: String,
+    pub operation: String,
+    pub operations: u64,
+    pub model_calls: u64,
+    pub reported_model_calls: u64,
+    pub unreported_model_calls: u64,
+    pub usage: ModelTokenUsage,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

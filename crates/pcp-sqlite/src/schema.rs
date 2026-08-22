@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 
-const STORE_SCHEMA_VERSION: &str = "0.8.0-clean.2";
+const STORE_SCHEMA_VERSION: &str = "0.8.0-clean.3";
 const LEGACY_DRAFT_SCHEMA_VERSION: &str = "0.8.0-draft";
 const LEGACY_CLEAN_SCHEMA_VERSION: &str = "0.8.0-clean";
 const LEGACY_CLEAN_ASSOCIATIONS_SCHEMA_VERSION: &str = "0.8.0-clean.1";
+const LEGACY_CLEAN_TOPIC_EXTRACTIONS_SCHEMA_VERSION: &str = "0.8.0-clean.2";
 
 pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
     connection
@@ -37,6 +38,9 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
         }
         Some(version) if version == LEGACY_CLEAN_ASSOCIATIONS_SCHEMA_VERSION => {
             crate::migration::migrate_clean_topic_extractions(connection, STORE_SCHEMA_VERSION)?;
+        }
+        Some(version) if version == LEGACY_CLEAN_TOPIC_EXTRACTIONS_SCHEMA_VERSION => {
+            crate::migration::migrate_clean_content_governance(connection, STORE_SCHEMA_VERSION)?;
         }
         Some(version) => {
             anyhow::bail!("unsupported PCP Store schema {version}; expected {STORE_SCHEMA_VERSION}")
@@ -289,6 +293,31 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 failure_kind TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS pcp_runtime_usage (
+                event_id TEXT PRIMARY KEY,
+                occurred_at TEXT NOT NULL,
+                principal_json TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                scopes_json TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                usage_json TEXT,
+                failure_kind TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS pcp_page_lifecycle_events (
+                event_id TEXT PRIMARY KEY,
+                page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
+                revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+                previous_status TEXT NOT NULL,
+                next_status TEXT NOT NULL,
+                actor_type TEXT NOT NULL,
+                actor_id TEXT NOT NULL,
+                reason TEXT,
+                created_at TEXT NOT NULL
+            );
+
             CREATE VIRTUAL TABLE IF NOT EXISTS pcp_revision_fts USING fts5(
                 revision_id UNINDEXED,
                 page_id UNINDEXED,
@@ -344,6 +373,10 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 ON pcp_access_log(occurred_at DESC, event_id DESC);
             CREATE INDEX IF NOT EXISTS pcp_query_audit_time
                 ON pcp_query_audit(occurred_at DESC, event_id DESC);
+            CREATE INDEX IF NOT EXISTS pcp_runtime_usage_time
+                ON pcp_runtime_usage(occurred_at DESC, event_id DESC);
+            CREATE INDEX IF NOT EXISTS pcp_page_lifecycle_events_page
+                ON pcp_page_lifecycle_events(page_id, created_at DESC);
 
             "#,
         )

@@ -14,8 +14,8 @@ use tokio::fs;
 use uuid::Uuid;
 
 use super::{
-    MaintenanceCycleReport, MaintenanceWorkerRequest, MaintenanceWorkerResponse,
-    SemanticMaintenanceWorker,
+    MaintenanceCycleReport, MaintenanceWorkerOutcome, MaintenanceWorkerRequest,
+    MaintenanceWorkerResponse, SemanticMaintenanceWorker,
 };
 
 const MAX_AUDIT_RECORDS: usize = 64;
@@ -204,6 +204,38 @@ impl SemanticMaintenanceWorker for AuditedWorker {
             }
         }
     }
+
+    async fn evaluate_with_usage(
+        &self,
+        request: MaintenanceWorkerRequest,
+    ) -> Result<MaintenanceWorkerOutcome> {
+        let operation = operation_name(&request).to_owned();
+        self.events
+            .lock()
+            .expect("maintenance audit events")
+            .push(event("worker_started", Some(operation), None, None));
+        match self.inner.evaluate_with_usage(request).await {
+            Ok(outcome) => {
+                self.events
+                    .lock()
+                    .expect("maintenance audit events")
+                    .push(event(
+                        "worker_response",
+                        None,
+                        Some(response_name(&outcome.response).to_owned()),
+                        None,
+                    ));
+                Ok(outcome)
+            }
+            Err(error) => {
+                self.events
+                    .lock()
+                    .expect("maintenance audit events")
+                    .push(event("failed", None, None, Some("worker")));
+                Err(error)
+            }
+        }
+    }
 }
 
 fn event(
@@ -227,6 +259,8 @@ fn operation_name(request: &MaintenanceWorkerRequest) -> &'static str {
         MaintenanceWorkerRequest::SummarizePages { .. } => "summarize_pages",
         MaintenanceWorkerRequest::SelectPacking { .. } => "select_packing",
         MaintenanceWorkerRequest::AnalyzePacking { .. } => "analyze_packing",
+        MaintenanceWorkerRequest::ExtractTopic { .. } => "extract_topic",
+        MaintenanceWorkerRequest::AssessArchive { .. } => "assess_archive",
         MaintenanceWorkerRequest::SelectRelation { .. } => "select_relation",
         MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => "select_retention_milestones",
     }
@@ -239,6 +273,8 @@ fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
         MaintenanceWorkerResponse::Candidate { .. } => "candidate",
         MaintenanceWorkerResponse::PackingCandidates { .. } => "packing_candidates",
         MaintenanceWorkerResponse::Relate { .. } => "relate",
+        MaintenanceWorkerResponse::ExtractTopic { .. } => "extract_topic",
+        MaintenanceWorkerResponse::ArchiveReview { .. } => "archive_review",
         MaintenanceWorkerResponse::Retain { .. } => "retain",
         MaintenanceWorkerResponse::NoCandidate => "no_candidate",
         MaintenanceWorkerResponse::Defer => "defer",

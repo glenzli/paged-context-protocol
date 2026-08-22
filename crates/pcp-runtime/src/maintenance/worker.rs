@@ -2,7 +2,7 @@ use std::{path::PathBuf, process::Stdio, time::Duration};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use pcp_core::{ReadPage, SourceRef};
+use pcp_core::{ModelTokenUsage, ReadPage, SourceRef};
 use pcp_store::DurablePageInventoryItem;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -32,6 +32,15 @@ pub enum MaintenanceWorkerRequest {
         pages: Vec<RelationCandidatePage>,
         #[serde(default)]
         excluded_page_pairs: Vec<[String; 2]>,
+    },
+    ExtractTopic {
+        pages: Vec<RelationCandidatePage>,
+        max_source_pages: usize,
+    },
+    /// A manual content-governance review. The worker can recommend archive,
+    /// retain, or defer, but never changes lifecycle state itself.
+    AssessArchive {
+        page: ArchiveCandidatePage,
     },
     SelectRetentionMilestones {
         pages: Vec<MaintenanceRoutingPage>,
@@ -73,6 +82,25 @@ pub struct RelationCandidatePage {
     pub facets: Option<Value>,
     #[serde(default)]
     pub relation_types: Vec<String>,
+}
+
+/// A bounded, reviewable view of an otherwise archive-eligible Page.  The
+/// structural signals originate from the deterministic scan; the worker is
+/// asked to judge the actual content rather than treating those signals as a
+/// value score.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveCandidatePage {
+    pub page: MaintenanceDetailPage,
+    pub candidate_signals: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveWorkerDecision {
+    Archive,
+    Retain,
+    Defer,
 }
 
 impl PackingCandidatePage {
@@ -169,12 +197,31 @@ pub enum MaintenanceWorkerResponse {
     },
     Relate {
         page_ids: [String; 2],
+        reason: String,
+    },
+    ExtractTopic {
+        page_ids: Vec<String>,
+        title: String,
+        content: String,
+    },
+    ArchiveReview {
+        outcome: ArchiveWorkerDecision,
+        reason: String,
     },
     Retain {
         milestones: Vec<RetentionMilestone>,
     },
     NoCandidate,
     Defer,
+}
+
+/// A worker result plus the provider's content-free token accounting. Command
+/// workers intentionally leave `usage` empty because they have no stable
+/// provider usage contract.
+#[derive(Clone, Debug)]
+pub struct MaintenanceWorkerOutcome {
+    pub response: MaintenanceWorkerResponse,
+    pub usage: Option<ModelTokenUsage>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -322,6 +369,16 @@ pub trait SemanticMaintenanceWorker: Send + Sync {
         request: MaintenanceWorkerRequest,
     ) -> Result<MaintenanceWorkerResponse>;
 
+    async fn evaluate_with_usage(
+        &self,
+        request: MaintenanceWorkerRequest,
+    ) -> Result<MaintenanceWorkerOutcome> {
+        Ok(MaintenanceWorkerOutcome {
+            response: self.evaluate(request).await?,
+            usage: None,
+        })
+    }
+
     /// Gives workers that support it one bounded chance to repair an invalid Pack partition.
     /// The default preserves the existing command-worker wire and simply retries the request.
     async fn repair_packing_analysis_overlap(
@@ -329,6 +386,16 @@ pub trait SemanticMaintenanceWorker: Send + Sync {
         request: MaintenanceWorkerRequest,
     ) -> Result<MaintenanceWorkerResponse> {
         self.evaluate(request).await
+    }
+
+    async fn repair_packing_analysis_overlap_with_usage(
+        &self,
+        request: MaintenanceWorkerRequest,
+    ) -> Result<MaintenanceWorkerOutcome> {
+        Ok(MaintenanceWorkerOutcome {
+            response: self.repair_packing_analysis_overlap(request).await?,
+            usage: None,
+        })
     }
 }
 

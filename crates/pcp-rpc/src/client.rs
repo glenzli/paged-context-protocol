@@ -31,6 +31,10 @@ use crate::wire::{
 };
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
+const SEMANTIC_SEARCH_RPC_TIMEOUT: Duration = Duration::from_secs(90);
+// Intent matching owns its actual end-to-end budget in Runtime. This is only
+// a transport safety fuse, and must not preempt a configured Router budget.
+const INTENT_MATCH_RPC_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone)]
 pub struct RemotePcpClient {
@@ -116,9 +120,18 @@ impl RemotePcpClient {
 }
 
 async fn request_at(socket_path: &Path, id: u64, operation: RpcOperation) -> Result<RpcValue> {
-    tokio::time::timeout(RPC_TIMEOUT, exchange(socket_path, id, operation))
+    let timeout = rpc_timeout(&operation);
+    tokio::time::timeout(timeout, exchange(socket_path, id, operation))
         .await
         .with_context(|| format!("PCP runtime request timed out at {}", socket_path.display()))?
+}
+
+fn rpc_timeout(operation: &RpcOperation) -> Duration {
+    match operation {
+        RpcOperation::SemanticSearch(_) => SEMANTIC_SEARCH_RPC_TIMEOUT,
+        RpcOperation::MatchIntent { .. } => INTENT_MATCH_RPC_TIMEOUT,
+        _ => RPC_TIMEOUT,
+    }
 }
 
 async fn exchange(socket_path: &Path, id: u64, operation: RpcOperation) -> Result<RpcValue> {
@@ -133,6 +146,36 @@ async fn exchange(socket_path: &Path, id: u64, operation: RpcOperation) -> Resul
     match response.outcome {
         RpcOutcome::Ok(value) => Ok(*value),
         RpcOutcome::Error { message } => anyhow::bail!("PCP runtime: {message}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn query() -> QueryContextRequest {
+        QueryContextRequest {
+            query: "test".to_owned(),
+            scopes: Vec::new(),
+            result_limit: None,
+            context_budget_chars: None,
+        }
+    }
+
+    #[test]
+    fn query_operations_do_not_use_the_generic_rpc_deadline() {
+        assert_eq!(rpc_timeout(&RpcOperation::Describe), RPC_TIMEOUT);
+        assert_eq!(
+            rpc_timeout(&RpcOperation::SemanticSearch(query())),
+            SEMANTIC_SEARCH_RPC_TIMEOUT
+        );
+        assert_eq!(
+            rpc_timeout(&RpcOperation::MatchIntent {
+                request: query(),
+                effort: IntentEffort::High,
+            }),
+            INTENT_MATCH_RPC_TIMEOUT
+        );
     }
 }
 
@@ -415,6 +458,29 @@ impl PcpApi for RemotePcpClient {
         match self.request(RpcOperation::RevisePage(request)).await? {
             RpcValue::WriteResult(value) => Ok(value),
             _ => Err(unexpected("revise_page")),
+        }
+    }
+
+    async fn archive_page(
+        &self,
+        request: pcp_core::ArchivePageRequest,
+    ) -> Result<pcp_core::PageLifecycleTransitionResult> {
+        match self.request(RpcOperation::ArchivePage(request)).await? {
+            RpcValue::LifecycleTransition(value) => Ok(value),
+            _ => Err(unexpected("archive_page")),
+        }
+    }
+
+    async fn restore_archived_page(
+        &self,
+        request: pcp_core::RestoreArchivedPageRequest,
+    ) -> Result<pcp_core::PageLifecycleTransitionResult> {
+        match self
+            .request(RpcOperation::RestoreArchivedPage(request))
+            .await?
+        {
+            RpcValue::LifecycleTransition(value) => Ok(value),
+            _ => Err(unexpected("restore_archived_page")),
         }
     }
 

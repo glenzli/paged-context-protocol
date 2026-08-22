@@ -11,7 +11,7 @@ use chrono::{SecondsFormat, Utc};
 use pcp_core::{AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, ScopeGrant};
 use pcp_store::{
     ActivityHealth, GraphHealth, HealthSnapshot, PackingHealth, PcpStore, RecallHealth,
-    StorageHealth,
+    RuntimeModelUsageHealth, StorageHealth,
 };
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
@@ -322,6 +322,7 @@ fn empty_health_snapshot() -> HealthSnapshot {
         recall: RecallHealth::default(),
         packing: PackingHealth::default(),
         graph: GraphHealth::default(),
+        model_usage: RuntimeModelUsageHealth::default(),
         operations: Vec::new(),
         scopes: Vec::new(),
         timeline: Vec::new(),

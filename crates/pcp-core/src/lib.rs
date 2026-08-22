@@ -10,21 +10,24 @@ pub use access::{
 };
 pub use model::{
     Actor, ActorType, BrowseIndexOrder, Capabilities, GraphEdgeDirection, GraphEdgeKind,
-    GraphSearchEdge, LifecycleStatus, PACKED_PAGE_MEDIA_TYPE, Page, PageMutability, PagePayload,
-    PageRevision, PageSummary, PageValidity, PageValidityHint, Projection, ProvenanceEvent,
-    ReadPage, Relation, Revision, Scope, SearchHit, SearchMode, SearchResult, SearchTermMatch,
-    SourceRef, SourceSpan, ValidityStanding, WriteResult, WriteSummaryResult, WriteValidityResult,
+    GraphSearchEdge, LifecycleStatus, PACKED_PAGE_MEDIA_TYPE, Page, PageLifecycleTransitionResult,
+    PageMutability, PagePayload, PageRevision, PageSummary, PageValidity, PageValidityHint,
+    Projection, ProvenanceEvent, ReadPage, Relation, Revision, Scope, SearchHit, SearchMode,
+    SearchResult, SearchTermMatch, SourceRef, SourceSpan, ValidityStanding, WriteResult,
+    WriteSummaryResult, WriteValidityResult,
 };
 pub use query::{
     ContextDetail, ContextPackEntry, ExpandGraphRequest, GraphSliceEdge, GraphSliceResponse,
-    IntentEffort, IntentMatchAudit, QueryAuditEvent, QueryAuditMethod, QueryContextRequest,
-    QueryContextResponse, QueryRelation, QueryVisibility, RouterTokenUsage,
+    IntentEffort, IntentMatchAudit, ModelTokenUsage, QueryAuditEvent, QueryAuditMethod,
+    QueryContextRequest, QueryContextResponse, QueryRelation, QueryVisibility, RouterTokenUsage,
+    RuntimeUsageEvent,
 };
 pub use request::{
-    AssessPageValidityRequest, CreateScopeRequest, ExtractTopicRequest, IngestPageRequest,
-    InitialRelation, LinkPagesRequest, PackPagesRequest, PageRevisionRef, ReadPagesRequest,
-    RevisePageRequest, SearchFilters, SearchPagesRequest, UnpackPageRequest, WritePageRequest,
-    WriteSummaryRequest, default_search_projections,
+    ArchivePageRequest, AssessPageValidityRequest, CreateScopeRequest, ExtractTopicRequest,
+    IngestPageRequest, InitialRelation, LinkPagesRequest, PackPagesRequest, PageRevisionRef,
+    ReadPagesRequest, RestoreArchivedPageRequest, RevisePageRequest, SearchFilters,
+    SearchPagesRequest, UnpackPageRequest, WritePageRequest, WriteSummaryRequest,
+    default_search_projections,
 };
 pub use retention::{
     CollectRevisionRetentionRequest, PlanRevisionRetentionRequest, ProtectedRevisionSample,

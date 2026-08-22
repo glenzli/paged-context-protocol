@@ -17,16 +17,20 @@ pub use config::{
     WriteTriggeredMaintenanceConfig,
 };
 pub use coordinator::{
-    AnalyzeMaintenancePacksRequest, AnalyzeMaintenanceRelationRequest,
-    AnalyzeMaintenanceSummariesRequest, AnalyzeMaintenanceSummaryRequest,
-    ApplyMaintenancePackRequest, ApplyMaintenanceRelationRequest, ApplyMaintenanceSummaryRequest,
-    MaintenanceCycleReport, MaintenancePackAnalysis, MaintenancePackAnalysisIssue,
-    MaintenancePackCandidate, MaintenancePackInput, MaintenancePackScan, MaintenancePackScanGroup,
+    AnalyzeMaintenanceArchiveRequest, AnalyzeMaintenancePacksRequest,
+    AnalyzeMaintenanceRelationRequest, AnalyzeMaintenanceSummariesRequest,
+    AnalyzeMaintenanceSummaryRequest, AnalyzeMaintenanceTopicRequest, ApplyMaintenancePackRequest,
+    ApplyMaintenanceRelationRequest, ApplyMaintenanceSummaryRequest, ApplyMaintenanceTopicRequest,
+    MaintenanceArchiveAnalysis, MaintenanceArchiveCandidate, MaintenanceArchiveDecision,
+    MaintenanceArchiveScan, MaintenanceArchiveScanPage, MaintenanceCycleReport,
+    MaintenancePackAnalysis, MaintenancePackAnalysisIssue, MaintenancePackCandidate,
+    MaintenancePackInput, MaintenancePackScan, MaintenancePackScanGroup,
     MaintenanceRelationAnalysis, MaintenanceRelationCandidate, MaintenanceRelationInput,
     MaintenanceRelationScan, MaintenanceRelationScanGroup, MaintenanceReviewDecision,
     MaintenanceSummaryAnalysis, MaintenanceSummaryAnalysisIssue, MaintenanceSummaryBatchAnalysis,
     MaintenanceSummaryCandidate, MaintenanceSummaryScan, MaintenanceSummaryScanPage,
-    MaintenanceWorkScan, RuntimeMaintainer,
+    MaintenanceTopicAnalysis, MaintenanceTopicCandidate, MaintenanceTopicInput,
+    MaintenanceTopicScan, MaintenanceTopicScanGroup, MaintenanceWorkScan, RuntimeMaintainer,
 };
 pub use infer_worker::InferRuntimeSemanticWorker;
 pub use ledger::{
@@ -37,8 +41,9 @@ pub use ledger::{
 pub use operator::MaintenanceOperator;
 pub use worker::{
     CommandSemanticWorker, MaintenanceDetailPage, MaintenanceRelation, MaintenanceRoutingPage,
-    MaintenanceSummarySelection, MaintenanceWorkerRequest, MaintenanceWorkerResponse,
-    PackingCandidateGroup, RelationCandidatePage, RetentionMilestone, SemanticMaintenanceWorker,
+    MaintenanceSummarySelection, MaintenanceWorkerOutcome, MaintenanceWorkerRequest,
+    MaintenanceWorkerResponse, PackingCandidateGroup, RelationCandidatePage, RetentionMilestone,
+    SemanticMaintenanceWorker,
 };
 
 pub fn build_semantic_worker(

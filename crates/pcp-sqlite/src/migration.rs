@@ -147,6 +147,44 @@ pub(crate) fn migrate_clean_topic_extractions(
     Ok(())
 }
 
+pub(crate) fn migrate_clean_content_governance(
+    connection: &mut Connection,
+    target_version: &str,
+) -> Result<()> {
+    let transaction = connection
+        .transaction()
+        .context("start PCP content governance schema migration")?;
+    transaction
+        .execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS pcp_page_lifecycle_events (
+                event_id TEXT PRIMARY KEY,
+                page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
+                revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+                previous_status TEXT NOT NULL,
+                next_status TEXT NOT NULL,
+                actor_type TEXT NOT NULL,
+                actor_id TEXT NOT NULL,
+                reason TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS pcp_page_lifecycle_events_page
+                ON pcp_page_lifecycle_events(page_id, created_at DESC);
+            ",
+        )
+        .context("create PCP content governance tables")?;
+    transaction
+        .execute(
+            "UPDATE pcp_metadata SET value = ?1 WHERE key = 'schema_version'",
+            [target_version],
+        )
+        .context("publish PCP content governance schema version")?;
+    transaction
+        .commit()
+        .context("commit PCP content governance schema migration")?;
+    Ok(())
+}
+
 fn clean_legacy_context_exposure(transaction: &Transaction<'_>) -> Result<()> {
     let mut statement = transaction
         .prepare(

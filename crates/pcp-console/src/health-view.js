@@ -46,7 +46,8 @@ export function createHealthView({ request, showError, formatNumber, t }) {
   function panel(label, description, entries) {
     const node = element("section", "aggregate-panel");
     const heading = element("div", "aggregate-panel-heading");
-    heading.append(element("h3", "", label), element("p", "", description));
+    heading.append(element("h3", "", label));
+    if (description) heading.append(element("p", "", description));
     node.append(heading);
     for (const [name, value, tone] of entries) {
       const row = element("div", `aggregate-row${tone ? ` health-${tone}` : ""}`);
@@ -57,7 +58,7 @@ export function createHealthView({ request, showError, formatNumber, t }) {
   }
 
   function renderSignals(data) {
-    const signals = [["info", t("Runtime metrics use operation metadata. They do not evaluate whether returned content is relevant.")]];
+    const signals = [];
     if (!data.activity.calls) {
       signals.push(["info", t("No workload calls were observed in this window. Telemetry begins with the upgraded runtime.")]);
     }
@@ -78,8 +79,9 @@ export function createHealthView({ request, showError, formatNumber, t }) {
     if (data.activity.failed || data.activity.denied) {
       signals.push(["danger", `${formatNumber(data.activity.failed)} ${t("failed and")} ${formatNumber(data.activity.denied)} ${t("denied calls need inspection.")}`]);
     }
-    const nodes = signals.map(([tone, text]) => element("div", `health-signal tone-${tone}`, text));
-    byId("health-signals").replaceChildren(...nodes);
+    const target = byId("health-signals");
+    target.hidden = !signals.length;
+    target.replaceChildren(...signals.map(([tone, text]) => element("div", `health-signal tone-${tone}`, text)));
   }
 
   function renderTimeline(data) {
@@ -156,6 +158,35 @@ export function createHealthView({ request, showError, formatNumber, t }) {
     byId("health-scope-rows").replaceChildren(...rows);
   }
 
+  function modelUsageLabel(source) {
+    if (source === "query") return t("Intent matching");
+    if (source === "manual_maintenance") return t("Manual maintenance");
+    if (source === "automatic_maintenance") return t("Automatic maintenance");
+    return source;
+  }
+
+  function renderModelUsage(data) {
+    const usage = data.modelUsage || {};
+    const totalCalls = usage.modelCalls || 0;
+    const reportedCalls = usage.reportedModelCalls || 0;
+    const totalTokens = usage.usage?.totalTokens || 0;
+    const sources = usage.sources || [];
+    const entries = sources.length
+      ? sources.map((source) => [
+          `${modelUsageLabel(source.source)} · ${source.operation}`,
+          `${formatNumber(source.usage?.totalTokens || 0)} ${t("tokens")} · ${formatNumber(source.reportedModelCalls || 0)}/${formatNumber(source.modelCalls || 0)}`,
+        ])
+      : [[t("No model usage was observed in this window"), "-"]];
+    byId("health-model-usage").replaceChildren(
+      panel(t("Model usage"), "", [
+        [t("Model calls"), formatNumber(totalCalls)],
+        [t("Reported tokens"), formatNumber(totalTokens)],
+        [t("Token reporting"), `${formatNumber(reportedCalls)}/${formatNumber(totalCalls)} · ${percentage(reportedCalls, totalCalls)}`],
+      ]),
+      panel(t("By workflow"), "", entries),
+    );
+  }
+
   function render(data) {
     latest = data;
     const failureCount = data.activity.failed + data.activity.denied;
@@ -166,19 +197,20 @@ export function createHealthView({ request, showError, formatNumber, t }) {
       metric(t("Telemetry coverage"), percentage(data.activity.measuredCalls, data.activity.calls), data.activity.measuredCalls < data.activity.calls ? "warning" : "positive", `${formatNumber(data.activity.measuredCalls)} ${t("measured calls")}`),
     );
     byId("health-flows").replaceChildren(
-      panel(t("Recall activity"), t("Retrieval volume and reach, not result quality."), [
+      panel(t("Recall activity"), "", [
         [t("Searches"), `${formatNumber(data.recall.searches)} · ${hourlyRate(data.recall.searches, data.windowHours)}/h`],
         [t("Zero-result"), percentage(data.recall.zeroResultSearches, data.recall.searches), data.recall.searches && data.recall.zeroResultSearches / data.recall.searches >= 0.35 ? "warning" : "positive"],
         [t("Pages returned"), `${formatNumber(data.recall.returnedPages)} · ${decimalRatio(data.recall.returnedPages, data.recall.searches)}/${t("search")}`],
         [t("Summary / detail reads"), `${formatNumber(data.recall.summaryReads)} / ${formatNumber(data.recall.detailReads)} · ${decimalRatio(data.recall.summaryReads + data.recall.detailReads, data.recall.searches)}/${t("search")}`],
       ]),
-      panel(t("Runtime service"), t("Observed telemetry coverage and response latency."), [
+      panel(t("Runtime service"), "", [
         [t("Principals"), formatNumber(data.activity.principals)],
         [t("Telemetry coverage"), percentage(data.activity.measuredCalls, data.activity.calls)],
         [t("p50 latency"), duration(data.activity.p50DurationMs)],
         [t("p95 latency"), duration(data.activity.p95DurationMs)],
       ]),
     );
+    renderModelUsage(data);
     renderSignals(data);
     renderTimeline(data);
     renderOperations(data);

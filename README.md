@@ -38,6 +38,8 @@
   时间相邻或文本相似不会自动成为领域关系。
 - **Summary、Topic 与 Validity**：Summary 是可选、稀疏、可追溯的派生 Page；跨多个 Page 的长期主题可
   逻辑提取为独立 Topic Page，作为默认检索入口而不删除源证据；Validity 记录内容当前是否仍适用。
+- **内容治理**：低长期价值的 Page 可被人工 archive：它退出默认检索、图扩展和维护库存，但不删除内容、
+  关系、Summary 或 Provenance；只有受权治理工具可按 ID 审阅并 restore。`purge` 尚未进入协议。
 - **Search、Read 与 Projection**：检索先返回可识别候选，再按需读取 Summary、Payload、Sources、
   Relations、History 等投影；模型或 Host 决定查询路径和进入注意力的时机。
 - **Pack 与 Retention**：来源连续、尚未被引用的细粒度 sealed Page 可以无损 pack 为一个 Page；历史
@@ -78,7 +80,7 @@ PCP 仍是开放协议，允许独立实现。“官方”表示该实现由 PCP
 | `pcp-runtime` | Identity 绑定端点、客户端授权注册与全局维护协调器 |
 | `pcp-cli` | 检查、检索、读取、导出与保留操作 |
 | `pcp-mcp` | 基于官方 Rust MCP SDK 的本地 stdio 工具服务器 |
-| `pcp-console` | 独立、只读的本地 Web Inspector |
+| `pcp-console` | 独立本地 Web Inspector 与受审计的本机治理入口 |
 
 ### 已实现
 
@@ -87,7 +89,7 @@ PCP 仍是开放协议，允许独立实现。“官方”表示该实现由 PCP
 - Runtime RPC 的 `semantic_search` 与分预算 `match_intent` Context 查询；结果以结构化 Page/Revision
   条目返回，由调用方决定提示词组装，不内置固定 Context Pack 前缀。
 - 以稳定 `pageId` 为锚点、深度/节点/边数受限且 ACL 逐跳过滤的图切片；不提供全库图导出。
-- Summary、Topic 逻辑提取、Validity、Relation、Provenance、无损 sealed-Page packing 与访问审计。
+- Summary、Topic 逻辑提取、人工 archive/restore、Validity、Relation、Provenance、无损 sealed-Page packing 与访问审计。
 - allowed 访问事件以最多 512 条或 1 秒的有界批次写入，自动提交至少间隔 500 ms；队列过载时
   反压而不静默丢弃。denied/failed 进入 writer 后使用最多 100 ms 的安全合并窗口，并在调用返回前
   持久化。原始 allowed 日志保留 30 天、每批最多清理 5,000 条；安全相关事件不会被该策略自动清理。
@@ -129,7 +131,7 @@ Revision ID。
 
 `PcpTenantApi` 是普通租户边界，只提供 descriptor、授权 Scope、`ingest_page`、Search、Read 与可选
 browse。`PcpApi` 是 Runtime maintainer 和本机管理工具使用的特权超集，包含高级写入、Relation、Summary、
-Topic 逻辑提取、Validity、pack、retention 与审计。Host 可以嵌入 Store，也可以通过 Runtime 使用独立生命周期和服务端注入
+Topic 逻辑提取、archive/restore、Validity、pack、retention 与审计。Host 可以嵌入 Store，也可以通过 Runtime 使用独立生命周期和服务端注入
 身份；两种部署形态不改变租户接口。
 
 ```text
@@ -186,10 +188,12 @@ sh scripts/import-store.sh \
 ### Runtime 维护
 
 维护协调器是可选能力，默认只观察，不应用变更。配置的 semantic worker 只能返回 Summary 内容、
-有序 pack 候选、两个 Page 的 `related_to` 候选、retention milestone、`no_candidate` 或 `defer`，不能直接
-写 Store。Runtime 控制候选、预算、关系类型、basis Revision 和提交，Store 再验证权限、精确当前
-Revision、来源连续性、外部引用与事务原子性。pack 与 Relation 维护默认关闭，必须单独启用；维护器也
-不会自动执行 Revision 回收。官方 Runtime 可使用独立授权的
+有序 pack 候选、明确来源的 Topic 提取提案、两个 Page 的 `related_to` 候选、retention milestone、
+`no_candidate` 或 `defer`，不能直接写 Store。Topic 提取只在 Console 的维护会话中进入审阅：模型必须从
+结构候选中选出 2–8 个明确来源并给出标题和正文，用户勾选后才创建独立 Topic Page；后台自动维护不会自动
+应用它。Runtime 控制候选、预算、关系类型、basis Revision 和提交，Store 再验证权限、精确当前 Revision、
+来源连续性、外部引用与事务原子性。pack 与 Relation 维护默认关闭，必须单独启用；维护器也不会自动执行
+Revision 回收。官方 Runtime 可使用独立授权的
 [Infer Runtime](https://github.com/glenzli/infer-runtime) consumer，也保留本地 command worker。
 
 详见 [`crates/pcp-runtime/README.md`](crates/pcp-runtime/README.md)。
@@ -238,9 +242,9 @@ pack。`write` 与 `admin` 是 Runtime 维护器和本机管理工具的特权�
 
 ### Console
 
-Console 应连接一个独立的 `audit` 端点。其 Store Inspector 只读，提供 Page、Relation、访问时间线、
-Retention 和 Health 视图；控制面动作为批准、拒绝或撤销本机客户端注册，以及在 Console 自己托管 Runtime
-时重启该 Runtime。Health 将存储形态、
+Console 应连接一个独立的 `audit` 端点。其 Store Inspector 默认只读，提供 Page、Relation、访问时间线、
+Retention 和 Health 视图；本机治理入口以显式理由执行 archive/restore，且要求 `manage_lifecycle` 权限。
+控制面动作为批准、拒绝或撤销本机客户端注册，以及在 Console 自己托管 Runtime 时重启该 Runtime。Health 将存储形态、
 活动、召回、pack、关系与运行状况分开呈现，不合成为不透明总分；操作遥测不保存查询文本或 Page 内容。
 查询页通过 Runtime RPC 展示结构化返回值，并将预览作为 Console 的本地展示，而不是另一套检索实现。
 

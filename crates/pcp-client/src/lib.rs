@@ -79,6 +79,7 @@ impl AccessMode {
         }
         if self == Self::Admin {
             permissions.extend([
+                AccessPermission::ManageLifecycle,
                 AccessPermission::ManageScope,
                 AccessPermission::Retract,
                 AccessPermission::Collect,
@@ -296,6 +297,11 @@ pub async fn expand_graph(
 /// administrative tools.
 #[async_trait]
 pub trait PcpApi: PcpTenantApi {
+    /// Runtime-owned, content-free model accounting. This is only implemented
+    /// by local Runtime clients; remote tenants cannot submit telemetry.
+    async fn record_runtime_usage(&self, _event: pcp_core::RuntimeUsageEvent) -> Result<()> {
+        anyhow::bail!("Runtime model usage recording is unavailable on this client")
+    }
     async fn integrity_check(&self) -> Result<String>;
     async fn create_scope(&self, request: CreateScopeRequest) -> Result<()>;
     async fn current_revision_id(&self, page_id: String) -> Result<String>;
@@ -320,6 +326,14 @@ pub trait PcpApi: PcpTenantApi {
     ) -> Result<Vec<RevisionRetentionLease>>;
     async fn write_page(&self, request: WritePageRequest) -> Result<WriteResult>;
     async fn revise_page(&self, request: RevisePageRequest) -> Result<WriteResult>;
+    async fn archive_page(
+        &self,
+        request: pcp_core::ArchivePageRequest,
+    ) -> Result<pcp_core::PageLifecycleTransitionResult>;
+    async fn restore_archived_page(
+        &self,
+        request: pcp_core::RestoreArchivedPageRequest,
+    ) -> Result<pcp_core::PageLifecycleTransitionResult>;
     async fn pack_pages(&self, request: PackPagesRequest) -> Result<WriteResult>;
     async fn unpack_page(&self, request: UnpackPageRequest) -> Result<UnpackPageResult>;
     async fn link_pages(&self, request: LinkPagesRequest) -> Result<Relation>;
@@ -486,6 +500,10 @@ impl PcpTenantApi for EmbeddedPcpClient {
 
 #[async_trait]
 impl PcpApi for EmbeddedPcpClient {
+    async fn record_runtime_usage(&self, event: pcp_core::RuntimeUsageEvent) -> Result<()> {
+        self.store.record_runtime_usage(event).await
+    }
+
     async fn integrity_check(&self) -> Result<String> {
         self.store.integrity_check().await
     }
@@ -551,6 +569,22 @@ impl PcpApi for EmbeddedPcpClient {
 
     async fn revise_page(&self, request: RevisePageRequest) -> Result<WriteResult> {
         self.store.revise_page(&self.access, request).await
+    }
+
+    async fn archive_page(
+        &self,
+        request: pcp_core::ArchivePageRequest,
+    ) -> Result<pcp_core::PageLifecycleTransitionResult> {
+        self.store.archive_page(&self.access, request).await
+    }
+
+    async fn restore_archived_page(
+        &self,
+        request: pcp_core::RestoreArchivedPageRequest,
+    ) -> Result<pcp_core::PageLifecycleTransitionResult> {
+        self.store
+            .restore_archived_page(&self.access, request)
+            .await
     }
 
     async fn pack_pages(&self, request: PackPagesRequest) -> Result<WriteResult> {
@@ -719,5 +753,21 @@ mod tests {
         assert!(!session.allows("project:test", AccessPermission::Audit));
         assert!(!session.allows("project:test", AccessPermission::Write));
         assert!(!session.allows("project:test", AccessPermission::Collect));
+    }
+
+    #[test]
+    fn admin_mode_can_manage_page_lifecycle() {
+        let session = AccessMode::Admin.session(
+            AccessPrincipal {
+                principal_id: "operator:admin-test".to_owned(),
+                principal_type: AccessPrincipalType::Service,
+                display_name: None,
+            },
+            "session:admin-test",
+            vec!["project:test".to_owned()],
+            false,
+        );
+
+        assert!(session.allows("project:test", AccessPermission::ManageLifecycle));
     }
 }

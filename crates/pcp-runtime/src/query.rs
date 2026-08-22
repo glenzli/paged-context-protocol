@@ -8,7 +8,7 @@ use pcp_core::{
     AccessDecision, ContextDetail, ContextPackEntry, GraphEdgeDirection, GraphEdgeKind,
     IntentEffort, Projection, QueryAuditEvent, QueryAuditMethod, QueryContextRequest,
     QueryContextResponse, QueryRelation, QueryVisibility, ReadPage, ReadPagesRequest,
-    SearchFilters, SearchHit, SearchMode, SearchPagesRequest, SearchTermMatch,
+    RuntimeUsageEvent, SearchFilters, SearchHit, SearchMode, SearchPagesRequest, SearchTermMatch,
 };
 use pcp_store::PcpStore;
 use serde_json::Value;
@@ -159,10 +159,40 @@ async fn execute(
         started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
         &result,
     );
-    if let Err(error) = audit_store.record_runtime_query_audit(event).await {
+    if let Err(error) = audit_store.record_runtime_query_audit(event.clone()).await {
         // Observability must never turn an otherwise usable context pack into
         // a failure. The Runtime still reports this local persistence problem.
         eprintln!("PCP query audit write failed: {error:#}");
+    }
+    let semantic_model_calls = result
+        .as_ref()
+        .ok()
+        .and_then(|response| response.semantic_model_calls)
+        .unwrap_or_default();
+    let mut usage = event.router_usage.clone().unwrap_or_default();
+    usage.unreported_responses = usage
+        .unreported_responses
+        .saturating_add(semantic_model_calls);
+    if usage.response_count() > 0 {
+        let usage_event = RuntimeUsageEvent {
+            event_id: format!("ru_{}", Uuid::new_v4().simple()),
+            occurred_at: event.occurred_at.clone(),
+            principal: event.principal.clone(),
+            session_id: event.session_id.clone(),
+            source: "query".to_owned(),
+            operation: match method {
+                QueryMethod::SemanticSearch => "semantic_search",
+                QueryMethod::MatchIntent => "match_intent",
+            }
+            .to_owned(),
+            scopes: event.scopes.clone(),
+            duration_ms: event.duration_ms,
+            usage: Some(usage),
+            failure_kind: event.failure_kind.clone(),
+        };
+        if let Err(error) = audit_store.record_runtime_usage(usage_event).await {
+            eprintln!("PCP Runtime model usage write failed: {error:#}");
+        }
     }
     result
 }
@@ -186,7 +216,13 @@ async fn execute_inner(
         .context_budget_chars
         .unwrap_or(DEFAULT_PACK_BUDGET_CHARS)
         .clamp(MIN_PACK_BUDGET_CHARS, MAX_PACK_BUDGET_CHARS);
-    let (anchors, semantic_indexed_count, semantic_embedded_count, intent_audit) = match method {
+    let (
+        anchors,
+        semantic_indexed_count,
+        semantic_embedded_count,
+        semantic_model_calls,
+        intent_audit,
+    ) = match method {
         QueryMethod::SemanticSearch => {
             let provider = semantic_search.context(unavailable_reason(&method))?;
             let candidate_limit = semantic_candidate_limit(top_k);
@@ -211,6 +247,7 @@ async fn execute_inner(
                 anchors,
                 Some(result.indexed_count),
                 Some(result.embedded_count),
+                Some(result.model_calls),
                 None,
             )
         }
@@ -247,6 +284,7 @@ async fn execute_inner(
                 anchors,
                 Some(result.indexed_count),
                 Some(result.embedded_count),
+                Some(result.semantic_model_calls),
                 Some(result.audit),
             )
         }
@@ -283,6 +321,7 @@ async fn execute_inner(
             .count(),
         semantic_indexed_count,
         semantic_embedded_count,
+        semantic_model_calls,
         intent_match: intent_audit,
         entries,
     })

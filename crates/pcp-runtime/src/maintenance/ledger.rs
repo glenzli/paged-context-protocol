@@ -76,6 +76,11 @@ pub struct MaintenanceRelationReviewProposal {
     pub risk: String,
     #[serde(default)]
     pub review_reason: String,
+    /// Grounded model explanation of why the two revision-bound Pages should
+    /// be reviewed as a possible relation. This remains proposal evidence and
+    /// is not itself asserted as a Page relation.
+    #[serde(default)]
+    pub relation_reason: String,
     pub status: MaintenanceRelationReviewStatus,
 }
 
@@ -231,6 +236,7 @@ impl MaintenanceLedger {
         &mut self,
         namespace: String,
         pages: [MaintenanceRelationReviewPage; 2],
+        relation_reason: String,
     ) -> String {
         let candidate_id = relation_review_id(&pages);
         self.relation_reviews
@@ -243,6 +249,7 @@ impl MaintenanceLedger {
                 proposed_at: chrono::Utc::now().to_rfc3339(),
                 risk: "manual_review".to_owned(),
                 review_reason: "The selected Pages are not a continuous Pack boundary with a shared protected identifier.".to_owned(),
+                relation_reason,
                 status: MaintenanceRelationReviewStatus::Pending,
             });
         candidate_id

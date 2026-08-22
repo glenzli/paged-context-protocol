@@ -174,11 +174,13 @@ fn relation_is_opt_in_and_selection_wire_omits_commit_authority() {
     assert_eq!(
         serde_json::to_value(MaintenanceWorkerResponse::Relate {
             page_ids: ["pg_1".to_owned(), "pg_2".to_owned()],
+            reason: "Both Pages establish the same bounded protocol decision.".to_owned(),
         })
         .expect("serialize relation decision"),
         serde_json::json!({
             "decision": "relate",
-            "page_ids": ["pg_1", "pg_2"]
+            "page_ids": ["pg_1", "pg_2"],
+            "reason": "Both Pages establish the same bounded protocol decision."
         })
     );
 }
@@ -584,6 +586,7 @@ async fn manual_relation_review_includes_adjacent_packed_conversation_pages() {
         .expect("pack second OET episode");
     let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
         page_ids: [first_pack.page_id.clone(), second_pack.page_id.clone()],
+        reason: "The two Pack Pages describe consecutive evidence for one OET topic.".to_owned(),
     }]));
     let mut config = fixture.config();
     config.summary.enabled = false;
@@ -2081,6 +2084,7 @@ async fn relation_runs_after_packing_against_the_refreshed_inventory() {
         },
         MaintenanceWorkerResponse::Relate {
             page_ids: [document_a.page_id, document_b.page_id],
+            reason: "The two documents establish the same durable relation subject.".to_owned(),
         },
     ]));
     let mut config = fixture.config();
@@ -2123,6 +2127,7 @@ async fn relation_maintains_a_source_page_without_a_pack_window() {
         .expect("write durable relation Page");
     let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
         page_ids: [source_page.page_id.clone(), document.page_id.clone()],
+        reason: "The source event and document concern the same stable evidence chain.".to_owned(),
     }]));
     let mut config = fixture.config();
     config.summary.enabled = false;
@@ -2181,6 +2186,7 @@ async fn relation_maintains_source_pages_after_packing_declines_their_window() {
         MaintenanceWorkerResponse::NoCandidate,
         MaintenanceWorkerResponse::Relate {
             page_ids: [first.page_id.clone(), document.page_id.clone()],
+            reason: "The selected Pages establish one stable relation subject.".to_owned(),
         },
     ]));
     let mut config = fixture.config();
@@ -2227,6 +2233,7 @@ async fn maintainer_links_only_an_offered_pair_with_runtime_owned_relation_seman
         .expect("write second relation candidate");
     let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
         page_ids: [second.page_id.clone(), first.page_id.clone()],
+        reason: "The selected Pages establish one stable relation subject.".to_owned(),
     }]));
     let mut config = fixture.config();
     config.summary.enabled = false;
@@ -2295,6 +2302,7 @@ async fn reviewed_relation_is_target_bound_and_applies_only_once() {
         .expect("write reviewed relation target");
     let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
         page_ids: [first.page_id.clone(), second.page_id.clone()],
+        reason: "The selected Pages establish one stable relation subject.".to_owned(),
     }]));
     let mut config = fixture.config();
     config.summary.enabled = false;
@@ -2319,6 +2327,10 @@ async fn reviewed_relation_is_target_bound_and_applies_only_once() {
         .await
         .expect("analyze relation review");
     let candidate = analysis.candidate.expect("relation proposal");
+    assert_eq!(
+        candidate.relation_reason,
+        "The selected Pages establish one stable relation subject."
+    );
     assert!(
         candidate
             .pages
@@ -2372,6 +2384,7 @@ async fn observe_relation_records_a_proposal_without_linking_pages() {
         .expect("write second observed relation candidate");
     let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
         page_ids: [first.page_id.clone(), second.page_id.clone()],
+        reason: "The selected Pages establish one stable relation subject.".to_owned(),
     }]));
     let mut config = fixture.config();
     config.mode = MaintenanceMode::Observe;
@@ -2416,6 +2429,7 @@ async fn scheduled_relation_waits_for_review_before_it_is_asserted() {
         .expect("write second source event");
     let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
         page_ids: [first.page_id.clone(), second.page_id.clone()],
+        reason: "The selected Pages establish one stable relation subject.".to_owned(),
     }]));
     let mut config = fixture.config();
     config.summary.enabled = false;
@@ -2477,10 +2491,18 @@ async fn scheduled_relation_waits_for_review_before_it_is_asserted() {
         std::collections::BTreeSet::from([first.page_id.as_str(), second.page_id.as_str()])
     );
     assert!(!reviews[0].pages[0].preview.is_empty());
+    assert_eq!(
+        reviews[0].relation_reason,
+        "The selected Pages establish one stable relation subject."
+    );
     let restored_ledger = super::ledger::MaintenanceLedger::load(&state_path)
         .await
         .expect("reload persisted review queue");
     assert_eq!(restored_ledger.relation_reviews().len(), 1);
+    assert_eq!(
+        restored_ledger.relation_reviews()[0].relation_reason,
+        "The selected Pages establish one stable relation subject."
+    );
     let pages = fixture
         .client
         .read_pages(ReadPagesRequest {
@@ -2559,6 +2581,7 @@ async fn scheduled_low_risk_pack_boundary_relation_is_asserted_automatically() {
         .expect("pack second OET boundary");
     let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
         page_ids: [first_pack.page_id.clone(), second_pack.page_id.clone()],
+        reason: "The two Pack Pages describe consecutive evidence for one OET topic.".to_owned(),
     }]));
     let mut config = fixture.config();
     config.summary.enabled = false;
@@ -2763,6 +2786,7 @@ async fn relation_selection_excludes_pairs_already_connected_by_a_path() {
     }
     let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
         page_ids: [first.page_id.clone(), third.page_id.clone()],
+        reason: "The selected Pages establish one stable relation subject.".to_owned(),
     }]));
     let mut config = fixture.config();
     config.summary.enabled = false;
@@ -2841,6 +2865,7 @@ async fn maintainer_rejects_a_relation_page_outside_the_offered_window() {
         .expect("write second offered Page");
     let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
         page_ids: [second.page_id, "pg_not_offered".to_owned()],
+        reason: "This invalid pair is used to verify candidate validation.".to_owned(),
     }]));
     let mut config = fixture.config();
     config.summary.enabled = false;

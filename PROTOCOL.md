@@ -162,6 +162,18 @@ Relation 展开中作为证据返回；只是默认 `semantic_search` 和 `match
 代表这些源 Page。Topic 更新必须发布新 Revision；只有其当前 Revision 仍列出同一源 Revision 时才继续
 压住对应默认候选。
 
+### 2.1 内容治理：archive 与 restore
+
+`archive_page(page_id, expected_revision_id, reason)` 是受 `manage_lifecycle` 权限保护的人工治理操作。它以
+CAS 将 Page 与当前 Revision 从 `active` 同步迁移为 `archived`，并记录操作者、理由、旧/新状态和时间。归档
+**不删除** Payload、Revision、Relation、Summary 或 Provenance；精确 `read_pages` 仍可用于审阅，治理接口可以
+显式以 `lifecycleStatus=archived` 列表查看。默认 Search、语义/意图召回、图扩展候选和维护库存只消费 active
+Page，因此不会通过 archive 再次把内容带入正常上下文。
+
+`restore_archived_page(page_id, expected_revision_id, reason)` 只能将当前 archived Page 恢复为 active，并以相同
+的 CAS 和审计约束执行。archive 不是 Topic 提取：Topic 为一个主题建立前置 Page 并保留来源作为高相关证据；
+archive 则没有新的检索入口。`purge` 是永久删除，需独立的恢复、保留与确认合同，尚未包含在 v0.8。
+
 典型召回路径是：
 
 ```text
@@ -249,6 +261,8 @@ Runtime maintainer 与本机管理工具可以使用完整 Core 接口：
 - `revise_page(page_id, expected_revision_id, content, based_on_revision_ids?)`
 - `pack_pages(pages[{page_id, revision_id}], idempotency_key?)`
 - `extract_topic(source_pages[{page_id, revision_id}], title, content)`
+- `archive_page(page_id, expected_revision_id, reason)`
+- `restore_archived_page(page_id, expected_revision_id, reason)`
 - `write_summary(target_page_id, target_revision_id, content)`
 - `assess_validity(target_page_id, target_revision_id, standing, evidence_revision_ids)`
 - `relate_pages(from_page_id, relation_type, to_page_id, basis_revision_ids?)`

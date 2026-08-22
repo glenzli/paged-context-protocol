@@ -17,6 +17,7 @@ pub enum AccessPermission {
     Link,
     Assess,
     Retract,
+    ManageLifecycle,
     ManageScope,
     Audit,
     Observe,
@@ -25,7 +26,7 @@ pub enum AccessPermission {
 }
 
 impl AccessPermission {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::ListScopes,
         Self::Search,
         Self::ReadSummary,
@@ -37,6 +38,7 @@ impl AccessPermission {
         Self::Link,
         Self::Assess,
         Self::Retract,
+        Self::ManageLifecycle,
         Self::ManageScope,
         Self::Audit,
         Self::Observe,
@@ -57,6 +59,7 @@ impl AccessPermission {
             Self::Link => "link",
             Self::Assess => "assess",
             Self::Retract => "retract",
+            Self::ManageLifecycle => "manage_lifecycle",
             Self::ManageScope => "manage_scope",
             Self::Audit => "audit",
             Self::Observe => "observe",

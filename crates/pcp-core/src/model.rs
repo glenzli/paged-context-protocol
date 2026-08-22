@@ -485,6 +485,18 @@ pub struct WriteResult {
     pub created: bool,
 }
 
+/// Result of a reversible content-governance lifecycle transition.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageLifecycleTransitionResult {
+    pub page_id: String,
+    pub revision_id: String,
+    pub previous_lifecycle_status: LifecycleStatus,
+    pub lifecycle_status: LifecycleStatus,
+    pub operation: String,
+    pub changed_at: String,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WriteSummaryResult {
