@@ -1,5 +1,5 @@
-import { createPageInspector } from "/page-inspector.js?v=20260816.3";
-import { describePagePayload, pagePayloadPreviewText, renderPagePreview } from "/page-content.js?v=20260816.3";
+import { createPageInspector } from "/page-inspector.js?v=20260822.1";
+import { describePagePayload, pagePayloadPreviewText, renderPagePreview } from "/page-content.js?v=20260822.1";
 import { createHealthView } from "/health-view.js?v=20260816.3";
 import { createRetentionView } from "/retention-view.js?v=20260818.1";
 import { createQueryView } from "/query-view.js?v=20260819.2";
@@ -63,6 +63,15 @@ const ZH_MESSAGES = {
   "Pending relation review": "待审关联",
   "Uncertain relation": "不确定关联",
   "Manual approval required": "需要人工批准",
+  "Relation comparison": "关联内容对照",
+  "Why this relation is worth review": "为什么值得建立这条关联",
+  "No relation rationale was supplied.": "未提供关联判断依据。",
+  "A relation comparison requires exactly two Pages.": "关联对照必须恰好包含两个页面。",
+  "Left Page": "左侧页面",
+  "Right Page": "右侧页面",
+  "Compare Pages": "对照页面",
+  "Expand all entries": "展开全部内容",
+  "Collapse all entries": "收起全部内容",
   "Expand full Page": "展开完整页面",
   "Loading full Page…": "正在加载完整页面…",
   "Open in inspector": "在检查器中打开",
@@ -2081,6 +2090,19 @@ function revisionBoundPageExpansion(page) {
   return fullPage;
 }
 
+function relationComparisonButton(proposal, className = "subtle-button") {
+  const compare = element("button", className, t("Compare Pages"));
+  compare.type = "button";
+  compare.addEventListener("click", () => {
+    pageInspector.compareRelation({
+      pages: proposal.pages,
+      relationReason: proposal.relationReason,
+      reviewReason: proposal.reviewReason,
+    }).catch(() => {});
+  });
+  return compare;
+}
+
 function relationReviewCard(proposal) {
   const card = element("article", "maintenance-relation-review-card");
   const heading = element("div", "maintenance-relation-review-card-heading");
@@ -2112,8 +2134,14 @@ function relationReviewCard(proposal) {
       element("span", "maintenance-relation-review-preview", compactRelationReviewPreview(page.preview)),
       element("span", "mono muted", page.revisionId),
     );
-    pageCard.addEventListener("click", () => pageInspector.open(page.pageId));
-    pageColumn.append(pageCard, revisionBoundPageExpansion(page));
+    pageCard.addEventListener("click", () => {
+      pageInspector.compareRelation({
+        pages: proposal.pages,
+        relationReason: proposal.relationReason,
+        reviewReason: proposal.reviewReason,
+      }).catch(() => {});
+    });
+    pageColumn.append(pageCard);
     pages.append(pageColumn);
     if (index === 0) pages.append(element("span", "maintenance-relation-review-link", "↔"));
   });
@@ -2125,7 +2153,7 @@ function relationReviewCard(proposal) {
   approve.addEventListener("click", () => resolveRelationReview(proposal.candidateId, "approve"));
   reject.addEventListener("click", () => resolveRelationReview(proposal.candidateId, "reject"));
   suppress.addEventListener("click", () => resolveRelationReview(proposal.candidateId, "suppress"));
-  actions.append(approve, reject, suppress);
+  actions.append(relationComparisonButton(proposal), approve, reject, suppress);
   card.append(heading, ...annotations, pages, actions);
   return card;
 }
@@ -2347,7 +2375,6 @@ function maintenanceCandidateRow(candidate) {
       item.append(
         element("span", "mono muted", page.pageId),
         element("span", "maintenance-preview", compactPreview(page.preview || t("No preview"))),
-        revisionBoundPageExpansion(page),
       );
       inputs.append(item);
     }
@@ -2360,6 +2387,7 @@ function maintenanceCandidateRow(candidate) {
       );
       content.append(evidence);
     }
+    content.append(relationComparisonButton(candidate, "subtle-button maintenance-relation-compare"));
   } else {
     const mergesPacks = candidate.pages.length === 2
       && candidate.pages.every((page) => page.mediaType === "application/vnd.pcp.packed-page+json");

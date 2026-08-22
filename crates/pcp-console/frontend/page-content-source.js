@@ -70,7 +70,7 @@ export function renderPagePreview(target, source, mediaType = "text/markdown", o
   if (presentation.type === "external_signal") {
     renderExternalSignal(target, presentation);
   } else if (presentation.type === "packed_page") {
-    renderPackedPage(target, presentation);
+    renderPackedPage(target, presentation, options);
   } else if (presentation.type === "image_asset") {
     renderImageAsset(target, presentation, options);
   } else {
@@ -98,12 +98,14 @@ function renderExternalSignal(target, signal) {
   ]);
 }
 
-function renderPackedPage(target, packedPage) {
+function renderPackedPage(target, packedPage, options = {}) {
   const heading = element("div", "structured-heading");
-  heading.append(
+  const title = element("div", "structured-heading-title");
+  title.append(
     element("strong", "", "Conversation pack"),
     element("span", "muted", `${packedPage.entries.length} entries`),
   );
+  heading.append(title);
   target.append(heading);
   const entries = element("div", "packed-entries");
   for (const [index, entry] of packedPage.entries.entries()) {
@@ -120,8 +122,27 @@ function renderPackedPage(target, packedPage) {
     item.append(header, body);
     entries.append(item);
   }
-  if (packedPage.entries.length) target.append(entries);
-  else target.append(element("div", "empty", "No readable entries"));
+  if (packedPage.entries.length) {
+    const controls = options.packedEntryControls;
+    if (controls && packedPage.entries.length > 1) {
+      const toggle = element("button", "packed-entry-toggle-all");
+      toggle.type = "button";
+      const sync = () => {
+        const allOpen = [...entries.querySelectorAll("details")].every((item) => item.open);
+        toggle.textContent = allOpen ? controls.collapseAll : controls.expandAll;
+        toggle.setAttribute("aria-expanded", String(allOpen));
+      };
+      toggle.addEventListener("click", () => {
+        const allOpen = [...entries.querySelectorAll("details")].every((item) => item.open);
+        for (const item of entries.querySelectorAll("details")) item.open = !allOpen;
+        sync();
+      });
+      entries.addEventListener("toggle", sync, true);
+      heading.append(toggle);
+      sync();
+    }
+    target.append(entries);
+  } else target.append(element("div", "empty", "No readable entries"));
 }
 
 function compactPreview(value, limit) {

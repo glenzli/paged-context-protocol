@@ -1,5 +1,5 @@
 import { createTopologyMap, relationFamily } from "./page-graph.js";
-import { pagePayloadPreviewText, renderPageContent, renderPagePreview } from "./page-content.js";
+import { pagePayloadPreviewText, renderPageContent, renderPagePreview } from "./page-content.js?v=20260822.1";
 
 export function createPageInspector({ request, showError, formatTime, t = (value) => value }) {
   const dialog = document.getElementById("page-dialog");
@@ -10,6 +10,11 @@ export function createPageInspector({ request, showError, formatTime, t = (value
   const graphPane = document.getElementById("detail-graph");
   const historyPane = document.getElementById("detail-history");
   const rawPane = document.getElementById("detail-raw");
+  const relationComparisonDialog = document.getElementById("relation-comparison-dialog");
+  const relationComparisonSubtitle = document.getElementById("relation-comparison-subtitle");
+  const relationComparisonReason = document.getElementById("relation-comparison-reason");
+  const relationComparisonReviewNote = document.getElementById("relation-comparison-review-note");
+  const relationComparisonPages = document.getElementById("relation-comparison-pages");
   const detailCache = new Map();
   const graphCache = new Map();
   const historyCache = new Map();
@@ -69,7 +74,13 @@ export function createPageInspector({ request, showError, formatTime, t = (value
 
   function previewBlock(content, mediaType, options = {}) {
     const block = element("div", "page-content");
-    renderPagePreview(block, content, mediaType, options);
+    renderPagePreview(block, content, mediaType, {
+      ...options,
+      packedEntryControls: {
+        expandAll: t("Expand all entries"),
+        collapseAll: t("Collapse all entries"),
+      },
+    });
     return block;
   }
 
@@ -452,6 +463,58 @@ export function createPageInspector({ request, showError, formatTime, t = (value
     return Promise.resolve();
   }
 
+  function comparisonPage(page, position) {
+    const section = element("section", "relation-comparison-page");
+    const heading = element("header", "relation-comparison-page-heading");
+    heading.append(
+      element("span", "relation-comparison-page-position", t(position)),
+      element("strong", "mono", page.pageId),
+      element("span", "mono muted", page.revisionId),
+    );
+    const body = element("div", "relation-comparison-page-body");
+    body.append(element("div", "loading", t("Loading full Page…")));
+    section.append(heading, body);
+    return { section, body };
+  }
+
+  async function loadComparedRevision(page, target) {
+    try {
+      const detail = await request(`/api/pages/${encodeURIComponent(page.revisionId)}`);
+      if (detail.revision?.revisionId !== page.revisionId) {
+        throw new Error(t("The reviewed revision is no longer available."));
+      }
+      const payload = detail.revision?.payload;
+      target.replaceChildren(previewBlock(
+        payload?.content || t("No content projection"),
+        payload?.mediaType || "text/plain",
+      ));
+    } catch (error) {
+      target.replaceChildren(element("div", "empty", error.message || String(error)));
+      showError(error);
+    }
+  }
+
+  function compareRelation({ pages, relationReason, reviewReason }) {
+    if (!Array.isArray(pages) || pages.length !== 2) {
+      const error = new Error(t("A relation comparison requires exactly two Pages."));
+      showError(error);
+      return Promise.resolve();
+    }
+    relationComparisonSubtitle.textContent = `${t("Explicit relation")} · related_to`;
+    relationComparisonReason.textContent = relationReason || t("No relation rationale was supplied.");
+    relationComparisonReviewNote.hidden = !reviewReason;
+    relationComparisonReviewNote.textContent = reviewReason || "";
+    const left = comparisonPage(pages[0], "Left Page");
+    const right = comparisonPage(pages[1], "Right Page");
+    relationComparisonPages.replaceChildren(left.section, right.section);
+    if (!relationComparisonDialog.open) relationComparisonDialog.showModal();
+    relationComparisonDialog.scrollTop = 0;
+    return Promise.all([
+      loadComparedRevision(pages[0], left.body),
+      loadComparedRevision(pages[1], right.body),
+    ]);
+  }
+
   document.querySelectorAll(".detail-tab").forEach((tab) => {
     tab.addEventListener("click", () => activate(tab.dataset.detailView));
   });
@@ -460,6 +523,9 @@ export function createPageInspector({ request, showError, formatTime, t = (value
     navigationHistory.length = 0;
     dialog.close();
   });
+  document.getElementById("relation-comparison-close").addEventListener("click", () => {
+    relationComparisonDialog.close();
+  });
 
-  return { open };
+  return { open, compareRelation };
 }

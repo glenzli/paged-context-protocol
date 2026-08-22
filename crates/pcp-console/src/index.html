@@ -455,6 +455,19 @@
     <div id="detail-raw" class="page-detail detail-view"></div>
   </dialog>
 
+  <dialog id="relation-comparison-dialog" class="relation-comparison-dialog">
+    <header class="dialog-header">
+      <div><strong data-i18n="Relation comparison">Relation comparison</strong><div id="relation-comparison-subtitle" class="muted"></div></div>
+      <button id="relation-comparison-close" type="button" data-i18n="Close">Close</button>
+    </header>
+    <section class="relation-comparison-rationale">
+      <span class="relation-comparison-rationale-label" data-i18n="Why this relation is worth review">Why this relation is worth review</span>
+      <p id="relation-comparison-reason"></p>
+      <p id="relation-comparison-review-note" class="muted" hidden></p>
+    </section>
+    <div id="relation-comparison-pages" class="relation-comparison-pages"></div>
+  </dialog>
+
   <dialog id="enrollment-dialog" class="enrollment-dialog">
     <header class="dialog-header">
       <div><strong data-i18n="Client access">Client access</strong><div class="muted" data-i18n="Applications requesting access to this PCP Store">Applications requesting access to this PCP Store</div></div>
