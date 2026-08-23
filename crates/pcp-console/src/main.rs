@@ -347,6 +347,10 @@ fn router(state: AppState) -> Router {
             get(maintenance_relation_decisions_js),
         )
         .route(
+            "/maintenance-review-session.js",
+            get(maintenance_review_session_js),
+        )
+        .route(
             "/maintenance-convergence.js",
             get(maintenance_convergence_js),
         )
@@ -537,6 +541,13 @@ async fn maintenance_relation_decisions_js() -> Response {
     static_asset(
         "text/javascript; charset=utf-8",
         include_str!("maintenance-relation-decisions.js"),
+    )
+}
+
+async fn maintenance_review_session_js() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("maintenance-review-session.js"),
     )
 }
 

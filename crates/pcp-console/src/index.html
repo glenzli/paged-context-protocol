@@ -176,6 +176,7 @@
           <div><div class="maintenance-automation-title"><h3 data-i18n="Automatic maintenance">Automatic maintenance</h3><span id="maintenance-automation-state" class="status-pill"></span></div><p data-i18n="Background maintenance and Run now use the same controller and persistent review inbox.">Background maintenance and Run now use the same controller and persistent review inbox.</p></div>
         </div>
         <div id="maintenance-automation-metrics" class="metrics maintenance-automation-metrics"></div>
+        <div id="maintenance-automation-chart" class="maintenance-automation-chart" aria-label="Maintenance workload chart"></div>
         <section id="maintenance-automation-progress" class="maintenance-automation-progress" hidden>
           <h4 id="maintenance-automation-progress-title"></h4>
           <div id="maintenance-automation-progress-metrics" class="metrics maintenance-automation-metrics"></div>
@@ -185,10 +186,19 @@
       </section>
       <section id="maintenance-relation-review" class="maintenance-relation-review" hidden>
         <div class="section-heading section-heading-copy">
-          <div><h3 data-i18n="Maintenance review inbox">Maintenance review inbox</h3><p data-i18n="Only unresolved decisions appear here. Nothing in this inbox affects retrieval or lifecycle state before acceptance.">Only unresolved decisions appear here. Nothing in this inbox affects retrieval or lifecycle state before acceptance.</p></div>
+          <div><h3 data-i18n="Maintenance review inbox">Maintenance review inbox</h3><p data-i18n="Review decisions stay reversible in this session. Nothing changes in the Store until you finish and apply the review.">Review decisions stay reversible in this session. Nothing changes in the Store until you finish and apply the review.</p></div>
           <span id="maintenance-relation-review-count" class="muted"></span>
         </div>
+        <div id="maintenance-review-progress" class="maintenance-review-progress" hidden></div>
         <div id="maintenance-relation-review-cards" class="maintenance-relation-review-cards"></div>
+        <div id="maintenance-review-settled" class="maintenance-review-settled" aria-live="polite"></div>
+        <footer id="maintenance-review-session-actions" class="maintenance-review-session-actions" hidden>
+          <span id="maintenance-review-session-summary" class="muted" data-i18n="No decision has been written yet.">No decision has been written yet.</span>
+          <div>
+            <button id="maintenance-review-undo-all" class="compact-button secondary-button" type="button" data-i18n="Undo all">Undo all</button>
+            <button id="maintenance-review-commit" class="primary-button" type="button" data-i18n="Finish review and apply">Finish review and apply</button>
+          </div>
+        </footer>
       </section>
       <section id="maintenance-idle" class="maintenance-empty-state">
         <div>
@@ -248,17 +258,12 @@
           </div>
           <div id="maintenance-proposals" hidden>
             <div class="section-heading section-heading-copy">
-              <label class="maintenance-select-all-label"><input id="maintenance-select-all" type="checkbox" aria-label="Select all candidates" data-i18n-aria-label="Select all candidates" disabled><span data-i18n="Proposals">Proposals</span></label>
+              <h4 data-i18n="Proposals">Proposals</h4>
               <span id="maintenance-selection-status" class="muted"></span>
             </div>
             <div id="maintenance-summary-cards" class="maintenance-summary-cards" hidden></div>
             <div id="maintenance-relation-cards" class="maintenance-relation-cards" hidden></div>
-            <div id="maintenance-table-wrap" class="table-wrap">
-              <table class="maintenance-table">
-                <thead><tr><th class="maintenance-select"></th><th data-i18n="Source">Source</th><th data-i18n="Change">Change</th><th data-i18n="Inputs">Inputs</th><th data-i18n="Content">Content</th></tr></thead>
-                <tbody id="maintenance-rows"></tbody>
-              </table>
-            </div>
+            <div id="maintenance-generic-cards" class="maintenance-generic-cards" hidden></div>
           </div>
         </section>
       </section>
@@ -309,7 +314,7 @@
           </details>
           <section id="archive-proposals" hidden>
             <div class="section-heading section-heading-copy">
-              <label class="maintenance-select-all-label"><input id="archive-select-all" type="checkbox" aria-label="Select all archive candidates" data-i18n-aria-label="Select all archive candidates"><span data-i18n="Archive proposals">Archive proposals</span></label>
+              <h4 data-i18n="Archive proposals">Archive proposals</h4>
               <span id="archive-selection-status" class="muted"></span>
             </div>
             <div id="archive-cards" class="archive-cards"></div>

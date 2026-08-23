@@ -282,8 +282,7 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 .maintenance-archive-steps { margin-top: 0; }
 .archive-cards { display: grid; gap: 8px; }
 .archive-candidate-card { display: grid; gap: 9px; padding: 13px; border: 1px solid var(--line); border-radius: var(--card-radius); background: var(--surface); }
-.archive-candidate-heading { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 9px; }
-.archive-candidate-heading input { width: 16px; min-height: 16px; margin: 2px 0 0; padding: 0; }
+.archive-candidate-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 9px; }
 .archive-candidate-copy { display: grid; min-width: 0; gap: 3px; }
 .archive-candidate-copy strong { font-size: 13px; }
 .archive-candidate-copy .muted { font-size: 11px; }
@@ -293,10 +292,11 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 .archive-candidate-signals { display: flex; flex-wrap: wrap; gap: 5px; }
 .archive-candidate-signals .status-pill { min-height: 19px; padding: 1px 6px; font-size: 10px; }
 #archive-proposals { margin-top: 10px; }
-#archive-proposals.is-live .maintenance-select-all-label::before { content: ""; width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+#archive-proposals > .section-heading h4 { display: inline-flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; }
+#archive-proposals.is-live > .section-heading h4::before { content: ""; width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .maintenance-archive-library { margin-top: 18px; border-top: 1px solid var(--line); }
-.maintenance-archive-library > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 0; cursor: pointer; color: var(--text); font-size: 13px; font-weight: 680; }
-.maintenance-archive-library > summary::marker { color: var(--muted); }
+.maintenance-archive-library > summary { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 13px 0; cursor: pointer; color: var(--text); font-size: 13px; font-weight: 680; list-style: none; }
+.maintenance-archive-library > summary::-webkit-details-marker { display: none; }
 .maintenance-archive-library[open] > summary { border-bottom: 1px solid var(--line); }
 .maintenance-archive-library .governance-controls { margin-top: 13px; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
@@ -333,14 +333,47 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 .maintenance-automation-progress { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .maintenance-automation-progress h4 { margin: 0; color: var(--text); font-size: 12px; }
 .maintenance-automation-progress .maintenance-automation-metrics { margin-top: 8px; }
+.maintenance-automation-chart { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(260px, .75fr); gap: 10px; margin-top: 10px; }
+.maintenance-chart-card { min-width: 0; padding: 12px 13px; border: 1px solid var(--line); border-radius: var(--card-radius); background: var(--surface-subtle); }
+.maintenance-chart-title { color: var(--text); font-size: 12px; font-weight: 680; }
+.maintenance-queue-chart { display: grid; grid-template-columns: minmax(96px, auto) minmax(120px, 1fr) auto; align-items: center; gap: 7px 11px; }
+.maintenance-queue-chart > .maintenance-chart-title { grid-column: 1 / -1; margin-bottom: 1px; }
+.maintenance-chart-row { display: contents; }
+.maintenance-chart-label { color: var(--muted); font-size: 11px; }
+.maintenance-chart-track { height: 6px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, var(--strong-line) 34%, transparent); }
+.maintenance-chart-fill { display: block; width: var(--chart-value); height: 100%; border-radius: inherit; background: var(--muted); transition: width .22s ease; }
+.maintenance-chart-fill.tone-warning { background: var(--warning); }
+.maintenance-chart-fill.tone-accent { background: var(--accent); }
+.maintenance-chart-fill.tone-positive { background: var(--positive); }
+.maintenance-chart-value { min-width: 24px; text-align: right; font-size: 11px; font-variant-numeric: tabular-nums; }
+.maintenance-cadence-chart { display: flex; align-items: center; gap: 13px; }
+.maintenance-cadence-ring, .maintenance-review-progress-ring { --chart-progress: 0%; position: relative; width: 66px; height: 66px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 50%; background: conic-gradient(var(--accent) var(--chart-progress), color-mix(in srgb, var(--strong-line) 36%, transparent) 0); }
+.maintenance-cadence-ring::after, .maintenance-review-progress-ring::after { content: ""; position: absolute; inset: 6px; border-radius: inherit; background: var(--surface); }
+.maintenance-cadence-ring strong, .maintenance-cadence-ring span, .maintenance-review-progress-ring strong, .maintenance-review-progress-ring span { position: relative; z-index: 1; }
+.maintenance-cadence-ring strong, .maintenance-review-progress-ring strong { align-self: end; font-size: 13px; font-variant-numeric: tabular-nums; }
+.maintenance-cadence-ring span, .maintenance-review-progress-ring span { align-self: start; margin-top: -2px; color: var(--muted); font-size: 9px; }
+.maintenance-cadence-copy { min-width: 0; display: grid; gap: 3px; }
+.maintenance-cadence-copy .muted { font-size: 10px; line-height: 1.35; }
 .status-pill { display: inline-flex; align-items: center; min-height: 22px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-subtle); color: var(--muted); font-size: 12px; font-weight: 650; white-space: nowrap; }
 .status-pill.status-positive { border-color: color-mix(in srgb, var(--positive) 38%, var(--line)); background: var(--positive-soft); color: var(--positive); }
 .status-pill.status-info { border-color: color-mix(in srgb, var(--accent) 38%, var(--line)); background: var(--accent-soft); color: var(--accent); }
 .status-pill.status-warning { border-color: color-mix(in srgb, var(--warning) 38%, var(--line)); background: var(--warning-soft); color: var(--warning); }
 .status-pill.status-danger { border-color: color-mix(in srgb, var(--danger) 38%, var(--line)); background: var(--danger-soft); color: var(--danger); }
 .maintenance-relation-review { margin: 0 0 18px; padding: 18px; border: 1px solid var(--line); border-radius: var(--panel-radius); background: var(--surface); box-shadow: var(--shadow-sm); }
+.maintenance-relation-review > .section-heading { margin: 0 0 12px; }
+.maintenance-relation-review > .section-heading p { max-width: 760px; margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.maintenance-review-progress { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; padding: 11px 13px; border: 1px solid var(--line); border-radius: var(--card-radius); background: var(--surface-subtle); }
+.maintenance-review-progress-ring { width: 58px; height: 58px; }
+.maintenance-review-progress-copy { min-width: 0; display: grid; gap: 3px; }
+.maintenance-review-progress-copy > strong { font-size: 13px; }
+.maintenance-review-progress-copy > .muted { font-size: 11px; }
+.maintenance-review-progress-legend { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 3px; }
+.maintenance-review-progress-legend span { min-height: 19px; padding: 1px 7px; border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 10px; }
+.maintenance-review-progress-legend .tone-accept { color: var(--positive); }
+.maintenance-review-progress-legend .tone-reject { color: var(--warning); }
+.maintenance-review-progress-legend .tone-suppress { color: var(--danger); }
 .maintenance-relation-review-cards { display: grid; gap: 10px; }
-.maintenance-relation-review-card { padding: 15px; border: 1px solid var(--line); border-radius: var(--card-radius); background: color-mix(in srgb, var(--surface) 94%, var(--surface-subtle)); box-shadow: 0 1px 1px rgb(15 23 42 / 3%); }
+.maintenance-relation-review-card { padding: 14px; border: 1px solid var(--line); border-radius: var(--card-radius); background: var(--surface); box-shadow: 0 1px 1px rgb(15 23 42 / 3%); }
 .maintenance-relation-review-card-heading { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
 .maintenance-relation-review-pages { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: stretch; gap: 9px; }
 .maintenance-relation-review-page-column { min-width: 0; display: grid; gap: 6px; }
@@ -349,7 +382,34 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 .maintenance-relation-review-page > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .maintenance-relation-review-preview { color: var(--text); line-height: 1.45; }
 .maintenance-relation-review-link { align-self: center; color: var(--accent); font-size: 17px; }
-.maintenance-relation-review-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin-top: 10px; }
+.maintenance-relation-review-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--line); }
+.maintenance-review-decision { display: inline-flex; align-items: center; gap: 5px; min-height: 30px; border-color: transparent; background: var(--surface-subtle); box-shadow: none; color: var(--muted); }
+.maintenance-review-decision:hover { border-color: transparent; background: var(--surface-hover); color: var(--text); }
+.maintenance-review-decision svg, .maintenance-review-undo svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.maintenance-review-decision.tone-accept { color: var(--positive); }
+.maintenance-review-decision.tone-archive, .maintenance-review-decision.tone-reject { color: var(--warning); }
+.maintenance-review-decision.tone-suppress { margin-left: auto; color: var(--danger); }
+.maintenance-review-settled { display: grid; gap: 5px; margin-top: 8px; }
+.maintenance-review-settled:empty { display: none; }
+.maintenance-review-settled-row { min-height: 38px; display: grid; grid-template-columns: auto auto minmax(120px, 1fr) auto auto; align-items: center; gap: 8px; padding: 5px 7px 5px 9px; border: 1px solid var(--line); border-left: 3px solid var(--muted); border-radius: 10px; background: var(--surface-subtle); }
+.maintenance-review-settled-row.tone-accept { border-left-color: var(--positive); }
+.maintenance-review-settled-row.tone-reject { border-left-color: var(--warning); }
+.maintenance-review-settled-row.tone-defer { border-left-color: var(--accent); }
+.maintenance-review-settled-row.tone-suppress { border-left-color: var(--danger); }
+.maintenance-review-settled-state { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.maintenance-review-settled-state svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.tone-accept .maintenance-review-settled-state { color: var(--positive); }
+.tone-reject .maintenance-review-settled-state { color: var(--warning); }
+.tone-defer .maintenance-review-settled-state { color: var(--accent); }
+.tone-suppress .maintenance-review-settled-state { color: var(--danger); }
+.maintenance-review-settled-summary { min-width: 0; overflow: hidden; color: var(--text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.maintenance-review-settled-pending { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.maintenance-review-settled-pending.has-error { color: var(--danger); }
+.maintenance-review-undo { display: inline-flex; align-items: center; gap: 4px; min-height: 26px; border-color: transparent; background: transparent; box-shadow: none; color: var(--accent); }
+.maintenance-review-undo:hover { border-color: transparent; background: var(--accent-soft); color: var(--accent); }
+.maintenance-review-session-actions { position: sticky; bottom: 10px; z-index: 4; display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 12px; padding: 10px 11px; border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line)); border-radius: var(--card-radius); background: color-mix(in srgb, var(--surface) 92%, var(--accent-soft)); box-shadow: var(--shadow-panel); -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px); }
+.maintenance-review-session-actions > span { min-width: 0; font-size: 11px; }
+.maintenance-review-session-actions > div { display: flex; flex: 0 0 auto; gap: 7px; }
 .maintenance-review-empty { padding: 24px; border: 1px dashed var(--line); border-radius: var(--card-radius); color: var(--muted); text-align: center; background: var(--surface-subtle); }
 .maintenance-review-metadata { display: flex; min-width: 0; align-items: center; flex-wrap: wrap; gap: 7px; }
 .maintenance-review-kind { display: inline-flex; align-items: center; min-height: 23px; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 700; }
@@ -365,7 +425,10 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 .maintenance-review-signals { display: flex; flex-wrap: wrap; gap: 5px; }
 .maintenance-review-reject { color: var(--warning); }
 .maintenance-advanced-tools { margin-top: 18px; padding: 0; overflow: hidden; border: 1px solid var(--line); border-radius: var(--panel-radius); background: var(--surface); box-shadow: var(--shadow-sm); }
-.maintenance-advanced-tools > summary { display: flex; min-height: 46px; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; cursor: pointer; color: var(--text); font-size: 13px; font-weight: 650; }
+.maintenance-advanced-tools > summary { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; min-height: 46px; align-items: center; gap: 10px; padding: 0 16px; cursor: pointer; color: var(--text); font-size: 13px; font-weight: 650; list-style: none; }
+.maintenance-advanced-tools > summary::-webkit-details-marker { display: none; }
+.maintenance-advanced-tools > summary::before, .maintenance-archive-library > summary::before { content: ""; width: 6px; height: 6px; margin-bottom: 2px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; color: var(--muted); transform: rotate(-45deg); transition: transform .16s ease; }
+.maintenance-advanced-tools[open] > summary::before, .maintenance-archive-library[open] > summary::before { transform: rotate(45deg); }
 .maintenance-advanced-tools[open] > summary { border-bottom: 1px solid var(--line); }
 .maintenance-advanced-tools > .section-heading, .maintenance-advanced-tools > section, .maintenance-advanced-tools > details { margin-inline: 16px; }
 .maintenance-advanced-tools > .section-heading { margin-top: 16px; }
@@ -439,15 +502,16 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 .maintenance-analysis-log { margin-top: 10px; border-top: 1px solid var(--line); }
 .maintenance-analysis-log > summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 2px; cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 650; list-style: none; }
 .maintenance-analysis-log > summary::-webkit-details-marker { display: none; }
-.maintenance-analysis-log > summary::before { content: "+"; color: var(--muted); font-size: 15px; font-weight: 400; }
-.maintenance-analysis-log[open] > summary::before { content: "−"; }
+.maintenance-analysis-log > summary::before { content: ""; width: 6px; height: 6px; margin: 0 2px 2px 1px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; color: var(--muted); transform: rotate(-45deg); transition: transform .16s ease; }
+.maintenance-analysis-log[open] > summary::before { transform: rotate(45deg); }
 .maintenance-analysis-log > summary > span:first-child { margin-right: auto; }
 .maintenance-analysis-log pre { margin: 0 0 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--card-radius); background: var(--surface-subtle); color: var(--muted); font: 11px/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .maintenance-report { margin-top: 20px; }
 .maintenance-report > button { margin-top: 12px; }
 #maintenance-proposals { margin-top: 20px; }
 #maintenance-proposals > .section-heading { margin-top: 0; }
-#maintenance-proposals.is-live .maintenance-select-all-label::before { content: ""; width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+#maintenance-proposals > .section-heading h4 { display: inline-flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; }
+#maintenance-proposals.is-live > .section-heading h4::before { content: ""; width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .store-signals { margin-top: 28px; }
 .store-signals .view-description { margin-top: 0; }
 .maintenance-table { min-width: 900px; }
@@ -470,8 +534,8 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 .maintenance-input { display: grid; grid-template-columns: 62px minmax(0, 1fr); gap: 9px; padding: 5px 0; border-bottom: 1px solid var(--line); }
 .maintenance-input:last-child { border-bottom: 0; }
 .maintenance-input > .maintenance-relation-review-full-page { grid-column: 1 / -1; margin-top: 1px; }
-.maintenance-summary-cards { display: grid; gap: 10px; }
-.maintenance-relation-cards { display: grid; gap: 10px; }
+.maintenance-summary-cards, .maintenance-relation-cards, .maintenance-generic-cards { display: grid; gap: 8px; }
+.maintenance-summary-cards + .maintenance-relation-cards:not([hidden]), .maintenance-relation-cards + .maintenance-generic-cards:not([hidden]), .maintenance-summary-cards + .maintenance-generic-cards:not([hidden]) { margin-top: 8px; }
 .maintenance-relation-proposal { display: grid; grid-template-columns: minmax(112px, 144px) minmax(0, 1fr); overflow: hidden; border: 1px solid var(--line); border-radius: var(--card-radius); background: var(--surface); }
 .maintenance-relation-proposal.is-accepted { border-color: color-mix(in srgb, var(--positive) 36%, var(--line)); }
 .maintenance-relation-proposal.is-rejected { border-color: color-mix(in srgb, var(--warning) 34%, var(--line)); }
@@ -494,6 +558,16 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 .maintenance-relation-proposal-actions { display: flex; align-items: center; justify-content: flex-end; gap: 5px; }
 .maintenance-relation-proposal-actions .maintenance-relation-no-suggest { order: -1; margin-right: auto; padding: 2px 0; border: 0; background: transparent; font-size: 11px; color: var(--danger); }
 .maintenance-relation-proposal-actions .maintenance-relation-no-suggest:hover { background: transparent; text-decoration: underline; }
+.maintenance-proposal-actions { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px; padding: 8px 10px; border-top: 1px solid var(--line); background: color-mix(in srgb, var(--surface-subtle) 65%, transparent); }
+.maintenance-relation-proposal-actions > .maintenance-proposal-actions { padding: 0; border: 0; background: transparent; }
+.maintenance-proposal-actions button { display: inline-flex; align-items: center; gap: 5px; min-height: 28px; border-color: transparent; background: transparent; box-shadow: none; color: var(--muted); }
+.maintenance-proposal-actions button:hover { border-color: transparent; background: var(--surface); color: var(--text); }
+.maintenance-proposal-actions svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.maintenance-proposal-actions .maintenance-proposal-accept { color: var(--positive); }
+.maintenance-proposal-actions .maintenance-proposal-reject { color: var(--warning); }
+.maintenance-proposal-actions .maintenance-proposal-skip { color: var(--accent); }
+.archive-candidate-card > .maintenance-proposal-actions { margin: 0 -13px -13px; }
+.maintenance-proposal-kind { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .025em; text-transform: uppercase; }
 .maintenance-relation-decision-group { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-subtle); }
 .maintenance-relation-decision-group .maintenance-relation-action-button { border-color: transparent; border-radius: 7px; background: transparent; color: var(--muted); }
 .maintenance-relation-decision-group .maintenance-relation-action-button:hover { border-color: transparent; background: var(--surface); color: var(--text); }
@@ -507,6 +581,15 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 .maintenance-summary-source span { margin-top: 2px; }
 .maintenance-summary-metadata { padding: 8px 12px 0; color: var(--muted); font-size: 12px; }
 .maintenance-summary-content { padding: 8px 12px 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.maintenance-generic-card { overflow: hidden; border: 1px solid var(--line); border-radius: var(--card-radius); background: var(--surface); }
+.maintenance-generic-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--surface-subtle); }
+.maintenance-generic-card-title { min-width: 0; display: grid; gap: 3px; }
+.maintenance-generic-card-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.maintenance-generic-card-body { display: grid; gap: 9px; padding: 11px 12px; }
+.maintenance-generic-preview { color: var(--text); font-size: 13px; line-height: 1.55; }
+.maintenance-generic-pages { display: grid; gap: 1px; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--line); }
+.maintenance-generic-page { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 10px; padding: 8px 9px; background: var(--surface); }
+.maintenance-generic-outcome { font-size: 13px; }
 .compact-button { min-height: var(--control-height-compact); padding: 3px 7px; font-size: 12px; }
 .compact-icon-button { display: inline-grid; width: 28px; min-width: 28px; place-items: center; padding: 0; }
 .compact-icon-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.9; }
@@ -945,6 +1028,15 @@ pre { margin: 0; max-height: 420px; overflow: auto; padding: 11px; border: 1px s
   .maintenance-stage-metrics { grid-template-columns: 1fr; }
   .maintenance-stage-metrics.four-columns { grid-template-columns: 1fr; }
   .maintenance-automation-metrics { grid-template-columns: 1fr 1fr; }
+  .maintenance-automation-chart { grid-template-columns: 1fr; }
+  .maintenance-review-settled-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .maintenance-review-settled-row > .maintenance-review-kind { grid-column: 1; grid-row: 1; }
+  .maintenance-review-settled-state { grid-column: 2; grid-row: 1; }
+  .maintenance-review-settled-summary { grid-column: 1 / -1; grid-row: 2; }
+  .maintenance-review-settled-pending { grid-column: 1 / -1; grid-row: 3; }
+  .maintenance-review-undo { grid-column: 3; grid-row: 1; }
+  .maintenance-review-session-actions { position: static; align-items: stretch; flex-direction: column; }
+  .maintenance-review-session-actions > div { justify-content: flex-end; }
   .maintenance-settings-grid { grid-template-columns: 1fr; }
   .aggregate-grid { grid-template-columns: 1fr; }
   .details-grid { grid-template-columns: 120px minmax(0, 1fr); }
@@ -970,6 +1062,10 @@ pre { margin: 0; max-height: 420px; overflow: auto; padding: 11px; border: 1px s
   .maintenance-pass-steps::before { display: none; }
   .maintenance-pass-steps li { min-height: 0; padding: 0; }
   .maintenance-automation-metrics { grid-template-columns: 1fr; }
+  .maintenance-review-progress { align-items: flex-start; }
+  .maintenance-review-session-actions > div { display: grid; grid-template-columns: 1fr; }
+  .maintenance-review-session-actions button { width: 100%; }
+  .maintenance-review-decision.tone-suppress { width: 100%; margin-left: 0; justify-content: center; }
   .maintenance-scene-alert { top: 6px; }
   .maintenance-scene-alert > button { grid-column: 1 / -1; width: 100%; }
   .maintenance-steps li, .maintenance-steps li:nth-child(2) { border-right: 0; border-bottom: 1px solid var(--line); }
