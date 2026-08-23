@@ -190,7 +190,7 @@ sh scripts/import-store.sh \
 维护协调器是可选能力，默认只观察，不应用变更。配置的 semantic worker 只能返回 Summary 内容、
 有序 pack 候选、明确来源的 Topic 提取提案、两个 Page 的 `related_to` 候选、retention milestone、
 `no_candidate` 或 `defer`，不能直接写 Store。Topic 提取只在 Console 的维护会话中进入审阅：模型必须从
-结构候选中选出 2–8 个明确来源并给出标题和正文，用户勾选后才创建独立 Topic Page；后台自动维护不会自动
+结构候选中选出 2–8 个明确来源并给出标题、正文与可审阅的凝练理由，用户勾选后才创建独立 Topic Page；后台自动维护不会自动
 应用它。Runtime 控制候选、预算、关系类型、basis Revision 和提交，Store 再验证权限、精确当前 Revision、
 来源连续性、外部引用与事务原子性。pack 与 Relation 维护默认关闭，必须单独启用；维护器也不会自动执行
 Revision 回收。官方 Runtime 可使用独立授权的

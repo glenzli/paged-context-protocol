@@ -158,6 +158,13 @@ impl MaintenanceOperator {
         self.maintainer.apply_relation_candidate(request).await
     }
 
+    pub async fn suppress_relation(
+        &mut self,
+        request: ApplyMaintenanceRelationRequest,
+    ) -> Result<()> {
+        self.maintainer.suppress_relation_candidate(request).await
+    }
+
     pub async fn analyze_topic(
         &self,
         request: AnalyzeMaintenanceTopicRequest,

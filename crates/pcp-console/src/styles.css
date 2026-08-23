@@ -299,7 +299,16 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 .maintenance-relation-review-full-page-body .page-content { min-width: 0; overflow-wrap: anywhere; }
 .maintenance-relation-evidence { display: grid; gap: 3px; margin: 9px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
 .maintenance-relation-evidence-label { color: var(--ink); font-weight: 650; }
-.maintenance-relation-compare { margin-top: 10px; }
+.maintenance-relation-actions { display: flex; align-items: center; gap: 4px; margin-top: 10px; }
+.maintenance-relation-action-button { width: 28px; min-width: 28px; min-height: 28px; border-color: transparent; }
+.maintenance-relation-action-button:hover { border-color: var(--line); }
+.maintenance-relation-action-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.maintenance-relation-suppress { color: var(--danger); }
+.maintenance-relation-suppress:hover { border-color: color-mix(in srgb, var(--danger) 42%, var(--line)); background: var(--danger-soft); color: var(--danger); }
+.maintenance-relation-suppress.is-staged { border-color: color-mix(in srgb, var(--danger) 42%, var(--line)); background: var(--danger-soft); color: var(--danger); }
+.maintenance-relation-state { display: inline-flex !important; width: fit-content; margin-top: 7px !important; padding: 2px 6px; border: 1px solid var(--line); border-radius: 999px; font-size: 11px; font-weight: 650; line-height: 1.25; }
+.maintenance-relation-state.reviewed { border-color: color-mix(in srgb, var(--positive) 34%, var(--line)); background: var(--positive-soft); color: var(--positive); }
+.maintenance-relation-state.suppressed { border-color: color-mix(in srgb, var(--danger) 34%, var(--line)); background: var(--danger-soft); color: var(--danger); }
 .maintenance-flow-overview { display: grid; grid-template-columns: minmax(210px, .7fr) minmax(0, 2.3fr); gap: 22px; margin: 20px 0 16px; padding: 4px 4px 10px; border-bottom: 1px solid var(--line); }
 .maintenance-flow-heading { min-width: 0; }
 .maintenance-flow-heading h3, .maintenance-stage-track-heading h3 { margin: 3px 0 0; letter-spacing: -.02em; font-size: 16px; line-height: 1.35; }
@@ -525,20 +534,46 @@ input:focus, select:focus { border-color: var(--accent); }
 .retention-reason-table th:nth-child(4) { width: 17%; }
 dialog { width: min(960px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow: auto; padding: 0; border: 1px solid var(--strong-line); border-radius: 7px; background: var(--surface); color: var(--text); box-shadow: 0 18px 55px rgba(0, 0, 0, .22); }
 dialog::backdrop { background: rgba(0, 0, 0, .38); }
+html.relation-comparison-open,
+html.relation-comparison-open body { overflow: hidden; }
+.dialog-header-actions { display: inline-flex; align-items: center; gap: 6px; }
 .relation-comparison-dialog { width: min(1440px, calc(100vw - 32px)); height: min(900px, calc(100vh - 32px)); max-height: none; overflow: hidden; }
 .relation-comparison-dialog[open] { display: grid; grid-template-rows: auto auto minmax(0, 1fr); }
 .relation-comparison-dialog .dialog-header { position: static; }
+.relation-comparison-review-button { color: var(--positive); }
+.relation-comparison-review-button.is-reviewed { border-color: var(--positive); background: var(--positive-soft); }
 .relation-comparison-rationale { display: grid; gap: 5px; padding: 12px 15px; border-bottom: 1px solid var(--line); background: var(--surface-subtle); }
 .relation-comparison-rationale-label { color: var(--muted); font-size: 11px; font-weight: 650; text-transform: uppercase; }
 .relation-comparison-rationale p { margin: 0; color: var(--text); line-height: 1.5; }
 .relation-comparison-rationale #relation-comparison-review-note { color: var(--muted); font-size: 12px; }
-.relation-comparison-pages { min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1px; background: var(--line); }
+.relation-comparison-pages { min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1px; background: var(--line); overscroll-behavior: contain; }
 .relation-comparison-page { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); background: var(--surface); }
 .relation-comparison-page-heading { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 9px; align-items: baseline; padding: 10px 13px; border-bottom: 1px solid var(--line); }
 .relation-comparison-page-position { grid-column: 1 / -1; color: var(--muted); font-size: 11px; font-weight: 650; text-transform: uppercase; }
 .relation-comparison-page-heading strong, .relation-comparison-page-heading .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.relation-comparison-page-body { min-height: 0; overflow: auto; padding: 13px; background: var(--surface-subtle); }
+.relation-comparison-page-body { min-height: 0; overflow: auto; padding: 13px; background: var(--surface-subtle); overscroll-behavior: contain; }
 .relation-comparison-page-body .page-content { background: var(--surface); }
+.topic-extraction-review-dialog { width: min(1120px, calc(100vw - 32px)); height: min(920px, calc(100vh - 32px)); max-height: none; overflow: auto; }
+.topic-extraction-review-dialog[open] { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); }
+.topic-extraction-review-dialog .dialog-header { position: static; }
+.topic-extraction-review-rationale, .topic-extraction-review-proposal { display: grid; gap: 6px; padding: 13px 15px; border-bottom: 1px solid var(--line); }
+.topic-extraction-review-rationale { background: var(--surface-subtle); }
+.topic-extraction-review-label { color: var(--muted); font-size: 11px; font-weight: 650; text-transform: uppercase; }
+.topic-extraction-review-rationale p { margin: 0; color: var(--text); line-height: 1.55; }
+.topic-extraction-review-proposal { background: var(--surface); }
+.topic-extraction-review-proposal-heading { display: grid; gap: 2px; }
+.topic-extraction-review-proposal-heading strong { font-size: 15px; line-height: 1.4; }
+.topic-extraction-review-proposal .page-content { max-height: 240px; overflow: auto; background: var(--surface-subtle); }
+.topic-extraction-review-sources { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); background: var(--surface-subtle); }
+.topic-extraction-review-sources-heading { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 10px 15px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.topic-extraction-review-tabs { display: flex; min-width: 0; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+.topic-extraction-review-tab { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 7px; min-width: 0; min-height: 29px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--muted); font-size: 12px; }
+.topic-extraction-review-tab:hover { border-color: var(--strong-line); color: var(--text); }
+.topic-extraction-review-tab.active { border-color: var(--accent); background: var(--accent-subtle); color: var(--accent); }
+.topic-extraction-review-tab-index { display: grid; place-items: center; width: 17px; height: 17px; border-radius: 50%; background: var(--surface-subtle); color: var(--muted); font-size: 10px; font-weight: 700; }
+.topic-extraction-review-tab.active .topic-extraction-review-tab-index { background: var(--accent); color: var(--surface); }
+.topic-extraction-review-page { min-height: 0; overflow: auto; padding: 13px 15px; }
+.topic-extraction-review-page .page-content { background: var(--surface); }
 .enrollment-dialog { width: min(720px, calc(100vw - 32px)); }
 .action-dialog { width: min(480px, calc(100vw - 32px)); overflow: visible; }
 .action-dialog-form { display: grid; margin: 0; }
@@ -618,6 +653,9 @@ dialog::backdrop { background: rgba(0, 0, 0, .38); }
   .relation-comparison-dialog { width: calc(100vw - 16px); height: calc(100vh - 16px); }
   .relation-comparison-pages { grid-template-columns: 1fr; overflow: auto; }
   .relation-comparison-page { min-height: min(62vh, 620px); }
+  .topic-extraction-review-dialog { width: calc(100vw - 16px); height: calc(100vh - 16px); }
+  .topic-extraction-review-sources-heading { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .topic-extraction-review-tabs { width: 100%; }
 }
 
 @media (max-width: 520px) {

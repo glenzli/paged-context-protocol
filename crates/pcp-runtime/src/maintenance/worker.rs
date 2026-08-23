@@ -203,6 +203,7 @@ pub enum MaintenanceWorkerResponse {
         page_ids: Vec<String>,
         title: String,
         content: String,
+        reason: String,
     },
     ArchiveReview {
         outcome: ArchiveWorkerDecision,

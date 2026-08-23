@@ -458,7 +458,10 @@
   <dialog id="relation-comparison-dialog" class="relation-comparison-dialog">
     <header class="dialog-header">
       <div><strong data-i18n="Relation comparison">Relation comparison</strong><div id="relation-comparison-subtitle" class="muted"></div></div>
-      <button id="relation-comparison-close" type="button" data-i18n="Close">Close</button>
+      <div class="dialog-header-actions">
+        <button id="relation-comparison-mark-reviewed" class="icon-button relation-comparison-review-button" type="button" aria-label="Mark reviewed" title="Mark reviewed" data-i18n-aria-label="Mark reviewed" data-i18n-title="Mark reviewed" hidden>✓</button>
+        <button id="relation-comparison-close" type="button" data-i18n="Close">Close</button>
+      </div>
     </header>
     <section class="relation-comparison-rationale">
       <span class="relation-comparison-rationale-label" data-i18n="Why this relation is worth review">Why this relation is worth review</span>
@@ -466,6 +469,31 @@
       <p id="relation-comparison-review-note" class="muted" hidden></p>
     </section>
     <div id="relation-comparison-pages" class="relation-comparison-pages"></div>
+  </dialog>
+
+  <dialog id="topic-extraction-review-dialog" class="topic-extraction-review-dialog">
+    <header class="dialog-header">
+      <div><strong data-i18n="Topic extraction review">Topic extraction review</strong><div id="topic-extraction-review-subtitle" class="muted"></div></div>
+      <button id="topic-extraction-review-close" type="button" data-i18n="Close">Close</button>
+    </header>
+    <section class="topic-extraction-review-rationale">
+      <span class="topic-extraction-review-label" data-i18n="Why this Topic Page is worth creating">Why this Topic Page is worth creating</span>
+      <p id="topic-extraction-review-reason"></p>
+    </section>
+    <section class="topic-extraction-review-proposal">
+      <div class="topic-extraction-review-proposal-heading">
+        <span class="topic-extraction-review-label" data-i18n="Topic Page proposal">Topic Page proposal</span>
+        <strong id="topic-extraction-review-title"></strong>
+      </div>
+      <div id="topic-extraction-review-proposal"></div>
+    </section>
+    <section class="topic-extraction-review-sources">
+      <div class="topic-extraction-review-sources-heading">
+        <span class="topic-extraction-review-label" data-i18n="Source Pages">Source Pages</span>
+        <nav id="topic-extraction-review-tabs" class="topic-extraction-review-tabs" role="tablist"></nav>
+      </div>
+      <div id="topic-extraction-review-page" class="topic-extraction-review-page" role="tabpanel"></div>
+    </section>
   </dialog>
 
   <dialog id="enrollment-dialog" class="enrollment-dialog">

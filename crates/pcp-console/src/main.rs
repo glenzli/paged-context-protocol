@@ -413,6 +413,10 @@ fn router(state: AppState) -> Router {
             post(maintenance_apply_relation),
         )
         .route(
+            "/api/maintenance/relations/suppress",
+            post(maintenance_suppress_relation),
+        )
+        .route(
             "/api/maintenance/topics/analyze",
             post(maintenance_analyze_topic),
         )
@@ -1443,6 +1447,17 @@ async fn maintenance_apply_relation(
     let operator = maintenance_operator_for_console(&state).await?;
     let result = operator.apply_relation(request).await?;
     Ok(Json(json!({"optimized": true, "result": result})))
+}
+
+async fn maintenance_suppress_relation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ApplyMaintenanceRelationRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let mut operator = maintenance_operator_for_console(&state).await?;
+    operator.suppress_relation(request).await?;
+    Ok(Json(json!({"suppressed": true})))
 }
 
 async fn maintenance_analyze_topic(

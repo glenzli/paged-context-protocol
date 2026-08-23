@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::SystemTime,
@@ -2367,6 +2367,172 @@ async fn reviewed_relation_is_target_bound_and_applies_only_once() {
 }
 
 #[tokio::test]
+async fn suppressed_manual_relation_pair_skips_manual_and_scheduled_analysis() {
+    let fixture = Fixture::open("suppressed-manual-relation").await;
+    let first = fixture
+        .client
+        .write_page(fixture.page(
+            "A durable protocol decision that must not be linked to the implementation note.",
+            "suppressed-manual-relation:1",
+        ))
+        .await
+        .expect("write first relation candidate");
+    let second = fixture
+        .client
+        .write_page(fixture.page(
+            "An implementation note for a separate protocol decision.",
+            "suppressed-manual-relation:2",
+        ))
+        .await
+        .expect("write second relation candidate");
+    let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
+        page_ids: [first.page_id.clone(), second.page_id.clone()],
+        reason: "The selected Pages establish one stable relation subject.".to_owned(),
+    }]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = true;
+    let mut maintainer =
+        RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+    let scan = maintainer
+        .scan_maintenance_work()
+        .await
+        .expect("scan relation review window");
+    let group = scan
+        .relation
+        .groups
+        .first()
+        .expect("one relation review window");
+    let request = AnalyzeMaintenanceRelationRequest {
+        scan_id: scan.relation.scan_id.clone(),
+        group_id: group.group_id.clone(),
+    };
+    let candidate = maintainer
+        .analyze_relation_candidate(request.clone())
+        .await
+        .expect("analyze relation review")
+        .candidate
+        .expect("relation proposal");
+    let apply_request = ApplyMaintenanceRelationRequest {
+        candidate_id: candidate.candidate_id,
+        pages: candidate.pages.map(|page| PageRevisionRef {
+            page_id: page.page_id,
+            revision_id: page.revision_id,
+        }),
+    };
+
+    maintainer
+        .suppress_relation_candidate(apply_request.clone())
+        .await
+        .expect("persist manual relation suppression");
+    assert!(maintainer.pending_relation_reviews().is_empty());
+    assert!(
+        maintainer
+            .analyze_relation_candidate(request)
+            .await
+            .expect("skip suppressed manual relation")
+            .candidate
+            .is_none()
+    );
+    assert!(
+        maintainer
+            .apply_relation_candidate(apply_request)
+            .await
+            .is_err()
+    );
+
+    let report = maintainer
+        .run_once()
+        .await
+        .expect("scheduled maintenance skips suppressed relation");
+    assert_eq!(report.worker_calls, 0);
+    assert_eq!(worker.request_count(), 1);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn suppressed_relation_pair_does_not_block_other_pairs_in_the_same_window() {
+    let fixture = Fixture::open("suppressed-exact-relation").await;
+    let first = fixture
+        .client
+        .write_page(fixture.page("First durable topic page.", "suppressed-exact-relation:1"))
+        .await
+        .expect("write first relation candidate");
+    let second = fixture
+        .client
+        .write_page(fixture.page("Second durable topic page.", "suppressed-exact-relation:2"))
+        .await
+        .expect("write second relation candidate");
+    let third = fixture
+        .client
+        .write_page(fixture.page("Third durable topic page.", "suppressed-exact-relation:3"))
+        .await
+        .expect("write third relation candidate");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::Relate {
+            page_ids: [first.page_id.clone(), second.page_id.clone()],
+            reason: "The first two Pages were reviewed together.".to_owned(),
+        },
+        MaintenanceWorkerResponse::Relate {
+            page_ids: [first.page_id.clone(), third.page_id.clone()],
+            reason: "The first and third Pages share a different stable subject.".to_owned(),
+        },
+    ]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = true;
+    let mut maintainer =
+        RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+    let scan = maintainer
+        .scan_maintenance_work()
+        .await
+        .expect("scan relation review window");
+    let group = scan
+        .relation
+        .groups
+        .iter()
+        .find(|group| group.page_count >= 3)
+        .expect("three-page relation review window");
+    let request = AnalyzeMaintenanceRelationRequest {
+        scan_id: scan.relation.scan_id,
+        group_id: group.group_id.clone(),
+    };
+    let suppressed = maintainer
+        .analyze_relation_candidate(request.clone())
+        .await
+        .expect("analyze initial relation")
+        .candidate
+        .expect("initial relation proposal");
+    maintainer
+        .suppress_relation_candidate(ApplyMaintenanceRelationRequest {
+            candidate_id: suppressed.candidate_id,
+            pages: suppressed.pages.map(|page| PageRevisionRef {
+                page_id: page.page_id,
+                revision_id: page.revision_id,
+            }),
+        })
+        .await
+        .expect("suppress exact first-second pair");
+
+    let remaining = maintainer
+        .analyze_relation_candidate(request)
+        .await
+        .expect("analyze another pair in same window")
+        .candidate
+        .expect("unrelated pair remains eligible");
+    let selected = remaining
+        .pages
+        .map(|page| page.page_id)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(selected, BTreeSet::from([first.page_id, third.page_id]));
+    assert_eq!(worker.request_count(), 2);
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn observe_relation_records_a_proposal_without_linking_pages() {
     let fixture = Fixture::open("observe-relation").await;
     let first = fixture
@@ -2764,6 +2930,15 @@ async fn relation_selection_excludes_pairs_already_connected_by_a_path() {
         .write_page(fixture.page("Third durable topic Page.", "relation-path:3"))
         .await
         .expect("write third relation Page");
+    // Keep one independent Page in the offered window.  The first three Pages
+    // are already one connected component, so without a fourth Page every
+    // possible pair would be excluded and relation analysis would correctly
+    // short-circuit before consulting the worker.
+    let _fourth = fixture
+        .client
+        .write_page(fixture.page("Fourth independent topic Page.", "relation-path:4"))
+        .await
+        .expect("write independent relation Page");
     for (index, (from, to)) in [(&first, &second), (&second, &third)]
         .into_iter()
         .enumerate()

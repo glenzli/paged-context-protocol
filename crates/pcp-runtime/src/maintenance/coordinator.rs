@@ -448,6 +448,8 @@ pub struct MaintenanceTopicCandidate {
     pub namespace: String,
     pub title: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub pages: Vec<MaintenanceTopicInput>,
 }
 
@@ -1375,7 +1377,14 @@ impl RuntimeMaintainer {
             .collect::<HashMap<_, _>>();
         let offered_page_ids = offered.keys().cloned().collect::<BTreeSet<_>>();
         let relation_edges = self.existing_related_pairs(&window).await?;
-        let excluded_page_pairs = connected_relation_pairs(&offered_page_ids, &relation_edges);
+        let excluded_page_pairs = relation_excluded_page_pairs(
+            &offered_page_ids,
+            &relation_edges,
+            &self.ledger.active_relation_pairs(),
+        );
+        if all_relation_pairs_excluded(&offered_page_ids, &excluded_page_pairs) {
+            return Ok(MaintenanceRelationAnalysis::no_candidate());
+        }
         let response = self
             .evaluate_worker(MaintenanceWorkerRequest::SelectRelation {
                 pages: window
@@ -1470,6 +1479,14 @@ impl RuntimeMaintainer {
             "maintenance relation candidate identity no longer matches the reviewed Pages"
         );
         let page_ids = [selected[0].page_id.clone(), selected[1].page_id.clone()];
+        anyhow::ensure!(
+            !self
+                .ledger
+                .suppressed_relation_pairs()
+                .into_iter()
+                .any(|pair| pair == page_ids),
+            "maintenance relation candidate was explicitly suppressed by the operator"
+        );
         let revision_ids = vec![
             selected[0].revision_id.clone(),
             selected[1].revision_id.clone(),
@@ -1490,6 +1507,57 @@ impl RuntimeMaintainer {
                 )),
             })
             .await
+    }
+
+    pub async fn suppress_relation_candidate(
+        &mut self,
+        request: ApplyMaintenanceRelationRequest,
+    ) -> Result<()> {
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        let current_by_id = inventory
+            .iter()
+            .map(|page| (page.page_id.as_str(), page))
+            .collect::<HashMap<_, _>>();
+        anyhow::ensure!(
+            request.pages[0].page_id != request.pages[1].page_id,
+            "maintenance relation candidate contains duplicate Pages"
+        );
+        let mut selected = request
+            .pages
+            .iter()
+            .map(|requested| {
+                let page = current_by_id
+                    .get(requested.page_id.as_str())
+                    .copied()
+                    .context("maintenance relation candidate is stale or no longer eligible")?;
+                anyhow::ensure!(
+                    page.revision_id == requested.revision_id
+                        && relation_page_eligible(page, &self.config.relation),
+                    "maintenance relation candidate is stale or no longer eligible"
+                );
+                Ok::<_, anyhow::Error>(page)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        selected.sort_by(|left, right| left.page_id.cmp(&right.page_id));
+        anyhow::ensure!(
+            selected[0].namespace == selected[1].namespace,
+            "maintenance relation candidate Pages no longer share a Scope"
+        );
+        let candidate = build_relation_candidate(&selected);
+        anyhow::ensure!(
+            candidate.candidate_id == request.candidate_id,
+            "maintenance relation candidate identity no longer matches the reviewed Pages"
+        );
+        self.ledger.suppress_relation_pair(
+            candidate.namespace,
+            candidate.pages.map(|page| MaintenanceRelationReviewPage {
+                page_id: page.page_id,
+                revision_id: page.revision_id,
+                preview: page.preview,
+            }),
+            candidate.relation_reason,
+        )?;
+        self.ledger.save(&self.config.state_path).await
     }
 
     pub async fn analyze_topic_candidate(
@@ -1534,6 +1602,7 @@ impl RuntimeMaintainer {
             page_ids,
             title,
             content,
+            reason,
         } = response
         else {
             return match response {
@@ -1563,7 +1632,10 @@ impl RuntimeMaintainer {
             })
             .collect::<Vec<_>>();
         Ok(MaintenanceTopicAnalysis::candidate(build_topic_candidate(
-            &selected, title, content,
+            &selected,
+            title,
+            content,
+            Some(reason),
         )?))
     }
 
@@ -1597,8 +1669,12 @@ impl RuntimeMaintainer {
             );
             selected.push(current);
         }
-        let candidate =
-            build_topic_candidate(&selected, request.title.clone(), request.content.clone())?;
+        let candidate = build_topic_candidate(
+            &selected,
+            request.title.clone(),
+            request.content.clone(),
+            None,
+        )?;
         anyhow::ensure!(
             candidate.candidate_id == request.candidate_id,
             "maintenance Topic candidate identity no longer matches the reviewed Pages"
@@ -1841,19 +1917,20 @@ impl RuntimeMaintainer {
                 .collect::<Vec<_>>(),
         );
         let offered_page_ids = offered.keys().cloned().collect::<BTreeSet<_>>();
-        let mut relation_edges = self.existing_related_pairs(&candidates).await?;
-        relation_edges.extend(
-            self.ledger
-                .active_relation_pairs()
-                .into_iter()
-                .filter(|pair| {
-                    pair.iter()
-                        .all(|page_id| offered_page_ids.contains(page_id))
-                }),
+        let relation_edges = self.existing_related_pairs(&candidates).await?;
+        let excluded_page_pairs = relation_excluded_page_pairs(
+            &offered_page_ids,
+            &relation_edges,
+            &self.ledger.active_relation_pairs(),
         );
-        relation_edges.sort();
-        relation_edges.dedup();
-        let excluded_page_pairs = connected_relation_pairs(&offered_page_ids, &relation_edges);
+        if all_relation_pairs_excluded(&offered_page_ids, &excluded_page_pairs) {
+            self.ledger.record(
+                window_key,
+                "all_pairs_excluded",
+                self.config.relation.retry_after_seconds,
+            );
+            return Ok(true);
+        }
 
         report.worker_calls += 1;
         let response = self
@@ -2673,6 +2750,43 @@ fn connected_relation_pairs(
         }
     }
     connected
+}
+
+fn relation_excluded_page_pairs(
+    offered_page_ids: &BTreeSet<String>,
+    relation_edges: &[[String; 2]],
+    suppressed_pairs: &[[String; 2]],
+) -> Vec<[String; 2]> {
+    // Existing asserted relations exclude their whole connected component.  An
+    // operator suppression is intentionally narrower: it excludes only the
+    // exact two Pages they reviewed, never unrelated pairs reached through a
+    // graph path.
+    let mut excluded = connected_relation_pairs(offered_page_ids, relation_edges);
+    excluded.extend(suppressed_pairs.iter().filter_map(|pair| {
+        (offered_page_ids.contains(&pair[0]) && offered_page_ids.contains(&pair[1]))
+            .then(|| normalized_relation_pair(pair.clone()))
+    }));
+    excluded.sort();
+    excluded.dedup();
+    excluded
+}
+
+fn all_relation_pairs_excluded(
+    offered_page_ids: &BTreeSet<String>,
+    excluded_page_pairs: &[[String; 2]],
+) -> bool {
+    let page_ids = offered_page_ids.iter().collect::<Vec<_>>();
+    page_ids.len() >= 2
+        && page_ids.iter().enumerate().all(|(index, first)| {
+            page_ids[index + 1..]
+                .iter()
+                .all(|second| excluded_page_pairs.contains(&[(*first).clone(), (*second).clone()]))
+        })
+}
+
+fn normalized_relation_pair(mut pair: [String; 2]) -> [String; 2] {
+    pair.sort();
+    pair
 }
 
 fn packing_scan_from_windows(
@@ -3668,9 +3782,11 @@ fn build_topic_candidate(
     pages: &[&pcp_store::DurablePageInventoryItem],
     title: String,
     content: String,
+    reason: Option<String>,
 ) -> Result<MaintenanceTopicCandidate> {
     let title = title.trim().to_owned();
     let content = content.trim().to_owned();
+    let reason = reason.map(validate_topic_reason).transpose()?;
     anyhow::ensure!(
         !title.is_empty() && title.chars().count() <= 160,
         "semantic maintenance worker returned an invalid Topic title"
@@ -3702,6 +3818,7 @@ fn build_topic_candidate(
         namespace: pages[0].namespace.clone(),
         title,
         content,
+        reason,
         pages: pages
             .iter()
             .map(|page| MaintenanceTopicInput {
@@ -3717,6 +3834,15 @@ fn build_topic_candidate(
             })
             .collect(),
     })
+}
+
+fn validate_topic_reason(reason: String) -> Result<String> {
+    let reason = reason.trim().to_owned();
+    anyhow::ensure!(
+        !reason.is_empty() && reason.chars().count() <= 480,
+        "semantic maintenance worker returned an invalid Topic rationale"
+    );
+    Ok(reason)
 }
 
 fn normalize_worker_summary(content: String, source_text: &str) -> Result<String> {

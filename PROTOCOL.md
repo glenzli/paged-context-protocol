@@ -162,6 +162,9 @@ Relation 展开中作为证据返回；只是默认 `semantic_search` 和 `match
 代表这些源 Page。Topic 更新必须发布新 Revision；只有其当前 Revision 仍列出同一源 Revision 时才继续
 压住对应默认候选。
 
+维护 worker 的凝练建议还必须附带简短、来源可核对的理由；它不是写入字段，也不参与 Topic 的恒等性，
+仅用于 Console 审阅时解释为什么这一组 Page 值得先被凝练为独立入口。
+
 ### 2.1 内容治理：archive 与 restore
 
 `archive_page(page_id, expected_revision_id, reason)` 是受 `manage_lifecycle` 权限保护的人工治理操作。它以

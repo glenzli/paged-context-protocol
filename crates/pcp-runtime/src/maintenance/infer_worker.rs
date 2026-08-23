@@ -342,7 +342,7 @@ fn instructions_for(request: &MaintenanceWorkerRequest) -> String {
                 .to_owned()
         }
         MaintenanceWorkerRequest::ExtractTopic { .. } => {
-            "Return exactly one JSON object and no markdown. Use either {\"decision\":\"extract_topic\",\"page_ids\":[\"pg_...\",\"pg_...\"],\"title\":\"...\",\"content\":\"...\"}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. A Topic Page is a durable front door, not a chronological digest or a replacement for sources. Select 2..=max_source_pages supplied Pages only when they establish one narrow, stable subject that a future query should reach before expanding evidence. Temporal adjacency, a shared Scope, broad AI/tool/workspace themes, or superficial keyword overlap are insufficient. When selecting sources, write a specific 120-4000 Unicode-character Topic Page body grounded only in them and a concise title (1-160 chars). Preserve qualifications, uncertainty, and disagreement; do not invent missing connective claims. Return no_candidate when the window contains no clearly bounded subject."
+            "Return exactly one JSON object and no markdown. Use either {\"decision\":\"extract_topic\",\"page_ids\":[\"pg_...\",\"pg_...\"],\"title\":\"...\",\"content\":\"...\",\"reason\":\"...\"}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. A Topic Page is a durable front door, not a chronological digest or a replacement for sources. Select 2..=max_source_pages supplied Pages only when they establish one narrow, stable subject that a future query should reach before expanding evidence. Temporal adjacency, a shared Scope, broad AI/tool/workspace themes, or superficial keyword overlap are insufficient. When selecting sources, write a specific 120-4000 Unicode-character Topic Page body grounded only in them and a concise title (1-160 chars). Also provide one concise, source-grounded reason (1-480 chars) explaining why these particular Pages jointly warrant a durable Topic Page. Preserve qualifications, uncertainty, and disagreement; do not invent missing connective claims. Return no_candidate when the window contains no clearly bounded subject."
                 .to_owned()
         }
         MaintenanceWorkerRequest::AssessArchive { .. } => {
@@ -819,7 +819,7 @@ mod tests {
                     && instructions.contains("Temporal adjacency"))
         );
         let decoded = decode_response(
-            &result("{\"decision\":\"extract_topic\",\"page_ids\":[\"pg_1\",\"pg_2\"],\"title\":\"PCP topic\",\"content\":\"A durable, source-grounded Topic Page for PCP retrieval.\"}"),
+            &result("{\"decision\":\"extract_topic\",\"page_ids\":[\"pg_1\",\"pg_2\"],\"title\":\"PCP topic\",\"content\":\"A durable, source-grounded Topic Page for PCP retrieval.\",\"reason\":\"The two Pages establish one stable PCP retrieval boundary.\"}"),
             &request,
         )
         .expect("decode Topic extraction response");

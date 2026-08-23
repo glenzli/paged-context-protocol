@@ -1,5 +1,5 @@
 import { createPageInspector } from "/page-inspector.js?v=20260822.1";
-import { describePagePayload, pagePayloadPreviewText, renderPagePreview } from "/page-content.js?v=20260822.1";
+import { describePagePayload, pagePayloadPreviewText } from "/page-content.js?v=20260822.1";
 import { createHealthView } from "/health-view.js?v=20260816.3";
 import { createRetentionView } from "/retention-view.js?v=20260818.1";
 import { createQueryView } from "/query-view.js?v=20260819.2";
@@ -70,6 +70,13 @@ const ZH_MESSAGES = {
   "Left Page": "左侧页面",
   "Right Page": "右侧页面",
   "Compare Pages": "对照页面",
+  "Review source Pages": "审阅来源页面",
+  "Topic extraction review": "凝练新页审阅",
+  "Topic Page proposal": "拟凝练主题页",
+  "Why this Topic Page is worth creating": "为什么值得凝练为新页",
+  "No Topic rationale was supplied.": "未提供凝练判断依据。",
+  "A Topic extraction review requires at least two Pages.": "凝练新页审阅至少需要两个页面。",
+  "Source Pages": "来源页面",
   "Expand all entries": "展开全部内容",
   "Collapse all entries": "收起全部内容",
   "Expand full Page": "展开完整页面",
@@ -215,8 +222,12 @@ const ZH_MESSAGES = {
   "Relation review queue": "关联审核队列",
   "These suggested links are not used for retrieval until you approve them.": "这些建议关联在你批准前不会参与检索。",
   "Review evidence": "审核依据",
+  "Reviewed": "已审阅",
+  "Mark reviewed": "标记已审阅",
+  "Undo no-suggest": "撤销不再建议",
+  "Will not be suggested when applied": "将在应用时不再建议",
   "Reject": "拒绝",
-  "Suppress": "抑制",
+  "Do not suggest this relation again": "不再建议此关联",
   "No preview": "没有预览",
   "Preview unavailable": "预览暂不可用",
   "New Pack": "新建打包页",
@@ -851,6 +862,9 @@ const state = {
     analyses: { pack: null, summary: null, topic: null, relation: null },
     pendingCandidates: [],
     selected: new Set(),
+    // Manual relation decisions remain local to the current review session until
+    // the operator explicitly applies the selection.
+    relationDraftStates: new Map(),
     relationReviews: [],
   },
   archive: {
@@ -883,6 +897,34 @@ function openPageIcon() {
   const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
   path.setAttribute("d", "M5 19 19 5M8 5h11v11");
   svg.append(path);
+  return svg;
+}
+
+function relationCompareIcon() {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  for (const d of ["M4 5h6v14H4z", "M14 5h6v14h-6z", "M10 12h4", "m2-2 2 2-2 2"]) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", d);
+    svg.append(path);
+  }
+  return svg;
+}
+
+function suppressRelationIcon() {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  for (const d of [
+    "m9 15-1.4 1.4a3 3 0 0 1-4.2-4.2l3.5-3.5a3 3 0 0 1 4.2 0L12.5 10",
+    "m15 9 1.4-1.4a3 3 0 0 1 4.2 4.2l-3.5 3.5a3 3 0 0 1-4.2 0L11.5 14",
+    "M4 4 20 20",
+  ]) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", d);
+    svg.append(path);
+  }
   return svg;
 }
 
@@ -1930,6 +1972,7 @@ function resetMaintenanceSession() {
   state.maintenance.analyses = { pack: null, summary: null, topic: null, relation: null };
   state.maintenance.pendingCandidates = [];
   state.maintenance.selected.clear();
+  state.maintenance.relationDraftStates.clear();
 }
 
 function renderMaintenanceStatus(status) {
@@ -2054,53 +2097,36 @@ function compactRelationReviewPreview(value, limit = 220) {
   return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 1)}…`;
 }
 
-function revisionBoundPageExpansion(page) {
-  const fullPage = element("details", "maintenance-relation-review-full-page");
-  const fullPageSummary = element("summary", "", t("Expand full Page"));
-  const fullPageBody = element("div", "maintenance-relation-review-full-page-body muted", "");
-  fullPage.append(fullPageSummary, fullPageBody);
-  let loaded = false;
-  fullPage.addEventListener("toggle", async () => {
-    if (!fullPage.open || loaded) return;
-    loaded = true;
-    fullPageBody.textContent = t("Loading full Page…");
-    try {
-      const detail = await api(`/api/pages/${encodeURIComponent(page.revisionId)}`);
-      if (detail.revision?.revisionId !== page.revisionId) {
-        throw new Error("The reviewed revision is no longer available.");
-      }
-      fullPageBody.classList.remove("muted");
-      fullPageBody.replaceChildren();
-      const content = element("div", "page-content");
-      renderPagePreview(
-        content,
-        detail.revision?.payload?.content || t("No content projection"),
-        detail.revision?.payload?.mediaType || "text/plain",
-      );
-      const open = element("button", "subtle-button", t("Open in inspector"));
-      open.type = "button";
-      open.addEventListener("click", () => pageInspector.open(page.pageId));
-      fullPageBody.append(content, open);
-    } catch (error) {
-      loaded = false;
-      fullPageBody.textContent = error.message || String(error);
-      showError(error);
-    }
-  });
-  return fullPage;
-}
-
-function relationComparisonButton(proposal, className = "subtle-button") {
-  const compare = element("button", className, t("Compare Pages"));
+function relationComparisonButton(proposal, className = "subtle-button", {
+  iconOnly = false,
+  onReviewed = null,
+  reviewed = false,
+} = {}) {
+  const label = t("Compare Pages");
+  const compare = element("button", className, iconOnly ? undefined : label);
   compare.type = "button";
+  if (iconOnly) compare.append(relationCompareIcon());
+  compare.title = label;
+  compare.setAttribute("aria-label", label);
   compare.addEventListener("click", () => {
     pageInspector.compareRelation({
       pages: proposal.pages,
       relationReason: proposal.relationReason,
       reviewReason: proposal.reviewReason,
+      onReviewed,
+      reviewed,
     }).catch(() => {});
   });
   return compare;
+}
+
+function topicExtractionReviewButton(candidate, className = "subtle-button") {
+  const review = element("button", className, t("Review source Pages"));
+  review.type = "button";
+  review.addEventListener("click", () => {
+    pageInspector.reviewTopic(candidate).catch(() => {});
+  });
+  return review;
 }
 
 function relationReviewCard(proposal) {
@@ -2148,7 +2174,7 @@ function relationReviewCard(proposal) {
   const actions = element("div", "maintenance-relation-review-actions");
   const approve = element("button", "primary-button", t("Approve"));
   const reject = element("button", "", t("Reject"));
-  const suppress = element("button", "danger-button", t("Suppress"));
+  const suppress = element("button", "danger-button", t("Do not suggest this relation again"));
   [approve, reject, suppress].forEach((button) => { button.type = "button"; });
   approve.addEventListener("click", () => resolveRelationReview(proposal.candidateId, "approve"));
   reject.addEventListener("click", () => resolveRelationReview(proposal.candidateId, "reject"));
@@ -2303,14 +2329,54 @@ function maintenanceCandidates() {
 function maintenanceSelectionCheckbox(candidate) {
   const checkbox = document.createElement("input");
   checkbox.type = "checkbox";
-  checkbox.checked = state.maintenance.selected.has(candidate.candidateId);
+  const stagedSuppression = candidate.operation === "relation"
+    && relationDraftState(candidate) === "suppressed";
+  checkbox.checked = !stagedSuppression && state.maintenance.selected.has(candidate.candidateId);
+  checkbox.disabled = stagedSuppression;
   checkbox.setAttribute("aria-label", `Select ${candidate.candidateId}`);
+  if (stagedSuppression) checkbox.title = t("Will not be suggested when applied");
   checkbox.addEventListener("change", () => {
     if (checkbox.checked) state.maintenance.selected.add(candidate.candidateId);
     else state.maintenance.selected.delete(candidate.candidateId);
     renderMaintenanceSession();
   });
   return checkbox;
+}
+
+function relationDraftState(candidate) {
+  return state.maintenance.relationDraftStates.get(candidate.candidateId) || null;
+}
+
+function markRelationCandidateReviewed(candidate) {
+  if (candidate.operation !== "relation" || relationDraftState(candidate) === "suppressed") return;
+  state.maintenance.relationDraftStates.set(candidate.candidateId, "reviewed");
+  renderMaintenanceSession();
+}
+
+function toggleRelationCandidateSuppression(candidate) {
+  if (candidate.operation !== "relation") return;
+  if (relationDraftState(candidate) === "suppressed") {
+    state.maintenance.relationDraftStates.delete(candidate.candidateId);
+  } else {
+    state.maintenance.relationDraftStates.set(candidate.candidateId, "suppressed");
+    state.maintenance.selected.delete(candidate.candidateId);
+  }
+  renderMaintenanceSession();
+}
+
+function stagedRelationSuppressions() {
+  return maintenanceCandidates().filter((candidate) => (
+    candidate.operation === "relation" && relationDraftState(candidate) === "suppressed"
+  ));
+}
+
+function maintenanceApplySelection() {
+  const suppressions = stagedRelationSuppressions();
+  const suppressionIds = new Set(suppressions.map((candidate) => candidate.candidateId));
+  const candidates = maintenanceCandidates().filter((candidate) => (
+    state.maintenance.selected.has(candidate.candidateId) && !suppressionIds.has(candidate.candidateId)
+  ));
+  return { candidates, suppressions };
 }
 
 function maintenanceCandidateRow(candidate) {
@@ -2351,17 +2417,21 @@ function maintenanceCandidateRow(candidate) {
       element("strong", "", t("Extract Topic Page")),
       element("span", "muted", candidate.title),
     );
-    for (const page of candidate.pages) {
-      const item = element("div", "maintenance-input");
-      item.append(
-        element("span", "mono muted", page.pageId),
-        element("span", "maintenance-preview", compactPreview(page.preview || t("No preview"))),
-        revisionBoundPageExpansion(page),
+    inputs.append(
+      element("span", "mono muted", candidate.pages.map((page) => page.pageId).join(" · ")),
+      topicExtractionReviewButton(candidate),
+    );
+    if (candidate.reason) {
+      const rationale = element("div", "maintenance-relation-evidence");
+      rationale.append(
+        element("span", "maintenance-relation-evidence-label", t("Why this Topic Page is worth creating")),
+        element("span", "", candidate.reason),
       );
-      inputs.append(item);
+      content.append(rationale);
     }
     content.append(element("span", "maintenance-preview", compactPreview(candidate.content, 240)));
   } else if (candidate.operation === "relation") {
+    const draftState = relationDraftState(candidate);
     source.append(
       element("strong", "", candidate.namespace),
       element("span", "muted", `2 ${t("Pages")}`),
@@ -2370,6 +2440,11 @@ function maintenanceCandidateRow(candidate) {
       element("strong", "", t("Explicit relation")),
       element("span", "muted", "related_to"),
     );
+    if (draftState === "reviewed") {
+      change.append(element("span", "maintenance-relation-state reviewed", t("Reviewed")));
+    } else if (draftState === "suppressed") {
+      change.append(element("span", "maintenance-relation-state suppressed", t("Will not be suggested when applied")));
+    }
     for (const page of candidate.pages) {
       const item = element("div", "maintenance-input");
       item.append(
@@ -2387,7 +2462,24 @@ function maintenanceCandidateRow(candidate) {
       );
       content.append(evidence);
     }
-    content.append(relationComparisonButton(candidate, "subtle-button maintenance-relation-compare"));
+    const actions = element("div", "maintenance-relation-actions");
+    const isSuppressed = draftState === "suppressed";
+    const suppressLabel = t(isSuppressed ? "Undo no-suggest" : "Do not suggest this relation again");
+    const suppress = element("button", `icon-button maintenance-relation-action-button maintenance-relation-suppress${isSuppressed ? " is-staged" : ""}`);
+    suppress.type = "button";
+    suppress.title = suppressLabel;
+    suppress.setAttribute("aria-label", suppressLabel);
+    suppress.append(suppressRelationIcon());
+    suppress.addEventListener("click", () => toggleRelationCandidateSuppression(candidate));
+    actions.append(
+      relationComparisonButton(candidate, "icon-button maintenance-relation-action-button maintenance-relation-compare", {
+        iconOnly: true,
+        reviewed: draftState === "reviewed",
+        onReviewed: draftState === "suppressed" ? null : () => markRelationCandidateReviewed(candidate),
+      }),
+      suppress,
+    );
+    content.append(actions);
   } else {
     const mergesPacks = candidate.pages.length === 2
       && candidate.pages.every((page) => page.mediaType === "application/vnd.pcp.packed-page+json");
@@ -2520,9 +2612,8 @@ function currentMaintenanceAction() {
   const stage = maintenanceWorkflowStage();
   if (stage === "scan") return "scan";
   if (stage === "analyze") return "analyze";
-  const selectedCount = maintenanceCandidates()
-    .filter((candidate) => state.maintenance.selected.has(candidate.candidateId)).length;
-  return selectedCount ? "apply" : "advance";
+  const { candidates, suppressions } = maintenanceApplySelection();
+  return candidates.length + suppressions.length ? "apply" : "advance";
 }
 
 function maintenancePrimaryLabel(action = currentMaintenanceAction()) {
@@ -2531,7 +2622,8 @@ function maintenancePrimaryLabel(action = currentMaintenanceAction()) {
   if (action === "analyze") return t("Analyze suggestions");
   if (action === "retry") return t("Retry failed pages");
   if (action === "apply") {
-    const count = maintenanceCandidates().filter((candidate) => state.maintenance.selected.has(candidate.candidateId)).length;
+    const { candidates, suppressions } = maintenanceApplySelection();
+    const count = candidates.length + suppressions.length;
     return `${t("Apply selected")} (${formatNumber(count)})`;
   }
   if (maintenancePass() === "pack") return t("Continue to semantic maintenance");
@@ -2857,6 +2949,27 @@ async function applyMaintenanceCandidates(candidates, onProgress) {
   return { applied, appliedCandidateIds, skipped };
 }
 
+async function applyRelationSuppressions(candidates, onProgress) {
+  let applied = 0;
+  const appliedCandidateIds = [];
+  const skipped = [];
+  for (const [index, candidate] of candidates.entries()) {
+    onProgress?.({ index, total: candidates.length, applied, skipped });
+    try {
+      await maintenanceMutation("/api/maintenance/relations/suppress", {
+        candidateId: candidate.candidateId,
+        pages: candidate.pages.map((page) => ({ pageId: page.pageId, revisionId: page.revisionId })),
+      });
+      applied += 1;
+      appliedCandidateIds.push(candidate.candidateId);
+    } catch (error) {
+      skipped.push({ candidateId: candidate.candidateId, message: error.message || String(error) });
+    }
+    onProgress?.({ index: index + 1, total: candidates.length, applied, skipped });
+  }
+  return { applied, appliedCandidateIds, skipped };
+}
+
 function maintenanceBatches(items, batchSize = SUMMARY_REVIEW_BATCH_SIZE) {
   const batches = [];
   for (let index = 0; index < items.length; index += batchSize) {
@@ -2941,6 +3054,7 @@ function resetCurrentMaintenanceWork() {
   state.maintenance.analyses = { pack: null, summary: null, topic: null, relation: null };
   state.maintenance.pendingCandidates = [];
   state.maintenance.selected.clear();
+  state.maintenance.relationDraftStates.clear();
 }
 
 async function scanMaintenance() {
@@ -3167,34 +3281,48 @@ async function retryFailedSummaryBatches() {
 
 async function optimizeMaintenanceSelection() {
   if (state.maintenance.busy) return;
-  const candidates = maintenanceCandidates()
-    .filter((candidate) => state.maintenance.selected.has(candidate.candidateId));
-  if (candidates.length === 0) return;
-  const candidateCount = formatNumber(candidates.length);
-  const singular = candidates.length === 1;
+  const { candidates, suppressions } = maintenanceApplySelection();
+  const totalCandidates = [...candidates, ...suppressions];
+  if (totalCandidates.length === 0) return;
+  const candidateCount = formatNumber(totalCandidates.length);
+  const singular = totalCandidates.length === 1;
   const phaseLabel = t(maintenancePhaseConfig().label);
   const confirmed = await confirmAction({
     title: currentLanguage === "zh"
       ? `优化选中的 ${candidateCount} 个${phaseLabel}提案？`
       : `Optimize ${candidateCount} selected ${phaseLabel} proposal${singular ? "" : "s"}?`,
     description: currentLanguage === "zh"
-      ? "只会提交当前阶段中已选择的提案。每项都会在写入前校验当前版本；完成后由你决定何时继续到下一阶段。"
-      : "Only selected proposals in the current phase will be applied. Each write checks the current revision first; you choose when to continue to the next stage.",
+      ? "只会提交当前阶段中已选择的提案，以及标为不再建议的关联。每项都会在写入前校验当前版本；完成后由你决定何时继续到下一阶段。"
+      : "Only selected proposals and staged relation suppressions in the current phase will be applied. Each write checks the current revision first; you choose when to continue to the next stage.",
     confirmLabel: t("Apply selected"),
   });
   if (!confirmed) return;
 
   state.maintenance.busy = true;
-  state.maintenance.activity = { kind: "optimize", current: 0, total: candidates.length };
-  byId("maintenance-status").textContent = `Optimizing 0 of ${formatNumber(candidates.length)}`;
+  state.maintenance.activity = { kind: "optimize", current: 0, total: totalCandidates.length };
+  byId("maintenance-status").textContent = `Optimizing 0 of ${formatNumber(totalCandidates.length)}`;
   renderMaintenanceSession();
   let result = { applied: 0, appliedCandidateIds: [], skipped: [] };
   try {
-    result = await applyMaintenanceCandidates(candidates, ({ index, total, applied, skipped }) => {
+    const reportProgress = (index, applied, skipped) => {
       state.maintenance.activity.current = index;
-      byId("maintenance-status").textContent = `Optimizing ${formatNumber(index)} of ${formatNumber(total)} · ${formatNumber(applied)} applied · ${formatNumber(skipped.length)} skipped`;
+      byId("maintenance-status").textContent = `Optimizing ${formatNumber(index)} of ${formatNumber(totalCandidates.length)} · ${formatNumber(applied)} applied · ${formatNumber(skipped.length)} skipped`;
       renderMaintenanceSession();
+    };
+    const appliedResult = await applyMaintenanceCandidates(candidates, ({ index, applied, skipped }) => {
+      reportProgress(index, applied, skipped);
     });
+    const suppressionResult = await applyRelationSuppressions(suppressions, ({ index, applied, skipped }) => {
+      reportProgress(candidates.length + index, appliedResult.applied + applied, [
+        ...appliedResult.skipped,
+        ...skipped,
+      ]);
+    });
+    result = {
+      applied: appliedResult.applied + suppressionResult.applied,
+      appliedCandidateIds: [...appliedResult.appliedCandidateIds, ...suppressionResult.appliedCandidateIds],
+      skipped: [...appliedResult.skipped, ...suppressionResult.skipped],
+    };
     state.maintenance.selected.clear();
     const consumed = new Set([...result.appliedCandidateIds, ...result.skipped.map((item) => item.candidateId)]);
     if (maintenanceWorkflowStage() === "review") {
@@ -3203,7 +3331,8 @@ async function optimizeMaintenanceSelection() {
       state.maintenance.pendingCandidates = state.maintenance.pendingCandidates
         .filter((candidate) => !consumed.has(candidate.candidateId));
     }
-    const byCandidateId = new Map(candidates.map((candidate) => [candidate.candidateId, candidate]));
+    for (const candidateId of consumed) state.maintenance.relationDraftStates.delete(candidateId);
+    const byCandidateId = new Map(totalCandidates.map((candidate) => [candidate.candidateId, candidate]));
     for (const candidateId of result.appliedCandidateIds) {
       const candidate = byCandidateId.get(candidateId);
       if (candidate) maintenanceOutcome(candidate.operation).applied += 1;
@@ -3233,7 +3362,9 @@ async function optimizeMaintenanceSelection() {
 }
 
 function toggleMaintenanceSelection() {
-  const candidates = maintenanceCandidates();
+  const candidates = maintenanceCandidates().filter((candidate) => (
+    relationDraftState(candidate) !== "suppressed"
+  ));
   const allSelected = candidates.length > 0
     && candidates.every((candidate) => state.maintenance.selected.has(candidate.candidateId));
   state.maintenance.selected.clear();

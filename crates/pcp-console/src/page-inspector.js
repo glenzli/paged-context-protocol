@@ -15,16 +15,26 @@ export function createPageInspector({ request, showError, formatTime, t = (value
   const relationComparisonReason = document.getElementById("relation-comparison-reason");
   const relationComparisonReviewNote = document.getElementById("relation-comparison-review-note");
   const relationComparisonPages = document.getElementById("relation-comparison-pages");
+  const relationComparisonMarkReviewed = document.getElementById("relation-comparison-mark-reviewed");
+  const topicExtractionDialog = document.getElementById("topic-extraction-review-dialog");
+  const topicExtractionSubtitle = document.getElementById("topic-extraction-review-subtitle");
+  const topicExtractionReason = document.getElementById("topic-extraction-review-reason");
+  const topicExtractionTitle = document.getElementById("topic-extraction-review-title");
+  const topicExtractionProposal = document.getElementById("topic-extraction-review-proposal");
+  const topicExtractionTabs = document.getElementById("topic-extraction-review-tabs");
+  const topicExtractionPage = document.getElementById("topic-extraction-review-page");
   const detailCache = new Map();
   const graphCache = new Map();
   const historyCache = new Map();
   const rawCache = new Map();
+  const reviewedRevisionCache = new Map();
   const navigationHistory = [];
   let currentPageId = null;
   let currentView = "summary";
   let currentGraphFilter = "all";
   let currentGraphDepth = 2;
   let currentGraphLimit = 120;
+  let comparisonReviewAction = null;
 
   const relationFamilies = [
     ["all", "All connections"],
@@ -477,24 +487,38 @@ export function createPageInspector({ request, showError, formatTime, t = (value
     return { section, body };
   }
 
-  async function loadComparedRevision(page, target) {
+  async function reviewedRevision(page) {
+    const cached = reviewedRevisionCache.get(page.revisionId);
+    if (cached) return cached;
+    const detail = await request(`/api/pages/${encodeURIComponent(page.revisionId)}`);
+    if (detail.revision?.revisionId !== page.revisionId) {
+      throw new Error(t("The reviewed revision is no longer available."));
+    }
+    const payload = detail.revision?.payload;
+    const value = {
+      content: payload?.content || t("No content projection"),
+      mediaType: payload?.mediaType || "text/plain",
+    };
+    reviewedRevisionCache.set(page.revisionId, value);
+    return value;
+  }
+
+  async function loadComparedRevision(page, target, isCurrent = () => true) {
     try {
-      const detail = await request(`/api/pages/${encodeURIComponent(page.revisionId)}`);
-      if (detail.revision?.revisionId !== page.revisionId) {
-        throw new Error(t("The reviewed revision is no longer available."));
-      }
-      const payload = detail.revision?.payload;
+      const payload = await reviewedRevision(page);
+      if (!isCurrent()) return;
       target.replaceChildren(previewBlock(
-        payload?.content || t("No content projection"),
-        payload?.mediaType || "text/plain",
+        payload.content,
+        payload.mediaType,
       ));
     } catch (error) {
+      if (!isCurrent()) return;
       target.replaceChildren(element("div", "empty", error.message || String(error)));
       showError(error);
     }
   }
 
-  function compareRelation({ pages, relationReason, reviewReason }) {
+  function compareRelation({ pages, relationReason, reviewReason, onReviewed = null, reviewed = false }) {
     if (!Array.isArray(pages) || pages.length !== 2) {
       const error = new Error(t("A relation comparison requires exactly two Pages."));
       showError(error);
@@ -504,15 +528,65 @@ export function createPageInspector({ request, showError, formatTime, t = (value
     relationComparisonReason.textContent = relationReason || t("No relation rationale was supplied.");
     relationComparisonReviewNote.hidden = !reviewReason;
     relationComparisonReviewNote.textContent = reviewReason || "";
+    comparisonReviewAction = typeof onReviewed === "function" ? onReviewed : null;
+    relationComparisonMarkReviewed.hidden = !comparisonReviewAction;
+    relationComparisonMarkReviewed.disabled = reviewed;
+    relationComparisonMarkReviewed.classList.toggle("is-reviewed", reviewed);
+    relationComparisonMarkReviewed.title = t(reviewed ? "Reviewed" : "Mark reviewed");
+    relationComparisonMarkReviewed.setAttribute("aria-label", relationComparisonMarkReviewed.title);
     const left = comparisonPage(pages[0], "Left Page");
     const right = comparisonPage(pages[1], "Right Page");
     relationComparisonPages.replaceChildren(left.section, right.section);
     if (!relationComparisonDialog.open) relationComparisonDialog.showModal();
+    document.documentElement.classList.add("relation-comparison-open");
     relationComparisonDialog.scrollTop = 0;
     return Promise.all([
       loadComparedRevision(pages[0], left.body),
       loadComparedRevision(pages[1], right.body),
     ]);
+  }
+
+  function topicSourceTab(page, index, active, select) {
+    const tab = element("button", `topic-extraction-review-tab${active ? " active" : ""}`);
+    tab.type = "button";
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", String(active));
+    tab.title = `${page.pageId} · ${page.revisionId}`;
+    tab.append(
+      element("span", "topic-extraction-review-tab-index", `${index + 1}`),
+      element("span", "mono", page.pageId),
+    );
+    tab.addEventListener("click", () => select(index));
+    return tab;
+  }
+
+  function reviewTopic(candidate) {
+    const pages = candidate?.pages;
+    if (!Array.isArray(pages) || pages.length < 2) {
+      const error = new Error(t("A Topic extraction review requires at least two Pages."));
+      showError(error);
+      return Promise.resolve();
+    }
+    topicExtractionSubtitle.textContent = `${candidate.namespace} · ${pages.length} ${t("Source Pages")}`;
+    topicExtractionReason.textContent = candidate.reason || t("No Topic rationale was supplied.");
+    topicExtractionTitle.textContent = candidate.title || t("Topic Page proposal");
+    topicExtractionProposal.replaceChildren(previewBlock(candidate.content || t("No content projection"), "text/markdown"));
+    let activeIndex = 0;
+    const select = async (index) => {
+      activeIndex = index;
+      topicExtractionTabs.replaceChildren(...pages.map((page, pageIndex) => (
+        topicSourceTab(page, pageIndex, pageIndex === activeIndex, select)
+      )));
+      topicExtractionPage.replaceChildren(element("div", "loading", t("Loading full Page…")));
+      await loadComparedRevision(
+        pages[activeIndex],
+        topicExtractionPage,
+        () => activeIndex === index && topicExtractionDialog.open,
+      );
+    };
+    if (!topicExtractionDialog.open) topicExtractionDialog.showModal();
+    topicExtractionDialog.scrollTop = 0;
+    return select(activeIndex);
   }
 
   document.querySelectorAll(".detail-tab").forEach((tab) => {
@@ -526,6 +600,18 @@ export function createPageInspector({ request, showError, formatTime, t = (value
   document.getElementById("relation-comparison-close").addEventListener("click", () => {
     relationComparisonDialog.close();
   });
+  relationComparisonMarkReviewed.addEventListener("click", () => {
+    if (!comparisonReviewAction) return;
+    comparisonReviewAction();
+    relationComparisonDialog.close();
+  });
+  relationComparisonDialog.addEventListener("close", () => {
+    comparisonReviewAction = null;
+    document.documentElement.classList.remove("relation-comparison-open");
+  });
+  document.getElementById("topic-extraction-review-close").addEventListener("click", () => {
+    topicExtractionDialog.close();
+  });
 
-  return { open, compareRelation };
+  return { open, compareRelation, reviewTopic };
 }

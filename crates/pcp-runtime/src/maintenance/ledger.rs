@@ -222,14 +222,58 @@ impl MaintenanceLedger {
                     MaintenanceRelationReviewStatus::Pending
                         | MaintenanceRelationReviewStatus::Suppressed
                 )
-                .then(|| {
-                    [
-                        proposal.pages[0].page_id.clone(),
-                        proposal.pages[1].page_id.clone(),
-                    ]
-                })
+                .then(|| relation_review_page_pair(proposal))
             }))
             .collect()
+    }
+
+    pub(crate) fn suppressed_relation_pairs(&self) -> Vec<[String; 2]> {
+        self.relation_reviews
+            .values()
+            .filter(|proposal| proposal.status == MaintenanceRelationReviewStatus::Suppressed)
+            .map(relation_review_page_pair)
+            .collect()
+    }
+
+    /// Persist an operator's decision that this exact Page pair must not be
+    /// proposed again.  Keep it alongside review decisions rather than in a
+    /// separate blacklist: the reviewed revisions remain auditable, while the
+    /// decision blocks this exact Page pair and stays out of the pending queue.
+    pub(crate) fn suppress_relation_pair(
+        &mut self,
+        namespace: String,
+        pages: [MaintenanceRelationReviewPage; 2],
+        relation_reason: String,
+    ) -> Result<()> {
+        let candidate_id = relation_review_id(&pages);
+        match self.relation_reviews.get_mut(&candidate_id) {
+            Some(proposal) if proposal.status == MaintenanceRelationReviewStatus::Pending => {
+                proposal.status = MaintenanceRelationReviewStatus::Suppressed;
+            }
+            Some(proposal) if proposal.status == MaintenanceRelationReviewStatus::Suppressed => {}
+            Some(_) => {
+                anyhow::bail!("PCP relation decision is already resolved and cannot be suppressed")
+            }
+            None => {
+                self.relation_reviews.insert(
+                    candidate_id.clone(),
+                    MaintenanceRelationReviewProposal {
+                        candidate_id,
+                        namespace,
+                        relation_type: "related_to".to_owned(),
+                        pages,
+                        proposed_at: chrono::Utc::now().to_rfc3339(),
+                        risk: "operator_suppressed".to_owned(),
+                        review_reason:
+                            "The operator chose not to suggest this exact Page pair again."
+                                .to_owned(),
+                        relation_reason,
+                        status: MaintenanceRelationReviewStatus::Suppressed,
+                    },
+                );
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn propose_relation_review(
@@ -483,6 +527,13 @@ fn relation_review_id(pages: &[MaintenanceRelationReviewPage; 2]) -> String {
     }
     let encoded = format!("mrr_{:x}", digest.finalize());
     encoded[..28].to_owned()
+}
+
+fn relation_review_page_pair(proposal: &MaintenanceRelationReviewProposal) -> [String; 2] {
+    [
+        proposal.pages[0].page_id.clone(),
+        proposal.pages[1].page_id.clone(),
+    ]
 }
 
 pub(crate) fn summary_key(page_id: &str) -> String {
