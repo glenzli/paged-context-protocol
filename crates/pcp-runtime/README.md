@@ -23,8 +23,8 @@ during migration.
 | --- | --- | --- |
 | Tenant | Source events, source-local deterministic structure, Page kind, SourceRefs, external-media custody | Global relation graph, maintenance cadence, cross-tenant policy |
 | PCP protocol and Store | Identity boundary, stable Pages, immutable Revisions, Relations, authorization, exact reads, atomic commits | A fixed inference model or active prompt |
-| Runtime maintainer | Identity-wide candidate discovery, bounded jobs, budgets, timeout, cooldown, worker invocation, validation, commit authority, maintenance ledger | Tenant product behavior or media-byte custody |
-| Inference worker | Summary, ordered packing-candidate, relation, validity, and milestone judgments requested by Runtime | Direct Store writes, content packing, Page-head advancement, scheduling, or GC policy |
+| Runtime maintainer | Identity-wide candidate discovery, bounded convergence, typed review queue, budgets, timeout, cooldown, worker invocation, validation, commit authority, maintenance ledger | Tenant product behavior or media-byte custody |
+| Inference worker | Summary, ordered packing-candidate, relation, Topic, archive-review, and milestone judgments requested by Runtime | Direct Store writes, content packing, Page-head advancement, scheduling, lifecycle mutation, or GC policy |
 
 The maintainer is disabled unless `[maintenance]` is present with
 `enabled = true`. It never falls back to automatic similarity-based merging.
@@ -45,11 +45,13 @@ enough new Pages and a completed quiet period (or its bounded maximum wait).
 The first heartbeat establishes a baseline rather than treating an existing
 Store backlog as newly written work.
 
-Scheduled packing and Summary work may apply in `mode = "apply"`. Scheduled
-semantic relations remain proposals even in apply mode: they are recorded for
-review and never enter the asserted relation graph or retrieval path merely
-because a worker selected a pair. Direct operator review remains the only path
-that asserts a semantic `related_to` edge.
+Scheduled packing and Summary work may apply in `mode = "apply"`. A relation is
+applied automatically only for the narrow structural case of two continuous
+Pack Pages in one source stream with a shared protected identifier. General
+relations, Topic Pages, and archive recommendations enter one persistent typed
+review queue even in apply mode. Background maintenance and Console `Run now`
+use this same controller and queue; queued items affect neither retrieval nor
+lifecycle state before acceptance.
 
 ```toml
 [maintenance.write_trigger]
@@ -70,9 +72,10 @@ One cycle is bounded by `max_jobs_per_cycle`:
 3. The worker may select one ordered coherent episode from that exact window. Lossless packing does not require every Page to state the same fact: questions, answers, corrections, qualifications, and short reasoning transitions may stay together. It does not generate packed content.
 4. Runtime validates the selected IDs, aggregate input size, and at most one packed anchor and, in apply mode, calls `pack_pages`; Store rechecks exact heads, source continuity, identity pins, anchor count, retention, and transaction invariants. It then reloads the current-Page inventory before the next phase.
 5. A long unsummarized Page may be sent to the worker as `summarize_page`. Runtime reloads the inventory after a Summary write before relation work.
-6. Runtime may send overlapping bounded current-Page routing windows as `select_relation`. The request lists already related or previously proposed pairs; the worker can return only two other offered Page IDs. Runtime fixes the relation to symmetric `related_to`, binds the exact current Revisions as basis, rejects stale or excluded pairs, and owns the commit. A window remains active until the worker returns `no_candidate`.
-7. Runtime obtains a bounded dry-run retention plan and may ask the worker whether any actual old candidate Revision is a semantic milestone.
-8. In apply mode only, Summary writes, packing, Relations, or finite retention leases cross into the PCP commit API. Leases additionally require `maintenance.retention.write_leases = true`. Lease selection and physical collection remain separate operations; the current maintainer does not collect Revision payloads automatically.
+6. Runtime may send overlapping bounded current-Page routing windows as `select_relation`. The request lists already related or previously reviewed pairs; the worker can return only two other offered Page IDs. Runtime fixes the relation to symmetric `related_to`, binds the exact current Revisions as basis, rejects stale or excluded pairs, and sends general semantic relations to review.
+7. After relation work quiesces, Runtime may ask for a source-grounded Topic front door. Valid Topic proposals and conservative archive recommendations are persisted as typed review items; archive is never applied automatically.
+8. Runtime obtains a bounded dry-run retention plan and may ask the worker whether any actual old candidate Revision is a semantic milestone.
+9. In apply mode only, validated low-risk Summary writes, packing, structurally low-risk Relations, or finite retention leases cross into the PCP commit API. Leases additionally require `maintenance.retention.write_leases = true`. Lease selection and physical collection remain separate operations; the current maintainer does not collect Revision payloads automatically.
 
 Runtime keeps cooldown decisions in `state_path`. This operational state is not
 written as user memory. Successful Summary writes remain traceable through normal
@@ -103,22 +106,31 @@ does not alter the long-running scheduler configuration.
 ## Worker Contract
 
 `maintenance.worker.provider = "infer_runtime"` uses the official Infer Runtime
-Consumer SDK and an independent `pcp-runtime` managed credential. Runtime
-discovers Infer locally and submits only `text.summarize` or `reasoning.solve`.
-Summary requests are fixed to the configured local deployment with local-only,
-offline execution. Packing and Retention judgments use the configured reasoning
-deployment; Relation uses it too unless `relation_deployment_id` explicitly
-names a higher review deployment. Advanced judgments use a subscription
-deployment with an advanced capability floor and medium reasoning effort. Both
-paths use unary Responses with background scheduling
-priority, a named deployment, zero estimated cost, and no fallback: an
-unavailable deployment fails instead of silently selecting a different model.
-The defaults are local Qwen 3.5 4B and Luna. Terra can be configured only as an
-explicit Relation escalation; it is not an automatic fallback, and Sol has no
-maintenance path. The configured output-token limit is sent to the
-local Summary deployment. Subscription reasoning omits that unsupported hard
-constraint and remains bounded by the strict decision schema and 1 MiB wire
-limit. Runtime accepts only strict JSON from `output_text`; missing text,
+Consumer SDK and an independent `pcp-runtime` managed credential. Summary and
+reasoning requests default to the explicitly named Luna deployment. There is no
+router fallback. `relation_deployment_id` may still pin Relation work to another
+baseline deployment, but it is not the uncertainty escalation path.
+
+`escalation_deployment_id` enables one sparse, bounded second opinion. Runtime
+uses it only after the baseline returns the explicit `defer` contract for an
+operation listed in `escalation_operations`; missing evidence, stale candidates,
+invalid output, transport failures, and schema failures do not escalate. The
+default eligible set is packing selection/analysis, Relation, Topic, and archive
+review. Summary and retention remain Luna-only. A typical policy is:
+
+```toml
+[maintenance.worker]
+provider = "infer_runtime"
+credential_file = "/absolute/path/to/pcp-runtime.token"
+summary_deployment_id = "codex_gpt_5_6_luna"
+reasoning_deployment_id = "codex_gpt_5_6_luna"
+escalation_deployment_id = "codex_gpt_5_6_sol"
+```
+
+Both attempts use unary Responses with background scheduling priority, a named
+deployment, zero estimated cost, and no fallback: an unavailable deployment
+fails instead of silently selecting a different model. Runtime accepts only
+strict JSON from `output_text`; missing text,
 markdown fences, unknown fields, terminal failure, timeout, or invalid PCP
 decisions fail closed.
 

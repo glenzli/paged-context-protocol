@@ -15,8 +15,9 @@ use super::{
     ApplyMaintenanceRelationRequest, ApplyMaintenanceSummaryRequest, ApplyMaintenanceTopicRequest,
     MaintenanceArchiveAnalysis, MaintenanceArchiveScan, MaintenanceMode, MaintenancePackAnalysis,
     MaintenancePackScan, MaintenanceRelationAnalysis, MaintenanceRelationReviewProposal,
-    MaintenanceSummaryAnalysis, MaintenanceSummaryBatchAnalysis, MaintenanceTopicAnalysis,
-    MaintenanceWorkScan, RuntimeMaintainer,
+    MaintenanceReviewItem, MaintenanceReviewStatus, MaintenanceSummaryAnalysis,
+    MaintenanceSummaryBatchAnalysis, MaintenanceTopicAnalysis, MaintenanceWorkScan,
+    RuntimeMaintainer,
 };
 
 pub struct MaintenanceOperator {
@@ -165,6 +166,13 @@ impl MaintenanceOperator {
         self.maintainer.suppress_relation_candidate(request).await
     }
 
+    pub async fn reject_relation(
+        &mut self,
+        request: ApplyMaintenanceRelationRequest,
+    ) -> Result<()> {
+        self.maintainer.reject_relation_candidate(request).await
+    }
+
     pub async fn analyze_topic(
         &self,
         request: AnalyzeMaintenanceTopicRequest,
@@ -181,6 +189,26 @@ impl MaintenanceOperator {
 
     pub fn pending_relation_reviews(&self) -> Vec<MaintenanceRelationReviewProposal> {
         self.maintainer.pending_relation_reviews()
+    }
+
+    pub fn pending_reviews(&self) -> Vec<MaintenanceReviewItem> {
+        self.maintainer.pending_reviews()
+    }
+
+    pub fn review_item(&self, candidate_id: &str) -> Option<MaintenanceReviewItem> {
+        self.maintainer.review_item(candidate_id)
+    }
+
+    pub async fn resolve_review(
+        &mut self,
+        candidate_id: &str,
+        status: MaintenanceReviewStatus,
+    ) -> Result<()> {
+        self.maintainer.resolve_review(candidate_id, status).await
+    }
+
+    pub async fn converge_once(&mut self) -> Result<super::MaintenanceCycleReport> {
+        self.maintainer.run_convergence_once(1).await
     }
 
     pub async fn approve_relation_review(

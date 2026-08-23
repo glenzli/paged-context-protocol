@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, path::PathBuf, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -9,7 +13,7 @@ use tokio::time::{Instant, sleep, timeout};
 
 use super::{
     MaintenanceWorkerOutcome, MaintenanceWorkerRequest, MaintenanceWorkerResponse,
-    SemanticMaintenanceWorker,
+    SemanticMaintenanceWorker, worker::ArchiveWorkerDecision,
 };
 
 const MAX_INFER_OUTPUT_BYTES: usize = 1024 * 1024;
@@ -17,6 +21,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const PACKING_OVERLAP_REPAIR_INSTRUCTIONS: &str = "The previous answer was rejected because a Page appeared in more than one packing candidate. Re-evaluate the supplied groups from scratch. The candidates array must be a disjoint partition: every page_id may occur in zero or one candidate only. Before responding, verify that no identifier repeats anywhere in candidates. Omit an ambiguous segment rather than returning overlapping alternatives.";
 const CHINESE_SUMMARY_REPAIR_INSTRUCTIONS: &str = "上一版摘要未满足中文输出合同。只输出替换后的摘要正文：自然语言叙述必须使用中文；技术名、产品名、模型名、版本号、URL、代码标识符和原文引号可按原样保留。不要解释，不要 JSON。";
 const ENGLISH_SUMMARY_REPAIR_INSTRUCTIONS: &str = "The previous summary did not meet the English output contract. Return only a replacement summary in English prose; preserve technical names, product names, model names, versions, URLs, code identifiers, and source quotations exactly. Do not explain and do not return JSON.";
+const CHINESE_RELATION_REPAIR_INSTRUCTIONS: &str = "上一版关联理由未满足中文输出合同。重新判断同一批候选，只返回规定的 JSON。若 decision 为 relate，reason 的自然语言叙述必须使用中文；技术名、产品名、模型名、版本号、URL、代码标识符和原文引号可按原样保留。不要把中文页面整体翻译成英语。";
+const ENGLISH_RELATION_REPAIR_INSTRUCTIONS: &str = "The previous relation rationale did not meet the English output contract. Re-evaluate the same candidates and return only the required JSON. With decision=relate, write reason in English prose while preserving technical names, product names, versions, URLs, code identifiers, and source quotations exactly.";
+const ESCALATION_INSTRUCTIONS: &str = "The inexpensive baseline maintenance model explicitly deferred this decision. Independently re-evaluate only the supplied evidence with deeper reasoning. Do not assume the baseline had a preferred answer, do not invent missing evidence, and return defer again when the supplied evidence is genuinely insufficient.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SummaryLanguage {
@@ -31,6 +38,8 @@ pub struct InferRuntimeSemanticWorker {
     summary_deployment_id: String,
     reasoning_deployment_id: String,
     relation_deployment_id: Option<String>,
+    escalation_deployment_id: Option<String>,
+    escalation_operations: BTreeSet<String>,
 }
 
 impl InferRuntimeSemanticWorker {
@@ -40,6 +49,8 @@ impl InferRuntimeSemanticWorker {
         summary_deployment_id: String,
         reasoning_deployment_id: String,
         relation_deployment_id: Option<String>,
+        escalation_deployment_id: Option<String>,
+        escalation_operations: Vec<String>,
     ) -> Result<Self> {
         let client = Client::builder()
             .credential_file(credential_file)
@@ -51,6 +62,8 @@ impl InferRuntimeSemanticWorker {
             summary_deployment_id,
             reasoning_deployment_id,
             relation_deployment_id,
+            escalation_deployment_id,
+            escalation_operations: escalation_operations.into_iter().collect(),
         })
     }
 
@@ -58,6 +71,7 @@ impl InferRuntimeSemanticWorker {
         &self,
         request: &MaintenanceWorkerRequest,
         additional_instructions: Option<&str>,
+        deployment_override: Option<&str>,
     ) -> Result<MaintenanceWorkerOutcome> {
         let mut infer_request = infer_request(
             request,
@@ -65,6 +79,7 @@ impl InferRuntimeSemanticWorker {
             &self.summary_deployment_id,
             &self.reasoning_deployment_id,
             self.relation_deployment_id.as_deref(),
+            deployment_override,
         )?;
         if let Some(additional_instructions) = additional_instructions {
             let instructions = infer_request
@@ -88,6 +103,8 @@ impl InferRuntimeSemanticWorker {
                     return Ok(MaintenanceWorkerOutcome {
                         response: decode_response(&response, request)?,
                         usage: Some(response_usage(&response)),
+                        model_attempts: 1,
+                        escalated: false,
                     });
                 }
                 "queued" | "in_progress" => {}
@@ -145,30 +162,35 @@ impl SemanticMaintenanceWorker for InferRuntimeSemanticWorker {
         &self,
         request: MaintenanceWorkerRequest,
     ) -> Result<MaintenanceWorkerOutcome> {
-        let initial = self.evaluate_inner(&request, None).await?;
+        let initial = self.evaluate_inner(&request, None, None).await?;
         let Some(repair_instructions) =
-            summary_language_repair_instructions(&request, &initial.response)
+            output_language_repair_instructions(&request, &initial.response)
         else {
-            return Ok(initial);
+            return self.maybe_escalate(&request, initial).await;
         };
 
         let repaired = self
-            .evaluate_inner(&request, Some(repair_instructions))
+            .evaluate_inner(&request, Some(repair_instructions), None)
             .await?;
         let mut usage = initial.usage.unwrap_or_default();
         if let Some(repaired_usage) = repaired.usage.as_ref() {
             usage.add_assign(repaired_usage);
         }
-        if summary_language_repair_instructions(&request, &repaired.response).is_none() {
+        if output_language_repair_instructions(&request, &repaired.response).is_none() {
             Ok(MaintenanceWorkerOutcome {
                 response: repaired.response,
                 usage: Some(usage),
+                model_attempts: 2,
+                escalated: false,
             })
         } else {
-            // A wrong-language routing summary is worse than an absent one: it poisons recall.
+            // Wrong-language maintenance evidence is worse than an absent proposal: it makes
+            // human review less reliable and can poison later routing surfaces.
             Ok(MaintenanceWorkerOutcome {
                 response: MaintenanceWorkerResponse::Defer,
                 usage: Some(usage),
+                model_attempts: 2,
+                escalated: false,
             })
         }
     }
@@ -187,8 +209,62 @@ impl SemanticMaintenanceWorker for InferRuntimeSemanticWorker {
         &self,
         request: MaintenanceWorkerRequest,
     ) -> Result<MaintenanceWorkerOutcome> {
-        self.evaluate_inner(&request, Some(PACKING_OVERLAP_REPAIR_INSTRUCTIONS))
+        self.evaluate_inner(&request, Some(PACKING_OVERLAP_REPAIR_INSTRUCTIONS), None)
             .await
+    }
+}
+
+impl InferRuntimeSemanticWorker {
+    async fn maybe_escalate(
+        &self,
+        request: &MaintenanceWorkerRequest,
+        mut baseline: MaintenanceWorkerOutcome,
+    ) -> Result<MaintenanceWorkerOutcome> {
+        let operation = operation_name(request);
+        let Some(deployment_id) = self.escalation_deployment_id.as_deref() else {
+            return Ok(baseline);
+        };
+        if !self.escalation_operations.contains(operation) || !response_defers(&baseline.response) {
+            return Ok(baseline);
+        }
+        let mut escalated = self
+            .evaluate_inner(request, Some(ESCALATION_INSTRUCTIONS), Some(deployment_id))
+            .await?;
+        if let (Some(total), Some(extra)) = (&mut baseline.usage, &escalated.usage) {
+            total.add_assign(extra);
+        } else if baseline.usage.is_none() {
+            baseline.usage = escalated.usage.take();
+        }
+        baseline.response = escalated.response;
+        baseline.model_attempts = baseline
+            .model_attempts
+            .saturating_add(escalated.model_attempts);
+        baseline.escalated = true;
+        Ok(baseline)
+    }
+}
+
+fn response_defers(response: &MaintenanceWorkerResponse) -> bool {
+    matches!(
+        response,
+        MaintenanceWorkerResponse::Defer
+            | MaintenanceWorkerResponse::ArchiveReview {
+                outcome: ArchiveWorkerDecision::Defer,
+                ..
+            }
+    )
+}
+
+fn operation_name(request: &MaintenanceWorkerRequest) -> &'static str {
+    match request {
+        MaintenanceWorkerRequest::SummarizePage { .. } => "summarize_page",
+        MaintenanceWorkerRequest::SummarizePages { .. } => "summarize_pages",
+        MaintenanceWorkerRequest::SelectPacking { .. } => "select_packing",
+        MaintenanceWorkerRequest::AnalyzePacking { .. } => "analyze_packing",
+        MaintenanceWorkerRequest::SelectRelation { .. } => "select_relation",
+        MaintenanceWorkerRequest::ExtractTopic { .. } => "extract_topic",
+        MaintenanceWorkerRequest::AssessArchive { .. } => "assess_archive",
+        MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => "select_retention_milestones",
     }
 }
 
@@ -238,6 +314,7 @@ fn infer_request(
     summary_deployment_id: &str,
     reasoning_deployment_id: &str,
     relation_deployment_id: Option<&str>,
+    deployment_override: Option<&str>,
 ) -> Result<ResponsesRequest> {
     let payload = inference_payload(request)?;
     let deadline_ms = timeout.as_millis().clamp(1, u128::from(u64::MAX));
@@ -269,12 +346,12 @@ fn infer_request(
         | MaintenanceWorkerRequest::AssessArchive { .. }
         | MaintenanceWorkerRequest::SelectRelation { .. }
         | MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => {
-            let deployment_id = match request {
+            let deployment_id = deployment_override.unwrap_or_else(|| match request {
                 MaintenanceWorkerRequest::SelectRelation { .. } => {
                     relation_deployment_id.unwrap_or(reasoning_deployment_id)
                 }
                 _ => reasoning_deployment_id,
-            };
+            });
             metadata.insert("infer.deployment_ids".to_owned(), deployment_id.to_owned());
             metadata.insert("infer.placement".to_owned(), "cloud_only".to_owned());
             metadata.insert("infer.prefer".to_owned(), "cloud".to_owned());
@@ -283,7 +360,12 @@ fn infer_request(
                 "subscription".to_owned(),
             );
             metadata.insert("infer.capability_floor".to_owned(), "advanced".to_owned());
-            Some(serde_json::json!({"effort": "medium"}))
+            let effort = if matches!(request, MaintenanceWorkerRequest::SelectRelation { .. }) {
+                "high"
+            } else {
+                "medium"
+            };
+            Some(serde_json::json!({"effort": effort}))
         }
     };
     Ok(ResponsesRequest {
@@ -349,9 +431,8 @@ fn instructions_for(request: &MaintenanceWorkerRequest) -> String {
             "Return exactly one JSON object and no markdown: {\"decision\":\"archive_review\",\"outcome\":\"archive\",\"reason\":\"...\"}, {\"decision\":\"archive_review\",\"outcome\":\"retain\",\"reason\":\"...\"}, or {\"decision\":\"archive_review\",\"outcome\":\"defer\",\"reason\":\"...\"}. This is a human-reviewed content-governance decision: you never delete anything and you do not apply lifecycle changes. Treat candidate_signals only as reasons to inspect, never as a value score. Recommend archive for a low-durability transient record, routine status update, greeting, duplicate observation, or resolved conversational turn that adds no independent reusable evidence, decision, definition, unresolved question, source material, or useful retrieval entry point. Existing summaries and explicit relations are review context, not retention proof by themselves: a Page may still be archived when those links do not rely on its detail. Retain any Page with durable evidence, a specific decision, a stable concept, a useful counterexample, source material, or plausible future value. Defer when the evidence is ambiguous. Your reason must be one concise, grounded sentence naming the Page's actual role; never cite age, lack of visits, lexical similarity, an existing summary, or a relation as sufficient evidence by itself."
                 .to_owned()
         }
-        MaintenanceWorkerRequest::SelectRelation { .. } => {
-            "Return exactly one JSON object and no markdown. Use either {\"decision\":\"relate\",\"page_ids\":[\"pg_...\",\"pg_...\"],\"reason\":\"...\"}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Select exactly two supplied Pages only when each directly helps understand, verify, or act on the same stable subject or evidence chain, and never select a pair listed in excluded_page_pairs. With relate, reason must be one concise, grounded sentence that names the shared subject or evidence chain and what the two Pages contribute; it is review evidence, not a generic statement of similarity. Temporal adjacency, shared Scope, co-retrieval, lexical similarity, broad analogy, or merely both discussing AI, tools, infrastructure, harnesses, runtimes, or workspaces are insufficient. Return no_candidate when no pair meets this bar."
-                .to_owned()
+        MaintenanceWorkerRequest::SelectRelation { pages, .. } => {
+            relation_instructions(pages)
         }
         MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => {
             "Return exactly one JSON object and no markdown. Use either {\"decision\":\"retain\",\"milestones\":[{\"revisionId\":\"rev_...\",\"reason\":\"...\"}]}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Select only supplied Revisions with durable semantic importance and stay within max_revisions."
@@ -366,6 +447,22 @@ fn summary_instructions(page: &super::MaintenanceDetailPage) -> String {
         SummaryLanguage::English => "Return only the routing summary itself as plain text: no JSON, keys, heading, Markdown, quotation marks, or explanation. The supplied Page already passed structural eligibility; write a 60-180 Unicode-character routing summary. Output language contract: English. The summary's natural-language prose must be English; preserve technical terms, product names, model names, versions, URLs, code identifiers, and source quotations exactly. Do not translate the Page into another language. Every named entity, product, model, version, and identifier you mention must be copied exactly from the supplied Page: do not change spelling, capitalization, transliteration, or version. State only the concrete subject and key assertion, decision, observation, or unresolved question. Preserve qualifications and never invent facts. Return exactly DEFER only when the Page content cannot be interpreted.".to_owned(),
         SummaryLanguage::Unspecified => "Return only the routing summary itself as plain text: no JSON, keys, heading, Markdown, quotation marks, or explanation. The supplied Page already passed structural eligibility; write a 60-180 Unicode-character routing summary in the Page body's dominant natural language. Preserve technical terms and quotations in their original language. Every named entity, product, model, version, and identifier you mention must be copied exactly from the supplied Page: do not change spelling, capitalization, transliteration, or version. State only the concrete subject and key assertion, decision, observation, or unresolved question. Preserve qualifications and never invent facts. Return exactly DEFER only when the Page content cannot be interpreted.".to_owned(),
     }
+}
+
+fn relation_instructions(pages: &[super::RelationCandidatePage]) -> String {
+    let base = "Return exactly one JSON object and no markdown. Use either {\"decision\":\"relate\",\"page_ids\":[\"pg_...\",\"pg_...\"],\"reason\":\"...\"}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Select exactly two supplied Pages only when each directly helps understand, verify, or act on the same stable subject or evidence chain, and never select a pair listed in excluded_page_pairs. With relate, reason must be one concise, grounded sentence that names the shared subject or evidence chain and what the two Pages contribute; it is review evidence, not a generic statement of similarity. Temporal adjacency, shared Scope, co-retrieval, lexical similarity, broad analogy, or merely both discussing AI, tools, infrastructure, harnesses, runtimes, or workspaces are insufficient. Return no_candidate when no pair meets this bar.";
+    let language_contract = match relation_language_for_pages(pages) {
+        SummaryLanguage::Chinese => {
+            "输出语言合同：中文。reason 的自然语言叙述必须使用中文；技术名、产品名、模型名、版本号、URL、代码标识符和原文引号可按原样保留。不得把中文页面整体翻译成英语。"
+        }
+        SummaryLanguage::English => {
+            "Output language contract: English. Write reason in English prose; preserve technical terms, product names, model names, versions, URLs, code identifiers, and source quotations exactly."
+        }
+        SummaryLanguage::Unspecified => {
+            "Write reason in the dominant natural language of the two selected Pages. Preserve technical terms, identifiers, and source quotations in their original language."
+        }
+    };
+    format!("{base} {language_contract}")
 }
 
 fn summary_source_text(page: &super::MaintenanceDetailPage) -> String {
@@ -458,6 +555,59 @@ fn summary_language_repair_instructions(
     }
 }
 
+fn relation_language_for_pages(pages: &[super::RelationCandidatePage]) -> SummaryLanguage {
+    let source = pages
+        .iter()
+        .map(|page| page.routing_text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    summary_language_for_text(&source)
+}
+
+fn relation_language_repair_instructions(
+    request: &MaintenanceWorkerRequest,
+    response: &MaintenanceWorkerResponse,
+) -> Option<&'static str> {
+    let MaintenanceWorkerRequest::SelectRelation { pages, .. } = request else {
+        return None;
+    };
+    let MaintenanceWorkerResponse::Relate { page_ids, reason } = response else {
+        return None;
+    };
+    match relation_language_for_selected_pages(pages, page_ids) {
+        SummaryLanguage::Chinese if !summary_has_chinese_prose(reason) => {
+            Some(CHINESE_RELATION_REPAIR_INSTRUCTIONS)
+        }
+        SummaryLanguage::English if !summary_has_english_prose(reason) => {
+            Some(ENGLISH_RELATION_REPAIR_INSTRUCTIONS)
+        }
+        SummaryLanguage::Unspecified | SummaryLanguage::Chinese | SummaryLanguage::English => None,
+    }
+}
+
+fn relation_language_for_selected_pages(
+    pages: &[super::RelationCandidatePage],
+    page_ids: &[String; 2],
+) -> SummaryLanguage {
+    let selected = pages
+        .iter()
+        .filter(|page| page_ids.contains(&page.page_id))
+        .map(|page| page.routing_text.as_str())
+        .collect::<Vec<_>>();
+    if selected.len() != 2 {
+        return relation_language_for_pages(pages);
+    }
+    summary_language_for_text(&selected.join("\n"))
+}
+
+fn output_language_repair_instructions(
+    request: &MaintenanceWorkerRequest,
+    response: &MaintenanceWorkerResponse,
+) -> Option<&'static str> {
+    summary_language_repair_instructions(request, response)
+        .or_else(|| relation_language_repair_instructions(request, response))
+}
+
 fn summary_has_chinese_prose(summary: &str) -> bool {
     summary
         .chars()
@@ -548,6 +698,7 @@ fn extract_output_text(response: &ResponsesResult) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::maintenance::worker::ArchiveCandidatePage;
     use crate::maintenance::{MaintenanceDetailPage, RelationCandidatePage, RetentionMilestone};
 
     fn result(text: &str) -> ResponsesResult {
@@ -604,6 +755,7 @@ mod tests {
             "codex_gpt_5_6_luna",
             "codex_gpt_5_6_luna",
             None,
+            None,
         )
         .expect("build Infer maintenance request");
 
@@ -623,10 +775,7 @@ mod tests {
         assert_eq!(infer.metadata["infer.fallback"], "none");
         assert_eq!(infer.metadata["infer.max_cost_usd"], "0");
         assert_eq!(infer.metadata["infer.deadline_ms"], "12000");
-        assert_eq!(
-            infer.reasoning,
-            Some(serde_json::json!({"effort": "medium"}))
-        );
+        assert_eq!(infer.reasoning, Some(serde_json::json!({"effort": "high"})));
         assert_eq!(infer.max_output_tokens, None);
     }
 
@@ -638,6 +787,7 @@ mod tests {
             Duration::from_secs(12),
             "codex_gpt_5_6_luna",
             "codex_gpt_5_6_luna",
+            None,
             None,
         )
         .expect("build Infer summary request");
@@ -707,6 +857,7 @@ mod tests {
             "codex_gpt_5_6_luna",
             "codex_gpt_5_6_luna",
             None,
+            None,
         )
         .expect("build Infer summary request");
 
@@ -769,6 +920,7 @@ mod tests {
             "ollama_qwen3_5_4b",
             "codex_gpt_5_6_luna",
             Some("codex_gpt_5_6_terra"),
+            None,
         )
         .expect("build Infer relation escalation request");
 
@@ -777,11 +929,121 @@ mod tests {
             "codex_gpt_5_6_terra"
         );
         assert_eq!(infer.metadata["infer.fallback"], "none");
-        assert_eq!(
-            infer.reasoning,
-            Some(serde_json::json!({"effort": "medium"}))
-        );
+        assert_eq!(infer.reasoning, Some(serde_json::json!({"effort": "high"})));
         assert_eq!(infer.max_output_tokens, None);
+    }
+
+    #[test]
+    fn relation_request_follows_chinese_source_language_and_repairs_english_reasoning() {
+        let pages = vec![
+            RelationCandidatePage {
+                page_id: "pg_1".to_owned(),
+                namespace: "project:one".to_owned(),
+                kind: "document".to_owned(),
+                created_at: "2026-08-15T00:00:00Z".to_owned(),
+                observed_at: None,
+                routing_text:
+                    "页面记录 PCP 如何维护稳定的中文长期记忆，并说明关联必须经过人工审阅。"
+                        .repeat(2),
+                facets: None,
+                relation_types: Vec::new(),
+            },
+            RelationCandidatePage {
+                page_id: "pg_2".to_owned(),
+                namespace: "project:one".to_owned(),
+                kind: "document".to_owned(),
+                created_at: "2026-08-16T00:00:00Z".to_owned(),
+                observed_at: None,
+                routing_text: "另一页解释 PCP 的关联审阅如何保留证据链，并避免相似度直接变成事实。"
+                    .repeat(2),
+                facets: None,
+                relation_types: Vec::new(),
+            },
+        ];
+        let request = MaintenanceWorkerRequest::SelectRelation {
+            pages,
+            excluded_page_pairs: Vec::new(),
+        };
+        let infer = infer_request(
+            &request,
+            Duration::from_secs(12),
+            "codex_gpt_5_6_luna",
+            "codex_gpt_5_6_luna",
+            None,
+            None,
+        )
+        .expect("build Chinese relation request");
+
+        assert!(
+            infer
+                .instructions
+                .as_ref()
+                .and_then(Value::as_str)
+                .is_some_and(|instructions| {
+                    instructions.contains("输出语言合同：中文")
+                        && instructions.contains("reason 的自然语言叙述必须使用中文")
+                })
+        );
+        assert!(
+            relation_language_repair_instructions(
+                &request,
+                &MaintenanceWorkerResponse::Relate {
+                    page_ids: ["pg_1".to_owned(), "pg_2".to_owned()],
+                    reason: "The two Pages establish one stable PCP evidence chain.".to_owned(),
+                }
+            )
+            .is_some()
+        );
+        assert!(
+            relation_language_repair_instructions(
+                &request,
+                &MaintenanceWorkerResponse::Relate {
+                    page_ids: ["pg_1".to_owned(), "pg_2".to_owned()],
+                    reason: "两页共同说明 PCP 关联审阅如何保留同一条稳定证据链。".to_owned(),
+                }
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn bounded_escalation_override_selects_sol_without_fallback() {
+        let request = MaintenanceWorkerRequest::AssessArchive {
+            page: ArchiveCandidatePage {
+                page: MaintenanceDetailPage {
+                    page_id: "pg_1".to_owned(),
+                    revision_id: "rev_1".to_owned(),
+                    namespace: "project:one".to_owned(),
+                    created_at: "2026-01-01T00:00:00Z".to_owned(),
+                    observed_at: None,
+                    media_type: Some("text/markdown".to_owned()),
+                    content: Some("transient status".to_owned()),
+                    summary: None,
+                    facets: None,
+                    source_refs: Vec::new(),
+                    relations: Vec::new(),
+                },
+                candidate_signals: vec!["older_than_14_days".to_owned()],
+            },
+        };
+        let infer = infer_request(
+            &request,
+            Duration::from_secs(12),
+            "codex_gpt_5_6_luna",
+            "codex_gpt_5_6_luna",
+            None,
+            Some("codex_gpt_5_6_sol"),
+        )
+        .expect("build Sol escalation request");
+
+        assert_eq!(infer.metadata["infer.deployment_ids"], "codex_gpt_5_6_sol");
+        assert_eq!(infer.metadata["infer.fallback"], "none");
+        assert!(response_defers(&MaintenanceWorkerResponse::Defer));
+        assert!(response_defers(&MaintenanceWorkerResponse::ArchiveReview {
+            outcome: ArchiveWorkerDecision::Defer,
+            reason: "ambiguous".to_owned(),
+        }));
+        assert!(!response_defers(&MaintenanceWorkerResponse::NoCandidate));
     }
 
     #[test]
@@ -804,6 +1066,7 @@ mod tests {
             Duration::from_secs(12),
             "codex_gpt_5_6_luna",
             "codex_gpt_5_6_luna",
+            None,
             None,
         )
         .expect("build Topic extraction request");

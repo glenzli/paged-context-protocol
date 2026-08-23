@@ -15,9 +15,10 @@ export function createPageInspector({ request, showError, formatTime, t = (value
   const relationComparisonReason = document.getElementById("relation-comparison-reason");
   const relationComparisonReviewNote = document.getElementById("relation-comparison-review-note");
   const relationComparisonPages = document.getElementById("relation-comparison-pages");
-  const relationComparisonMarkReviewed = document.getElementById("relation-comparison-mark-reviewed");
   const relationComparisonAccept = document.getElementById("relation-comparison-accept");
   const relationComparisonReject = document.getElementById("relation-comparison-reject");
+  const relationComparisonSkip = document.getElementById("relation-comparison-skip");
+  const relationComparisonDecisionGroup = relationComparisonAccept.closest(".relation-comparison-decision-group");
   const topicExtractionDialog = document.getElementById("topic-extraction-review-dialog");
   const topicExtractionSubtitle = document.getElementById("topic-extraction-review-subtitle");
   const topicExtractionReason = document.getElementById("topic-extraction-review-reason");
@@ -36,9 +37,9 @@ export function createPageInspector({ request, showError, formatTime, t = (value
   let currentGraphFilter = "all";
   let currentGraphDepth = 2;
   let currentGraphLimit = 120;
-  let comparisonReviewAction = null;
   let comparisonAcceptAction = null;
   let comparisonRejectAction = null;
+  let comparisonSkipAction = null;
   let comparisonScrollTop = 0;
 
   const relationFamilies = [
@@ -539,12 +540,12 @@ export function createPageInspector({ request, showError, formatTime, t = (value
     pages,
     relationReason,
     reviewReason,
-    onReviewed = null,
-    reviewed = false,
     onAccept = null,
     onReject = null,
+    onSkip = null,
     accepted = false,
     rejected = false,
+    skipped = false,
   }) {
     if (!Array.isArray(pages) || pages.length !== 2) {
       const error = new Error(t("A relation comparison requires exactly two Pages."));
@@ -555,24 +556,25 @@ export function createPageInspector({ request, showError, formatTime, t = (value
     relationComparisonReason.textContent = relationReason || t("No relation rationale was supplied.");
     relationComparisonReviewNote.hidden = !reviewReason;
     relationComparisonReviewNote.textContent = reviewReason || "";
-    comparisonReviewAction = typeof onReviewed === "function" ? onReviewed : null;
     comparisonAcceptAction = typeof onAccept === "function" ? onAccept : null;
     comparisonRejectAction = typeof onReject === "function" ? onReject : null;
-    relationComparisonMarkReviewed.hidden = !comparisonReviewAction;
-    relationComparisonMarkReviewed.disabled = reviewed;
-    relationComparisonMarkReviewed.classList.toggle("is-reviewed", reviewed);
-    relationComparisonMarkReviewed.title = t(reviewed ? "Reviewed" : "Mark reviewed");
-    relationComparisonMarkReviewed.setAttribute("aria-label", relationComparisonMarkReviewed.title);
+    comparisonSkipAction = typeof onSkip === "function" ? onSkip : null;
+    relationComparisonDecisionGroup.hidden = !comparisonAcceptAction && !comparisonRejectAction && !comparisonSkipAction;
     relationComparisonAccept.hidden = !comparisonAcceptAction;
-    relationComparisonAccept.disabled = accepted;
     relationComparisonAccept.classList.toggle("is-accepted", accepted);
+    relationComparisonAccept.setAttribute("aria-pressed", String(accepted));
     relationComparisonAccept.title = t(accepted ? "Accepted" : "Accept");
     relationComparisonAccept.setAttribute("aria-label", relationComparisonAccept.title);
     relationComparisonReject.hidden = !comparisonRejectAction;
-    relationComparisonReject.disabled = rejected;
     relationComparisonReject.classList.toggle("is-rejected", rejected);
+    relationComparisonReject.setAttribute("aria-pressed", String(rejected));
     relationComparisonReject.title = t(rejected ? "Rejected for this review" : "Reject");
     relationComparisonReject.setAttribute("aria-label", relationComparisonReject.title);
+    relationComparisonSkip.hidden = !comparisonSkipAction;
+    relationComparisonSkip.classList.toggle("is-skipped", skipped);
+    relationComparisonSkip.setAttribute("aria-pressed", String(skipped));
+    relationComparisonSkip.title = t(skipped ? "Skipped for now" : "Skip for now");
+    relationComparisonSkip.setAttribute("aria-label", relationComparisonSkip.title);
     const left = comparisonPage(pages[0], "Left Page");
     const right = comparisonPage(pages[1], "Right Page");
     relationComparisonPages.replaceChildren(left.section, right.section);
@@ -641,11 +643,6 @@ export function createPageInspector({ request, showError, formatTime, t = (value
   document.getElementById("relation-comparison-close").addEventListener("click", () => {
     relationComparisonDialog.close();
   });
-  relationComparisonMarkReviewed.addEventListener("click", () => {
-    if (!comparisonReviewAction) return;
-    comparisonReviewAction();
-    relationComparisonDialog.close();
-  });
   relationComparisonAccept.addEventListener("click", () => {
     if (!comparisonAcceptAction) return;
     comparisonAcceptAction();
@@ -656,10 +653,15 @@ export function createPageInspector({ request, showError, formatTime, t = (value
     comparisonRejectAction();
     relationComparisonDialog.close();
   });
+  relationComparisonSkip.addEventListener("click", () => {
+    if (!comparisonSkipAction) return;
+    comparisonSkipAction();
+    relationComparisonDialog.close();
+  });
   relationComparisonDialog.addEventListener("close", () => {
-    comparisonReviewAction = null;
     comparisonAcceptAction = null;
     comparisonRejectAction = null;
+    comparisonSkipAction = null;
     unlockRelationComparisonScroll();
   });
   document.getElementById("topic-extraction-review-close").addEventListener("click", () => {

@@ -19,13 +19,17 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use super::{
-    MaintenanceConfig, MaintenanceMode, MaintenanceWorkerRequest, MaintenanceWorkerResponse,
-    PackingMaintenanceConfig, RelationMaintenanceConfig, RetentionMilestone,
-    SemanticMaintenanceWorker,
+    MaintenanceConfig, MaintenanceMode, MaintenanceWorkerOutcome, MaintenanceWorkerRequest,
+    MaintenanceWorkerResponse, PackingMaintenanceConfig, RelationMaintenanceConfig,
+    RetentionMilestone, SemanticMaintenanceWorker,
     ledger::{
         MaintenanceAutomationStatus, MaintenanceLedger, MaintenanceRelationReviewPage,
         MaintenanceRelationReviewProposal, MaintenanceRelationReviewStatus, maintenance_region_key,
         packing_key, retention_window_key, selection_window_key, summary_key,
+    },
+    review::{
+        MaintenanceReviewItem, MaintenanceReviewOrigin, MaintenanceReviewPayload,
+        MaintenanceReviewStatus,
     },
     worker::{
         ArchiveCandidatePage, ArchiveWorkerDecision, MaintenanceDetailPage, MaintenanceRoutingPage,
@@ -37,6 +41,7 @@ use super::{
 #[serde(default, rename_all = "camelCase")]
 pub struct MaintenanceCycleReport {
     pub inspected_pages: usize,
+    pub jobs_advanced: u32,
     pub worker_calls: u32,
     pub summaries_written: u32,
     pub summaries_proposed: u32,
@@ -46,12 +51,17 @@ pub struct MaintenanceCycleReport {
     pub relations_proposed: u32,
     pub retention_leases_written: u32,
     pub retention_leases_proposed: u32,
+    pub topics_proposed: u32,
+    pub archives_proposed: u32,
+    pub review_items_proposed: u32,
+    pub escalated_decisions: u32,
     pub deferred: u32,
 }
 
 impl MaintenanceCycleReport {
     fn merge(&mut self, report: Self) {
         self.inspected_pages = self.inspected_pages.max(report.inspected_pages);
+        self.jobs_advanced = self.jobs_advanced.saturating_add(report.jobs_advanced);
         self.worker_calls = self.worker_calls.saturating_add(report.worker_calls);
         self.summaries_written = self
             .summaries_written
@@ -73,6 +83,16 @@ impl MaintenanceCycleReport {
         self.retention_leases_proposed = self
             .retention_leases_proposed
             .saturating_add(report.retention_leases_proposed);
+        self.topics_proposed = self.topics_proposed.saturating_add(report.topics_proposed);
+        self.archives_proposed = self
+            .archives_proposed
+            .saturating_add(report.archives_proposed);
+        self.review_items_proposed = self
+            .review_items_proposed
+            .saturating_add(report.review_items_proposed);
+        self.escalated_decisions = self
+            .escalated_decisions
+            .saturating_add(report.escalated_decisions);
         self.deferred = self.deferred.saturating_add(report.deferred);
     }
 }
@@ -486,6 +506,7 @@ const MAX_SUMMARY_REVIEW_PAGES_PER_REQUEST: usize = 16;
 const ARCHIVE_MINIMUM_AGE_DAYS: i64 = 14;
 const MAX_ARCHIVE_CANDIDATES: usize = 40;
 const MAX_ARCHIVE_REVIEW_INPUT_CHARS: u32 = 24_000;
+const REVIEW_SNOOZE_SECONDS: u64 = 24 * 60 * 60;
 
 pub struct RuntimeMaintainer {
     client: Arc<dyn PcpApi>,
@@ -560,7 +581,7 @@ impl RuntimeMaintainer {
     async fn evaluate_worker(
         &self,
         request: MaintenanceWorkerRequest,
-    ) -> Result<MaintenanceWorkerResponse> {
+    ) -> Result<MaintenanceWorkerOutcome> {
         let operation = worker_operation(&request).to_owned();
         let scopes = worker_scopes(&request, self.client.access());
         let started = Instant::now();
@@ -569,6 +590,10 @@ impl RuntimeMaintainer {
         let (usage, failure_kind) = match &outcome {
             Ok(outcome) => (outcome.usage.clone(), None),
             Err(_) => (None, Some("worker_failed".to_owned())),
+        };
+        let operation = match &outcome {
+            Ok(outcome) if outcome.escalated => format!("{operation}_escalated"),
+            _ => operation,
         };
         let event = RuntimeUsageEvent {
             event_id: format!("ru_{}", Uuid::new_v4().simple()),
@@ -585,13 +610,13 @@ impl RuntimeMaintainer {
         if let Err(error) = self.client.record_runtime_usage(event).await {
             eprintln!("PCP maintenance model usage write failed: {error:#}");
         }
-        outcome.map(|outcome| outcome.response)
+        outcome
     }
 
     async fn repair_packing_overlap_worker(
         &self,
         request: MaintenanceWorkerRequest,
-    ) -> Result<MaintenanceWorkerResponse> {
+    ) -> Result<MaintenanceWorkerOutcome> {
         let operation = format!("{}_repair", worker_operation(&request));
         let scopes = worker_scopes(&request, self.client.access());
         let started = Instant::now();
@@ -619,7 +644,7 @@ impl RuntimeMaintainer {
         if let Err(error) = self.client.record_runtime_usage(event).await {
             eprintln!("PCP maintenance model usage write failed: {error:#}");
         }
-        outcome.map(|outcome| outcome.response)
+        outcome
     }
 
     pub async fn run_forever(mut self) -> Result<()> {
@@ -635,22 +660,28 @@ impl RuntimeMaintainer {
                         || report.packs_proposed > 0
                         || report.relations_committed > 0
                         || report.relations_proposed > 0
+                        || report.topics_proposed > 0
+                        || report.archives_proposed > 0
+                        || report.review_items_proposed > 0
                         || report.retention_leases_written > 0
                         || report.retention_leases_proposed > 0 =>
                 {
                     eprintln!(
-                        "PCP maintenance: {} Summary proposed / {} written, {} pack proposed / {} committed, {} relation proposed / {} committed, {} retention proposed / {} leased after {} worker calls",
+                        "PCP maintenance: {} Summary proposed / {} written, {} pack proposed / {} committed, {} relation proposed / {} committed, {} Topic / {} archive reviews proposed, {} retention proposed / {} leased after {} jobs and {} worker calls",
                         report.summaries_proposed,
                         report.summaries_written,
                         report.packs_proposed,
                         report.packs_committed,
                         report.relations_proposed,
                         report.relations_committed,
+                        report.topics_proposed,
+                        report.archives_proposed,
                         report.retention_leases_proposed,
                         report.retention_leases_written,
+                        report.jobs_advanced,
                         report.worker_calls
                     );
-                    report.worker_calls >= self.config.max_jobs_per_cycle
+                    report.jobs_advanced >= self.config.max_jobs_per_cycle
                 }
                 Ok(_) => false,
                 Err(error) => {
@@ -676,17 +707,17 @@ impl RuntimeMaintainer {
     }
 
     pub async fn run_once(&mut self) -> Result<MaintenanceCycleReport> {
-        self.run_once_inner(true, self.config.max_jobs_per_cycle, None, false)
+        self.run_once_inner(true, self.config.max_jobs_per_cycle, None, false, false)
             .await
     }
 
     pub async fn run_bounded_cycle(&mut self) -> Result<MaintenanceCycleReport> {
         let mut aggregate = MaintenanceCycleReport::default();
-        while aggregate.worker_calls < self.config.max_jobs_per_cycle {
-            let report = self.run_once_inner(false, 1, None, false).await?;
-            let worker_calls = report.worker_calls;
+        while aggregate.jobs_advanced < self.config.max_jobs_per_cycle {
+            let report = self.run_once_inner(false, 1, None, false, false).await?;
+            let jobs_advanced = report.jobs_advanced;
             aggregate.merge(report);
-            if worker_calls == 0 {
+            if jobs_advanced == 0 {
                 break;
             }
         }
@@ -730,21 +761,25 @@ impl RuntimeMaintainer {
             return Ok(aggregate);
         }
         let expected = MaintenanceLedger::region_snapshot(&inventory, &regions);
-        while aggregate.worker_calls < self.config.max_jobs_per_cycle {
-            let report = self.run_once_inner(false, 1, Some(&regions), true).await?;
-            let worker_calls = report.worker_calls;
+        while aggregate.jobs_advanced < self.config.max_jobs_per_cycle {
+            let report = self
+                .run_once_inner(false, 1, Some(&regions), true, true)
+                .await?;
+            let jobs_advanced = report.jobs_advanced;
             aggregate.merge(report);
             self.ledger.update_scheduled_cycle(aggregate.clone());
             self.ledger.save(&self.config.state_path).await?;
-            if worker_calls == 0 {
+            if jobs_advanced == 0 {
                 break;
             }
         }
         let refreshed = self.client.durable_page_inventory(Vec::new()).await?;
         self.ledger
             .observe_writes(&refreshed, &self.config.write_trigger);
-        self.ledger
-            .acknowledge_unchanged_regions(&expected, &refreshed);
+        if aggregate.jobs_advanced < self.config.max_jobs_per_cycle {
+            self.ledger
+                .acknowledge_unchanged_regions(&expected, &refreshed);
+        }
         Ok(aggregate)
     }
 
@@ -795,15 +830,21 @@ impl RuntimeMaintainer {
     ) -> Result<MaintenanceArchiveAnalysis> {
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
         let scan = archive_scan_from_inventory(&inventory, Utc::now());
-        anyhow::ensure!(
-            request.scan_id == scan.scan_id,
-            "content-governance archive scan is stale; scan the Store again"
-        );
+        // Archive review authority is Page-local: unrelated Store writes may change the
+        // aggregate scan id while this exact candidate and Revision remain current. Recheck
+        // both against the fresh inventory below instead of invalidating the entire batch.
+        let scan_changed = request.scan_id != scan.scan_id;
         let scan_page = scan
             .pages
             .iter()
             .find(|page| page.page_id == request.page_id)
-            .context("content-governance archive candidate no longer exists")?;
+            .with_context(|| {
+                if scan_changed {
+                    "content-governance archive scan changed and this candidate is no longer eligible"
+                } else {
+                    "content-governance archive candidate no longer exists"
+                }
+            })?;
         anyhow::ensure!(
             scan_page.revision_id == request.revision_id,
             "content-governance archive candidate revision changed after scan"
@@ -826,7 +867,7 @@ impl RuntimeMaintainer {
                 },
             })
             .await?;
-        let (decision, candidate, reason) = match response {
+        let (decision, candidate, reason) = match response.response {
             MaintenanceWorkerResponse::ArchiveReview { outcome, reason } => {
                 let reason = validate_archive_reason(reason)?;
                 match outcome {
@@ -863,6 +904,47 @@ impl RuntimeMaintainer {
 
     pub fn pending_relation_reviews(&self) -> Vec<MaintenanceRelationReviewProposal> {
         self.ledger.relation_reviews()
+    }
+
+    pub fn pending_reviews(&self) -> Vec<MaintenanceReviewItem> {
+        let mut reviews = self.ledger.review_items();
+        reviews.extend(
+            self.ledger
+                .relation_reviews()
+                .into_iter()
+                .map(MaintenanceReviewItem::relation),
+        );
+        reviews.sort_by(|left, right| {
+            left.proposed_at
+                .cmp(&right.proposed_at)
+                .then_with(|| left.candidate_id.cmp(&right.candidate_id))
+        });
+        reviews
+    }
+
+    pub fn review_item(&self, candidate_id: &str) -> Option<MaintenanceReviewItem> {
+        self.ledger.review_item(candidate_id).or_else(|| {
+            self.ledger
+                .relation_review(candidate_id)
+                .filter(|proposal| proposal.status == MaintenanceRelationReviewStatus::Pending)
+                .map(MaintenanceReviewItem::relation)
+        })
+    }
+
+    pub async fn resolve_review(
+        &mut self,
+        candidate_id: &str,
+        status: MaintenanceReviewStatus,
+    ) -> Result<()> {
+        if status == MaintenanceReviewStatus::Deferred {
+            self.ledger
+                .snooze_review(candidate_id, REVIEW_SNOOZE_SECONDS)?;
+        } else if self.ledger.review_item(candidate_id).is_some() {
+            self.ledger.resolve_review(candidate_id, status)?;
+        } else {
+            anyhow::bail!("legacy PCP relation reviews must use their typed decision operation")
+        }
+        self.ledger.save(&self.config.state_path).await
     }
 
     pub async fn approve_relation_review(
@@ -1016,16 +1098,29 @@ impl RuntimeMaintainer {
         };
         let initial_response = self.evaluate_worker(worker_request.clone()).await;
         let (response, worker_calls, overlap_retries) = match initial_response {
-            Ok(MaintenanceWorkerResponse::PackingCandidates { candidates })
-                if packing_candidates_overlap(&candidates) =>
+            Ok(outcome)
+                if matches!(
+                    &outcome.response,
+                    MaintenanceWorkerResponse::PackingCandidates { candidates }
+                        if packing_candidates_overlap(candidates)
+                ) =>
             {
+                let initial_attempts = outcome.model_attempts;
+                let repaired = self.repair_packing_overlap_worker(worker_request).await;
+                let repair_attempts = repaired
+                    .as_ref()
+                    .map(|outcome| outcome.model_attempts)
+                    .unwrap_or(1);
                 (
-                    self.repair_packing_overlap_worker(worker_request).await,
-                    2,
+                    repaired.map(|outcome| outcome.response),
+                    initial_attempts.saturating_add(repair_attempts),
                     1,
                 )
             }
-            Ok(response) => (Ok(response), 1, 0),
+            Ok(outcome) => {
+                let attempts = outcome.model_attempts;
+                (Ok(outcome.response), attempts, 0)
+            }
             Err(error) => (Err(error), 1, 0),
         };
 
@@ -1149,7 +1244,7 @@ impl RuntimeMaintainer {
                 page: Box::new(page),
             })
             .await?;
-        match response {
+        match response.response {
             MaintenanceWorkerResponse::WriteSummary { content } => {
                 let content = normalize_worker_summary(content, &source_text)?;
                 Ok(MaintenanceSummaryAnalysis::candidate(
@@ -1248,7 +1343,6 @@ impl RuntimeMaintainer {
                 continue;
             };
             analysis.analyzed_pages = analysis.analyzed_pages.saturating_add(1);
-            analysis.worker_calls = analysis.worker_calls.saturating_add(1);
             let source_text = detail.content.clone().unwrap_or_default();
             let response = self
                 .evaluate_worker(MaintenanceWorkerRequest::SummarizePage {
@@ -1256,37 +1350,46 @@ impl RuntimeMaintainer {
                 })
                 .await;
             match response {
-                Ok(MaintenanceWorkerResponse::WriteSummary { content }) => {
-                    match normalize_worker_summary(content, &source_text) {
-                        Ok(content) => analysis
-                            .candidates
-                            .push(build_summary_candidate(page, content)),
-                        Err(error) => {
+                Ok(outcome) => {
+                    analysis.worker_calls =
+                        analysis.worker_calls.saturating_add(outcome.model_attempts);
+                    match outcome.response {
+                        MaintenanceWorkerResponse::WriteSummary { content } => {
+                            match normalize_worker_summary(content, &source_text) {
+                                Ok(content) => analysis
+                                    .candidates
+                                    .push(build_summary_candidate(page, content)),
+                                Err(error) => {
+                                    analysis.deferred_pages =
+                                        analysis.deferred_pages.saturating_add(1);
+                                    analysis.issues.push(MaintenanceSummaryAnalysisIssue {
+                                        batch_index: page_index,
+                                        message: error.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        MaintenanceWorkerResponse::NoCandidate => {
+                            analysis.no_candidate_pages =
+                                analysis.no_candidate_pages.saturating_add(1);
+                        }
+                        MaintenanceWorkerResponse::Defer => {
+                            analysis.deferred_pages = analysis.deferred_pages.saturating_add(1);
+                        }
+                        other => {
                             analysis.deferred_pages = analysis.deferred_pages.saturating_add(1);
                             analysis.issues.push(MaintenanceSummaryAnalysisIssue {
-                                batch_index: page_index,
-                                message: error.to_string(),
-                            });
-                        }
-                    }
-                }
-                Ok(MaintenanceWorkerResponse::NoCandidate) => {
-                    analysis.no_candidate_pages = analysis.no_candidate_pages.saturating_add(1);
-                }
-                Ok(MaintenanceWorkerResponse::Defer) => {
-                    analysis.deferred_pages = analysis.deferred_pages.saturating_add(1);
-                }
-                Ok(other) => {
-                    analysis.deferred_pages = analysis.deferred_pages.saturating_add(1);
-                    analysis.issues.push(MaintenanceSummaryAnalysisIssue {
                         batch_index: page_index,
                         message: format!(
                             "semantic worker returned {} for a summarize_page review request",
                             response_name(&other)
                         ),
                     });
+                        }
+                    }
                 }
                 Err(error) => {
+                    analysis.worker_calls = analysis.worker_calls.saturating_add(1);
                     analysis.deferred_pages = analysis.deferred_pages.saturating_add(1);
                     analysis.issues.push(MaintenanceSummaryAnalysisIssue {
                         batch_index: page_index,
@@ -1381,10 +1484,12 @@ impl RuntimeMaintainer {
             .collect::<HashMap<_, _>>();
         let offered_page_ids = offered.keys().cloned().collect::<BTreeSet<_>>();
         let relation_edges = self.existing_related_pairs(&window).await?;
+        let mut recorded_relation_pairs = self.ledger.active_relation_pairs();
+        recorded_relation_pairs.extend(self.ledger.rejected_relation_pairs(&offered));
         let excluded_page_pairs = relation_excluded_page_pairs(
             &offered_page_ids,
             &relation_edges,
-            &self.ledger.active_relation_pairs(),
+            &recorded_relation_pairs,
         );
         if all_relation_pairs_excluded(&offered_page_ids, &excluded_page_pairs) {
             return Ok(MaintenanceRelationAnalysis::no_candidate());
@@ -1403,7 +1508,7 @@ impl RuntimeMaintainer {
                 excluded_page_pairs: excluded_page_pairs.clone(),
             })
             .await?;
-        let (mut page_ids, relation_reason) = match response {
+        let (mut page_ids, relation_reason) = match response.response {
             MaintenanceWorkerResponse::Relate { page_ids, reason } => {
                 (page_ids, validate_relation_reason(reason)?)
             }
@@ -1416,11 +1521,11 @@ impl RuntimeMaintainer {
                 response_name(&other)
             ),
         };
-        anyhow::ensure!(
-            page_ids[0] != page_ids[1]
-                && page_ids.iter().all(|page_id| offered.contains_key(page_id)),
-            "semantic worker selected an invalid relation pair for the reviewed window"
-        );
+        if page_ids[0] == page_ids[1]
+            || !page_ids.iter().all(|page_id| offered.contains_key(page_id))
+        {
+            return Ok(MaintenanceRelationAnalysis::defer());
+        }
         page_ids.sort();
         if excluded_page_pairs.iter().any(|pair| pair == &page_ids) {
             return Ok(MaintenanceRelationAnalysis::no_candidate());
@@ -1491,10 +1596,16 @@ impl RuntimeMaintainer {
                 .any(|pair| pair == page_ids),
             "maintenance relation candidate was explicitly suppressed by the operator"
         );
-        let revision_ids = vec![
+        let revision_ids = [
             selected[0].revision_id.clone(),
             selected[1].revision_id.clone(),
         ];
+        anyhow::ensure!(
+            !self
+                .ledger
+                .relation_pair_is_rejected(&page_ids, &revision_ids),
+            "maintenance relation candidate was rejected for the reviewed revisions"
+        );
         if self.related_pair_exists(&page_ids, &revision_ids).await? {
             anyhow::bail!("maintenance relation candidate is already explicitly related");
         }
@@ -1503,7 +1614,7 @@ impl RuntimeMaintainer {
                 from_page_id: page_ids[0].clone(),
                 relation_type: "related_to".to_owned(),
                 to_page_id: page_ids[1].clone(),
-                basis_revision_ids: revision_ids.clone(),
+                basis_revision_ids: revision_ids.to_vec(),
                 created_by: self.config.worker_actor(),
                 idempotency_key: Some(format!(
                     "maintenance:related:{}:{}",
@@ -1517,6 +1628,34 @@ impl RuntimeMaintainer {
         &mut self,
         request: ApplyMaintenanceRelationRequest,
     ) -> Result<()> {
+        self.record_relation_candidate_decision(
+            request,
+            MaintenanceRelationReviewStatus::Suppressed,
+        )
+        .await
+    }
+
+    pub async fn reject_relation_candidate(
+        &mut self,
+        request: ApplyMaintenanceRelationRequest,
+    ) -> Result<()> {
+        self.record_relation_candidate_decision(request, MaintenanceRelationReviewStatus::Rejected)
+            .await
+    }
+
+    async fn record_relation_candidate_decision(
+        &mut self,
+        request: ApplyMaintenanceRelationRequest,
+        status: MaintenanceRelationReviewStatus,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            matches!(
+                status,
+                MaintenanceRelationReviewStatus::Rejected
+                    | MaintenanceRelationReviewStatus::Suppressed
+            ),
+            "unsupported maintenance relation decision"
+        );
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
         let current_by_id = inventory
             .iter()
@@ -1552,15 +1691,23 @@ impl RuntimeMaintainer {
             candidate.candidate_id == request.candidate_id,
             "maintenance relation candidate identity no longer matches the reviewed Pages"
         );
-        self.ledger.suppress_relation_pair(
-            candidate.namespace,
-            candidate.pages.map(|page| MaintenanceRelationReviewPage {
-                page_id: page.page_id,
-                revision_id: page.revision_id,
-                preview: page.preview,
-            }),
-            candidate.relation_reason,
-        )?;
+        let namespace = candidate.namespace;
+        let pages = candidate.pages.map(|page| MaintenanceRelationReviewPage {
+            page_id: page.page_id,
+            revision_id: page.revision_id,
+            preview: page.preview,
+        });
+        match status {
+            MaintenanceRelationReviewStatus::Rejected => {
+                self.ledger
+                    .reject_relation_pair(namespace, pages, candidate.relation_reason)?
+            }
+            MaintenanceRelationReviewStatus::Suppressed => {
+                self.ledger
+                    .suppress_relation_pair(namespace, pages, candidate.relation_reason)?
+            }
+            _ => unreachable!("validated relation decision status"),
+        }
         self.ledger.save(&self.config.state_path).await
     }
 
@@ -1602,6 +1749,7 @@ impl RuntimeMaintainer {
                 max_source_pages: 8,
             })
             .await?;
+        let response = response.response;
         let MaintenanceWorkerResponse::ExtractTopic {
             page_ids,
             title,
@@ -1706,6 +1854,19 @@ impl RuntimeMaintainer {
             max_jobs.min(self.config.max_jobs_per_cycle),
             None,
             false,
+            false,
+        )
+        .await
+    }
+
+    pub async fn run_convergence_once(&mut self, max_jobs: u32) -> Result<MaintenanceCycleReport> {
+        anyhow::ensure!(max_jobs > 0, "maintenance job limit must be positive");
+        self.run_once_inner(
+            true,
+            max_jobs.min(self.config.max_jobs_per_cycle),
+            None,
+            false,
+            true,
         )
         .await
     }
@@ -1715,7 +1876,7 @@ impl RuntimeMaintainer {
             self.config.mode == MaintenanceMode::Observe,
             "operator maintenance run-once only permits observe mode"
         );
-        self.run_once_inner(false, 1, None, false).await
+        self.run_once_inner(false, 1, None, false, false).await
     }
 
     async fn run_once_inner(
@@ -1724,6 +1885,7 @@ impl RuntimeMaintainer {
         max_jobs: u32,
         regions: Option<&BTreeSet<String>>,
         scheduled: bool,
+        include_governance: bool,
     ) -> Result<MaintenanceCycleReport> {
         let mut inventory = self.scoped_inventory(regions).await?;
         let mut report = MaintenanceCycleReport {
@@ -1731,6 +1893,11 @@ impl RuntimeMaintainer {
             ..MaintenanceCycleReport::default()
         };
         let mut jobs_remaining = max_jobs;
+        let review_origin = if scheduled {
+            MaintenanceReviewOrigin::Automatic
+        } else {
+            MaintenanceReviewOrigin::Manual
+        };
 
         // Pack boundaries change the Page surface. Exhaust the current Pack
         // pass before Summary or Relation sees the inventory. If the cycle
@@ -1739,12 +1906,13 @@ impl RuntimeMaintainer {
         // conversation.
         while self.config.packing.enabled && jobs_remaining > 0 {
             let packing_ran = self
-                .run_packing_job(&inventory, &mut report)
+                .run_packing_job(&inventory, &mut report, review_origin)
                 .await
                 .context("run PCP packing maintenance job")?;
             if !packing_ran {
                 break;
             }
+            report.jobs_advanced += 1;
             jobs_remaining -= 1;
             inventory = self.scoped_inventory(regions).await?;
             report.inspected_pages = report.inspected_pages.max(inventory.len());
@@ -1753,10 +1921,11 @@ impl RuntimeMaintainer {
         let summary_ran = self.config.summary.enabled
             && jobs_remaining > 0
             && self
-                .run_summary_job(&inventory, &mut report)
+                .run_summary_job(&inventory, &mut report, review_origin)
                 .await
                 .context("run PCP Summary maintenance job")?;
         if summary_ran {
+            report.jobs_advanced += 1;
             jobs_remaining -= 1;
             inventory = self.scoped_inventory(regions).await?;
             report.inspected_pages = report.inspected_pages.max(inventory.len());
@@ -1764,16 +1933,42 @@ impl RuntimeMaintainer {
         if self.config.relation.enabled
             && jobs_remaining > 0
             && self
-                .run_relation_job(&inventory, &mut report, scheduled)
+                .run_relation_job(&inventory, &mut report)
                 .await
                 .context("run PCP relation maintenance job")?
         {
+            report.jobs_advanced += 1;
+            jobs_remaining -= 1;
+        }
+        if include_governance
+            && self.config.relation.enabled
+            && jobs_remaining > 0
+            && self
+                .run_topic_review_job(&inventory, &mut report, review_origin)
+                .await
+                .context("run PCP Topic maintenance review job")?
+        {
+            report.jobs_advanced += 1;
+            jobs_remaining -= 1;
+        }
+        if include_governance
+            && jobs_remaining > 0
+            && self
+                .run_archive_review_job(&inventory, &mut report, review_origin)
+                .await
+                .context("run PCP archive maintenance review job")?
+        {
+            report.jobs_advanced += 1;
             jobs_remaining -= 1;
         }
         if self.config.retention.enabled && jobs_remaining > 0 {
-            self.run_retention_job(&mut report)
+            if self
+                .run_retention_job(&mut report)
                 .await
-                .context("run PCP semantic retention maintenance job")?;
+                .context("run PCP semantic retention maintenance job")?
+            {
+                report.jobs_advanced += 1;
+            }
         }
 
         if persist_ledger {
@@ -1786,6 +1981,7 @@ impl RuntimeMaintainer {
         &mut self,
         inventory: &[pcp_store::DurablePageInventoryItem],
         report: &mut MaintenanceCycleReport,
+        review_origin: MaintenanceReviewOrigin,
     ) -> Result<bool> {
         let eligible = |page: &&pcp_store::DurablePageInventoryItem| {
             summary_page_eligible(page, &self.config.summary)
@@ -1813,13 +2009,18 @@ impl RuntimeMaintainer {
             .await?;
         let page = pages.pop().context("Summary candidate disappeared")?;
         let source_text = page.content.clone().unwrap_or_default();
-        report.worker_calls += 1;
-        match self
+        let outcome = self
             .evaluate_worker(MaintenanceWorkerRequest::SummarizePage {
                 page: Box::new(page),
             })
-            .await?
-        {
+            .await?;
+        report.worker_calls = report.worker_calls.saturating_add(outcome.model_attempts);
+        report.escalated_decisions = report
+            .escalated_decisions
+            .saturating_add(u32::from(outcome.escalated));
+        let model_attempts = outcome.model_attempts;
+        let escalated = outcome.escalated;
+        match outcome.response {
             MaintenanceWorkerResponse::WriteSummary { content } => {
                 let content = match normalize_worker_summary(content, &source_text) {
                     Ok(content) => content,
@@ -1848,12 +2049,21 @@ impl RuntimeMaintainer {
                         .await?;
                     report.summaries_written += 1;
                 } else {
+                    let candidate = build_summary_candidate(candidate, content);
+                    self.ledger.enqueue_review(
+                        MaintenanceReviewPayload::Summary(candidate),
+                        review_origin,
+                        "Summary metadata is ready for operator review.".to_owned(),
+                        model_attempts,
+                        escalated,
+                    );
                     self.ledger.record(
                         summary_key(&page_id),
-                        "observed_write_summary",
+                        "summary_pending_review",
                         self.config.summary.retry_after_seconds,
                     );
                     report.summaries_proposed += 1;
+                    report.review_items_proposed += 1;
                 }
             }
             MaintenanceWorkerResponse::NoCandidate => {
@@ -1893,7 +2103,6 @@ impl RuntimeMaintainer {
         &mut self,
         inventory: &[pcp_store::DurablePageInventoryItem],
         report: &mut MaintenanceCycleReport,
-        scheduled: bool,
     ) -> Result<bool> {
         let active_packing_page_ids = self.active_packing_page_ids();
         let Some(candidates) =
@@ -1922,10 +2131,12 @@ impl RuntimeMaintainer {
         );
         let offered_page_ids = offered.keys().cloned().collect::<BTreeSet<_>>();
         let relation_edges = self.existing_related_pairs(&candidates).await?;
+        let mut recorded_relation_pairs = self.ledger.active_relation_pairs();
+        recorded_relation_pairs.extend(self.ledger.rejected_relation_pairs(&offered));
         let excluded_page_pairs = relation_excluded_page_pairs(
             &offered_page_ids,
             &relation_edges,
-            &self.ledger.active_relation_pairs(),
+            &recorded_relation_pairs,
         );
         if all_relation_pairs_excluded(&offered_page_ids, &excluded_page_pairs) {
             self.ledger.record(
@@ -1936,8 +2147,7 @@ impl RuntimeMaintainer {
             return Ok(true);
         }
 
-        report.worker_calls += 1;
-        let response = self
+        let outcome = self
             .evaluate_worker(MaintenanceWorkerRequest::SelectRelation {
                 pages: candidates
                     .iter()
@@ -1951,7 +2161,13 @@ impl RuntimeMaintainer {
                 excluded_page_pairs: excluded_page_pairs.clone(),
             })
             .await?;
-        let (mut page_ids, relation_reason) = match response {
+        report.worker_calls = report.worker_calls.saturating_add(outcome.model_attempts);
+        report.escalated_decisions = report
+            .escalated_decisions
+            .saturating_add(u32::from(outcome.escalated));
+        let model_attempts = outcome.model_attempts;
+        let escalated = outcome.escalated;
+        let (mut page_ids, relation_reason) = match outcome.response {
             MaintenanceWorkerResponse::Relate { page_ids, reason } => {
                 (page_ids, validate_relation_reason(reason)?)
             }
@@ -1977,11 +2193,17 @@ impl RuntimeMaintainer {
                 response_name(&other)
             ),
         };
-        anyhow::ensure!(
-            page_ids[0] != page_ids[1]
-                && page_ids.iter().all(|page_id| offered.contains_key(page_id)),
-            "semantic worker selected an invalid relation pair"
-        );
+        if page_ids[0] == page_ids[1]
+            || !page_ids.iter().all(|page_id| offered.contains_key(page_id))
+        {
+            self.ledger.record(
+                window_key,
+                "invalid_worker_selection",
+                self.config.relation.retry_after_seconds,
+            );
+            report.deferred += 1;
+            return Ok(true);
+        }
         page_ids.sort();
         if excluded_page_pairs.iter().any(|pair| pair == &page_ids) {
             self.ledger.record(
@@ -2025,7 +2247,8 @@ impl RuntimeMaintainer {
                     .expect("validated relation Page is offered")
             })
             .collect::<Vec<_>>();
-        let requires_review = scheduled && !is_low_risk_automatic_relation(&selected_pages);
+        let requires_review =
+            !self.config.applies_changes() || !is_low_risk_automatic_relation(&selected_pages);
         if requires_review {
             let selected = page_ids
                 .iter()
@@ -2045,8 +2268,11 @@ impl RuntimeMaintainer {
                 candidates[0].namespace.clone(),
                 [selected[0].clone(), selected[1].clone()],
                 relation_reason,
+                model_attempts,
+                escalated,
             );
             report.relations_proposed += 1;
+            report.review_items_proposed += 1;
         } else if self.config.applies_changes() {
             self.client
                 .link_pages(LinkPagesRequest {
@@ -2082,6 +2308,210 @@ impl RuntimeMaintainer {
         Ok(true)
     }
 
+    async fn run_topic_review_job(
+        &mut self,
+        inventory: &[pcp_store::DurablePageInventoryItem],
+        report: &mut MaintenanceCycleReport,
+        review_origin: MaintenanceReviewOrigin,
+    ) -> Result<bool> {
+        let active_packing_page_ids = self.active_packing_page_ids();
+        let Some(window) =
+            topic_candidate_windows(inventory, &self.config.relation, &active_packing_page_ids)
+                .into_iter()
+                .find(|pages| {
+                    self.ledger.eligible(&topic_window_key(
+                        &pages
+                            .iter()
+                            .map(|page| page.revision_id.clone())
+                            .collect::<Vec<_>>(),
+                    ))
+                })
+        else {
+            return Ok(false);
+        };
+        let key = topic_window_key(
+            &window
+                .iter()
+                .map(|page| page.revision_id.clone())
+                .collect::<Vec<_>>(),
+        );
+        let offered = window
+            .iter()
+            .map(|page| page.page_id.clone())
+            .collect::<BTreeSet<_>>();
+        let outcome = self
+            .evaluate_worker(MaintenanceWorkerRequest::ExtractTopic {
+                pages: window
+                    .iter()
+                    .map(|page| {
+                        RelationCandidatePage::from_inventory(
+                            page,
+                            self.config.relation.routing_chars_per_page,
+                        )
+                    })
+                    .collect(),
+                max_source_pages: 8,
+            })
+            .await?;
+        report.worker_calls = report.worker_calls.saturating_add(outcome.model_attempts);
+        report.escalated_decisions = report
+            .escalated_decisions
+            .saturating_add(u32::from(outcome.escalated));
+        let model_attempts = outcome.model_attempts;
+        let escalated = outcome.escalated;
+        match outcome.response {
+            MaintenanceWorkerResponse::ExtractTopic {
+                page_ids,
+                title,
+                content,
+                reason,
+            } => {
+                anyhow::ensure!(
+                    (2..=8).contains(&page_ids.len())
+                        && page_ids.iter().collect::<BTreeSet<_>>().len() == page_ids.len()
+                        && page_ids.iter().all(|page_id| offered.contains(page_id)),
+                    "semantic worker selected invalid Topic sources"
+                );
+                let selected = page_ids
+                    .iter()
+                    .map(|page_id| {
+                        window
+                            .iter()
+                            .find(|page| page.page_id == *page_id)
+                            .expect("validated Topic Page is offered")
+                    })
+                    .collect::<Vec<_>>();
+                let candidate = build_topic_candidate(&selected, title, content, Some(reason))?;
+                self.ledger.enqueue_review(
+                    MaintenanceReviewPayload::Topic(candidate),
+                    review_origin,
+                    "A cross-Page Topic front door requires operator approval.".to_owned(),
+                    model_attempts,
+                    escalated,
+                );
+                self.ledger.record(
+                    key,
+                    "topic_pending_review",
+                    self.config.relation.retry_after_seconds,
+                );
+                report.topics_proposed += 1;
+                report.review_items_proposed += 1;
+            }
+            MaintenanceWorkerResponse::NoCandidate => {
+                self.ledger.record(
+                    key,
+                    "no_topic_candidate",
+                    self.config.relation.retry_after_seconds,
+                );
+            }
+            MaintenanceWorkerResponse::Defer => {
+                self.ledger.record(
+                    key,
+                    "topic_deferred",
+                    self.config.relation.retry_after_seconds,
+                );
+                report.deferred += 1;
+            }
+            other => anyhow::bail!(
+                "semantic worker returned {} for an extract_topic request",
+                response_name(&other)
+            ),
+        }
+        Ok(true)
+    }
+
+    async fn run_archive_review_job(
+        &mut self,
+        inventory: &[pcp_store::DurablePageInventoryItem],
+        report: &mut MaintenanceCycleReport,
+        review_origin: MaintenanceReviewOrigin,
+    ) -> Result<bool> {
+        let scan = archive_scan_from_inventory(inventory, Utc::now());
+        let Some(scan_page) = scan
+            .pages
+            .iter()
+            .find(|page| self.ledger.eligible(&archive_review_key(&page.revision_id)))
+        else {
+            return Ok(false);
+        };
+        let key = archive_review_key(&scan_page.revision_id);
+        let mut pages = self
+            .read_detail_pages(
+                vec![scan_page.revision_id.clone()],
+                MAX_ARCHIVE_REVIEW_INPUT_CHARS,
+            )
+            .await?;
+        let page = pages
+            .pop()
+            .context("archive maintenance candidate disappeared")?;
+        let outcome = self
+            .evaluate_worker(MaintenanceWorkerRequest::AssessArchive {
+                page: ArchiveCandidatePage {
+                    page,
+                    candidate_signals: scan_page.candidate_signals.clone(),
+                },
+            })
+            .await?;
+        report.worker_calls = report.worker_calls.saturating_add(outcome.model_attempts);
+        report.escalated_decisions = report
+            .escalated_decisions
+            .saturating_add(u32::from(outcome.escalated));
+        let model_attempts = outcome.model_attempts;
+        let escalated = outcome.escalated;
+        match outcome.response {
+            MaintenanceWorkerResponse::ArchiveReview { outcome, reason } => {
+                let reason = validate_archive_reason(reason)?;
+                match outcome {
+                    ArchiveWorkerDecision::Archive => {
+                        self.ledger.enqueue_review(
+                            MaintenanceReviewPayload::Archive(build_archive_candidate(
+                                scan_page, reason,
+                            )),
+                            review_origin,
+                            "Archiving is destructive governance and always requires approval."
+                                .to_owned(),
+                            model_attempts,
+                            escalated,
+                        );
+                        self.ledger.record(
+                            key,
+                            "archive_pending_review",
+                            self.config.relation.retry_after_seconds,
+                        );
+                        report.archives_proposed += 1;
+                        report.review_items_proposed += 1;
+                    }
+                    ArchiveWorkerDecision::Retain => self.ledger.record(
+                        key,
+                        "archive_retained",
+                        self.config.relation.retry_after_seconds,
+                    ),
+                    ArchiveWorkerDecision::Defer => {
+                        self.ledger.record(
+                            key,
+                            "archive_deferred",
+                            self.config.relation.retry_after_seconds,
+                        );
+                        report.deferred += 1;
+                    }
+                }
+            }
+            MaintenanceWorkerResponse::Defer => {
+                self.ledger.record(
+                    key,
+                    "archive_deferred",
+                    self.config.relation.retry_after_seconds,
+                );
+                report.deferred += 1;
+            }
+            other => anyhow::bail!(
+                "semantic worker returned {} for an assess_archive request",
+                response_name(&other)
+            ),
+        }
+        Ok(true)
+    }
+
     /// Only a concrete, still-active Pack proposal blocks relation analysis.
     ///
     /// A Page being *eligible* for packing is not a pending mutation. Excluding
@@ -2099,8 +2529,14 @@ impl RuntimeMaintainer {
         &mut self,
         inventory: &[pcp_store::DurablePageInventoryItem],
         report: &mut MaintenanceCycleReport,
+        review_origin: MaintenanceReviewOrigin,
     ) -> Result<bool> {
-        let Some(candidates) = packing_candidate_windows(inventory, &self.config.packing)
+        let Some(candidates) = self
+            .time_continuous_packing_windows(packing_candidate_windows(
+                inventory,
+                &self.config.packing,
+            ))
+            .await?
             .into_iter()
             .find(|pages| {
                 self.ledger.eligible(&selection_window_key(
@@ -2141,14 +2577,19 @@ impl RuntimeMaintainer {
         }
 
         let excluded_candidate_sets = self.ledger.active_packing_sets();
-        report.worker_calls += 1;
-        let selection = self
+        let outcome = self
             .evaluate_worker(MaintenanceWorkerRequest::SelectPacking {
                 pages: routing_pages,
                 excluded_candidate_sets: excluded_candidate_sets.clone(),
             })
             .await?;
-        let page_ids = match selection {
+        report.worker_calls = report.worker_calls.saturating_add(outcome.model_attempts);
+        report.escalated_decisions = report
+            .escalated_decisions
+            .saturating_add(u32::from(outcome.escalated));
+        let model_attempts = outcome.model_attempts;
+        let escalated = outcome.escalated;
+        let page_ids = match outcome.response {
             MaintenanceWorkerResponse::Candidate { page_ids } => page_ids,
             MaintenanceWorkerResponse::NoCandidate => {
                 self.ledger
@@ -2166,7 +2607,9 @@ impl RuntimeMaintainer {
                 response_name(&other)
             ),
         };
-        if select_packing_items(&candidates, &page_ids, &self.config.packing).is_none() {
+        let Some(selected_pages) =
+            select_packing_items(&candidates, &page_ids, &self.config.packing)
+        else {
             self.ledger.record(
                 selection_key,
                 "invalid_worker_selection",
@@ -2174,7 +2617,7 @@ impl RuntimeMaintainer {
             );
             report.deferred += 1;
             return Ok(true);
-        }
+        };
         let key = packing_key(&page_ids);
         let mut normalized_page_ids = page_ids.clone();
         normalized_page_ids.sort();
@@ -2211,9 +2654,17 @@ impl RuntimeMaintainer {
                 .await?;
             report.packs_committed += 1;
         } else {
+            self.ledger.enqueue_review(
+                MaintenanceReviewPayload::Pack(build_pack_candidate(&selected_pages)),
+                review_origin,
+                "Pack boundary is ready for operator review.".to_owned(),
+                model_attempts,
+                escalated,
+            );
             self.ledger
-                .record(key, "observed_pack", PACKING_RETRY_AFTER_SECONDS);
+                .record(key, "pack_pending_review", PACKING_RETRY_AFTER_SECONDS);
             report.packs_proposed += 1;
+            report.review_items_proposed += 1;
         }
         Ok(true)
     }
@@ -2298,15 +2749,18 @@ impl RuntimeMaintainer {
                 )
             })
             .collect::<HashMap<_, _>>();
-        report.worker_calls += 1;
-        match self
+        let outcome = self
             .evaluate_worker(MaintenanceWorkerRequest::SelectRetentionMilestones {
                 pages: routing_pages,
                 max_revisions: self.config.retention.max_revisions_per_cycle,
                 lease_days: self.config.retention.lease_days,
             })
-            .await?
-        {
+            .await?;
+        report.worker_calls = report.worker_calls.saturating_add(outcome.model_attempts);
+        report.escalated_decisions = report
+            .escalated_decisions
+            .saturating_add(u32::from(outcome.escalated));
+        match outcome.response {
             MaintenanceWorkerResponse::Retain { mut milestones } => {
                 normalize_milestones(
                     &mut milestones,
@@ -2709,6 +3163,17 @@ fn relation_window_key(revision_ids: &[String]) -> String {
     revision_ids.sort();
     revision_ids.dedup();
     format!("relation_window:{}", revision_ids.join(","))
+}
+
+fn topic_window_key(revision_ids: &[String]) -> String {
+    let mut revision_ids = revision_ids.to_vec();
+    revision_ids.sort();
+    revision_ids.dedup();
+    format!("topic_window:{}", revision_ids.join(","))
+}
+
+fn archive_review_key(revision_id: &str) -> String {
+    format!("archive_review:{revision_id}")
 }
 
 fn relation_pair_key(page_ids: &[String; 2]) -> String {

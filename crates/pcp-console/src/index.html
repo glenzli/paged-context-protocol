@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PCP Console</title>
-  <link rel="stylesheet" href="/styles.css?v=20260823.3">
+  <link rel="stylesheet" href="/styles.css?v=20260824.1">
   <link rel="stylesheet" href="/page-content.css?v=20260816.3">
 </head>
 <body>
@@ -157,12 +157,23 @@
       <div class="view-heading">
         <div class="view-heading-copy">
           <div><h2 data-i18n="Memory maintenance">Memory maintenance</h2><span id="maintenance-status" class="muted" aria-live="polite" data-i18n="Not loaded">Not loaded</span></div>
-          <p class="view-description" data-i18n="Maintain Pack boundaries, semantic structure, then topic Pages in order. Suggested links are never retrievable before approval.">Maintain Pack boundaries, semantic structure, then topic Pages in order. Suggested links are never retrievable before approval.</p>
+          <p class="view-description" data-i18n="PCP advances maintenance one bounded job at a time. Safe structural work is applied automatically; uncertain semantic and governance decisions collect here for review.">PCP advances maintenance one bounded job at a time. Safe structural work is applied automatically; uncertain semantic and governance decisions collect here for review.</p>
         </div>
       </div>
+      <section id="maintenance-scene-alert" class="maintenance-scene-alert" role="alert" aria-live="assertive" hidden>
+        <span class="maintenance-scene-alert-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 3 2.8 20h18.4L12 3Z"/><path d="M12 9v5"/><path d="M12 17.5h.01"/></svg>
+        </span>
+        <div class="maintenance-scene-alert-copy">
+          <strong id="maintenance-scene-alert-title"></strong>
+          <p id="maintenance-scene-alert-summary"></p>
+          <code id="maintenance-scene-alert-detail"></code>
+        </div>
+        <button id="maintenance-scene-alert-retry" class="warning-button" type="button" data-i18n="Retry maintenance">Retry maintenance</button>
+      </section>
       <section id="maintenance-automation-status" class="maintenance-automation-status" hidden>
         <div class="section-heading section-heading-copy">
-          <div><div class="maintenance-automation-title"><h3 data-i18n="Automatic maintenance">Automatic maintenance</h3><span id="maintenance-automation-state" class="status-pill"></span></div><p data-i18n="Runtime updates this status; relation proposals still require approval.">Runtime updates this status; relation proposals still require approval.</p></div>
+          <div><div class="maintenance-automation-title"><h3 data-i18n="Automatic maintenance">Automatic maintenance</h3><span id="maintenance-automation-state" class="status-pill"></span></div><p data-i18n="Background maintenance and Run now use the same controller and persistent review inbox.">Background maintenance and Run now use the same controller and persistent review inbox.</p></div>
         </div>
         <div id="maintenance-automation-metrics" class="metrics maintenance-automation-metrics"></div>
         <section id="maintenance-automation-progress" class="maintenance-automation-progress" hidden>
@@ -174,17 +185,17 @@
       </section>
       <section id="maintenance-relation-review" class="maintenance-relation-review" hidden>
         <div class="section-heading section-heading-copy">
-          <div><h3 data-i18n="Relation review queue">Relation review queue</h3><p data-i18n="These suggested links are not used for retrieval until you approve them.">These suggested links are not used for retrieval until you approve them.</p></div>
+          <div><h3 data-i18n="Maintenance review inbox">Maintenance review inbox</h3><p data-i18n="Only unresolved decisions appear here. Nothing in this inbox affects retrieval or lifecycle state before acceptance.">Only unresolved decisions appear here. Nothing in this inbox affects retrieval or lifecycle state before acceptance.</p></div>
           <span id="maintenance-relation-review-count" class="muted"></span>
         </div>
         <div id="maintenance-relation-review-cards" class="maintenance-relation-review-cards"></div>
       </section>
       <section id="maintenance-idle" class="maintenance-empty-state">
         <div>
-          <h3 data-i18n="Start a maintenance session">Start a maintenance session</h3>
-          <p data-i18n="Maintenance proceeds from Pack boundaries, through summaries and relations, to Topic Pages on the refreshed inventory. Each stage scans candidates, analyzes suggestions, then waits for your explicit application.">Maintenance proceeds from Pack boundaries, through summaries and relations, to Topic Pages on the refreshed inventory. Each stage scans candidates, analyzes suggestions, then waits for your explicit application.</p>
+          <div class="maintenance-convergence-title"><h3 data-i18n="Converge memory maintenance">Converge memory maintenance</h3><span id="maintenance-convergence-state" class="status-pill" aria-live="polite"></span></div>
+          <p data-i18n="Run now progressively processes one bounded job per response. You can review accumulated decisions immediately while the remaining work continues.">Run now progressively processes one bounded job per response. You can review accumulated decisions immediately while the remaining work continues.</p>
         </div>
-        <button id="maintenance-start" class="primary-button" type="button" disabled data-i18n="Start maintenance">Start maintenance</button>
+        <div class="maintenance-start-actions"><button id="maintenance-start" class="primary-button" type="button" disabled data-i18n="Run now">Run now</button><button id="maintenance-manual-start" class="secondary-button" type="button" disabled data-i18n="Manual staged review">Manual staged review</button></div>
       </section>
 
       <section id="maintenance-workflow" hidden>
@@ -258,10 +269,11 @@
           <span id="maintenance-report-status" class="muted" aria-live="polite"></span>
         </div>
         <div id="maintenance-report-metrics" class="metrics"></div>
-        <button id="maintenance-start-new" class="primary-button" type="button" data-i18n="Start maintenance">Start maintenance</button>
+        <button id="maintenance-start-new" class="primary-button" type="button" data-i18n="Run now">Run now</button>
       </section>
 
-      <section id="maintenance-archive" class="maintenance-archive">
+      <details id="maintenance-archive" class="maintenance-archive maintenance-advanced-tools">
+        <summary><span data-i18n="Advanced manual archive review">Advanced manual archive review</span><span class="muted" data-i18n="Optional">Optional</span></summary>
         <div class="section-heading section-heading-copy">
           <div>
             <h3 data-i18n="Content governance">Content governance</h3>
@@ -321,7 +333,7 @@
           <div id="governance-results" class="governance-results" aria-live="polite"></div>
           <div class="list-footer"><button id="governance-more" type="button" class="compact-button secondary-button" hidden data-i18n="Load more">Load more</button></div>
         </details>
-      </section>
+      </details>
 
     </section>
 
@@ -473,9 +485,11 @@
     <header class="dialog-header">
       <div><strong data-i18n="Relation comparison">Relation comparison</strong><div id="relation-comparison-subtitle" class="muted"></div></div>
       <div class="dialog-header-actions">
-        <button id="relation-comparison-mark-reviewed" class="icon-button relation-comparison-review-button" type="button" aria-label="Mark reviewed" title="Mark reviewed" data-i18n-aria-label="Mark reviewed" data-i18n-title="Mark reviewed" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l4 4L19 6"/></svg></button>
-        <button id="relation-comparison-accept" class="icon-button relation-comparison-accept-button" type="button" aria-label="Accept" title="Accept" data-i18n-aria-label="Accept" data-i18n-title="Accept" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/><circle cx="12" cy="12" r="10"/></svg></button>
-        <button id="relation-comparison-reject" class="icon-button relation-comparison-reject-button" type="button" aria-label="Reject" title="Reject" data-i18n-aria-label="Reject" data-i18n-title="Reject" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8l8 8M16 8l-8 8"/><circle cx="12" cy="12" r="10"/></svg></button>
+        <div class="relation-comparison-decision-group" role="group" aria-label="Relation decision" data-i18n-aria-label="Relation decision">
+          <button id="relation-comparison-accept" class="icon-button relation-comparison-decision-button relation-comparison-accept-button" type="button" aria-label="Accept" title="Accept" data-i18n-aria-label="Accept" data-i18n-title="Accept" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5 9.5 17 19 7"/></svg></button>
+          <button id="relation-comparison-reject" class="icon-button relation-comparison-decision-button relation-comparison-reject-button" type="button" aria-label="Reject" title="Reject" data-i18n-aria-label="Reject" data-i18n-title="Reject" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8.5 15.5-1.6 1.6a3.5 3.5 0 0 1-5-5l3.2-3.2a3.5 3.5 0 0 1 4.5-.4"/><path d="m15.5 8.5 1.6-1.6a3.5 3.5 0 0 1 5 5l-3.2 3.2a3.5 3.5 0 0 1-4.5.4"/><path d="M8.8 12h6.4"/></svg></button>
+          <button id="relation-comparison-skip" class="icon-button relation-comparison-decision-button relation-comparison-skip-button" type="button" aria-label="Skip for now" title="Skip for now" data-i18n-aria-label="Skip for now" data-i18n-title="Skip for now" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v5l3 2"/><path d="M12 21a9 9 0 1 0-9-9"/></svg></button>
+        </div>
         <button id="relation-comparison-close" class="icon-button dialog-close-button" type="button" aria-label="Close" title="Close" data-i18n-aria-label="Close" data-i18n-title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
       </div>
     </header>
@@ -590,6 +604,6 @@
   </dialog>
 
   <div id="error" class="error" hidden></div>
-  <script type="module" src="/app.js?v=20260823.3"></script>
+  <script type="module" src="/app.js?v=20260824.1"></script>
 </body>
 </html>

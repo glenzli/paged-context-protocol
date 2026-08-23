@@ -4,12 +4,24 @@ import { createHealthView } from "/health-view.js?v=20260816.3";
 import { createRetentionView } from "/retention-view.js?v=20260818.1";
 import { createQueryView } from "/query-view.js?v=20260823.2";
 import {
+  RELATION_DECISION,
+  bulkSelectableCandidates,
+  partitionMaintenanceDecisions,
+  stageRelationDecision,
+  toggleBulkSelection,
+} from "/maintenance-relation-decisions.js?v=20260823.1";
+import {
   batchProgress,
   beginBatch,
   completeBatch,
   failBatch,
   runnableBatchIndexes,
 } from "/progressive-operation.js?v=20260823.2";
+import {
+  convergencePhase,
+  convergenceSettled,
+  mergeConvergenceReport,
+} from "/maintenance-convergence.js?v=20260824.1";
 
 const DEFAULT_PAGE_LIMIT = 20;
 const PAGE_LIMIT_OPTIONS = new Set([10, 20, 30]);
@@ -57,7 +69,9 @@ const ZH_MESSAGES = {
   "Maximum wait must be at least the quiet period, and all values must be positive.": "最长等待必须不小于静默期，且所有值必须为正数。",
   "Save and restart Runtime": "保存并重启 Runtime",
   "Runtime updates this status; relation proposals still require approval.": "状态由 Runtime 更新；关联提案仍需批准。",
+  "Background maintenance and Run now use the same controller and persistent review inbox.": "后台维护与立即运行共用同一控制器和持久审阅箱。",
   "Maintain Pack boundaries, semantic structure, then topic Pages in order. Suggested links are never retrievable before approval.": "按顺序维护 Pack 边界、语义结构与主题页；建议关联仍需批准后才会参与检索。",
+  "PCP advances maintenance one bounded job at a time. Safe structural work is applied automatically; uncertain semantic and governance decisions collect here for review.": "PCP 每次推进一个有界维护任务；安全的结构工作自动应用，不确定的语义与治理决策统一进入审阅箱。",
   "Not started": "尚未开始",
   "Waiting": "等待写入",
   "Running": "正在执行",
@@ -69,6 +83,31 @@ const ZH_MESSAGES = {
   "Dirty regions": "待整理范围",
   "Ready regions": "已就绪范围",
   "Pending relation review": "待审关联",
+  "Pending review": "待审决策",
+  "Maintenance review inbox": "维护审阅箱",
+  "Only unresolved decisions appear here. Nothing in this inbox affects retrieval or lifecycle state before acceptance.": "这里只展示尚未解决的决策；接受之前，它们不会影响检索或页面生命周期。",
+  "Converge memory maintenance": "收敛记忆维护",
+  "Run now progressively processes one bounded job per response. You can review accumulated decisions immediately while the remaining work continues.": "立即运行会逐次处理任务，每次响应只推进一个有界工作单元；已有决策可立刻审阅，其余工作继续推进。",
+  "Run now": "立即运行",
+  "Awaiting run": "等待运行",
+  "Run in progress": "正在运行",
+  "Awaiting review": "等待审阅",
+  "Converged": "已收敛",
+  "Needs attention": "需要处理",
+  "Retry maintenance": "重试维护",
+  "Maintenance run paused": "维护运行已暂停",
+  "Relation analysis paused": "关联分析已暂停",
+  "The model returned a Page pair outside the current candidate window. No relation was applied for this work unit.": "模型返回的页面组合不属于当前候选窗口；这个工作单元没有应用任何关联。",
+  "The current maintenance run stopped before convergence. Completed work and accumulated reviews are preserved.": "本次维护在收敛前停止；已完成的工作和已经积累的审阅项均已保留。",
+  "Manual staged review": "手动分阶段审阅",
+  "Advanced manual archive review": "高级手动归档审阅",
+  "Optional": "可选",
+  "Model escalation": "模型升级",
+  "Baseline model": "基础模型",
+  "Escalated model": "升级模型",
+  "Skip for now": "暂时跳过",
+  "Review inbox is clear": "审阅箱已清空",
+  "Maintenance converged": "维护已收敛",
   "Uncertain relation": "不确定关联",
   "Manual approval required": "需要人工批准",
   "Relation comparison": "关联内容对照",
@@ -96,6 +135,7 @@ const ZH_MESSAGES = {
   "Approve": "批准",
   "Accept": "接受",
   "Accepted": "已接受",
+  "Apply decisions": "应用决策",
   "Analyzing": "正在分析",
   "Batches completed": "已完成批次",
   "Pages completed": "已完成页面",
@@ -232,10 +272,11 @@ const ZH_MESSAGES = {
   "Relation review queue": "关联审核队列",
   "These suggested links are not used for retrieval until you approve them.": "这些建议关联在你批准前不会参与检索。",
   "Review evidence": "审核依据",
-  "Reviewed": "已审阅",
-  "Mark reviewed": "标记已审阅",
   "Rejected for this review": "本次拒绝",
-  "Undo rejection": "撤销拒绝",
+  "Skip for now": "本次跳过",
+  "Skipped for now": "本次跳过",
+  "Relation proposal": "关联提案",
+  "Relation decision": "关联决策",
   "View relation Pages": "查看关联页面",
   "Analysis log": "分析日志",
   "Undo no-suggest": "撤销不再建议",
@@ -884,6 +925,14 @@ const state = {
     relationReviewStates: new Map(),
     applyStates: new Map(),
     relationReviews: [],
+    reviewBusy: new Set(),
+    convergence: {
+      running: false,
+      report: null,
+      steps: 0,
+      completedAt: null,
+      error: null,
+    },
   },
   archive: {
     state: "idle",
@@ -939,11 +988,19 @@ function suppressRelationIcon() {
 }
 
 function acceptRelationIcon() {
-  return strokeIcon(["M20 6 9 17l-5-5", "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20"]);
+  return strokeIcon(["M5 12.5 9.5 17 19 7"]);
 }
 
 function rejectRelationIcon() {
-  return strokeIcon(["M8 8l8 8M16 8l-8 8", "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20"]);
+  return strokeIcon([
+    "m8.5 15.5-1.6 1.6a3.5 3.5 0 0 1-5-5l3.2-3.2a3.5 3.5 0 0 1 4.5-.4",
+    "m15.5 8.5 1.6-1.6a3.5 3.5 0 0 1 5 5l-3.2 3.2a3.5 3.5 0 0 1-4.5.4",
+    "M8.8 12h6.4",
+  ]);
+}
+
+function skipRelationIcon() {
+  return strokeIcon(["M12 7v5l3 2", "M12 21a9 9 0 1 0-9-9"]);
 }
 
 function formatNumber(value) {
@@ -1326,7 +1383,7 @@ function pageResult(hit) {
   open.type = "button";
   const indicator = element("span", "page-open-indicator");
   indicator.append(openPageIcon());
-  open.append(element("strong", "page-title", pageSnippet(hit)), indicator);
+  open.append(element("span", "page-title", pageSnippet(hit)), indicator);
   open.addEventListener("click", () => pageInspector.open(hit.pageId));
   result.append(open, pageResultMeta(hit));
   return result;
@@ -2037,6 +2094,8 @@ function emptyMaintenanceOutcome() {
     modelCalls: 0,
     proposals: 0,
     applied: 0,
+    rejected: 0,
+    suppressed: 0,
     skipped: 0,
     completed: false,
     issues: [],
@@ -2072,6 +2131,63 @@ function renderMaintenanceStatus(status) {
   state.maintenance.loaded = true;
   renderAutomationStatus();
   renderMaintenanceSession();
+}
+
+function maintenanceSceneError() {
+  if (state.maintenance.convergence.error) return state.maintenance.convergence.error;
+  if (state.maintenance.convergence.running) return null;
+  if (state.maintenance.convergence.completedAt) return null;
+  const message = state.maintenance.status?.automation?.lastError;
+  return message ? { message } : null;
+}
+
+function maintenanceSceneErrorCopy(error) {
+  const detail = error?.message || String(error || "");
+  if (detail.includes("invalid relation pair")) {
+    return {
+      title: t("Relation analysis paused"),
+      summary: t("The model returned a Page pair outside the current candidate window. No relation was applied for this work unit."),
+      detail,
+    };
+  }
+  return {
+    title: t("Maintenance run paused"),
+    summary: t("The current maintenance run stopped before convergence. Completed work and accumulated reviews are preserved."),
+    detail,
+  };
+}
+
+function renderMaintenanceConvergenceState() {
+  const error = maintenanceSceneError();
+  const phase = error
+    ? "failed"
+    : convergencePhase(state.maintenance.convergence, state.maintenance.relationReviews.length);
+  const labels = {
+    waiting: "Awaiting run",
+    running: "Run in progress",
+    review: "Awaiting review",
+    settled: "Converged",
+    failed: "Needs attention",
+  };
+  const tones = {
+    waiting: "warning",
+    running: "info",
+    review: "warning",
+    settled: "positive",
+    failed: "warning",
+  };
+  const stateNode = byId("maintenance-convergence-state");
+  stateNode.textContent = t(labels[phase]);
+  stateNode.className = `status-pill status-${tones[phase]}`;
+
+  const alert = byId("maintenance-scene-alert");
+  alert.hidden = !error;
+  byId("maintenance-scene-alert-retry").disabled = state.maintenance.busy || !maintenanceAvailable() || archiveSessionActive();
+  if (!error) return;
+  const copy = maintenanceSceneErrorCopy(error);
+  byId("maintenance-scene-alert-title").textContent = copy.title;
+  byId("maintenance-scene-alert-summary").textContent = copy.summary;
+  byId("maintenance-scene-alert-detail").textContent = copy.detail;
 }
 
 function automationStateLabel(status) {
@@ -2111,28 +2227,37 @@ function renderAutomationStatus() {
     ),
     metric(t("Dirty regions"), formatNumber(automation.dirtyRegionCount), automation.dirtyRegionCount ? "warning" : ""),
     metric(t("Ready regions"), formatNumber(automation.readyRegionCount), automation.readyRegionCount ? "info" : ""),
-    metric(t("Pending relation review"), formatNumber(automation.pendingRelationReviewCount), automation.pendingRelationReviewCount ? "warning" : ""),
+    metric(t("Pending review"), formatNumber(automation.pendingReviewCount), automation.pendingReviewCount ? "warning" : ""),
   );
-  const currentReport = automation.currentReport;
+  const convergence = state.maintenance.convergence;
+  const currentReport = convergence.running
+    ? convergence.report
+    : automation.currentReport || convergence.report;
   const progress = byId("maintenance-automation-progress");
   progress.hidden = !currentReport;
   if (currentReport) {
     const proposed = (currentReport.summariesProposed || 0)
       + (currentReport.packsProposed || 0)
       + (currentReport.relationsProposed || 0)
+      + (currentReport.topicsProposed || 0)
+      + (currentReport.archivesProposed || 0)
       + (currentReport.retentionLeasesProposed || 0);
     const committed = (currentReport.summariesWritten || 0)
       + (currentReport.packsCommitted || 0)
       + (currentReport.relationsCommitted || 0)
       + (currentReport.retentionLeasesWritten || 0);
-    byId("maintenance-automation-progress-title").textContent = automation.state === "running"
+    byId("maintenance-automation-progress-title").textContent = convergence.running
+      ? (currentLanguage === "zh" ? `立即运行 · 已推进 ${formatNumber(convergence.steps)} 个工作单元` : `Run now · ${formatNumber(convergence.steps)} bounded jobs advanced`)
+      : automation.state === "running"
       ? (currentLanguage === "zh" ? "本轮实时进度" : "Live cycle progress")
-      : (currentLanguage === "zh" ? "上次失败前的部分进度" : "Partial progress before the last failure");
+      : convergence.completedAt
+        ? t("Maintenance converged")
+        : (currentLanguage === "zh" ? "上次失败前的部分进度" : "Partial progress before the last failure");
     byId("maintenance-automation-progress-metrics").replaceChildren(
       metric(t("Maintenance inventory"), formatNumber(currentReport.inspectedPages)),
       metric(t("Model calls"), formatNumber(currentReport.workerCalls), currentReport.workerCalls ? "info" : ""),
       metric(t("Proposals"), formatNumber(proposed), proposed ? "warning" : ""),
-      metric(t("Applied"), formatNumber(committed), committed ? "positive" : "", `${formatNumber(currentReport.deferred || 0)} ${t("Deferred")}`),
+      metric(t("Applied"), formatNumber(committed), committed ? "positive" : "", `${formatNumber(currentReport.deferred || 0)} ${t("Deferred")} · ${formatNumber(currentReport.escalatedDecisions || 0)} ${t("Model escalation")}`),
     );
   }
   const completed = automation.lastCompletedAt;
@@ -2141,8 +2266,11 @@ function renderAutomationStatus() {
     ? [started ? `${currentLanguage === "zh" ? "最近开始" : "Last started"}: ${formatTime(started)}` : "", completed ? `${t("Last completed")}: ${formatTime(completed)}` : ""].filter(Boolean).join(" · ")
     : t("Awaiting the first Runtime heartbeat.");
   const error = byId("maintenance-automation-error");
-  error.hidden = !automation.lastError;
-  error.textContent = automation.lastError || "";
+  // Operation failures are owned by the scene-level alert above the workflow.
+  // Keeping the old footer hidden avoids two competing error locations.
+  error.hidden = true;
+  error.textContent = "";
+  renderMaintenanceConvergenceState();
 }
 
 function populateMaintenanceSettings() {
@@ -2214,12 +2342,12 @@ function compactRelationReviewPreview(value, limit = 220) {
 
 function relationComparisonButton(proposal, className = "secondary-button", {
   iconOnly = false,
-  onReviewed = null,
-  reviewed = false,
   onAccept = null,
   onReject = null,
+  onSkip = null,
   accepted = false,
   rejected = false,
+  skipped = false,
 } = {}) {
   const label = t("Compare Pages");
   const compare = element("button", className, iconOnly ? undefined : label);
@@ -2232,12 +2360,12 @@ function relationComparisonButton(proposal, className = "secondary-button", {
       pages: proposal.pages,
       relationReason: proposal.relationReason,
       reviewReason: proposal.reviewReason,
-      onReviewed,
-      reviewed,
       onAccept,
       onReject,
+      onSkip,
       accepted,
       rejected,
+      skipped,
     }).catch(() => {});
   });
   return compare;
@@ -2314,13 +2442,127 @@ function relationReviewCard(proposal) {
 function renderRelationReviews() {
   const section = byId("maintenance-relation-review");
   const reviews = state.maintenance.relationReviews;
-  section.hidden = !reviews.length;
+  section.hidden = !maintenanceAvailable();
   byId("maintenance-relation-review-count").textContent = reviews.length
     ? `${formatNumber(reviews.length)} ${t("proposals")}`
-    : "";
+    : t("Review inbox is clear");
   byId("maintenance-relation-review-cards").replaceChildren(
-    ...reviews.map(relationReviewCard),
+    ...(reviews.length
+      ? reviews.map(maintenanceReviewCard)
+      : [element("div", "maintenance-review-empty", t("Review inbox is clear"))]),
   );
+}
+
+function maintenanceReviewKindLabel(kind) {
+  return {
+    pack: "Pack",
+    summary: "Summary",
+    relation: "Relations",
+    topic: "Extract Topic Page",
+    archive: "Archive",
+  }[kind] || kind;
+}
+
+function maintenanceReviewContent(review) {
+  const payload = review.payload || {};
+  const candidate = payload.candidate || {};
+  const body = element("div", `maintenance-review-content maintenance-review-${payload.kind || "unknown"}`);
+  if (payload.kind === "relation") {
+    const pages = element("div", "maintenance-relation-review-pages");
+    (candidate.pages || []).forEach((page, index) => {
+      const pageCard = element("button", "maintenance-relation-review-page");
+      pageCard.type = "button";
+      pageCard.append(
+        element("span", "mono muted", page.pageId),
+        element("span", "maintenance-relation-review-preview", compactRelationReviewPreview(page.preview)),
+        element("span", "mono muted", page.revisionId),
+      );
+      pageCard.addEventListener("click", () => pageInspector.compareRelation({
+        pages: candidate.pages,
+        relationReason: candidate.relationReason,
+        reviewReason: review.reason,
+      }).catch(() => {}));
+      pages.append(pageCard);
+      if (index === 0) pages.append(element("span", "maintenance-relation-review-link", "↔"));
+    });
+    if (candidate.relationReason) body.append(element("p", "maintenance-review-evidence", candidate.relationReason));
+    body.append(pages);
+  } else if (payload.kind === "topic") {
+    body.append(
+      element("strong", "maintenance-review-title", candidate.title),
+      element("p", "maintenance-review-preview", candidate.content),
+      element("span", "muted", `${formatNumber(candidate.pages?.length || 0)} ${t("Source Pages")}`),
+    );
+  } else if (payload.kind === "summary") {
+    body.append(
+      element("span", "mono muted", candidate.pageId),
+      element("p", "maintenance-review-preview", candidate.content),
+    );
+  } else if (payload.kind === "pack") {
+    body.append(element("span", "muted", `${formatNumber(candidate.inputPageCount || candidate.pages?.length || 0)} ${t("Pages")} · ${formatNumber(candidate.contentChars || 0)} chars`));
+    const pages = element("div", "maintenance-review-source-list");
+    (candidate.pages || []).slice(0, 4).forEach((page) => pages.append(
+      element("p", "maintenance-review-source", compactRelationReviewPreview(page.preview)),
+    ));
+    body.append(pages);
+  } else if (payload.kind === "archive") {
+    body.append(
+      element("span", "mono muted", candidate.pageId),
+      element("p", "maintenance-review-preview", candidate.preview),
+      element("p", "maintenance-review-evidence", candidate.reason),
+    );
+    const signals = element("div", "maintenance-review-signals");
+    (candidate.candidateSignals || []).forEach((signal) => signals.append(element("span", "status-pill", signal)));
+    body.append(signals);
+  }
+  return body;
+}
+
+function maintenanceReviewCard(review) {
+  const payload = review.payload || {};
+  const candidate = payload.candidate || {};
+  const card = element("article", "maintenance-relation-review-card maintenance-review-card");
+  const heading = element("div", "maintenance-relation-review-card-heading");
+  const metadata = element("div", "maintenance-review-metadata");
+  metadata.append(
+    element("span", `maintenance-review-kind maintenance-review-kind-${payload.kind || "unknown"}`, t(maintenanceReviewKindLabel(payload.kind))),
+    element("span", "muted", review.origin === "automatic" ? t("Automatic maintenance") : t("Manual maintenance")),
+    element("span", "muted", formatTime(review.proposedAt)),
+  );
+  const model = element("span", `status-pill ${review.escalated ? "status-warning" : ""}`, review.escalated
+    ? `${t("Escalated model")} · ${formatNumber(review.modelAttempts)}`
+    : `${t("Baseline model")} · ${formatNumber(review.modelAttempts)}`);
+  heading.append(metadata, model);
+  const reason = element("p", "maintenance-relation-review-reason muted", review.reason);
+  const actions = element("div", "maintenance-relation-review-actions");
+  if (payload.kind === "relation") {
+    actions.append(relationComparisonButton({
+      pages: candidate.pages,
+      relationReason: candidate.relationReason,
+      reviewReason: review.reason,
+    }, "compact-button compact-icon-button", { iconOnly: true }));
+  } else if (payload.kind === "topic") {
+    actions.append(topicExtractionReviewButton(candidate, "compact-button secondary-button"));
+  }
+  const accept = element("button", payload.kind === "archive" ? "warning-button" : "primary-button", t(payload.kind === "archive" ? "Archive" : "Accept"));
+  const reject = element("button", "secondary-button maintenance-review-reject", t("Reject"));
+  const defer = element("button", "compact-button secondary-button", t("Skip for now"));
+  [accept, reject, defer].forEach((button) => { button.type = "button"; });
+  const busy = state.maintenance.reviewBusy?.has(review.candidateId);
+  [accept, reject, defer].forEach((button) => { button.disabled = busy; });
+  accept.addEventListener("click", () => resolveMaintenanceReview(review, "accept"));
+  reject.addEventListener("click", () => resolveMaintenanceReview(review, "reject"));
+  defer.addEventListener("click", () => resolveMaintenanceReview(review, "defer"));
+  actions.append(accept, reject, defer);
+  if (payload.kind === "relation") {
+    const suppress = element("button", "compact-button danger-button", t("Do not suggest this relation again"));
+    suppress.type = "button";
+    suppress.disabled = busy;
+    suppress.addEventListener("click", () => resolveMaintenanceReview(review, "suppress"));
+    actions.append(suppress);
+  }
+  card.append(heading, reason, maintenanceReviewContent(review), actions);
+  return card;
 }
 
 async function loadRelationReviews() {
@@ -2329,27 +2571,43 @@ async function loadRelationReviews() {
     renderRelationReviews();
     return;
   }
-  const response = await api("/api/maintenance/relation-reviews");
-  state.maintenance.relationReviews = response.proposals || [];
+  const response = await api("/api/maintenance/reviews");
+  state.maintenance.relationReviews = response.reviews || [];
   renderRelationReviews();
 }
 
-async function resolveRelationReview(candidateId, decision) {
-  if (state.maintenance.busy) return;
-  state.maintenance.busy = true;
+async function resolveMaintenanceReview(review, decision) {
+  if (state.maintenance.reviewBusy.has(review.candidateId)) return;
+  if (decision === "accept" && review.payload?.kind === "archive") {
+    const confirmed = await confirmAction({
+      title: t("Archive this Page?"),
+      description: t("Archiving excludes this Page from default retrieval, graph expansion, and maintenance without deleting it."),
+      confirmLabel: t("Archive"),
+    });
+    if (!confirmed) return;
+  }
+  state.maintenance.reviewBusy.add(review.candidateId);
+  renderRelationReviews();
   try {
-    const suffix = decision === "approve" ? "approve" : "reject";
     await maintenanceMutation(
-      `/api/maintenance/relation-reviews/${encodeURIComponent(candidateId)}/${suffix}`,
-      decision === "approve" ? {} : { suppress: decision === "suppress" },
+      `/api/maintenance/reviews/${encodeURIComponent(review.candidateId)}/${decision}`,
+      {},
     );
-    await loadMaintenance({ reload: true });
+    await Promise.all([loadRelationReviews(), loadOverview()]);
+    renderMaintenanceStatus(await api("/api/maintenance"));
   } catch (error) {
     showError(error);
   } finally {
-    state.maintenance.busy = false;
+    state.maintenance.reviewBusy.delete(review.candidateId);
     renderRelationReviews();
   }
+}
+
+async function resolveRelationReview(candidateId, decision) {
+  const review = state.maintenance.relationReviews.find((item) => item.candidateId === candidateId);
+  if (!review) return;
+  const mapped = decision === "approve" ? "accept" : decision;
+  return resolveMaintenanceReview(review, mapped);
 }
 
 function maintenanceAvailable() {
@@ -2446,6 +2704,10 @@ function maintenanceCandidates() {
     .filter((candidate) => passPhases.has(candidate.operation));
 }
 
+function maintenanceBulkSelectableCandidates() {
+  return bulkSelectableCandidates(maintenanceCandidates(), state.maintenance.relationDraftStates);
+}
+
 function maintenanceSelectionCheckbox(candidate) {
   const checkbox = document.createElement("input");
   checkbox.type = "checkbox";
@@ -2458,12 +2720,6 @@ function maintenanceSelectionCheckbox(candidate) {
   checkbox.addEventListener("change", () => {
     if (checkbox.checked) state.maintenance.selected.add(candidate.candidateId);
     else state.maintenance.selected.delete(candidate.candidateId);
-    if (candidate.operation === "relation") {
-      state.maintenance.relationReviewStates.set(
-        candidate.candidateId,
-        checkbox.checked ? "accepted" : "rejected",
-      );
-    }
     renderMaintenanceSession();
   });
   return checkbox;
@@ -2488,23 +2744,36 @@ function relationReviewState(candidate) {
   return state.maintenance.relationReviewStates.get(candidate.candidateId) || null;
 }
 
-function markRelationCandidateReviewed(candidate) {
-  if (candidate.operation !== "relation" || relationDraftState(candidate) === "suppressed") return;
-  state.maintenance.relationReviewStates.set(candidate.candidateId, "reviewed");
-  renderMaintenanceSession();
-}
-
 function acceptRelationCandidate(candidate) {
   if (candidate.operation !== "relation" || relationDraftState(candidate) === "suppressed") return;
-  state.maintenance.selected.add(candidate.candidateId);
-  state.maintenance.relationReviewStates.set(candidate.candidateId, "accepted");
+  stageRelationDecision(
+    state.maintenance.selected,
+    state.maintenance.relationReviewStates,
+    candidate.candidateId,
+    RELATION_DECISION.ACCEPT,
+  );
   renderMaintenanceSession();
 }
 
 function rejectRelationCandidate(candidate) {
   if (candidate.operation !== "relation" || relationDraftState(candidate) === "suppressed") return;
-  state.maintenance.selected.delete(candidate.candidateId);
-  state.maintenance.relationReviewStates.set(candidate.candidateId, "rejected");
+  stageRelationDecision(
+    state.maintenance.selected,
+    state.maintenance.relationReviewStates,
+    candidate.candidateId,
+    RELATION_DECISION.REJECT,
+  );
+  renderMaintenanceSession();
+}
+
+function skipRelationCandidate(candidate) {
+  if (candidate.operation !== "relation" || relationDraftState(candidate) === "suppressed") return;
+  stageRelationDecision(
+    state.maintenance.selected,
+    state.maintenance.relationReviewStates,
+    candidate.candidateId,
+    RELATION_DECISION.SKIP,
+  );
   renderMaintenanceSession();
 }
 
@@ -2520,19 +2789,13 @@ function toggleRelationCandidateSuppression(candidate) {
   renderMaintenanceSession();
 }
 
-function stagedRelationSuppressions() {
-  return maintenanceCandidates().filter((candidate) => (
-    candidate.operation === "relation" && relationDraftState(candidate) === "suppressed"
-  ));
-}
-
 function maintenanceApplySelection() {
-  const suppressions = stagedRelationSuppressions();
-  const suppressionIds = new Set(suppressions.map((candidate) => candidate.candidateId));
-  const candidates = maintenanceCandidates().filter((candidate) => (
-    state.maintenance.selected.has(candidate.candidateId) && !suppressionIds.has(candidate.candidateId)
-  ));
-  return { candidates, suppressions };
+  return partitionMaintenanceDecisions(
+    maintenanceCandidates(),
+    state.maintenance.selected,
+    state.maintenance.relationReviewStates,
+    state.maintenance.relationDraftStates,
+  );
 }
 
 function maintenanceCandidateRow(candidate) {
@@ -2596,9 +2859,7 @@ function maintenanceCandidateRow(candidate) {
       element("strong", "", t("Explicit relation")),
       element("span", "muted", "related_to"),
     );
-    if (draftState === "reviewed") {
-      change.append(element("span", "maintenance-relation-state reviewed", t("Reviewed")));
-    } else if (draftState === "suppressed") {
+    if (draftState === "suppressed") {
       change.append(element("span", "maintenance-relation-state suppressed", t("Will not be suggested when applied")));
     }
     for (const page of candidate.pages) {
@@ -2630,8 +2891,12 @@ function maintenanceCandidateRow(candidate) {
     actions.append(
       relationComparisonButton(candidate, "icon-button maintenance-relation-action-button maintenance-relation-compare", {
         iconOnly: true,
-        reviewed: draftState === "reviewed",
-        onReviewed: draftState === "suppressed" ? null : () => markRelationCandidateReviewed(candidate),
+        onAccept: draftState === "suppressed" ? null : () => acceptRelationCandidate(candidate),
+        onReject: draftState === "suppressed" ? null : () => rejectRelationCandidate(candidate),
+        onSkip: draftState === "suppressed" ? null : () => skipRelationCandidate(candidate),
+        accepted: relationReviewState(candidate) === "accepted",
+        rejected: relationReviewState(candidate) === "rejected",
+        skipped: relationReviewState(candidate) === "skipped",
       }),
       suppress,
     );
@@ -2705,16 +2970,14 @@ function relationProposalCard(candidate) {
   const reviewState = relationReviewState(candidate);
   const card = element("article", `maintenance-relation-proposal${reviewState ? ` is-${reviewState}` : ""}${draftState === "suppressed" ? " is-suppressed" : ""}`);
   const aside = element("div", "maintenance-relation-proposal-aside");
-  const selection = element("label", "maintenance-card-select");
-  selection.append(maintenanceSelectionCheckbox(candidate), element("span", "", t("Proposals")));
   aside.append(
-    selection,
+    element("span", "maintenance-relation-proposal-kind", t("Relation proposal")),
     element("strong", "", candidate.namespace),
     element("span", "muted", `${candidate.pages.length} ${t("Pages")}`),
   );
   if (reviewState === "accepted") aside.append(element("span", "maintenance-relation-state accepted", t("Accepted")));
   else if (reviewState === "rejected") aside.append(element("span", "maintenance-relation-state rejected", t("Rejected for this review")));
-  else if (reviewState === "reviewed") aside.append(element("span", "maintenance-relation-state reviewed", t("Reviewed")));
+  else if (reviewState === "skipped") aside.append(element("span", "maintenance-relation-state skipped", t("Skipped for now")));
   if (draftState === "suppressed") aside.append(element("span", "maintenance-relation-state suppressed", t("Will not be suggested when applied")));
   const applyState = maintenanceApplyStateNode(candidate);
   if (applyState) aside.append(applyState);
@@ -2739,12 +3002,12 @@ function relationProposalCard(candidate) {
   const actions = element("div", "maintenance-relation-proposal-actions");
   const view = relationComparisonButton(candidate, "icon-button maintenance-relation-action-button maintenance-relation-view", {
     iconOnly: true,
-    reviewed: reviewState === "reviewed",
-    onReviewed: draftState === "suppressed" ? null : () => markRelationCandidateReviewed(candidate),
     onAccept: draftState === "suppressed" ? null : () => acceptRelationCandidate(candidate),
     onReject: draftState === "suppressed" ? null : () => rejectRelationCandidate(candidate),
+    onSkip: draftState === "suppressed" ? null : () => skipRelationCandidate(candidate),
     accepted: reviewState === "accepted",
     rejected: reviewState === "rejected",
+    skipped: reviewState === "skipped",
   });
   view.title = t("View relation Pages");
   view.setAttribute("aria-label", view.title);
@@ -2753,6 +3016,7 @@ function relationProposalCard(candidate) {
   accept.type = "button";
   accept.title = t("Accept");
   accept.setAttribute("aria-label", t("Accept"));
+  accept.setAttribute("aria-pressed", String(reviewState === "accepted"));
   accept.append(acceptRelationIcon());
   accept.disabled = draftState === "suppressed";
   accept.addEventListener("click", () => acceptRelationCandidate(candidate));
@@ -2760,10 +3024,23 @@ function relationProposalCard(candidate) {
   reject.type = "button";
   reject.title = t("Reject");
   reject.setAttribute("aria-label", t("Reject"));
+  reject.setAttribute("aria-pressed", String(reviewState === "rejected"));
   reject.append(rejectRelationIcon());
   reject.disabled = draftState === "suppressed";
   reject.addEventListener("click", () => rejectRelationCandidate(candidate));
-  actions.append(view, accept, reject);
+  const skip = element("button", `icon-button maintenance-relation-action-button maintenance-relation-skip${reviewState === "skipped" ? " is-active" : ""}`);
+  skip.type = "button";
+  skip.title = t("Skip for now");
+  skip.setAttribute("aria-label", t("Skip for now"));
+  skip.setAttribute("aria-pressed", String(reviewState === "skipped"));
+  skip.append(skipRelationIcon());
+  skip.disabled = draftState === "suppressed";
+  skip.addEventListener("click", () => skipRelationCandidate(candidate));
+  const decisions = element("div", "maintenance-relation-decision-group");
+  decisions.setAttribute("role", "group");
+  decisions.setAttribute("aria-label", t("Relation proposal"));
+  decisions.append(accept, reject, skip);
+  actions.append(view, decisions);
   if (reviewState === "rejected" || draftState === "suppressed") {
     const suppress = element("button", "maintenance-relation-no-suggest", t(draftState === "suppressed" ? "Undo no-suggest" : "Do not suggest this relation again"));
     suppress.type = "button";
@@ -2851,8 +3128,8 @@ function currentMaintenanceAction() {
   const stage = maintenanceWorkflowStage();
   if (stage === "scan") return "scan";
   if (stage === "analyze") return "analyze";
-  const { candidates, suppressions } = maintenanceApplySelection();
-  return candidates.length + suppressions.length ? "apply" : "advance";
+  const { candidates, rejections, suppressions } = maintenanceApplySelection();
+  return candidates.length + rejections.length + suppressions.length ? "apply" : "advance";
 }
 
 function maintenancePrimaryLabel(action = currentMaintenanceAction()) {
@@ -2860,9 +3137,9 @@ function maintenancePrimaryLabel(action = currentMaintenanceAction()) {
   if (action === "scan") return t("Scan candidates");
   if (action === "analyze") return t("Analyze suggestions");
   if (action === "apply") {
-    const { candidates, suppressions } = maintenanceApplySelection();
-    const count = candidates.length + suppressions.length;
-    return `${t("Apply selected")} (${formatNumber(count)})`;
+    const { candidates, rejections, suppressions } = maintenanceApplySelection();
+    const count = candidates.length + rejections.length + suppressions.length;
+    return `${t("Apply decisions")} (${formatNumber(count)})`;
   }
   if (maintenancePass() === "pack") return t("Continue to semantic maintenance");
   if (maintenancePass() === "semantic") return t("Continue to Topic Page extraction");
@@ -3131,9 +3408,12 @@ function renderMaintenanceWorkflow() {
   const cancel = byId("maintenance-cancel");
   cancel.disabled = state.maintenance.busy;
   const selectAll = byId("maintenance-select-all");
-  selectAll.disabled = state.maintenance.busy || candidates.length === 0;
-  selectAll.checked = candidates.length > 0 && selectedCount === candidates.length;
-  selectAll.indeterminate = selectedCount > 0 && selectedCount < candidates.length;
+  const bulkCandidates = maintenanceBulkSelectableCandidates();
+  const bulkSelectedCount = bulkCandidates.filter((candidate) => state.maintenance.selected.has(candidate.candidateId)).length;
+  selectAll.closest("label").hidden = bulkCandidates.length === 0;
+  selectAll.disabled = state.maintenance.busy || bulkCandidates.length === 0;
+  selectAll.checked = bulkCandidates.length > 0 && bulkSelectedCount === bulkCandidates.length;
+  selectAll.indeterminate = bulkSelectedCount > 0 && bulkSelectedCount < bulkCandidates.length;
 
   if (!state.maintenance.busy) {
     byId("maintenance-status").textContent = `${t(stageConfig.label)} · ${stage === "review" && candidates.length ? t("Ready to apply") : t("Ready to continue")}`;
@@ -3149,7 +3429,13 @@ function renderMaintenanceReport() {
   byId("maintenance-report-metrics").replaceChildren(
     metric(t("Pack"), `${formatNumber(outcomes.pack.applied)} ${t("Applied")}`, outcomes.pack.applied ? "positive" : ""),
     metric(t("Summary"), `${formatNumber(outcomes.summary.applied)} ${t("Applied")}`, outcomes.summary.applied ? "positive" : ""),
-    metric(t("Relations"), `${formatNumber(outcomes.relation.applied)} ${t("Applied")}`, outcomes.relation.applied ? "positive" : ""),
+    metric(
+      t("Relations"),
+      currentLanguage === "zh"
+        ? `${formatNumber(outcomes.relation.applied)} 接受 · ${formatNumber(outcomes.relation.rejected)} 拒绝 · ${formatNumber(outcomes.relation.suppressed)} 不再建议`
+        : `${formatNumber(outcomes.relation.applied)} accepted · ${formatNumber(outcomes.relation.rejected)} rejected · ${formatNumber(outcomes.relation.suppressed)} suppressed`,
+      outcomes.relation.applied || outcomes.relation.rejected || outcomes.relation.suppressed ? "positive" : "",
+    ),
     metric(t("Extract Topic Page"), `${formatNumber(outcomes.topic.applied)} ${t("Applied")}`, outcomes.topic.applied ? "positive" : ""),
     metric(t("Model calls"), formatNumber(totalCalls), totalCalls ? "info" : ""),
     metric(t("Skipped"), formatNumber(totalSkipped), totalSkipped ? "warning" : ""),
@@ -3158,15 +3444,24 @@ function renderMaintenanceReport() {
 }
 
 function renderMaintenanceSession() {
+  renderMaintenanceConvergenceState();
   const idle = !maintenanceSessionActive() && !maintenanceSessionComplete();
   byId("maintenance-idle").hidden = !idle;
   byId("maintenance-workflow").hidden = !maintenanceSessionActive();
   byId("maintenance-report").hidden = !maintenanceSessionComplete();
   byId("maintenance-start").disabled = !maintenanceAvailable() || state.maintenance.busy || archiveSessionActive();
+  byId("maintenance-manual-start").disabled = !maintenanceAvailable() || state.maintenance.busy || archiveSessionActive();
   if (idle) {
-    byId("maintenance-status").textContent = maintenanceAvailable()
-      ? (currentLanguage === "zh" ? "准备开始可审阅的维护会话" : "Ready to start a reviewable maintenance session")
-      : t("Unavailable");
+    const convergence = state.maintenance.convergence;
+    byId("maintenance-status").textContent = convergence.running
+      ? state.maintenance.activity || t("Working")
+      : maintenanceSceneError()
+        ? t("Needs attention")
+      : convergence.completedAt
+        ? `${t(state.maintenance.relationReviews.length ? "Awaiting review" : "Maintenance converged")} · ${formatTime(convergence.completedAt)}`
+        : maintenanceAvailable()
+          ? t("Awaiting run")
+          : t("Unavailable");
     return;
   }
   if (maintenanceSessionActive()) renderMaintenanceWorkflow();
@@ -3292,6 +3587,29 @@ async function applyMaintenanceCandidates(candidates, onProgress) {
   return { applied, appliedCandidateIds, skipped };
 }
 
+async function applyRelationRejections(candidates, onProgress) {
+  let applied = 0;
+  const appliedCandidateIds = [];
+  const skipped = [];
+  for (const [index, candidate] of candidates.entries()) {
+    onProgress?.({ index, total: candidates.length, applied, skipped, candidate, status: "running" });
+    try {
+      await maintenanceMutation("/api/maintenance/relations/reject", {
+        candidateId: candidate.candidateId,
+        pages: candidate.pages.map((page) => ({ pageId: page.pageId, revisionId: page.revisionId })),
+      });
+      applied += 1;
+      appliedCandidateIds.push(candidate.candidateId);
+      onProgress?.({ index: index + 1, total: candidates.length, applied, skipped, candidate, status: "applied" });
+    } catch (error) {
+      const failure = { candidateId: candidate.candidateId, message: error.message || String(error) };
+      skipped.push(failure);
+      onProgress?.({ index: index + 1, total: candidates.length, applied, skipped, candidate, status: "failed", error: failure.message });
+    }
+  }
+  return { applied, appliedCandidateIds, skipped };
+}
+
 async function applyRelationSuppressions(candidates, onProgress) {
   let applied = 0;
   const appliedCandidateIds = [];
@@ -3331,7 +3649,7 @@ function appendMaintenanceCandidates(operation, candidates) {
     if (existing >= 0) state.maintenance.pendingCandidates.splice(existing, 1, proposal);
     else {
       state.maintenance.pendingCandidates.push(proposal);
-      state.maintenance.selected.add(proposal.candidateId);
+      if (operation !== "relation") state.maintenance.selected.add(proposal.candidateId);
     }
     candidateIds.push(proposal.candidateId);
   }
@@ -3822,20 +4140,20 @@ async function retryFailedMaintenanceBatches() {
 
 async function optimizeMaintenanceSelection() {
   if (state.maintenance.busy) return;
-  const { candidates, suppressions } = maintenanceApplySelection();
-  const totalCandidates = [...candidates, ...suppressions];
+  const { candidates, rejections, suppressions } = maintenanceApplySelection();
+  const totalCandidates = [...candidates, ...rejections, ...suppressions];
   if (totalCandidates.length === 0) return;
   const candidateCount = formatNumber(totalCandidates.length);
   const singular = totalCandidates.length === 1;
   const phaseLabel = t(maintenancePhaseConfig().label);
   const confirmed = await confirmAction({
     title: currentLanguage === "zh"
-      ? `优化选中的 ${candidateCount} 个${phaseLabel}提案？`
-      : `Optimize ${candidateCount} selected ${phaseLabel} proposal${singular ? "" : "s"}?`,
+      ? `应用 ${candidateCount} 个${phaseLabel}决策？`
+      : `Apply ${candidateCount} ${phaseLabel} decision${singular ? "" : "s"}?`,
     description: currentLanguage === "zh"
-      ? "只会提交当前阶段中已选择的提案，以及标为不再建议的关联。每项都会在写入前校验当前版本；完成后由你决定何时继续到下一阶段。"
-      : "Only selected proposals and staged relation suppressions in the current phase will be applied. Each write checks the current revision first; you choose when to continue to the next stage.",
-    confirmLabel: t("Apply selected"),
+      ? "会提交已选择的变更、接受或拒绝的关联，以及标为不再建议的关联；本次跳过的项目不会写入。每项都会在写入前重新校验当前版本。"
+      : "Selected changes, accepted or rejected relations, and staged suppressions will be committed. Items skipped for now are left untouched. Every decision revalidates the current revision before writing.",
+    confirmLabel: t("Apply decisions"),
   });
   if (!confirmed) return;
 
@@ -3870,23 +4188,41 @@ async function optimizeMaintenanceSelection() {
       reflectCandidateProgress({ candidate, status, error });
       reportProgress(index, applied, skipped);
     });
-    const suppressionResult = await applyRelationSuppressions(suppressions, ({ index, applied, skipped, candidate, status, error }) => {
+    const rejectionResult = await applyRelationRejections(rejections, ({ index, applied, skipped, candidate, status, error }) => {
       reflectCandidateProgress({ candidate, status, error });
       reportProgress(candidates.length + index, appliedResult.applied + applied, [
         ...appliedResult.skipped,
         ...skipped,
       ]);
     });
+    const suppressionResult = await applyRelationSuppressions(suppressions, ({ index, applied, skipped, candidate, status, error }) => {
+      reflectCandidateProgress({ candidate, status, error });
+      reportProgress(candidates.length + rejections.length + index, appliedResult.applied + rejectionResult.applied + applied, [
+        ...appliedResult.skipped,
+        ...rejectionResult.skipped,
+        ...skipped,
+      ]);
+    });
     result = {
-      applied: appliedResult.applied + suppressionResult.applied,
-      appliedCandidateIds: [...appliedResult.appliedCandidateIds, ...suppressionResult.appliedCandidateIds],
-      skipped: [...appliedResult.skipped, ...suppressionResult.skipped],
+      applied: appliedResult.applied + rejectionResult.applied + suppressionResult.applied,
+      appliedCandidateIds: [
+        ...appliedResult.appliedCandidateIds,
+        ...rejectionResult.appliedCandidateIds,
+        ...suppressionResult.appliedCandidateIds,
+      ],
+      skipped: [
+        ...appliedResult.skipped,
+        ...rejectionResult.skipped,
+        ...suppressionResult.skipped,
+      ],
     };
     const byCandidateId = new Map(totalCandidates.map((candidate) => [candidate.candidateId, candidate]));
-    for (const candidateId of result.appliedCandidateIds) {
+    for (const candidateId of appliedResult.appliedCandidateIds) {
       const candidate = byCandidateId.get(candidateId);
       if (candidate) maintenanceOutcome(candidate.operation).applied += 1;
     }
+    maintenanceOutcome("relation").rejected += rejectionResult.applied;
+    maintenanceOutcome("relation").suppressed += suppressionResult.applied;
     for (const skipped of result.skipped) {
       const candidate = byCandidateId.get(skipped.candidateId);
       if (candidate) {
@@ -3912,16 +4248,61 @@ async function optimizeMaintenanceSelection() {
 }
 
 function toggleMaintenanceSelection() {
-  const candidates = maintenanceCandidates().filter((candidate) => (
-    relationDraftState(candidate) !== "suppressed"
-  ));
-  const allSelected = candidates.length > 0
-    && candidates.every((candidate) => state.maintenance.selected.has(candidate.candidateId));
-  state.maintenance.selected.clear();
-  if (!allSelected) {
-    for (const candidate of candidates) state.maintenance.selected.add(candidate.candidateId);
-  }
+  const candidates = maintenanceBulkSelectableCandidates();
+  toggleBulkSelection(candidates, state.maintenance.selected);
   renderMaintenanceSession();
+}
+
+async function runMaintenanceConvergence() {
+  if (state.maintenance.busy || !maintenanceAvailable() || archiveSessionActive()) return;
+  state.maintenance.busy = true;
+  state.maintenance.activity = t("Working");
+  state.maintenance.convergence = { running: true, report: null, steps: 0, completedAt: null, error: null };
+  renderMaintenanceSession();
+  renderAutomationStatus();
+  const maxSteps = 512;
+  try {
+    for (let step = 0; step < maxSteps; step += 1) {
+      state.maintenance.activity = currentLanguage === "zh"
+        ? `正在推进第 ${formatNumber(step + 1)} 个工作单元`
+        : `Advancing bounded job ${formatNumber(step + 1)}`;
+      byId("maintenance-status").textContent = state.maintenance.activity;
+      const response = await maintenanceMutation("/api/maintenance/converge", {});
+      state.maintenance.convergence.steps += response.report?.jobsAdvanced || 0;
+      state.maintenance.convergence.report = mergeConvergenceReport(
+        state.maintenance.convergence.report,
+        response.report || {},
+      );
+      state.maintenance.relationReviews = response.reviews || [];
+      renderRelationReviews();
+      renderAutomationStatus();
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      if (convergenceSettled(response)) {
+        state.maintenance.convergence.running = false;
+        state.maintenance.convergence.completedAt = new Date().toISOString();
+        break;
+      }
+    }
+    if (state.maintenance.convergence.running) {
+      state.maintenance.convergence.running = false;
+      throw new Error(currentLanguage === "zh"
+        ? "本次已达到 512 个工作单元的安全上限；可以再次点击立即运行继续收敛。"
+        : "This run reached the 512-job safety bound; choose Run now again to continue convergence.");
+    }
+    await Promise.all([loadRelationReviews(), loadOverview()]);
+    renderMaintenanceStatus(await api("/api/maintenance"));
+  } catch (error) {
+    state.maintenance.convergence.running = false;
+    state.maintenance.convergence.error = {
+      message: error.message || String(error),
+      occurredAt: new Date().toISOString(),
+    };
+  } finally {
+    state.maintenance.busy = false;
+    state.maintenance.activity = null;
+    renderMaintenanceSession();
+    renderAutomationStatus();
+  }
 }
 
 async function startMaintenanceSession() {
@@ -4165,13 +4546,15 @@ document.addEventListener("click", (event) => {
 });
 byId("pages-previous").addEventListener("click", () => loadPages({ page: state.pages.page - 1 }).catch(showError));
 byId("pages-next").addEventListener("click", () => loadPages({ page: state.pages.page + 1 }).catch(showError));
-byId("maintenance-start").addEventListener("click", () => startMaintenanceSession().catch(showError));
+byId("maintenance-start").addEventListener("click", () => runMaintenanceConvergence().catch(showError));
+byId("maintenance-scene-alert-retry").addEventListener("click", () => runMaintenanceConvergence().catch(showError));
+byId("maintenance-manual-start").addEventListener("click", () => startMaintenanceSession().catch(showError));
 byId("maintenance-primary").addEventListener("click", () => runMaintenancePrimaryAction().catch(showError));
 byId("maintenance-skip").addEventListener("click", () => skipMaintenancePhase().catch(showError));
 byId("maintenance-retry-failed").addEventListener("click", () => retryFailedMaintenanceBatches().catch(showError));
 byId("maintenance-rescan").addEventListener("click", () => rescanMaintenancePhase().catch(showError));
 byId("maintenance-cancel").addEventListener("click", () => cancelMaintenanceSession().catch(showError));
-byId("maintenance-start-new").addEventListener("click", () => startMaintenanceSession().catch(showError));
+byId("maintenance-start-new").addEventListener("click", () => runMaintenanceConvergence().catch(showError));
 byId("archive-start").addEventListener("click", () => startArchiveSession().catch(showError));
 byId("archive-analyze").addEventListener("click", () => analyzeArchiveCandidates().catch(showError));
 byId("archive-retry-failed").addEventListener("click", () => analyzeArchiveCandidates({ retryFailed: true }).catch(showError));

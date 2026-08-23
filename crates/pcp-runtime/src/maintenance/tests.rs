@@ -20,15 +20,17 @@ use pcp_store::PcpStore;
 
 use super::ledger::MaintenanceLedger;
 use super::{
-    AnalyzeMaintenancePacksRequest, AnalyzeMaintenanceRelationRequest,
-    AnalyzeMaintenanceSummariesRequest, AnalyzeMaintenanceSummaryRequest,
-    ApplyMaintenancePackRequest, ApplyMaintenanceRelationRequest, ApplyMaintenanceSummaryRequest,
-    CommandSemanticWorker, MaintenanceAutomationState, MaintenanceConfig, MaintenanceCycleReport,
-    MaintenanceMode, MaintenanceRunAudit, MaintenanceWorkerConfig, MaintenanceWorkerRequest,
+    AnalyzeMaintenanceArchiveRequest, AnalyzeMaintenancePacksRequest,
+    AnalyzeMaintenanceRelationRequest, AnalyzeMaintenanceSummariesRequest,
+    AnalyzeMaintenanceSummaryRequest, ApplyMaintenancePackRequest, ApplyMaintenanceRelationRequest,
+    ApplyMaintenanceSummaryRequest, CommandSemanticWorker, MaintenanceArchiveDecision,
+    MaintenanceAutomationState, MaintenanceConfig, MaintenanceCycleReport, MaintenanceMode,
+    MaintenanceRunAudit, MaintenanceWorkerConfig, MaintenanceWorkerRequest,
     MaintenanceWorkerResponse, PackingCandidateGroup, PackingMaintenanceConfig,
     RelationCandidatePage, RelationMaintenanceConfig, RetentionMaintenanceConfig,
     RetentionMilestone, RuntimeMaintainer, SemanticMaintenanceWorker, SummaryMaintenanceConfig,
-    WriteTriggeredMaintenanceConfig, worker::PackingCandidatePage,
+    WriteTriggeredMaintenanceConfig,
+    worker::{ArchiveWorkerDecision, PackingCandidatePage},
 };
 
 struct FakeWorker {
@@ -1881,6 +1883,70 @@ async fn packing_scan_keeps_pages_connected_by_provenance_eligible() {
 }
 
 #[tokio::test]
+async fn convergence_filters_time_discontinuous_packing_before_worker() {
+    let fixture = Fixture::open("packing-convergence-time-gap").await;
+    let mut first = fixture.sealed_event(
+        "One conversation episode ends before a long interruption.",
+        "packing-convergence-time-gap:1",
+        1,
+    );
+    first.observed_at = Some("2026-08-24T00:00:00Z".to_owned());
+    let first = fixture
+        .client
+        .write_page(first)
+        .await
+        .expect("write first time-bounded Page");
+    let mut second = fixture.sealed_event(
+        "A later episode starts after the packing continuity limit.",
+        "packing-convergence-time-gap:2",
+        2,
+    );
+    second.observed_at = Some("2026-08-24T00:15:01Z".to_owned());
+    let second = fixture
+        .client
+        .write_page(second)
+        .await
+        .expect("write time-discontinuous Page");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::Candidate {
+            page_ids: vec![first.page_id, second.page_id],
+        },
+    ]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = true;
+    config.relation.enabled = false;
+    config.retention.enabled = false;
+    let mut maintainer =
+        RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let scan = maintainer
+        .scan_packing_candidates()
+        .await
+        .expect("scan time-discontinuous packing input");
+    assert_eq!(scan.candidate_group_count, 0);
+
+    let report = maintainer
+        .run_convergence_once(1)
+        .await
+        .expect("skip time-discontinuous packing without failing convergence");
+
+    assert_eq!(report.jobs_advanced, 0);
+    assert_eq!(report.worker_calls, 0);
+    assert_eq!(report.packs_committed, 0);
+    assert_eq!(worker.request_count(), 0);
+    assert_eq!(
+        fixture
+            .client
+            .page_count(Vec::new())
+            .await
+            .expect("count unmodified source Pages"),
+        2
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn bounded_cycle_reloads_inventory_and_commits_multiple_pack_windows() {
     let fixture = Fixture::open("packing-converge").await;
     let mut a1 = fixture.sealed_event("Topic A starts.", "packing-converge:a1", 1);
@@ -2101,7 +2167,9 @@ async fn relation_runs_after_packing_against_the_refreshed_inventory() {
         .expect("run ordered Pack and Relation maintenance");
     assert_eq!(report.worker_calls, 2);
     assert_eq!(report.packs_committed, 1);
-    assert_eq!(report.relations_committed, 1);
+    assert_eq!(report.relations_committed, 0);
+    assert_eq!(report.relations_proposed, 1);
+    assert_eq!(maintainer.pending_reviews().len(), 1);
     assert_eq!(worker.request_count(), 2);
     fixture.close().await;
 }
@@ -2145,7 +2213,9 @@ async fn relation_maintains_a_source_page_without_a_pack_window() {
 
     assert_eq!(report.worker_calls, 1);
     assert_eq!(report.packs_committed, 0);
-    assert_eq!(report.relations_committed, 1);
+    assert_eq!(report.relations_committed, 0);
+    assert_eq!(report.relations_proposed, 1);
+    assert_eq!(maintainer.pending_reviews().len(), 1);
     let requests = worker.requests.lock().expect("read relation request");
     let MaintenanceWorkerRequest::SelectRelation { pages, .. } = &requests[0] else {
         panic!("expected relation selection for the unpackable source Page");
@@ -2204,7 +2274,9 @@ async fn relation_maintains_source_pages_after_packing_declines_their_window() {
         .expect("route the declined Pack window to relation maintenance");
     assert_eq!(report.worker_calls, 2);
     assert_eq!(report.packs_committed, 0);
-    assert_eq!(report.relations_committed, 1);
+    assert_eq!(report.relations_committed, 0);
+    assert_eq!(report.relations_proposed, 1);
+    assert_eq!(maintainer.pending_reviews().len(), 1);
     let requests = worker.requests.lock().expect("read maintenance requests");
     let MaintenanceWorkerRequest::SelectRelation { pages, .. } = &requests[1] else {
         panic!("expected relation selection after the Pack worker declined");
@@ -2249,8 +2321,14 @@ async fn maintainer_links_only_an_offered_pair_with_runtime_owned_relation_seman
         .expect("run relation maintenance");
 
     assert_eq!(report.worker_calls, 1);
-    assert_eq!(report.relations_committed, 1);
-    assert_eq!(report.relations_proposed, 0);
+    assert_eq!(report.relations_committed, 0);
+    assert_eq!(report.relations_proposed, 1);
+    let pending = maintainer.pending_relation_reviews();
+    assert_eq!(pending.len(), 1);
+    maintainer
+        .approve_relation_review(&pending[0].candidate_id)
+        .await
+        .expect("approve the reviewed relation");
     let pages = fixture
         .client
         .read_pages(ReadPagesRequest {
@@ -2364,6 +2442,95 @@ async fn reviewed_relation_is_target_bound_and_applies_only_once() {
             && (relation.to_page_id == second.page_id || relation.from_page_id == second.page_id)
     }));
     assert!(maintainer.apply_relation_candidate(request).await.is_err());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn rejected_manual_relation_pair_is_applied_as_a_revision_bound_decision() {
+    let fixture = Fixture::open("rejected-manual-relation").await;
+    let first = fixture
+        .client
+        .write_page(fixture.page(
+            "A durable protocol decision that should not be linked to the implementation note.",
+            "rejected-manual-relation:1",
+        ))
+        .await
+        .expect("write first relation candidate");
+    let second = fixture
+        .client
+        .write_page(fixture.page(
+            "An implementation note for a separate protocol decision.",
+            "rejected-manual-relation:2",
+        ))
+        .await
+        .expect("write second relation candidate");
+    let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
+        page_ids: [first.page_id.clone(), second.page_id.clone()],
+        reason: "The selected Pages appear to establish one stable relation subject.".to_owned(),
+    }]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = true;
+    let mut maintainer =
+        RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+    let scan = maintainer
+        .scan_maintenance_work()
+        .await
+        .expect("scan relation review window");
+    let group = scan
+        .relation
+        .groups
+        .first()
+        .expect("one relation review window");
+    let analyze_request = AnalyzeMaintenanceRelationRequest {
+        scan_id: scan.relation.scan_id,
+        group_id: group.group_id.clone(),
+    };
+    let candidate = maintainer
+        .analyze_relation_candidate(analyze_request.clone())
+        .await
+        .expect("analyze relation review")
+        .candidate
+        .expect("relation proposal");
+    let decision = ApplyMaintenanceRelationRequest {
+        candidate_id: candidate.candidate_id,
+        pages: candidate.pages.map(|page| PageRevisionRef {
+            page_id: page.page_id,
+            revision_id: page.revision_id,
+        }),
+    };
+
+    maintainer
+        .reject_relation_candidate(decision.clone())
+        .await
+        .expect("persist revision-bound rejection");
+    assert!(
+        maintainer
+            .analyze_relation_candidate(analyze_request)
+            .await
+            .expect("skip rejected revisions")
+            .candidate
+            .is_none()
+    );
+    assert!(maintainer.apply_relation_candidate(decision).await.is_err());
+    assert_eq!(worker.request_count(), 1);
+    let report = maintainer
+        .run_once()
+        .await
+        .expect("scheduled maintenance skips rejected revisions");
+    assert_eq!(report.worker_calls, 0);
+    let pages = fixture
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![first.page_id],
+            revision_ids: Vec::new(),
+            projections: vec![Projection::Manifest, Projection::Relations],
+            max_chars: 1,
+        })
+        .await
+        .expect("read rejected relation Page");
+    assert!(pages[0].relations.is_empty());
     fixture.close().await;
 }
 
@@ -3027,7 +3194,7 @@ async fn relation_window_reads_existing_pairs_in_store_sized_batches() {
 }
 
 #[tokio::test]
-async fn maintainer_rejects_a_relation_page_outside_the_offered_window() {
+async fn maintainer_defers_a_relation_page_outside_the_offered_window() {
     let fixture = Fixture::open("relation-outside-window").await;
     fixture
         .client
@@ -3049,12 +3216,16 @@ async fn maintainer_rejects_a_relation_page_outside_the_offered_window() {
     config.relation.enabled = true;
     let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
 
-    let error = maintainer
+    let report = maintainer
         .run_once()
         .await
-        .expect_err("reject relation outside offered window");
+        .expect("defer relation outside offered window");
 
-    assert!(format!("{error:#}").contains("invalid relation pair"));
+    assert_eq!(report.worker_calls, 1);
+    assert_eq!(report.relations_proposed, 0);
+    assert_eq!(report.relations_committed, 0);
+    assert_eq!(report.deferred, 1);
+    assert!(maintainer.pending_relation_reviews().is_empty());
     fixture.close().await;
 }
 
@@ -3156,6 +3327,173 @@ async fn operator_audit_records_only_worker_operation_and_decision() {
     assert!(serialized.contains("no_candidate"));
     assert_eq!(record.mode, "apply");
     assert_eq!(record.max_jobs, 7);
+}
+
+#[tokio::test]
+async fn convergence_enqueues_a_typed_topic_review_after_relation_quiesces() {
+    let fixture = Fixture::open("topic-convergence-review").await;
+    let first = fixture
+        .client
+        .write_page(fixture.page(
+            "PCP maintenance uses a persistent typed review inbox for semantic decisions.",
+            "topic-convergence-review:1",
+        ))
+        .await
+        .expect("write first Topic source");
+    let second = fixture
+        .client
+        .write_page(fixture.page(
+            "Background and manual convergence share the same bounded maintenance controller.",
+            "topic-convergence-review:2",
+        ))
+        .await
+        .expect("write second Topic source");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::NoCandidate,
+        MaintenanceWorkerResponse::ExtractTopic {
+            page_ids: vec![first.page_id, second.page_id],
+            title: "PCP maintenance convergence".to_owned(),
+            content: "PCP maintenance advances one bounded job at a time. Safe structural updates can apply automatically, while uncertain semantic decisions persist in a shared typed inbox for explicit operator review before they affect retrieval.".to_owned(),
+            reason: "The two Pages define the shared controller and its review boundary.".to_owned(),
+        },
+    ]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = true;
+    config.retention.enabled = false;
+    let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+
+    let relation = maintainer
+        .run_convergence_once(1)
+        .await
+        .expect("quiesce relation maintenance");
+    assert_eq!(relation.worker_calls, 1);
+    assert_eq!(relation.review_items_proposed, 0);
+    let topic = maintainer
+        .run_convergence_once(1)
+        .await
+        .expect("propose Topic review");
+    assert_eq!(topic.topics_proposed, 1);
+    assert_eq!(topic.review_items_proposed, 1);
+    let reviews = maintainer.pending_reviews();
+    assert_eq!(reviews.len(), 1);
+    assert!(matches!(
+        reviews[0].payload,
+        super::MaintenanceReviewPayload::Topic(_)
+    ));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn convergence_never_applies_archive_without_a_typed_review() {
+    let fixture = Fixture::open("archive-convergence-review").await;
+    let mut page = fixture.page(
+        "A transient completed status update with no durable evidence or reusable decision.",
+        "archive-convergence-review:1",
+    );
+    page.observed_at = Some("2026-01-01T00:00:00Z".to_owned());
+    let written = fixture
+        .client
+        .write_page(page)
+        .await
+        .expect("write old archive source");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::ArchiveReview {
+            outcome: ArchiveWorkerDecision::Archive,
+            reason: "This Page is a completed transient status update without reusable evidence."
+                .to_owned(),
+        },
+    ]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = false;
+    config.retention.enabled = false;
+    let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+
+    let report = maintainer
+        .run_convergence_once(1)
+        .await
+        .expect("propose archive review");
+    assert_eq!(report.archives_proposed, 1);
+    assert_eq!(report.review_items_proposed, 1);
+    let reviews = maintainer.pending_reviews();
+    assert_eq!(reviews.len(), 1);
+    assert!(matches!(
+        reviews[0].payload,
+        super::MaintenanceReviewPayload::Archive(_)
+    ));
+    assert_eq!(
+        fixture
+            .client
+            .current_revision_id(written.page_id)
+            .await
+            .expect("archive proposal did not retire the Page"),
+        written.revision_id
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn archive_review_survives_unrelated_scan_drift_for_the_same_revision() {
+    let fixture = Fixture::open("archive-review-unrelated-drift").await;
+    let mut target = fixture.page(
+        "A transient completed status update with no durable reusable evidence.",
+        "archive-review-unrelated-drift:target",
+    );
+    target.observed_at = Some("2026-01-01T00:00:00Z".to_owned());
+    let target = fixture
+        .client
+        .write_page(target)
+        .await
+        .expect("write archive review target");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::ArchiveReview {
+            outcome: ArchiveWorkerDecision::Retain,
+            reason: "This Page still provides a specific record worth retaining for review."
+                .to_owned(),
+        },
+    ]));
+    let maintainer =
+        RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), fixture.config());
+    let scan = maintainer
+        .scan_archive_candidates()
+        .await
+        .expect("scan initial archive candidates");
+    let scan_target = scan
+        .pages
+        .iter()
+        .find(|page| page.page_id == target.page_id)
+        .expect("target is archive-review eligible");
+    let request = AnalyzeMaintenanceArchiveRequest {
+        scan_id: scan.scan_id,
+        page_id: scan_target.page_id.clone(),
+        revision_id: scan_target.revision_id.clone(),
+    };
+
+    let mut unrelated = fixture.page(
+        "Another old transient record changes the aggregate archive scan only.",
+        "archive-review-unrelated-drift:unrelated",
+    );
+    unrelated.observed_at = Some("2026-01-02T00:00:00Z".to_owned());
+    fixture
+        .client
+        .write_page(unrelated)
+        .await
+        .expect("write unrelated archive candidate after scan");
+
+    let analysis = maintainer
+        .analyze_archive_candidate(request)
+        .await
+        .expect("analyze unchanged target after unrelated scan drift");
+
+    assert!(matches!(
+        analysis.decision,
+        MaintenanceArchiveDecision::Retain
+    ));
+    assert_eq!(worker.request_count(), 1);
+    fixture.close().await;
 }
 
 struct Fixture {

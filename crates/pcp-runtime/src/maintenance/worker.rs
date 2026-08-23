@@ -223,6 +223,8 @@ pub enum MaintenanceWorkerResponse {
 pub struct MaintenanceWorkerOutcome {
     pub response: MaintenanceWorkerResponse,
     pub usage: Option<ModelTokenUsage>,
+    pub model_attempts: u32,
+    pub escalated: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -377,6 +379,8 @@ pub trait SemanticMaintenanceWorker: Send + Sync {
         Ok(MaintenanceWorkerOutcome {
             response: self.evaluate(request).await?,
             usage: None,
+            model_attempts: 1,
+            escalated: false,
         })
     }
 
@@ -396,6 +400,8 @@ pub trait SemanticMaintenanceWorker: Send + Sync {
         Ok(MaintenanceWorkerOutcome {
             response: self.repair_packing_analysis_overlap(request).await?,
             usage: None,
+            model_attempts: 1,
+            escalated: false,
         })
     }
 }

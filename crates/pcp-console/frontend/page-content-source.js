@@ -110,13 +110,15 @@ function renderPackedPage(target, packedPage, options = {}) {
   const entries = element("div", "packed-entries");
   for (const [index, entry] of packedPage.entries.entries()) {
     const item = element("details", "packed-entry");
+    item.dataset.role = String(entry.role || "entry").toLowerCase();
     if (index === 0) item.open = true;
     const header = element("summary", "packed-entry-header");
-    header.append(
-      element("strong", "", entry.role || "Entry"),
-      element("span", "muted", entry.createdAt || entry.pageId),
-      element("span", "packed-entry-preview", compactPreview(entry.content, 150)),
-    );
+    const identity = element("span", "packed-entry-identity");
+    const timestamp = entry.createdAt || entry.pageId;
+    const time = element("span", "packed-entry-time", compactTimestamp(timestamp));
+    time.title = timestamp;
+    identity.append(element("strong", "packed-entry-role", entry.role || "Entry"), time);
+    header.append(identity, element("span", "packed-entry-preview", compactPreview(entry.content, 150)));
     const body = element("div", "structured-body");
     renderPageContent(body, entry.content, entry.mediaType);
     item.append(header, body);
@@ -129,7 +131,10 @@ function renderPackedPage(target, packedPage, options = {}) {
       toggle.type = "button";
       const sync = () => {
         const allOpen = [...entries.querySelectorAll("details")].every((item) => item.open);
-        toggle.textContent = allOpen ? controls.collapseAll : controls.expandAll;
+        const label = allOpen ? controls.collapseAll : controls.expandAll;
+        toggle.replaceChildren(packedToggleIcon(allOpen));
+        toggle.title = label;
+        toggle.setAttribute("aria-label", label);
         toggle.setAttribute("aria-expanded", String(allOpen));
       };
       toggle.addEventListener("click", () => {
@@ -143,6 +148,27 @@ function renderPackedPage(target, packedPage, options = {}) {
     }
     target.append(entries);
   } else target.append(element("div", "empty", "No readable entries"));
+}
+
+function packedToggleIcon(allOpen) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  const paths = allOpen
+    ? ["M3 8h5V3", "M21 8h-5V3", "M3 16h5v5", "M21 16h-5v5"]
+    : ["M8 3H3v5", "M16 3h5v5", "M8 21H3v-5", "M16 21h5v-5"];
+  for (const d of paths) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", d);
+    svg.append(path);
+  }
+  return svg;
+}
+
+function compactTimestamp(value) {
+  const raw = String(value || "");
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/.exec(raw);
+  return match ? `${match[1]} ${match[2]}` : raw;
 }
 
 function compactPreview(value, limit) {

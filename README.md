@@ -188,10 +188,11 @@ sh scripts/import-store.sh \
 ### Runtime 维护
 
 维护协调器是可选能力，默认只观察，不应用变更。配置的 semantic worker 只能返回 Summary 内容、
-有序 pack 候选、明确来源的 Topic 提取提案、两个 Page 的 `related_to` 候选、retention milestone、
-`no_candidate` 或 `defer`，不能直接写 Store。Topic 提取只在 Console 的维护会话中进入审阅：模型必须从
-结构候选中选出 2–8 个明确来源并给出标题、正文与可审阅的凝练理由，用户勾选后才创建独立 Topic Page；后台自动维护不会自动
-应用它。Runtime 控制候选、预算、关系类型、basis Revision 和提交，Store 再验证权限、精确当前 Revision、
+有序 pack 候选、明确来源的 Topic 提取提案、两个 Page 的 `related_to` 候选、archive 建议、retention milestone、
+`no_candidate` 或 `defer`，不能直接写 Store。后台维护与 Console 的“立即运行”共用同一个逐任务收敛控制器和
+持久 typed review inbox：Pack 与 Summary 等低风险工作可在 apply 模式自动应用；一般 Relation、Topic 与 Archive
+必须人工接受后才影响检索或生命周期。Luna 作为默认低成本模型；只有证据完整且 Luna 明确 `defer` 的指定语义任务
+才允许一次 Sol 二次判定，格式错误、过期候选和调用失败都不会升级。Runtime 控制候选、预算、关系类型、basis Revision 和提交，Store 再验证权限、精确当前 Revision、
 来源连续性、外部引用与事务原子性。pack 与 Relation 维护默认关闭，必须单独启用；维护器也不会自动执行
 Revision 回收。官方 Runtime 可使用独立授权的
 [Infer Runtime](https://github.com/glenzli/infer-runtime) consumer，也保留本地 command worker。

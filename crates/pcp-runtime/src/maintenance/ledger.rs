@@ -1,5 +1,7 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
+    fs::OpenOptions,
+    os::fd::AsRawFd,
     path::Path,
     time::SystemTime,
 };
@@ -9,7 +11,13 @@ use pcp_store::DurablePageInventoryItem;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{MaintenanceConfig, MaintenanceCycleReport, WriteTriggeredMaintenanceConfig};
+use super::{
+    MaintenanceConfig, MaintenanceCycleReport, WriteTriggeredMaintenanceConfig,
+    review::{
+        MaintenanceReviewItem, MaintenanceReviewOrigin, MaintenanceReviewPayload,
+        MaintenanceReviewStatus,
+    },
+};
 
 const LEDGER_RETENTION_MILLIS: u64 = 30 * 24 * 60 * 60 * 1_000;
 
@@ -22,6 +30,8 @@ pub(crate) struct MaintenanceLedger {
     write_trigger: WriteTriggerLedger,
     #[serde(default)]
     relation_reviews: BTreeMap<String, MaintenanceRelationReviewProposal>,
+    #[serde(default)]
+    review_items: BTreeMap<String, MaintenanceReviewItem>,
     #[serde(default)]
     scheduler: SchedulerLedger,
 }
@@ -50,6 +60,7 @@ pub struct MaintenanceAutomationStatus {
     pub dirty_region_count: usize,
     pub ready_region_count: usize,
     pub pending_relation_review_count: usize,
+    pub pending_review_count: usize,
     pub dirty_regions: Vec<MaintenanceDirtyRegionStatus>,
 }
 
@@ -83,6 +94,12 @@ pub struct MaintenanceRelationReviewProposal {
     /// is not itself asserted as a Page relation.
     #[serde(default)]
     pub relation_reason: String,
+    #[serde(default = "default_model_attempts")]
+    pub model_attempts: u32,
+    #[serde(default)]
+    pub escalated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_until: Option<String>,
     pub status: MaintenanceRelationReviewStatus,
 }
 
@@ -100,6 +117,7 @@ pub enum MaintenanceRelationReviewStatus {
     Pending,
     Accepted,
     Rejected,
+    Deferred,
     Suppressed,
 }
 
@@ -165,7 +183,13 @@ impl MaintenanceLedger {
                 )
             })?;
         }
-        let temporary = path.with_extension("tmp");
+        let _lock = MaintenanceLedgerLock::acquire(path)?;
+        if let Ok(bytes) = tokio::fs::read(path).await
+            && let Ok(persisted) = serde_json::from_slice::<Self>(&bytes)
+        {
+            self.merge_persisted_reviews(persisted);
+        }
+        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
         let bytes = serde_json::to_vec_pretty(self).context("encode PCP maintenance state")?;
         tokio::fs::write(&temporary, bytes)
             .await
@@ -173,6 +197,29 @@ impl MaintenanceLedger {
         tokio::fs::rename(&temporary, path)
             .await
             .with_context(|| format!("publish PCP maintenance state {}", path.display()))
+    }
+
+    fn merge_persisted_reviews(&mut self, persisted: Self) {
+        for (candidate_id, persisted_item) in persisted.review_items {
+            match self.review_items.get(&candidate_id) {
+                Some(local_item) if local_item.updated_at >= persisted_item.updated_at => {}
+                _ => {
+                    self.review_items.insert(candidate_id, persisted_item);
+                }
+            }
+        }
+        for (candidate_id, persisted_proposal) in persisted.relation_reviews {
+            match self.relation_reviews.get(&candidate_id) {
+                Some(local_proposal)
+                    if local_proposal.status != MaintenanceRelationReviewStatus::Pending => {}
+                Some(_)
+                    if persisted_proposal.status == MaintenanceRelationReviewStatus::Pending => {}
+                _ => {
+                    self.relation_reviews
+                        .insert(candidate_id, persisted_proposal);
+                }
+            }
+        }
     }
 
     pub(crate) fn eligible(&self, key: &str) -> bool {
@@ -239,6 +286,38 @@ impl MaintenanceLedger {
             .collect()
     }
 
+    pub(crate) fn rejected_relation_pairs(
+        &self,
+        current_revision_ids: &HashMap<String, String>,
+    ) -> Vec<[String; 2]> {
+        self.relation_reviews
+            .values()
+            .filter(|proposal| proposal.status == MaintenanceRelationReviewStatus::Rejected)
+            .filter(|proposal| {
+                proposal
+                    .pages
+                    .iter()
+                    .all(|page| current_revision_ids.get(&page.page_id) == Some(&page.revision_id))
+            })
+            .map(relation_review_page_pair)
+            .collect()
+    }
+
+    pub(crate) fn relation_pair_is_rejected(
+        &self,
+        page_ids: &[String; 2],
+        revision_ids: &[String; 2],
+    ) -> bool {
+        let current_revision_ids = page_ids
+            .iter()
+            .cloned()
+            .zip(revision_ids.iter().cloned())
+            .collect::<HashMap<_, _>>();
+        self.rejected_relation_pairs(&current_revision_ids)
+            .into_iter()
+            .any(|pair| pair == *page_ids)
+    }
+
     /// Persist an operator's decision that this exact Page pair must not be
     /// proposed again.  Keep it alongside review decisions rather than in a
     /// separate blacklist: the reviewed revisions remain auditable, while the
@@ -249,14 +328,59 @@ impl MaintenanceLedger {
         pages: [MaintenanceRelationReviewPage; 2],
         relation_reason: String,
     ) -> Result<()> {
+        self.record_relation_pair_decision(
+            namespace,
+            pages,
+            relation_reason,
+            MaintenanceRelationReviewStatus::Suppressed,
+            "operator_suppressed",
+            "The operator chose not to suggest this exact Page pair again.",
+        )
+    }
+
+    /// Persist a negative decision for the exact reviewed revisions. Unlike a
+    /// suppression, a later revision of either Page may be reviewed again.
+    pub(crate) fn reject_relation_pair(
+        &mut self,
+        namespace: String,
+        pages: [MaintenanceRelationReviewPage; 2],
+        relation_reason: String,
+    ) -> Result<()> {
+        self.record_relation_pair_decision(
+            namespace,
+            pages,
+            relation_reason,
+            MaintenanceRelationReviewStatus::Rejected,
+            "operator_rejected",
+            "The operator rejected this revision-bound Page relation.",
+        )
+    }
+
+    fn record_relation_pair_decision(
+        &mut self,
+        namespace: String,
+        pages: [MaintenanceRelationReviewPage; 2],
+        relation_reason: String,
+        status: MaintenanceRelationReviewStatus,
+        risk: &str,
+        review_reason: &str,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            matches!(
+                status,
+                MaintenanceRelationReviewStatus::Rejected
+                    | MaintenanceRelationReviewStatus::Suppressed
+            ),
+            "unsupported PCP relation decision"
+        );
         let candidate_id = relation_review_id(&pages);
         match self.relation_reviews.get_mut(&candidate_id) {
             Some(proposal) if proposal.status == MaintenanceRelationReviewStatus::Pending => {
-                proposal.status = MaintenanceRelationReviewStatus::Suppressed;
+                proposal.status = status;
             }
-            Some(proposal) if proposal.status == MaintenanceRelationReviewStatus::Suppressed => {}
+            Some(proposal) if proposal.status == status => {}
             Some(_) => {
-                anyhow::bail!("PCP relation decision is already resolved and cannot be suppressed")
+                anyhow::bail!("PCP relation decision is already resolved")
             }
             None => {
                 self.relation_reviews.insert(
@@ -267,12 +391,13 @@ impl MaintenanceLedger {
                         relation_type: "related_to".to_owned(),
                         pages,
                         proposed_at: chrono::Utc::now().to_rfc3339(),
-                        risk: "operator_suppressed".to_owned(),
-                        review_reason:
-                            "The operator chose not to suggest this exact Page pair again."
-                                .to_owned(),
+                        risk: risk.to_owned(),
+                        review_reason: review_reason.to_owned(),
                         relation_reason,
-                        status: MaintenanceRelationReviewStatus::Suppressed,
+                        model_attempts: 1,
+                        escalated: false,
+                        snoozed_until: None,
+                        status,
                     },
                 );
             }
@@ -285,6 +410,8 @@ impl MaintenanceLedger {
         namespace: String,
         pages: [MaintenanceRelationReviewPage; 2],
         relation_reason: String,
+        model_attempts: u32,
+        escalated: bool,
     ) -> String {
         let candidate_id = relation_review_id(&pages);
         self.relation_reviews
@@ -298,6 +425,9 @@ impl MaintenanceLedger {
                 risk: "manual_review".to_owned(),
                 review_reason: "The selected Pages are not a continuous Pack boundary with a shared protected identifier.".to_owned(),
                 relation_reason,
+                model_attempts: model_attempts.max(1),
+                escalated,
+                snoozed_until: None,
                 status: MaintenanceRelationReviewStatus::Pending,
             });
         candidate_id
@@ -306,7 +436,10 @@ impl MaintenanceLedger {
     pub(crate) fn relation_reviews(&self) -> Vec<MaintenanceRelationReviewProposal> {
         self.relation_reviews
             .values()
-            .filter(|proposal| proposal.status == MaintenanceRelationReviewStatus::Pending)
+            .filter(|proposal| {
+                proposal.status == MaintenanceRelationReviewStatus::Pending
+                    && snooze_is_visible(proposal.snoozed_until.as_deref())
+            })
             .cloned()
             .collect()
     }
@@ -332,6 +465,84 @@ impl MaintenanceLedger {
             "PCP relation review candidate is no longer pending"
         );
         proposal.status = status;
+        Ok(())
+    }
+
+    pub(crate) fn enqueue_review(
+        &mut self,
+        payload: MaintenanceReviewPayload,
+        origin: MaintenanceReviewOrigin,
+        reason: String,
+        model_attempts: u32,
+        escalated: bool,
+    ) -> String {
+        let candidate_id = payload.candidate_id().to_owned();
+        self.review_items
+            .entry(candidate_id.clone())
+            .or_insert_with(|| {
+                MaintenanceReviewItem::pending(payload, origin, reason, model_attempts, escalated)
+            });
+        candidate_id
+    }
+
+    pub(crate) fn review_items(&self) -> Vec<MaintenanceReviewItem> {
+        self.review_items
+            .values()
+            .filter(|item| {
+                item.status == MaintenanceReviewStatus::Pending
+                    && snooze_is_visible(item.snoozed_until.as_deref())
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn review_item(&self, candidate_id: &str) -> Option<MaintenanceReviewItem> {
+        self.review_items.get(candidate_id).cloned()
+    }
+
+    pub(crate) fn resolve_review(
+        &mut self,
+        candidate_id: &str,
+        status: MaintenanceReviewStatus,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            status != MaintenanceReviewStatus::Pending,
+            "PCP maintenance review resolution cannot remain pending"
+        );
+        let item = self
+            .review_items
+            .get_mut(candidate_id)
+            .context("unknown PCP maintenance review candidate")?;
+        anyhow::ensure!(
+            item.status == MaintenanceReviewStatus::Pending,
+            "PCP maintenance review candidate is no longer pending"
+        );
+        item.status = status;
+        item.updated_at = chrono::Utc::now().to_rfc3339();
+        Ok(())
+    }
+
+    pub(crate) fn snooze_review(&mut self, candidate_id: &str, seconds: u64) -> Result<()> {
+        let until =
+            chrono::Utc::now() + chrono::Duration::seconds(seconds.try_into().unwrap_or(i64::MAX));
+        if let Some(item) = self.review_items.get_mut(candidate_id) {
+            anyhow::ensure!(
+                item.status == MaintenanceReviewStatus::Pending,
+                "PCP maintenance review candidate is no longer pending"
+            );
+            item.snoozed_until = Some(until.to_rfc3339());
+            item.updated_at = chrono::Utc::now().to_rfc3339();
+            return Ok(());
+        }
+        let proposal = self
+            .relation_reviews
+            .get_mut(candidate_id)
+            .context("unknown PCP maintenance review candidate")?;
+        anyhow::ensure!(
+            proposal.status == MaintenanceRelationReviewStatus::Pending,
+            "PCP maintenance review candidate is no longer pending"
+        );
+        proposal.snoozed_until = Some(until.to_rfc3339());
         Ok(())
     }
 
@@ -411,6 +622,10 @@ impl MaintenanceLedger {
             dirty_region_count: self.write_trigger.dirty_regions.len(),
             ready_region_count: ready_regions.len(),
             pending_relation_review_count: self.relation_reviews().len(),
+            pending_review_count: self
+                .review_items()
+                .len()
+                .saturating_add(self.relation_reviews().len()),
             dirty_regions,
         }
     }
@@ -519,6 +734,34 @@ impl MaintenanceLedger {
     }
 }
 
+struct MaintenanceLedgerLock(std::fs::File);
+
+impl MaintenanceLedgerLock {
+    fn acquire(path: &Path) -> Result<Self> {
+        let lock_path = path.with_extension("lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("open PCP maintenance lock {}", lock_path.display()))?;
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        anyhow::ensure!(
+            result == 0,
+            "lock PCP maintenance state {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        );
+        Ok(Self(file))
+    }
+}
+
+impl Drop for MaintenanceLedgerLock {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
 pub(crate) fn maintenance_region_key(page: &DurablePageInventoryItem) -> String {
     match page.source_span.as_ref() {
         Some(source) => format!("stream:{}:{}", page.namespace, source.stream_id),
@@ -585,6 +828,16 @@ fn timestamp_string(unix_ms: u64) -> String {
         .unwrap_or_default()
 }
 
+fn default_model_attempts() -> u32 {
+    1
+}
+
+fn snooze_is_visible(value: Option<&str>) -> bool {
+    value
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .is_none_or(|until| until <= chrono::Utc::now())
+}
+
 #[cfg(test)]
 mod tests {
     use pcp_core::PageMutability;
@@ -632,6 +885,84 @@ mod tests {
         let ready = ledger.observe_writes(&[first, second.clone()], &trigger);
         let expected = BTreeSet::from([maintenance_region_key(&second)]);
         assert_eq!(ready, expected);
+    }
+
+    #[test]
+    fn persisted_review_resolution_wins_over_a_stale_pending_writer() {
+        let payload =
+            MaintenanceReviewPayload::Summary(crate::maintenance::MaintenanceSummaryCandidate {
+                candidate_id: "msu_test".to_owned(),
+                page_id: "pg_1".to_owned(),
+                revision_id: "rev_1".to_owned(),
+                namespace: "conversation:test".to_owned(),
+                content_chars: 100,
+                expected_summary_revision_id: None,
+                content: "A bounded routing summary.".to_owned(),
+            });
+        let mut stale = MaintenanceLedger::default();
+        stale.enqueue_review(
+            payload.clone(),
+            MaintenanceReviewOrigin::Automatic,
+            "review".to_owned(),
+            1,
+            false,
+        );
+        let mut persisted = MaintenanceLedger::default();
+        persisted.enqueue_review(
+            payload,
+            MaintenanceReviewOrigin::Automatic,
+            "review".to_owned(),
+            1,
+            false,
+        );
+        persisted
+            .resolve_review("msu_test", MaintenanceReviewStatus::Accepted)
+            .expect("resolve persisted review");
+        persisted
+            .review_items
+            .get_mut("msu_test")
+            .expect("persisted review")
+            .updated_at = "9999-01-01T00:00:00Z".to_owned();
+
+        stale.merge_persisted_reviews(persisted);
+
+        assert_eq!(
+            stale.review_item("msu_test").expect("merged review").status,
+            MaintenanceReviewStatus::Accepted
+        );
+    }
+
+    #[test]
+    fn snoozing_keeps_a_review_unresolved_but_out_of_the_current_inbox() {
+        let mut ledger = MaintenanceLedger::default();
+        ledger.enqueue_review(
+            MaintenanceReviewPayload::Summary(crate::maintenance::MaintenanceSummaryCandidate {
+                candidate_id: "msu_snooze".to_owned(),
+                page_id: "pg_1".to_owned(),
+                revision_id: "rev_1".to_owned(),
+                namespace: "conversation:test".to_owned(),
+                content_chars: 100,
+                expected_summary_revision_id: None,
+                content: "A bounded routing summary.".to_owned(),
+            }),
+            MaintenanceReviewOrigin::Manual,
+            "review".to_owned(),
+            1,
+            false,
+        );
+
+        ledger
+            .snooze_review("msu_snooze", 60)
+            .expect("snooze review");
+
+        assert!(ledger.review_items().is_empty());
+        assert_eq!(
+            ledger
+                .review_item("msu_snooze")
+                .expect("unresolved snoozed review")
+                .status,
+            MaintenanceReviewStatus::Pending
+        );
     }
 
     #[test]

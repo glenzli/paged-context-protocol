@@ -4,6 +4,7 @@ mod coordinator;
 mod infer_worker;
 mod ledger;
 mod operator;
+mod review;
 mod worker;
 
 use std::{sync::Arc, time::Duration};
@@ -39,6 +40,10 @@ pub use ledger::{
     MaintenanceRelationReviewStatus,
 };
 pub use operator::MaintenanceOperator;
+pub use review::{
+    MaintenanceReviewItem, MaintenanceReviewOrigin, MaintenanceReviewPayload,
+    MaintenanceReviewStatus,
+};
 pub use worker::{
     CommandSemanticWorker, MaintenanceDetailPage, MaintenanceRelation, MaintenanceRoutingPage,
     MaintenanceSummarySelection, MaintenanceWorkerOutcome, MaintenanceWorkerRequest,
@@ -66,6 +71,8 @@ pub fn build_semantic_worker(
             summary_deployment_id,
             reasoning_deployment_id,
             relation_deployment_id,
+            escalation_deployment_id,
+            escalation_operations,
             ..
         } => Ok(Arc::new(InferRuntimeSemanticWorker::new(
             credential_file.clone(),
@@ -73,6 +80,8 @@ pub fn build_semantic_worker(
             summary_deployment_id.clone(),
             reasoning_deployment_id.clone(),
             relation_deployment_id.clone(),
+            escalation_deployment_id.clone(),
+            escalation_operations.clone(),
         )?)),
     }
 }

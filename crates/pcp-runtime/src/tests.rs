@@ -179,6 +179,8 @@ actor_type = "model"
         summary_deployment_id,
         reasoning_deployment_id,
         relation_deployment_id,
+        escalation_deployment_id,
+        escalation_operations,
         ..
     } = maintenance.worker
     else {
@@ -189,6 +191,17 @@ actor_type = "model"
     assert_eq!(summary_deployment_id, "codex_gpt_5_6_luna");
     assert_eq!(reasoning_deployment_id, "codex_gpt_5_6_luna");
     assert_eq!(relation_deployment_id, None);
+    assert_eq!(escalation_deployment_id, None);
+    assert_eq!(
+        escalation_operations,
+        vec![
+            "select_packing",
+            "analyze_packing",
+            "select_relation",
+            "extract_topic",
+            "assess_archive",
+        ]
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 

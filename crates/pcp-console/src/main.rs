@@ -33,7 +33,8 @@ use pcp_runtime::{
     AnalyzeMaintenanceRelationRequest, AnalyzeMaintenanceSummariesRequest,
     AnalyzeMaintenanceSummaryRequest, AnalyzeMaintenanceTopicRequest, ApplyMaintenancePackRequest,
     ApplyMaintenanceRelationRequest, ApplyMaintenanceSummaryRequest, ApplyMaintenanceTopicRequest,
-    MaintenanceMode, MaintenanceOperator, RuntimeConfig, RuntimeMaintainer,
+    MaintenanceMode, MaintenanceOperator, MaintenanceReviewPayload, MaintenanceReviewStatus,
+    RuntimeConfig, RuntimeMaintainer,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -341,6 +342,14 @@ fn router(state: AppState) -> Router {
         .route("/retention-view.js", get(retention_view_js))
         .route("/query-view.js", get(query_view_js))
         .route("/progressive-operation.js", get(progressive_operation_js))
+        .route(
+            "/maintenance-relation-decisions.js",
+            get(maintenance_relation_decisions_js),
+        )
+        .route(
+            "/maintenance-convergence.js",
+            get(maintenance_convergence_js),
+        )
         .route("/styles.css", get(styles_css))
         .route("/api/health", get(health))
         .route("/api/runtime", get(runtime_status))
@@ -368,6 +377,24 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/maintenance/scan", post(maintenance_scan))
         .route("/api/maintenance/analyze", post(maintenance_analyze))
+        .route("/api/maintenance/converge", post(maintenance_converge))
+        .route("/api/maintenance/reviews", get(maintenance_reviews))
+        .route(
+            "/api/maintenance/reviews/{candidate_id}/accept",
+            post(accept_maintenance_review),
+        )
+        .route(
+            "/api/maintenance/reviews/{candidate_id}/reject",
+            post(reject_maintenance_review),
+        )
+        .route(
+            "/api/maintenance/reviews/{candidate_id}/defer",
+            post(defer_maintenance_review),
+        )
+        .route(
+            "/api/maintenance/reviews/{candidate_id}/suppress",
+            post(suppress_maintenance_review),
+        )
         .route(
             "/api/maintenance/archive/scan",
             post(maintenance_archive_scan),
@@ -412,6 +439,10 @@ fn router(state: AppState) -> Router {
         .route(
             "/api/maintenance/relations/apply",
             post(maintenance_apply_relation),
+        )
+        .route(
+            "/api/maintenance/relations/reject",
+            post(maintenance_reject_relation),
         )
         .route(
             "/api/maintenance/relations/suppress",
@@ -499,6 +530,20 @@ async fn progressive_operation_js() -> Response {
     static_asset(
         "text/javascript; charset=utf-8",
         include_str!("progressive-operation.js"),
+    )
+}
+
+async fn maintenance_relation_decisions_js() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("maintenance-relation-decisions.js"),
+    )
+}
+
+async fn maintenance_convergence_js() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("maintenance-convergence.js"),
     )
 }
 
@@ -1196,6 +1241,216 @@ async fn maintenance_analyze(
     Ok(Json(json!(analysis)))
 }
 
+async fn maintenance_converge(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(_request): Json<MaintenanceScanRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let mut operator = maintenance_operator_for_console(&state).await?;
+    let report = operator.converge_once().await?;
+    let reviews = operator.pending_reviews();
+    Ok(Json(json!({
+        "report": report,
+        "reviews": reviews,
+        "settled": report.jobs_advanced == 0,
+    })))
+}
+
+async fn maintenance_reviews(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let operator = maintenance_operator_for_console(&state).await?;
+    Ok(Json(json!({"reviews": operator.pending_reviews()})))
+}
+
+async fn accept_maintenance_review(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(candidate_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let mut operator = maintenance_operator_for_console(&state).await?;
+    let item = operator
+        .review_item(&candidate_id)
+        .context("unknown PCP maintenance review candidate")?;
+    let result = match item.payload {
+        MaintenanceReviewPayload::Pack(candidate) => json!(
+            operator
+                .apply_pack(ApplyMaintenancePackRequest {
+                    candidate_id: candidate.candidate_id,
+                    pages: candidate
+                        .pages
+                        .into_iter()
+                        .map(|page| PageRevisionRef {
+                            page_id: page.page_id,
+                            revision_id: page.revision_id,
+                        })
+                        .collect(),
+                })
+                .await?
+        ),
+        MaintenanceReviewPayload::Summary(candidate) => json!(
+            operator
+                .apply_summary(ApplyMaintenanceSummaryRequest {
+                    candidate_id: candidate.candidate_id,
+                    page_id: candidate.page_id,
+                    revision_id: candidate.revision_id,
+                    expected_summary_revision_id: candidate.expected_summary_revision_id,
+                    content: candidate.content,
+                })
+                .await?
+        ),
+        MaintenanceReviewPayload::Relation(_candidate) if candidate_id.starts_with("mrr_") => {
+            json!(operator.approve_relation_review(&candidate_id).await?)
+        }
+        MaintenanceReviewPayload::Relation(candidate) => {
+            let result = operator
+                .apply_relation(ApplyMaintenanceRelationRequest {
+                    candidate_id: candidate.candidate_id,
+                    pages: candidate.pages.map(|page| PageRevisionRef {
+                        page_id: page.page_id,
+                        revision_id: page.revision_id,
+                    }),
+                })
+                .await?;
+            operator
+                .resolve_review(&candidate_id, MaintenanceReviewStatus::Accepted)
+                .await?;
+            return Ok(Json(json!({
+                "candidateId": candidate_id,
+                "status": "accepted",
+                "result": result,
+            })));
+        }
+        MaintenanceReviewPayload::Topic(candidate) => json!(
+            operator
+                .apply_topic(ApplyMaintenanceTopicRequest {
+                    candidate_id: candidate.candidate_id,
+                    title: candidate.title,
+                    content: candidate.content,
+                    pages: candidate
+                        .pages
+                        .into_iter()
+                        .map(|page| PageRevisionRef {
+                            page_id: page.page_id,
+                            revision_id: page.revision_id,
+                        })
+                        .collect(),
+                })
+                .await?
+        ),
+        MaintenanceReviewPayload::Archive(candidate) => json!(
+            state
+                .client
+                .archive_page(ArchivePageRequest {
+                    page_id: candidate.page_id,
+                    expected_revision_id: candidate.revision_id,
+                    reason: Some(candidate.reason),
+                })
+                .await?
+        ),
+    };
+    if !candidate_id.starts_with("mrr_") {
+        operator
+            .resolve_review(&candidate_id, MaintenanceReviewStatus::Accepted)
+            .await?;
+    }
+    Ok(Json(json!({
+        "candidateId": candidate_id,
+        "status": "accepted",
+        "result": result,
+    })))
+}
+
+async fn reject_maintenance_review(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(candidate_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let mut operator = maintenance_operator_for_console(&state).await?;
+    let item = operator
+        .review_item(&candidate_id)
+        .context("unknown PCP maintenance review candidate")?;
+    match item.payload {
+        MaintenanceReviewPayload::Relation(_) if candidate_id.starts_with("mrr_") => {
+            operator
+                .reject_relation_review(&candidate_id, false)
+                .await?;
+        }
+        MaintenanceReviewPayload::Relation(candidate) => {
+            operator
+                .reject_relation(ApplyMaintenanceRelationRequest {
+                    candidate_id: candidate.candidate_id,
+                    pages: candidate.pages.map(|page| PageRevisionRef {
+                        page_id: page.page_id,
+                        revision_id: page.revision_id,
+                    }),
+                })
+                .await?;
+            operator
+                .resolve_review(&candidate_id, MaintenanceReviewStatus::Rejected)
+                .await?;
+        }
+        _ => {
+            operator
+                .resolve_review(&candidate_id, MaintenanceReviewStatus::Rejected)
+                .await?;
+        }
+    }
+    Ok(Json(
+        json!({"candidateId": candidate_id, "status": "rejected"}),
+    ))
+}
+
+async fn defer_maintenance_review(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(candidate_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let mut operator = maintenance_operator_for_console(&state).await?;
+    operator
+        .resolve_review(&candidate_id, MaintenanceReviewStatus::Deferred)
+        .await?;
+    Ok(Json(
+        json!({"candidateId": candidate_id, "status": "snoozed", "snoozedForSeconds": 86400}),
+    ))
+}
+
+async fn suppress_maintenance_review(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(candidate_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let mut operator = maintenance_operator_for_console(&state).await?;
+    let item = operator
+        .review_item(&candidate_id)
+        .context("unknown PCP maintenance review candidate")?;
+    let MaintenanceReviewPayload::Relation(candidate) = item.payload else {
+        return Err(anyhow::anyhow!("only relation reviews can be suppressed").into());
+    };
+    if candidate_id.starts_with("mrr_") {
+        operator.reject_relation_review(&candidate_id, true).await?;
+    } else {
+        operator
+            .suppress_relation(ApplyMaintenanceRelationRequest {
+                candidate_id: candidate.candidate_id,
+                pages: candidate.pages.map(|page| PageRevisionRef {
+                    page_id: page.page_id,
+                    revision_id: page.revision_id,
+                }),
+            })
+            .await?;
+        operator
+            .resolve_review(&candidate_id, MaintenanceReviewStatus::Suppressed)
+            .await?;
+    }
+    Ok(Json(
+        json!({"candidateId": candidate_id, "status": "suppressed"}),
+    ))
+}
+
 async fn maintenance_apply_pack(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1466,6 +1721,17 @@ async fn maintenance_suppress_relation(
     let mut operator = maintenance_operator_for_console(&state).await?;
     operator.suppress_relation(request).await?;
     Ok(Json(json!({"suppressed": true})))
+}
+
+async fn maintenance_reject_relation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ApplyMaintenanceRelationRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let mut operator = maintenance_operator_for_console(&state).await?;
+    operator.reject_relation(request).await?;
+    Ok(Json(json!({"rejected": true})))
 }
 
 async fn maintenance_analyze_topic(

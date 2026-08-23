@@ -73,6 +73,14 @@ pub enum MaintenanceWorkerConfig {
         reasoning_deployment_id: String,
         #[serde(default)]
         relation_deployment_id: Option<String>,
+        /// Optional higher-capability deployment used only after the baseline
+        /// worker explicitly defers an eligible semantic decision.
+        #[serde(default)]
+        escalation_deployment_id: Option<String>,
+        /// Operation names eligible for one bounded escalation attempt. Keep
+        /// Summary and retention work on the inexpensive baseline by default.
+        #[serde(default = "default_infer_escalation_operations")]
+        escalation_operations: Vec<String>,
         actor_id: String,
         #[serde(default = "default_worker_actor_type")]
         actor_type: String,
@@ -130,6 +138,8 @@ impl MaintenanceWorkerConfig {
                 summary_deployment_id,
                 reasoning_deployment_id,
                 relation_deployment_id,
+                escalation_deployment_id,
+                escalation_operations,
                 ..
             } => {
                 anyhow::ensure!(
@@ -149,6 +159,25 @@ impl MaintenanceWorkerConfig {
                         .as_ref()
                         .is_none_or(|deployment_id| !deployment_id.trim().is_empty()),
                     "PCP Infer Runtime relation_deployment_id must not be empty"
+                );
+                anyhow::ensure!(
+                    escalation_deployment_id
+                        .as_ref()
+                        .is_none_or(|deployment_id| !deployment_id.trim().is_empty()),
+                    "PCP Infer Runtime escalation_deployment_id must not be empty"
+                );
+                const SUPPORTED_ESCALATION_OPERATIONS: &[&str] = &[
+                    "select_packing",
+                    "analyze_packing",
+                    "select_relation",
+                    "extract_topic",
+                    "assess_archive",
+                ];
+                anyhow::ensure!(
+                    escalation_operations.iter().all(|operation| {
+                        SUPPORTED_ESCALATION_OPERATIONS.contains(&operation.as_str())
+                    }),
+                    "unsupported PCP maintenance escalation operation"
                 );
             }
         }
@@ -213,6 +242,7 @@ impl Default for SummaryMaintenanceConfig {
                 "pcp_summary".to_owned(),
                 "summary_projection".to_owned(),
                 "validity_assessment".to_owned(),
+                "topic_summary".to_owned(),
                 "tombstone".to_owned(),
             ],
         }
@@ -290,6 +320,7 @@ impl Default for PackingMaintenanceConfig {
                 "pcp_summary".to_owned(),
                 "summary_projection".to_owned(),
                 "validity_assessment".to_owned(),
+                "topic_summary".to_owned(),
                 "tombstone".to_owned(),
             ],
         }
@@ -313,6 +344,7 @@ impl Default for RelationMaintenanceConfig {
                 "pcp_summary".to_owned(),
                 "summary_projection".to_owned(),
                 "validity_assessment".to_owned(),
+                "topic_summary".to_owned(),
                 "tombstone".to_owned(),
             ],
         }
@@ -530,4 +562,17 @@ fn default_infer_summary_deployment_id() -> String {
 
 fn default_infer_reasoning_deployment_id() -> String {
     "codex_gpt_5_6_luna".to_owned()
+}
+
+fn default_infer_escalation_operations() -> Vec<String> {
+    [
+        "select_packing",
+        "analyze_packing",
+        "select_relation",
+        "extract_topic",
+        "assess_archive",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
