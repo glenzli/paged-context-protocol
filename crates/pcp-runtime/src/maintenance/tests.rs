@@ -25,7 +25,7 @@ use super::{
     AnalyzeMaintenanceSummaryRequest, ApplyMaintenancePackRequest, ApplyMaintenanceRelationRequest,
     ApplyMaintenanceSummaryRequest, CommandSemanticWorker, MaintenanceArchiveDecision,
     MaintenanceAutomationState, MaintenanceConfig, MaintenanceCycleReport, MaintenanceMode,
-    MaintenanceRunAudit, MaintenanceWorkerConfig, MaintenanceWorkerRequest,
+    MaintenanceRunAudit, MaintenanceWakeReason, MaintenanceWorkerConfig, MaintenanceWorkerRequest,
     MaintenanceWorkerResponse, PackingCandidateGroup, PackingMaintenanceConfig,
     RelationCandidatePage, RelationMaintenanceConfig, RetentionMaintenanceConfig,
     RetentionMilestone, RuntimeMaintainer, SemanticMaintenanceWorker, SummaryMaintenanceConfig,
@@ -3600,6 +3600,7 @@ impl Fixture {
             state_path: self.root.join("maintenance.json"),
             allowed_scopes: vec![self.namespace.clone()],
             interval_seconds: 60,
+            max_interval_seconds: 3_600,
             initial_delay_seconds: 0,
             write_trigger: WriteTriggeredMaintenanceConfig::default(),
             max_jobs_per_cycle: 2,
@@ -3664,7 +3665,7 @@ async fn scheduler_status_exposes_live_progress_and_retains_failed_partial_repor
     let config = fixture.config();
     let mut ledger = MaintenanceLedger::default();
 
-    ledger.start_scheduled_cycle();
+    ledger.start_scheduled_cycle(MaintenanceWakeReason::Timer);
     ledger.update_scheduled_cycle(MaintenanceCycleReport {
         inspected_pages: 12,
         worker_calls: 2,
@@ -3689,7 +3690,7 @@ async fn scheduler_status_exposes_live_progress_and_retains_failed_partial_repor
         1
     );
 
-    ledger.start_scheduled_cycle();
+    ledger.start_scheduled_cycle(MaintenanceWakeReason::Timer);
     ledger.complete_scheduled_cycle(MaintenanceCycleReport {
         inspected_pages: 13,
         ..MaintenanceCycleReport::default()

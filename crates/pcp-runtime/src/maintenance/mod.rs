@@ -37,7 +37,7 @@ pub use infer_worker::InferRuntimeSemanticWorker;
 pub use ledger::{
     MaintenanceAutomationState, MaintenanceAutomationStatus, MaintenanceDirtyRegionStatus,
     MaintenanceRelationReviewPage, MaintenanceRelationReviewProposal,
-    MaintenanceRelationReviewStatus,
+    MaintenanceRelationReviewStatus, MaintenanceWakeReason,
 };
 pub use operator::MaintenanceOperator;
 pub use review::{

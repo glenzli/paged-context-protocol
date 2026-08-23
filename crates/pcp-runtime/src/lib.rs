@@ -29,7 +29,7 @@ pub use maintenance::{
     MaintenanceSummaryBatchAnalysis, MaintenanceSummaryCandidate, MaintenanceSummaryScan,
     MaintenanceSummaryScanPage, MaintenanceSummarySelection, MaintenanceTopicAnalysis,
     MaintenanceTopicCandidate, MaintenanceTopicInput, MaintenanceTopicScan,
-    MaintenanceTopicScanGroup, MaintenanceWorkScan, MaintenanceWorkerConfig,
+    MaintenanceTopicScanGroup, MaintenanceWakeReason, MaintenanceWorkScan, MaintenanceWorkerConfig,
     MaintenanceWorkerRequest, MaintenanceWorkerResponse, PackingCandidateGroup,
     PackingMaintenanceConfig, RelationCandidatePage, RelationMaintenanceConfig,
     RetentionMaintenanceConfig, RetentionMilestone, RuntimeMaintainer, SemanticMaintenanceWorker,

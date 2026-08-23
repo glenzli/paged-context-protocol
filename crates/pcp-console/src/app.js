@@ -131,6 +131,10 @@ const ZH_MESSAGES = {
   "Open in inspector": "在检查器中打开",
   "Write trigger": "写入触发条件",
   "Last completed": "最近完成",
+  "Next automatic check": "下次自动检查",
+  "Idle backoff": "空闲退避",
+  "Write activity wakes Runtime early.": "新的写入会提前唤醒 Runtime。",
+  "Consecutive failures": "连续失败",
   "Awaiting the first Runtime heartbeat.": "等待 Runtime 首次心跳。",
   "Approve": "批准",
   "Accept": "接受",
@@ -2262,8 +2266,16 @@ function renderAutomationStatus() {
   }
   const completed = automation.lastCompletedAt;
   const started = automation.lastStartedAt;
-  byId("maintenance-automation-detail").textContent = started || completed
-    ? [started ? `${currentLanguage === "zh" ? "最近开始" : "Last started"}: ${formatTime(started)}` : "", completed ? `${t("Last completed")}: ${formatTime(completed)}` : ""].filter(Boolean).join(" · ")
+  const nextWake = automation.nextWakeAt;
+  byId("maintenance-automation-detail").textContent = started || completed || nextWake
+    ? [
+        started ? `${currentLanguage === "zh" ? "最近开始" : "Last started"}: ${formatTime(started)}` : "",
+        completed ? `${t("Last completed")}: ${formatTime(completed)}` : "",
+        nextWake ? `${t("Next automatic check")}: ${formatTime(nextWake)}` : "",
+        automation.idleCycles ? `${t("Idle backoff")}: ${formatNumber(automation.idleCycles)}` : "",
+        automation.consecutiveFailures ? `${t("Consecutive failures")}: ${formatNumber(automation.consecutiveFailures)}` : "",
+        t("Write activity wakes Runtime early."),
+      ].filter(Boolean).join(" · ")
     : t("Awaiting the first Runtime heartbeat.");
   const error = byId("maintenance-automation-error");
   // Operation failures are owned by the scene-level alert above the workflow.

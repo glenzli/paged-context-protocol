@@ -1128,6 +1128,7 @@ async fn maintenance_status(State(state): State<AppState>) -> Result<Json<Value>
         "enabled": maintenance.enabled,
         "mode": maintenance.mode,
         "intervalSeconds": maintenance.interval_seconds,
+        "maxIntervalSeconds": maintenance.max_interval_seconds,
         "maxJobsPerCycle": maintenance.max_jobs_per_cycle,
         "writeTrigger": {
             "minNewPages": maintenance.write_trigger.min_new_pages,

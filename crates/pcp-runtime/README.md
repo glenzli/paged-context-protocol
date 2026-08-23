@@ -37,13 +37,25 @@ Principal: the worker still evaluates candidates, but Runtime cannot write an
 assessment, Summary, or replacement Page. `mode = "apply"` must be selected
 explicitly after the worker has been observed against the target Identity.
 `initial_delay_seconds` optionally delays the first inventory heartbeat after
-process start. `interval_seconds` is only the maximum delay before Runtime
-notices another Page-head write; it does not itself authorize a model call.
-Runtime persists a write watermark, groups changed Pages by source stream, and
-runs semantic maintenance only when `[maintenance.write_trigger]` has both
-enough new Pages and a completed quiet period (or its bounded maximum wait).
-The first heartbeat establishes a baseline rather than treating an existing
-Store backlog as newly written work.
+process start. Successful content writes through a Runtime endpoint wake the
+maintainer immediately and break any idle backoff; the wake only refreshes the
+inventory watermark and does not itself authorize a model call. Runtime
+persists changed regions, groups source-backed Pages by stream, and runs
+semantic maintenance only when `[maintenance.write_trigger]` has enough new
+Pages plus a completed quiet period, or reaches its absolute maximum wait.
+
+With no dirty regions, empty cycles back off exponentially from
+`interval_seconds` to `max_interval_seconds`. These timer wakes are safety polls
+for writes outside Runtime's observable endpoint path. Productive cycles that
+leave follow-up work retry after 30 seconds; failures use an independent bounded
+30-second exponential retry. The first heartbeat establishes a baseline rather
+than treating an existing Store backlog as newly written work.
+
+```toml
+[maintenance]
+interval_seconds = 1800
+max_interval_seconds = 86400
+```
 
 Scheduled packing and Summary work may apply in `mode = "apply"`. A relation is
 applied automatically only for the narrow structural case of two continuous

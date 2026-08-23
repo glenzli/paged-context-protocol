@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use pcp_client::{AccessMode, EmbeddedPcpClient};
+use pcp_client::{AccessMode, EmbeddedPcpClient, PcpApi};
 use pcp_core::{AccessPrincipal, AccessPrincipalType};
 use pcp_rpc::{RuntimeEndpoint, serve_unix, serve_unix_endpoints};
 use pcp_runtime::{
@@ -289,17 +289,34 @@ async fn run_broker(config_path: PathBuf) -> Result<()> {
         config.semantic_search.clone(),
         config.intent_match.clone(),
     )?);
+    let (successful_write_observer, maintenance_write_wake) = if config
+        .maintenance
+        .as_ref()
+        .is_some_and(|value| value.enabled)
+    {
+        let (sender, receiver) = tokio::sync::watch::channel(0_u64);
+        let observer: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            sender.send_modify(|generation| *generation = generation.wrapping_add(1));
+        });
+        (Some(observer), Some(receiver))
+    } else {
+        (None, None)
+    };
     let endpoints = config
         .endpoints
         .iter()
         .enumerate()
         .map(|(index, endpoint)| {
+            let mut client = EmbeddedPcpClient::new(
+                Arc::clone(&store),
+                endpoint.access_session(&identity_id, index)?,
+            );
+            if let Some(observer) = successful_write_observer.as_ref() {
+                client = client.with_successful_write_observer(Arc::clone(observer));
+            }
             Ok(RuntimeEndpoint {
                 socket_path: endpoint.socket_path.clone(),
-                client: EmbeddedPcpClient::shared(
-                    Arc::clone(&store),
-                    endpoint.access_session(&identity_id, index)?,
-                ),
+                client: Arc::new(client) as Arc<dyn PcpApi>,
                 query_service: Some(
                     Arc::clone(&query_service) as Arc<dyn pcp_rpc::RuntimeQueryService>
                 ),
@@ -312,7 +329,10 @@ async fn run_broker(config_path: PathBuf) -> Result<()> {
         let client =
             EmbeddedPcpClient::shared(Arc::clone(&store), maintenance.access_session(&identity_id));
         let worker = build_semantic_worker(&maintenance.worker)?;
-        let maintainer = RuntimeMaintainer::load(client, worker, maintenance).await?;
+        let mut maintainer = RuntimeMaintainer::load(client, worker, maintenance).await?;
+        if let Some(write_wake) = maintenance_write_wake {
+            maintainer = maintainer.with_write_wakeup(write_wake);
+        }
         Some(tokio::spawn(maintainer.run_forever()))
     } else {
         None

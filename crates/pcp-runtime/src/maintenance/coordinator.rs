@@ -15,7 +15,7 @@ use pcp_core::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::time::Instant;
+use tokio::{sync::watch, time::Instant};
 use uuid::Uuid;
 
 use super::{
@@ -24,8 +24,9 @@ use super::{
     RetentionMilestone, SemanticMaintenanceWorker,
     ledger::{
         MaintenanceAutomationStatus, MaintenanceLedger, MaintenanceRelationReviewPage,
-        MaintenanceRelationReviewProposal, MaintenanceRelationReviewStatus, maintenance_region_key,
-        packing_key, retention_window_key, selection_window_key, summary_key,
+        MaintenanceRelationReviewProposal, MaintenanceRelationReviewStatus, MaintenanceWakeReason,
+        maintenance_region_key, packing_key, retention_window_key, selection_window_key,
+        summary_key,
     },
     review::{
         MaintenanceReviewItem, MaintenanceReviewOrigin, MaintenanceReviewPayload,
@@ -514,6 +515,29 @@ pub struct RuntimeMaintainer {
     config: MaintenanceConfig,
     ledger: MaintenanceLedger,
     usage_source: &'static str,
+    write_wakeup: Option<watch::Receiver<u64>>,
+}
+
+async fn wait_for_scheduler_wakeup(
+    write_wakeup: &mut Option<watch::Receiver<u64>>,
+    delay_seconds: u64,
+    timer_reason: MaintenanceWakeReason,
+) -> MaintenanceWakeReason {
+    let Some(receiver) = write_wakeup.as_mut() else {
+        tokio::time::sleep(Duration::from_secs(delay_seconds)).await;
+        return timer_reason;
+    };
+    let write_channel_closed = tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs(delay_seconds)) => return timer_reason,
+        result = receiver.changed() => result.is_err(),
+    };
+    if write_channel_closed {
+        *write_wakeup = None;
+        tokio::time::sleep(Duration::from_secs(delay_seconds)).await;
+        timer_reason
+    } else {
+        MaintenanceWakeReason::ExternalWrite
+    }
 }
 
 impl RuntimeMaintainer {
@@ -539,6 +563,7 @@ impl RuntimeMaintainer {
             config,
             ledger,
             usage_source,
+            write_wakeup: None,
         })
     }
 
@@ -560,6 +585,7 @@ impl RuntimeMaintainer {
             // An operator smoke run must not be blocked by, or mutate, the normal cadence.
             ledger: MaintenanceLedger::default(),
             usage_source: "manual_maintenance",
+            write_wakeup: None,
         })
     }
 
@@ -575,7 +601,13 @@ impl RuntimeMaintainer {
             config,
             ledger: MaintenanceLedger::default(),
             usage_source: "test_maintenance",
+            write_wakeup: None,
         }
+    }
+
+    pub fn with_write_wakeup(mut self, write_wakeup: watch::Receiver<u64>) -> Self {
+        self.write_wakeup = Some(write_wakeup);
+        self
     }
 
     async fn evaluate_worker(
@@ -648,12 +680,21 @@ impl RuntimeMaintainer {
     }
 
     pub async fn run_forever(mut self) -> Result<()> {
-        if self.config.initial_delay_seconds > 0 {
-            tokio::time::sleep(Duration::from_secs(self.config.initial_delay_seconds)).await;
-        }
+        let mut wake_reason = if self.config.initial_delay_seconds > 0 {
+            self.ledger
+                .schedule_initial_wake(self.config.initial_delay_seconds);
+            self.ledger.save(&self.config.state_path).await?;
+            self.wait_for_wakeup(
+                self.config.initial_delay_seconds,
+                MaintenanceWakeReason::Startup,
+            )
+            .await
+        } else {
+            MaintenanceWakeReason::Startup
+        };
         loop {
-            let retry_soon = match self.run_scheduled_cycle().await {
-                Ok(report)
+            let (delay, timer_reason) = match self.run_scheduled_cycle_for(wake_reason).await {
+                Ok(report) => {
                     if report.summaries_written > 0
                         || report.summaries_proposed > 0
                         || report.packs_committed > 0
@@ -664,38 +705,54 @@ impl RuntimeMaintainer {
                         || report.archives_proposed > 0
                         || report.review_items_proposed > 0
                         || report.retention_leases_written > 0
-                        || report.retention_leases_proposed > 0 =>
-                {
-                    eprintln!(
-                        "PCP maintenance: {} Summary proposed / {} written, {} pack proposed / {} committed, {} relation proposed / {} committed, {} Topic / {} archive reviews proposed, {} retention proposed / {} leased after {} jobs and {} worker calls",
-                        report.summaries_proposed,
-                        report.summaries_written,
-                        report.packs_proposed,
-                        report.packs_committed,
-                        report.relations_proposed,
-                        report.relations_committed,
-                        report.topics_proposed,
-                        report.archives_proposed,
-                        report.retention_leases_proposed,
-                        report.retention_leases_written,
-                        report.jobs_advanced,
-                        report.worker_calls
-                    );
-                    report.jobs_advanced >= self.config.max_jobs_per_cycle
+                        || report.retention_leases_proposed > 0
+                    {
+                        eprintln!(
+                            "PCP maintenance: {} Summary proposed / {} written, {} pack proposed / {} committed, {} relation proposed / {} committed, {} Topic / {} archive reviews proposed, {} retention proposed / {} leased after {} jobs and {} worker calls",
+                            report.summaries_proposed,
+                            report.summaries_written,
+                            report.packs_proposed,
+                            report.packs_committed,
+                            report.relations_proposed,
+                            report.relations_committed,
+                            report.topics_proposed,
+                            report.archives_proposed,
+                            report.retention_leases_proposed,
+                            report.retention_leases_written,
+                            report.jobs_advanced,
+                            report.worker_calls
+                        );
+                    }
+                    let jobs_advanced = report.jobs_advanced;
+                    let active_retry = jobs_advanced >= self.config.max_jobs_per_cycle
+                        || (jobs_advanced > 0 && self.ledger.has_dirty_regions());
+                    let delay = self.ledger.schedule_after_success(&self.config, &report);
+                    let timer_reason = if active_retry {
+                        MaintenanceWakeReason::ActiveRetry
+                    } else {
+                        MaintenanceWakeReason::Timer
+                    };
+                    (delay, timer_reason)
                 }
-                Ok(_) => false,
                 Err(error) => {
                     eprintln!("PCP maintenance cycle failed: {error:#}");
-                    true
+                    (
+                        self.ledger.schedule_after_failure(&self.config),
+                        MaintenanceWakeReason::ErrorRetry,
+                    )
                 }
             };
-            let delay = if retry_soon {
-                self.config.interval_seconds.min(30)
-            } else {
-                self.config.interval_seconds
-            };
-            tokio::time::sleep(Duration::from_secs(delay)).await;
+            self.ledger.save(&self.config.state_path).await?;
+            wake_reason = self.wait_for_wakeup(delay, timer_reason).await;
         }
+    }
+
+    async fn wait_for_wakeup(
+        &mut self,
+        delay_seconds: u64,
+        timer_reason: MaintenanceWakeReason,
+    ) -> MaintenanceWakeReason {
+        wait_for_scheduler_wakeup(&mut self.write_wakeup, delay_seconds, timer_reason).await
     }
 
     pub async fn automation_status(
@@ -728,8 +785,17 @@ impl RuntimeMaintainer {
     /// The long-running scheduler is write-driven.  Its interval is only the
     /// maximum discovery latency for a lightweight inventory watermark; no
     /// semantic worker is called until a dirty region becomes eligible.
+    #[cfg(test)]
     pub(crate) async fn run_scheduled_cycle(&mut self) -> Result<MaintenanceCycleReport> {
-        self.ledger.start_scheduled_cycle();
+        self.run_scheduled_cycle_for(MaintenanceWakeReason::Timer)
+            .await
+    }
+
+    async fn run_scheduled_cycle_for(
+        &mut self,
+        wake_reason: MaintenanceWakeReason,
+    ) -> Result<MaintenanceCycleReport> {
+        self.ledger.start_scheduled_cycle(wake_reason);
         self.ledger.save(&self.config.state_path).await?;
         let result = self.run_scheduled_cycle_inner().await;
         match result {
@@ -4494,16 +4560,36 @@ fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
 
 #[cfg(test)]
 mod relation_window_tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        time::Duration,
+    };
 
     use chrono::{TimeZone, Utc};
     use pcp_core::{PACKED_PAGE_MEDIA_TYPE, PageMutability, SourceSpan};
     use pcp_store::DurablePageInventoryItem;
 
     use super::{
-        PackingMaintenanceConfig, RelationMaintenanceConfig, archive_scan_from_inventory,
-        packing_candidate_windows, relation_candidate_windows, source_boundary_relation_windows,
+        MaintenanceWakeReason, PackingMaintenanceConfig, RelationMaintenanceConfig,
+        archive_scan_from_inventory, packing_candidate_windows, relation_candidate_windows,
+        source_boundary_relation_windows, wait_for_scheduler_wakeup,
     };
+
+    #[tokio::test]
+    async fn external_write_interrupts_a_long_idle_wait() {
+        let (sender, receiver) = tokio::sync::watch::channel(0_u64);
+        let mut wakeup = Some(receiver);
+        sender.send_modify(|generation| *generation += 1);
+
+        let reason = tokio::time::timeout(
+            Duration::from_millis(100),
+            wait_for_scheduler_wakeup(&mut wakeup, 3_600, MaintenanceWakeReason::Timer),
+        )
+        .await
+        .expect("write wake should not wait for the safety poll");
+
+        assert_eq!(reason, MaintenanceWakeReason::ExternalWrite);
+    }
 
     fn page(namespace: &str, page_id: &str) -> DurablePageInventoryItem {
         DurablePageInventoryItem {

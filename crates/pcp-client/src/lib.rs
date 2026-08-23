@@ -384,11 +384,25 @@ pub trait PcpApi: PcpTenantApi {
 pub struct EmbeddedPcpClient {
     store: Arc<dyn PcpStore>,
     access: AccessSession,
+    successful_write_observer: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl EmbeddedPcpClient {
     pub fn new(store: Arc<dyn PcpStore>, access: AccessSession) -> Self {
-        Self { store, access }
+        Self {
+            store,
+            access,
+            successful_write_observer: None,
+        }
+    }
+
+    /// Observes successful content mutations issued through this client. The
+    /// callback is deliberately attached per client so Runtime can wake
+    /// maintenance for tenant/operator writes without treating the
+    /// maintainer's own writes as new external pressure.
+    pub fn with_successful_write_observer(mut self, observer: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.successful_write_observer = Some(observer);
+        self
     }
 
     pub fn shared(store: Arc<dyn PcpStore>, access: AccessSession) -> Arc<dyn PcpApi> {
@@ -397,6 +411,15 @@ impl EmbeddedPcpClient {
 
     pub fn tenant_shared(store: Arc<dyn PcpStore>, access: AccessSession) -> Arc<dyn PcpTenantApi> {
         Arc::new(Self::new(store, access))
+    }
+
+    fn observe_successful_write<T>(&self, result: Result<T>) -> Result<T> {
+        if result.is_ok()
+            && let Some(observer) = self.successful_write_observer.as_ref()
+        {
+            observer();
+        }
+        result
     }
 }
 
@@ -494,7 +517,8 @@ impl PcpTenantApi for EmbeddedPcpClient {
     }
 
     async fn ingest_page(&self, request: IngestPageRequest) -> Result<WriteResult> {
-        self.store.ingest_page(&self.access, request).await
+        let result = self.store.ingest_page(&self.access, request).await;
+        self.observe_successful_write(result)
     }
 }
 
@@ -564,47 +588,57 @@ impl PcpApi for EmbeddedPcpClient {
     }
 
     async fn write_page(&self, request: WritePageRequest) -> Result<WriteResult> {
-        self.store.write_page(&self.access, request).await
+        let result = self.store.write_page(&self.access, request).await;
+        self.observe_successful_write(result)
     }
 
     async fn revise_page(&self, request: RevisePageRequest) -> Result<WriteResult> {
-        self.store.revise_page(&self.access, request).await
+        let result = self.store.revise_page(&self.access, request).await;
+        self.observe_successful_write(result)
     }
 
     async fn archive_page(
         &self,
         request: pcp_core::ArchivePageRequest,
     ) -> Result<pcp_core::PageLifecycleTransitionResult> {
-        self.store.archive_page(&self.access, request).await
+        let result = self.store.archive_page(&self.access, request).await;
+        self.observe_successful_write(result)
     }
 
     async fn restore_archived_page(
         &self,
         request: pcp_core::RestoreArchivedPageRequest,
     ) -> Result<pcp_core::PageLifecycleTransitionResult> {
-        self.store
+        let result = self
+            .store
             .restore_archived_page(&self.access, request)
-            .await
+            .await;
+        self.observe_successful_write(result)
     }
 
     async fn pack_pages(&self, request: PackPagesRequest) -> Result<WriteResult> {
-        self.store.pack_pages(&self.access, request).await
+        let result = self.store.pack_pages(&self.access, request).await;
+        self.observe_successful_write(result)
     }
 
     async fn unpack_page(&self, request: UnpackPageRequest) -> Result<UnpackPageResult> {
-        self.store.unpack_page(&self.access, request).await
+        let result = self.store.unpack_page(&self.access, request).await;
+        self.observe_successful_write(result)
     }
 
     async fn link_pages(&self, request: LinkPagesRequest) -> Result<Relation> {
-        self.store.link_pages(&self.access, request).await
+        let result = self.store.link_pages(&self.access, request).await;
+        self.observe_successful_write(result)
     }
 
     async fn write_summary(&self, request: WriteSummaryRequest) -> Result<WriteSummaryResult> {
-        self.store.write_summary(&self.access, request).await
+        let result = self.store.write_summary(&self.access, request).await;
+        self.observe_successful_write(result)
     }
 
     async fn extract_topic(&self, request: ExtractTopicRequest) -> Result<WriteResult> {
-        self.store.extract_topic(&self.access, request).await
+        let result = self.store.extract_topic(&self.access, request).await;
+        self.observe_successful_write(result)
     }
 
     async fn next_summary_candidate(
@@ -632,7 +666,8 @@ impl PcpApi for EmbeddedPcpClient {
         &self,
         request: AssessPageValidityRequest,
     ) -> Result<WriteValidityResult> {
-        self.store.assess_page_validity(&self.access, request).await
+        let result = self.store.assess_page_validity(&self.access, request).await;
+        self.observe_successful_write(result)
     }
 
     async fn tombstone_derivation_cascade(
@@ -640,9 +675,11 @@ impl PcpApi for EmbeddedPcpClient {
         root_revision_id: String,
         actor: pcp_core::Actor,
     ) -> Result<TombstoneCascadeResult> {
-        self.store
+        let result = self
+            .store
             .tombstone_derivation_cascade(&self.access, root_revision_id, actor)
-            .await
+            .await;
+        self.observe_successful_write(result)
     }
 
     async fn durable_page_inventory(

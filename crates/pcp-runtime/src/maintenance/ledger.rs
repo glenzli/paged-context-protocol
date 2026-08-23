@@ -20,6 +20,8 @@ use super::{
 };
 
 const LEDGER_RETENTION_MILLIS: u64 = 30 * 24 * 60 * 60 * 1_000;
+const ACTIVE_RETRY_SECONDS: u64 = 30;
+const ERROR_RETRY_MAX_SECONDS: u64 = 30 * 60;
 
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,12 +58,30 @@ pub struct MaintenanceAutomationStatus {
     pub last_report: Option<MaintenanceCycleReport>,
     #[serde(default)]
     pub current_report: Option<MaintenanceCycleReport>,
+    #[serde(default)]
+    pub next_wake_at: Option<String>,
+    #[serde(default)]
+    pub last_wake_reason: Option<MaintenanceWakeReason>,
+    #[serde(default)]
+    pub idle_cycles: u32,
+    #[serde(default)]
+    pub consecutive_failures: u32,
     pub observed_page_count: usize,
     pub dirty_region_count: usize,
     pub ready_region_count: usize,
     pub pending_relation_review_count: usize,
     pub pending_review_count: usize,
     pub dirty_regions: Vec<MaintenanceDirtyRegionStatus>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaintenanceWakeReason {
+    Startup,
+    Timer,
+    ExternalWrite,
+    ActiveRetry,
+    ErrorRetry,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -145,6 +165,14 @@ struct SchedulerLedger {
     last_report: Option<MaintenanceCycleReport>,
     #[serde(default)]
     current_report: Option<MaintenanceCycleReport>,
+    #[serde(default)]
+    next_wake_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    last_wake_reason: Option<MaintenanceWakeReason>,
+    #[serde(default)]
+    idle_cycles: u32,
+    #[serde(default)]
+    consecutive_failures: u32,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -546,10 +574,15 @@ impl MaintenanceLedger {
         Ok(())
     }
 
-    pub(crate) fn start_scheduled_cycle(&mut self) {
+    pub(crate) fn start_scheduled_cycle(&mut self, wake_reason: MaintenanceWakeReason) {
         self.scheduler.last_started_at_unix_ms = Some(now_unix_ms());
         self.scheduler.last_error = None;
         self.scheduler.current_report = Some(MaintenanceCycleReport::default());
+        self.scheduler.next_wake_at_unix_ms = None;
+        self.scheduler.last_wake_reason = Some(wake_reason);
+        if wake_reason == MaintenanceWakeReason::ExternalWrite {
+            self.scheduler.idle_cycles = 0;
+        }
     }
 
     pub(crate) fn update_scheduled_cycle(&mut self, report: MaintenanceCycleReport) {
@@ -561,11 +594,93 @@ impl MaintenanceLedger {
         self.scheduler.last_error = None;
         self.scheduler.last_report = Some(report);
         self.scheduler.current_report = None;
+        self.scheduler.consecutive_failures = 0;
     }
 
     pub(crate) fn fail_scheduled_cycle(&mut self, error: impl std::fmt::Display) {
         self.scheduler.last_completed_at_unix_ms = Some(now_unix_ms());
         self.scheduler.last_error = Some(error.to_string());
+    }
+
+    pub(crate) fn schedule_after_success(
+        &mut self,
+        config: &MaintenanceConfig,
+        report: &MaintenanceCycleReport,
+    ) -> u64 {
+        self.scheduler.consecutive_failures = 0;
+        let delay = if report.jobs_advanced >= config.max_jobs_per_cycle {
+            self.scheduler.idle_cycles = 0;
+            ACTIVE_RETRY_SECONDS
+        } else if !self.write_trigger.dirty_regions.is_empty() {
+            self.scheduler.idle_cycles = 0;
+            if report.jobs_advanced > 0 {
+                ACTIVE_RETRY_SECONDS
+            } else {
+                self.next_dirty_deadline_seconds(&config.write_trigger)
+                    .unwrap_or(config.interval_seconds)
+            }
+        } else if report.jobs_advanced > 0 {
+            self.scheduler.idle_cycles = 0;
+            config.interval_seconds
+        } else {
+            self.scheduler.idle_cycles = self.scheduler.idle_cycles.saturating_add(1);
+            exponential_delay(
+                config.interval_seconds,
+                config.max_interval_seconds,
+                self.scheduler.idle_cycles.saturating_sub(1),
+            )
+        };
+        self.record_next_wake(delay);
+        delay
+    }
+
+    pub(crate) fn has_dirty_regions(&self) -> bool {
+        !self.write_trigger.dirty_regions.is_empty()
+    }
+
+    pub(crate) fn schedule_initial_wake(&mut self, delay_seconds: u64) {
+        self.record_next_wake(delay_seconds);
+    }
+
+    pub(crate) fn schedule_after_failure(&mut self, config: &MaintenanceConfig) -> u64 {
+        self.scheduler.idle_cycles = 0;
+        self.scheduler.consecutive_failures = self.scheduler.consecutive_failures.saturating_add(1);
+        let ceiling = config.interval_seconds.min(ERROR_RETRY_MAX_SECONDS).max(1);
+        let delay = exponential_delay(
+            ACTIVE_RETRY_SECONDS.min(ceiling),
+            ceiling,
+            self.scheduler.consecutive_failures.saturating_sub(1),
+        );
+        self.record_next_wake(delay);
+        delay
+    }
+
+    fn record_next_wake(&mut self, delay_seconds: u64) {
+        self.scheduler.next_wake_at_unix_ms =
+            Some(now_unix_ms().saturating_add(delay_seconds.saturating_mul(1_000)));
+    }
+
+    fn next_dirty_deadline_seconds(&self, config: &WriteTriggeredMaintenanceConfig) -> Option<u64> {
+        let now = now_unix_ms();
+        self.write_trigger
+            .dirty_regions
+            .values()
+            .map(|dirty| {
+                let max_wait_deadline = dirty
+                    .first_dirty_at_unix_ms
+                    .saturating_add(config.max_wait_seconds.saturating_mul(1_000));
+                let deadline = if dirty.new_page_ids.len() >= config.min_new_pages {
+                    max_wait_deadline.min(
+                        dirty
+                            .last_dirty_at_unix_ms
+                            .saturating_add(config.quiet_period_seconds.saturating_mul(1_000)),
+                    )
+                } else {
+                    max_wait_deadline
+                };
+                deadline.saturating_sub(now).div_ceil(1_000).max(1)
+            })
+            .min()
     }
 
     pub(crate) fn automation_status(
@@ -588,7 +703,7 @@ impl MaintenanceLedger {
             (_, Some(completed), _)
                 if now.saturating_sub(completed)
                     > config
-                        .interval_seconds
+                        .max_interval_seconds
                         .saturating_mul(2)
                         .saturating_mul(1_000) =>
             {
@@ -618,6 +733,10 @@ impl MaintenanceLedger {
             last_error: self.scheduler.last_error.clone(),
             last_report: self.scheduler.last_report.clone(),
             current_report: self.scheduler.current_report.clone(),
+            next_wake_at: self.scheduler.next_wake_at_unix_ms.map(timestamp_string),
+            last_wake_reason: self.scheduler.last_wake_reason,
+            idle_cycles: self.scheduler.idle_cycles,
+            consecutive_failures: self.scheduler.consecutive_failures,
             observed_page_count: self.write_trigger.observed_revisions.len(),
             dirty_region_count: self.write_trigger.dirty_regions.len(),
             ready_region_count: ready_regions.len(),
@@ -734,6 +853,11 @@ impl MaintenanceLedger {
     }
 }
 
+fn exponential_delay(base: u64, ceiling: u64, exponent: u32) -> u64 {
+    base.saturating_mul(1_u64.checked_shl(exponent.min(63)).unwrap_or(u64::MAX))
+        .min(ceiling)
+}
+
 struct MaintenanceLedgerLock(std::fs::File);
 
 impl MaintenanceLedgerLock {
@@ -840,9 +964,46 @@ fn snooze_is_visible(value: Option<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use pcp_core::PageMutability;
 
     use super::*;
+    use crate::maintenance::{
+        MaintenanceMode, MaintenanceWorkerConfig, PackingMaintenanceConfig,
+        RelationMaintenanceConfig, RetentionMaintenanceConfig, SummaryMaintenanceConfig,
+    };
+
+    fn scheduler_config() -> MaintenanceConfig {
+        MaintenanceConfig {
+            enabled: true,
+            mode: MaintenanceMode::Apply,
+            state_path: PathBuf::from("maintenance-test.json"),
+            allowed_scopes: vec!["conversation:test".to_owned()],
+            interval_seconds: 10,
+            max_interval_seconds: 80,
+            initial_delay_seconds: 0,
+            write_trigger: WriteTriggeredMaintenanceConfig {
+                min_new_pages: 8,
+                quiet_period_seconds: 10,
+                max_wait_seconds: 60,
+            },
+            max_jobs_per_cycle: 2,
+            principal_id: "service:test-maintainer".to_owned(),
+            principal_name: "Test maintainer".to_owned(),
+            worker: MaintenanceWorkerConfig::Command {
+                program: PathBuf::from("/bin/false"),
+                args: Vec::new(),
+                timeout_seconds: 1,
+                actor_id: "model:test-maintainer".to_owned(),
+                actor_type: "model".to_owned(),
+            },
+            summary: SummaryMaintenanceConfig::default(),
+            packing: PackingMaintenanceConfig::default(),
+            relation: RelationMaintenanceConfig::default(),
+            retention: RetentionMaintenanceConfig::default(),
+        }
+    }
 
     fn page(id: &str, revision: &str) -> DurablePageInventoryItem {
         DurablePageInventoryItem {
@@ -981,5 +1142,99 @@ mod tests {
             MaintenanceLedger::region_snapshot(&[first.clone(), second.clone()], &regions);
         ledger.acknowledge_unchanged_regions(&expected, &[first, second]);
         assert!(ledger.ready_regions(&trigger).is_empty());
+    }
+
+    #[test]
+    fn idle_cycles_back_off_to_the_configured_safety_poll_ceiling() {
+        let config = scheduler_config();
+        let mut ledger = MaintenanceLedger::default();
+        let report = MaintenanceCycleReport::default();
+
+        assert_eq!(ledger.schedule_after_success(&config, &report), 10);
+        assert_eq!(ledger.schedule_after_success(&config, &report), 20);
+        assert_eq!(ledger.schedule_after_success(&config, &report), 40);
+        assert_eq!(ledger.schedule_after_success(&config, &report), 80);
+        assert_eq!(ledger.schedule_after_success(&config, &report), 80);
+        assert_eq!(ledger.scheduler.idle_cycles, 5);
+        assert!(ledger.scheduler.next_wake_at_unix_ms.is_some());
+    }
+
+    #[test]
+    fn an_external_write_breaks_idle_backoff() {
+        let config = scheduler_config();
+        let mut ledger = MaintenanceLedger::default();
+        let report = MaintenanceCycleReport::default();
+        let _ = ledger.schedule_after_success(&config, &report);
+        let _ = ledger.schedule_after_success(&config, &report);
+        assert_eq!(ledger.scheduler.idle_cycles, 2);
+
+        ledger.start_scheduled_cycle(MaintenanceWakeReason::ExternalWrite);
+        assert_eq!(ledger.schedule_after_success(&config, &report), 10);
+        assert_eq!(ledger.scheduler.idle_cycles, 1);
+        assert_eq!(
+            ledger.scheduler.last_wake_reason,
+            Some(MaintenanceWakeReason::ExternalWrite)
+        );
+    }
+
+    #[test]
+    fn write_pressure_uses_quiet_or_absolute_deadlines_instead_of_idle_backoff() {
+        let config = scheduler_config();
+        let mut ledger = MaintenanceLedger::default();
+        let report = MaintenanceCycleReport::default();
+        let mut inventory = vec![page("1", "rev_1")];
+        let _ = ledger.observe_writes(&inventory, &config.write_trigger);
+
+        inventory.push(page("2", "rev_2"));
+        let _ = ledger.observe_writes(&inventory, &config.write_trigger);
+        let sparse_delay = ledger.schedule_after_success(&config, &report);
+        assert!((59..=60).contains(&sparse_delay));
+
+        for id in 3..=9 {
+            inventory.push(page(&id.to_string(), &format!("rev_{id}")));
+        }
+        let _ = ledger.observe_writes(&inventory, &config.write_trigger);
+        let pressure_delay = ledger.schedule_after_success(&config, &report);
+        assert!((9..=10).contains(&pressure_delay));
+        assert_eq!(ledger.scheduler.idle_cycles, 0);
+    }
+
+    #[test]
+    fn failures_use_a_bounded_independent_retry_backoff() {
+        let mut config = scheduler_config();
+        config.interval_seconds = 600;
+        config.max_interval_seconds = 3_600;
+        let mut ledger = MaintenanceLedger::default();
+
+        assert_eq!(ledger.schedule_after_failure(&config), 30);
+        assert_eq!(ledger.schedule_after_failure(&config), 60);
+        assert_eq!(ledger.schedule_after_failure(&config), 120);
+        assert_eq!(ledger.scheduler.consecutive_failures, 3);
+        assert_eq!(ledger.scheduler.idle_cycles, 0);
+    }
+
+    #[test]
+    fn older_scheduler_state_loads_with_adaptive_fields_at_safe_defaults() {
+        let ledger: MaintenanceLedger = serde_json::from_str(
+            r#"{
+                "entries": {},
+                "writeTrigger": {"observedRevisions": {}, "dirtyRegions": {}},
+                "relationReviews": {},
+                "reviewItems": {},
+                "scheduler": {
+                    "lastStartedAtUnixMs": 10,
+                    "lastCompletedAtUnixMs": 11,
+                    "lastError": null,
+                    "lastReport": null,
+                    "currentReport": null
+                }
+            }"#,
+        )
+        .expect("load pre-adaptive maintenance ledger");
+
+        assert_eq!(ledger.scheduler.idle_cycles, 0);
+        assert_eq!(ledger.scheduler.consecutive_failures, 0);
+        assert!(ledger.scheduler.next_wake_at_unix_ms.is_none());
+        assert!(ledger.scheduler.last_wake_reason.is_none());
     }
 }

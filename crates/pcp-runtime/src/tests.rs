@@ -1,4 +1,10 @@
-use std::{sync::Arc, time::SystemTime};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::SystemTime,
+};
 
 use pcp_client::{EmbeddedPcpClient, PcpApi, PcpTenantApi};
 use pcp_core::{
@@ -42,6 +48,7 @@ mode = "apply"
 state_path = "data/maintenance.json"
 allowed_scopes = ["user:{identity_id}", "project:symbiont-d"]
 interval_seconds = 300
+max_interval_seconds = 3600
 initial_delay_seconds = 45
 max_jobs_per_cycle = 2
 
@@ -68,8 +75,12 @@ max_pages = 6
     );
     let maintenance = config.maintenance.as_ref().expect("maintenance config");
     assert_eq!(maintenance.mode, crate::MaintenanceMode::Apply);
+    assert_eq!(maintenance.max_interval_seconds, 3600);
     assert_eq!(maintenance.initial_delay_seconds, 45);
     assert_eq!(maintenance.state_path, root.join("data/maintenance.json"));
+    let mut invalid_schedule = maintenance.clone();
+    invalid_schedule.max_interval_seconds = invalid_schedule.interval_seconds - 1;
+    assert!(invalid_schedule.validate().is_err());
     let crate::MaintenanceWorkerConfig::Command { program, .. } = &maintenance.worker else {
         panic!("expected command maintenance worker");
     };
@@ -338,7 +349,13 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
         vec![namespace.clone()],
     );
     let store: Arc<dyn PcpStore> = store;
-    let embedded = EmbeddedPcpClient::shared(store, access);
+    let observed_writes = Arc::new(AtomicUsize::new(0));
+    let observer_counter = Arc::clone(&observed_writes);
+    let embedded: Arc<dyn PcpApi> = Arc::new(
+        EmbeddedPcpClient::new(store, access).with_successful_write_observer(Arc::new(move || {
+            observer_counter.fetch_add(1, Ordering::SeqCst);
+        })),
+    );
     let server_path = socket_path.clone();
     let mut server = tokio::spawn(async move { serve_unix(server_path, embedded).await });
     let remote = tokio::select! {
@@ -402,6 +419,7 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
         })
         .await
         .expect("write through remote client");
+    assert_eq!(observed_writes.load(Ordering::SeqCst), 1);
     let found = remote
         .search_pages(SearchPagesRequest {
             query: "server bound principal".to_owned(),
@@ -417,6 +435,7 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
         .expect("search through remote client");
     assert_eq!(found.hits.len(), 1);
     assert_eq!(found.hits[0].revision_id, written.revision_id);
+    assert_eq!(observed_writes.load(Ordering::SeqCst), 1);
     let mut second_request = test_page(
         &identity_id,
         &namespace,

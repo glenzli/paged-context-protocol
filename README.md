@@ -194,7 +194,8 @@ sh scripts/import-store.sh \
 必须人工接受后才影响检索或生命周期。Luna 作为默认低成本模型；只有证据完整且 Luna 明确 `defer` 的指定语义任务
 才允许一次 Sol 二次判定，格式错误、过期候选和调用失败都不会升级。Runtime 控制候选、预算、关系类型、basis Revision 和提交，Store 再验证权限、精确当前 Revision、
 来源连续性、外部引用与事务原子性。pack 与 Relation 维护默认关闭，必须单独启用；维护器也不会自动执行
-Revision 回收。官方 Runtime 可使用独立授权的
+Revision 回收。外部写入会打断空闲等待并重新计算静默窗口；连续空跑则从基础检查间隔逐级退避到配置上限，
+仍有工作时以短周期继续收敛，错误使用独立退避。官方 Runtime 可使用独立授权的
 [Infer Runtime](https://github.com/glenzli/infer-runtime) consumer，也保留本地 command worker。
 
 详见 [`crates/pcp-runtime/README.md`](crates/pcp-runtime/README.md)。

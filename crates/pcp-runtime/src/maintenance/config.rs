@@ -29,6 +29,11 @@ pub struct MaintenanceConfig {
     pub allowed_scopes: Vec<String>,
     #[serde(default = "default_interval_seconds")]
     pub interval_seconds: u64,
+    /// Longest idle safety-poll interval after repeated cycles observe no
+    /// changes. Successful writes wake the scheduler independently of this
+    /// ceiling when Runtime owns the write path.
+    #[serde(default = "default_max_interval_seconds")]
+    pub max_interval_seconds: u64,
     #[serde(default)]
     pub initial_delay_seconds: u64,
     #[serde(default)]
@@ -371,6 +376,10 @@ impl MaintenanceConfig {
             "PCP maintenance interval_seconds must be positive"
         );
         anyhow::ensure!(
+            self.max_interval_seconds >= self.interval_seconds,
+            "PCP maintenance max_interval_seconds must not be shorter than interval_seconds"
+        );
+        anyhow::ensure!(
             self.max_jobs_per_cycle > 0,
             "PCP maintenance max_jobs_per_cycle must be positive"
         );
@@ -534,6 +543,10 @@ impl MaintenanceConfig {
 
 fn default_interval_seconds() -> u64 {
     1_800
+}
+
+fn default_max_interval_seconds() -> u64 {
+    24 * 60 * 60
 }
 
 fn default_jobs_per_cycle() -> u32 {
