@@ -44,6 +44,8 @@ pub struct MaintenanceAutomationStatus {
     pub last_completed_at: Option<String>,
     pub last_error: Option<String>,
     pub last_report: Option<MaintenanceCycleReport>,
+    #[serde(default)]
+    pub current_report: Option<MaintenanceCycleReport>,
     pub observed_page_count: usize,
     pub dirty_region_count: usize,
     pub ready_region_count: usize,
@@ -123,6 +125,8 @@ struct SchedulerLedger {
     last_completed_at_unix_ms: Option<u64>,
     last_error: Option<String>,
     last_report: Option<MaintenanceCycleReport>,
+    #[serde(default)]
+    current_report: Option<MaintenanceCycleReport>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -334,12 +338,18 @@ impl MaintenanceLedger {
     pub(crate) fn start_scheduled_cycle(&mut self) {
         self.scheduler.last_started_at_unix_ms = Some(now_unix_ms());
         self.scheduler.last_error = None;
+        self.scheduler.current_report = Some(MaintenanceCycleReport::default());
+    }
+
+    pub(crate) fn update_scheduled_cycle(&mut self, report: MaintenanceCycleReport) {
+        self.scheduler.current_report = Some(report);
     }
 
     pub(crate) fn complete_scheduled_cycle(&mut self, report: MaintenanceCycleReport) {
         self.scheduler.last_completed_at_unix_ms = Some(now_unix_ms());
         self.scheduler.last_error = None;
         self.scheduler.last_report = Some(report);
+        self.scheduler.current_report = None;
     }
 
     pub(crate) fn fail_scheduled_cycle(&mut self, error: impl std::fmt::Display) {
@@ -359,6 +369,7 @@ impl MaintenanceLedger {
             self.scheduler.last_error.as_ref(),
         ) {
             (None, _, _) => MaintenanceAutomationState::NotStarted,
+            (Some(_), None, _) => MaintenanceAutomationState::Running,
             (Some(started), Some(completed), _) if completed < started => {
                 MaintenanceAutomationState::Running
             }
@@ -395,6 +406,7 @@ impl MaintenanceLedger {
                 .map(timestamp_string),
             last_error: self.scheduler.last_error.clone(),
             last_report: self.scheduler.last_report.clone(),
+            current_report: self.scheduler.current_report.clone(),
             observed_page_count: self.write_trigger.observed_revisions.len(),
             dirty_region_count: self.write_trigger.dirty_regions.len(),
             ready_region_count: ready_regions.len(),

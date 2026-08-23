@@ -719,19 +719,23 @@ impl RuntimeMaintainer {
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
         self.ledger
             .observe_writes(&inventory, &self.config.write_trigger);
+        let mut aggregate = MaintenanceCycleReport {
+            inspected_pages: inventory.len(),
+            ..MaintenanceCycleReport::default()
+        };
+        self.ledger.update_scheduled_cycle(aggregate.clone());
+        self.ledger.save(&self.config.state_path).await?;
         let regions = self.ledger.ready_regions(&self.config.write_trigger);
         if regions.is_empty() {
-            return Ok(MaintenanceCycleReport {
-                inspected_pages: inventory.len(),
-                ..MaintenanceCycleReport::default()
-            });
+            return Ok(aggregate);
         }
         let expected = MaintenanceLedger::region_snapshot(&inventory, &regions);
-        let mut aggregate = MaintenanceCycleReport::default();
         while aggregate.worker_calls < self.config.max_jobs_per_cycle {
             let report = self.run_once_inner(false, 1, Some(&regions), true).await?;
             let worker_calls = report.worker_calls;
             aggregate.merge(report);
+            self.ledger.update_scheduled_cycle(aggregate.clone());
+            self.ledger.save(&self.config.state_path).await?;
             if worker_calls == 0 {
                 break;
             }

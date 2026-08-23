@@ -2,7 +2,14 @@ import { createPageInspector } from "/page-inspector.js?v=20260823.1";
 import { describePagePayload, pagePayloadPreviewText } from "/page-content.js?v=20260822.1";
 import { createHealthView } from "/health-view.js?v=20260816.3";
 import { createRetentionView } from "/retention-view.js?v=20260818.1";
-import { createQueryView } from "/query-view.js?v=20260819.2";
+import { createQueryView } from "/query-view.js?v=20260823.2";
+import {
+  batchProgress,
+  beginBatch,
+  completeBatch,
+  failBatch,
+  runnableBatchIndexes,
+} from "/progressive-operation.js?v=20260823.2";
 
 const DEFAULT_PAGE_LIMIT = 20;
 const PAGE_LIMIT_OPTIONS = new Set([10, 20, 30]);
@@ -13,6 +20,7 @@ const SUMMARY_REVIEW_BATCH_SIZE = 1;
 const THEME_STORAGE_KEY = "pcp-console.theme";
 const LANGUAGE_STORAGE_KEY = "pcp-console.language";
 const PAGE_LIMIT_STORAGE_KEY = "pcp-console.pages-per-page";
+let maintenanceStatusPoll = null;
 const ZH_MESSAGES = {
   "24 hours": "24 小时",
   "7 days": "7 天",
@@ -281,6 +289,8 @@ const ZH_MESSAGES = {
   "Semantic search in progress": "语义搜索进行中",
   "The Router is retrieving and reviewing bounded candidates.": "Router 正在受限预算内检索并审阅候选。",
   "Finding independently relevant pages.": "正在查找独立相关的页面。",
+  "The previous completed context pack stays visible until this atomic request completes.": "在这次原子请求完成前，上一份完整 Context Pack 会继续保留在页面上。",
+  "Ranking and budget assembly return as one stable context pack; unstable intermediate ranks are not shown.": "排序与预算组装会一次性返回稳定的 Context Pack；不会展示尚未稳定的中间排名。",
   "seconds": "秒",
   "Context pack review": "Context Pack 审阅",
   "Run a query to inspect the ranked context pack.": "执行查询以审阅按相关度排序的 Context Pack。",
@@ -872,12 +882,14 @@ const state = {
     // the operator explicitly applies the selection.
     relationDraftStates: new Map(),
     relationReviewStates: new Map(),
+    applyStates: new Map(),
     relationReviews: [],
   },
   archive: {
     state: "idle",
     busy: false,
     activity: null,
+    operation: null,
     scan: null,
     analyses: [],
     selected: new Set(),
@@ -1143,6 +1155,7 @@ const queryView = createQueryView({
   showError,
   t,
   formatNumber,
+  openPageIcon,
   openPage: (pageId) => pageInspector.open(pageId),
 });
 const healthView = createHealthView({ request: api, showError, formatNumber, t });
@@ -1701,6 +1714,7 @@ function resetArchiveSession() {
   state.archive.state = "idle";
   state.archive.busy = false;
   state.archive.activity = null;
+  state.archive.operation = null;
   state.archive.scan = null;
   state.archive.analyses = [];
   state.archive.selected.clear();
@@ -1713,8 +1727,17 @@ function resetArchiveSession() {
 
 function archiveCandidates() {
   return state.archive.analyses
-    .map(({ scanPage, analysis, applied }) => !applied && analysis.candidate ? { ...analysis.candidate, scanPage } : null)
+    .map(({ scanPage, analysis, applied, applyIssue }) => !applied && analysis?.candidate
+      ? { ...analysis.candidate, scanPage, applyIssue }
+      : null)
     .filter(Boolean);
+}
+
+function refreshArchiveAnalysisTotals() {
+  state.archive.retained = state.archive.analyses.filter(({ analysis }) => analysis?.decision === "retain").length;
+  state.archive.deferred = state.archive.analyses.filter(({ status, analysis }) => (
+    status === "failed" || analysis?.decision === "defer"
+  )).length;
 }
 
 function renderArchiveSteps(stage, { scanning = false } = {}) {
@@ -1739,7 +1762,7 @@ function archiveProposalCard(candidate) {
   const select = document.createElement("input");
   select.type = "checkbox";
   select.checked = state.archive.selected.has(candidate.candidateId);
-  select.disabled = state.archive.busy;
+  select.disabled = state.archive.operation === "apply";
   select.setAttribute("aria-label", t("Select archive candidate"));
   select.addEventListener("change", () => {
     if (select.checked) state.archive.selected.add(candidate.candidateId);
@@ -1762,14 +1785,21 @@ function archiveProposalCard(candidate) {
   const reason = element("p", "archive-candidate-reason", candidate.reason);
   const signals = element("div", "archive-candidate-signals");
   candidate.candidateSignals.forEach((signal) => signals.append(element("span", "status-pill", signal)));
+  if (candidate.applyIssue) {
+    const failed = element("span", "maintenance-apply-state failed", currentLanguage === "zh" ? "应用失败，可重试" : "Apply failed; retry available");
+    failed.title = candidate.applyIssue;
+    signals.append(failed);
+  }
   card.append(heading, preview, reason, signals);
   return card;
 }
 
 function renderArchiveWorkflow() {
   const scan = state.archive.scan;
-  const analyzed = state.archive.analyses.length;
   const total = scan?.pages?.length || 0;
+  const progress = batchProgress(state.archive.analyses);
+  const analyzed = progress.processed;
+  const attempts = state.archive.analyses.reduce((total, batch) => total + (batch.attempts || 0), 0);
   const candidates = archiveCandidates();
   const stage = !scan ? "scan" : analyzed < total ? "analyze" : "review";
   const scanning = state.archive.busy && !scan;
@@ -1778,12 +1808,16 @@ function renderArchiveWorkflow() {
   byId("archive-scan-metrics").replaceChildren(
     metric(t("Candidates"), scanning ? "—" : formatNumber(total)),
     metric(t("Eligible Pages"), scanning ? "—" : formatNumber(scan?.eligiblePages || 0)),
-    metric(t("Model calls"), `${formatNumber(analyzed)} / ${formatNumber(scan?.estimatedModelCalls || 0)}`, analyzed ? "info" : ""),
-    metric(t("Archive proposals"), formatNumber(candidates.length), candidates.length ? "warning" : "", stage === "review" ? `${formatNumber(state.archive.retained)} ${t("Retained")} · ${formatNumber(state.archive.deferred)} ${t("Deferred")}` : ""),
+    metric(t("Model calls"), `${formatNumber(attempts)} / ${formatNumber(scan?.estimatedModelCalls || 0)}`, attempts ? "info" : ""),
+    metric(t("Archive proposals"), formatNumber(candidates.length), candidates.length ? "warning" : "", analyzed ? `${formatNumber(state.archive.retained)} ${t("Retained")} · ${formatNumber(state.archive.deferred)} ${t("Deferred")}` : ""),
   );
   const issue = byId("archive-issue");
-  issue.hidden = !state.archive.issue;
-  issue.textContent = state.archive.issue || "";
+  const batchIssues = state.archive.analyses
+    .filter((batch) => batch.issue || batch.applyIssue)
+    .map((batch) => `${currentLanguage === "zh" ? "页面" : "Page"} ${formatNumber(batch.batchIndex + 1)}: ${batch.applyIssue || batch.issue}`);
+  const issueText = [state.archive.issue, ...batchIssues].filter(Boolean).join("\n");
+  issue.hidden = !issueText;
+  issue.textContent = issueText;
   byId("archive-status").textContent = state.archive.busy
     ? state.archive.activity || t("Working")
     : stage === "review"
@@ -1792,23 +1826,41 @@ function renderArchiveWorkflow() {
         ? t("Scanning candidates")
         : `${formatNumber(analyzed)} / ${formatNumber(total)} ${t("Analyzed")}`;
   const analyze = byId("archive-analyze");
-  analyze.disabled = state.archive.busy || !scan || analyzed >= total;
+  analyze.disabled = state.archive.busy || !scan || !state.archive.analyses.some((batch) => batch.status === "pending");
   analyze.textContent = analyzed ? t("Continue analysis") : t("Analyze suggestions");
   const apply = byId("archive-apply");
-  apply.disabled = state.archive.busy || selectedCount === 0;
+  apply.disabled = state.archive.busy || stage !== "review" || selectedCount === 0;
   apply.textContent = `${t("Archive selected")} (${formatNumber(selectedCount)})`;
   const rescan = byId("archive-rescan");
   rescan.disabled = state.archive.busy;
   const finish = byId("archive-finish");
   finish.disabled = state.archive.busy || stage !== "review";
+  const retry = byId("archive-retry-failed");
+  retry.hidden = progress.failed === 0;
+  retry.disabled = state.archive.busy || progress.failed === 0;
+  retry.textContent = `${t("Retry failed batches")} (${formatNumber(progress.failed)})`;
+  const analysisLog = byId("archive-analysis-log");
+  analysisLog.hidden = !state.archive.analyses.length;
+  byId("archive-analysis-log-summary").textContent = currentLanguage === "zh"
+    ? `分析进度：${formatNumber(progress.completed)} 个完成，${formatNumber(progress.failed)} 个失败，共 ${formatNumber(progress.total)} 个。`
+    : `Analysis progress: ${formatNumber(progress.completed)} complete, ${formatNumber(progress.failed)} failed, ${formatNumber(progress.total)} total.`;
+  byId("archive-analysis-log-body").textContent = state.archive.analyses
+    .filter((batch) => batch.status !== "pending" || batch.issue)
+    .map((batch) => `${currentLanguage === "zh" ? "页面" : "Page"} ${formatNumber(batch.batchIndex + 1)} · ${batch.status}${batch.analysis?.decision ? ` · ${batch.analysis.decision}` : ""}${batch.issue ? ` · ${batch.issue}` : ""}${batch.applyIssue ? ` · ${batch.applyIssue}` : ""}`)
+    .join("\n");
   const proposals = byId("archive-proposals");
-  proposals.hidden = stage !== "review";
-  if (stage === "review") {
-    byId("archive-selection-status").textContent = `${t("Selected")} ${formatNumber(selectedCount)} / ${formatNumber(candidates.length)}`;
+  proposals.hidden = !["analyze", "review"].includes(stage) || candidates.length === 0;
+  proposals.classList.toggle("is-live", stage === "analyze");
+  if (!proposals.hidden) {
+    byId("archive-selection-status").textContent = stage === "analyze"
+      ? (currentLanguage === "zh"
+        ? `分析仍在继续 · 已选 ${formatNumber(selectedCount)} / ${formatNumber(candidates.length)} · 完成前不能应用`
+        : `Analysis is still running · ${formatNumber(selectedCount)} of ${formatNumber(candidates.length)} selected · applying is locked`)
+      : `${t("Selected")} ${formatNumber(selectedCount)} / ${formatNumber(candidates.length)}`;
     const selectAll = byId("archive-select-all");
     selectAll.checked = candidates.length > 0 && selectedCount === candidates.length;
     selectAll.indeterminate = selectedCount > 0 && selectedCount < candidates.length;
-    selectAll.disabled = state.archive.busy || candidates.length === 0;
+    selectAll.disabled = state.archive.busy || stage !== "review" || candidates.length === 0;
     byId("archive-cards").replaceChildren(
       ...(candidates.length ? candidates.map(archiveProposalCard) : [element("div", "empty", t("No archive proposals"))]),
     );
@@ -1841,12 +1893,22 @@ async function scanArchiveCandidates() {
   if (state.archive.busy) return;
   state.archive.busy = true;
   state.archive.activity = t("Scanning candidates");
+  state.archive.operation = "scan";
   state.archive.issue = null;
   renderArchiveSession();
   try {
     const scan = await maintenanceMutation("/api/maintenance/archive/scan", {});
     state.archive.scan = scan;
-    state.archive.analyses = [];
+    state.archive.analyses = (scan.pages || []).map((scanPage, batchIndex) => ({
+      batchIndex,
+      scanPage,
+      status: "pending",
+      attempts: 0,
+      analysis: null,
+      issue: null,
+      applyIssue: null,
+      applied: false,
+    }));
     state.archive.selected.clear();
     state.archive.retained = 0;
     state.archive.deferred = 0;
@@ -1860,6 +1922,7 @@ async function scanArchiveCandidates() {
   } finally {
     state.archive.busy = false;
     state.archive.activity = null;
+    state.archive.operation = null;
     renderArchiveSession();
   }
 }
@@ -1872,34 +1935,39 @@ async function startArchiveSession() {
   await scanArchiveCandidates();
 }
 
-async function analyzeArchiveCandidates() {
+async function analyzeArchiveCandidates({ retryFailed = false } = {}) {
   const scan = state.archive.scan;
   if (!archiveSessionActive() || state.archive.busy || !scan) return;
-  const pending = scan.pages.filter((page) => !state.archive.analyses.some(({ scanPage }) => scanPage.pageId === page.pageId));
-  if (!pending.length) return;
+  const indexes = runnableBatchIndexes(state.archive.analyses, { retryFailed });
+  if (!indexes.length) return;
   state.archive.busy = true;
+  state.archive.operation = "analyze";
   state.archive.issue = null;
-  try {
-    for (const [index, page] of pending.entries()) {
-      state.archive.activity = `${t("Analyzing")} ${formatNumber(index + 1)} / ${formatNumber(pending.length)}`;
-      renderArchiveSession();
+  for (const [progressIndex, batchIndex] of indexes.entries()) {
+    const batch = state.archive.analyses[batchIndex];
+    if (!batch) continue;
+    const page = batch.scanPage;
+    beginBatch(batch);
+    batch.applyIssue = null;
+    state.archive.activity = `${t("Analyzing")} ${formatNumber(progressIndex + 1)} / ${formatNumber(indexes.length)}`;
+    renderArchiveSession();
+    try {
       const analysis = await maintenanceMutation("/api/maintenance/archive/analyze", {
         scanId: scan.scanId,
         pageId: page.pageId,
         revisionId: page.revisionId,
       });
-      state.archive.analyses.push({ scanPage: page, analysis });
-      if (analysis.decision === "retain") state.archive.retained += 1;
-      if (analysis.decision === "defer") state.archive.deferred += 1;
+      completeBatch(batch, { analysis });
+    } catch (error) {
+      failBatch(batch, error);
     }
-  } catch (error) {
-    state.archive.issue = error.message || String(error);
-    showError(error);
-  } finally {
-    state.archive.busy = false;
-    state.archive.activity = null;
+    refreshArchiveAnalysisTotals();
     renderArchiveSession();
   }
+  state.archive.busy = false;
+  state.archive.activity = null;
+  state.archive.operation = null;
+  renderArchiveSession();
 }
 
 function toggleArchiveSelection() {
@@ -1920,28 +1988,43 @@ async function applyArchiveSelection() {
   });
   if (!confirmed) return;
   state.archive.busy = true;
+  state.archive.operation = "apply";
   state.archive.issue = null;
-  try {
-    for (const [index, candidate] of selected.entries()) {
-      state.archive.activity = `${t("Archiving")} ${formatNumber(index + 1)} / ${formatNumber(selected.length)}`;
-      renderArchiveSession();
+  const failures = [];
+  for (const [index, candidate] of selected.entries()) {
+    state.archive.activity = `${t("Archiving")} ${formatNumber(index + 1)} / ${formatNumber(selected.length)}`;
+    renderArchiveSession();
+    const record = state.archive.analyses.find(({ analysis }) => analysis?.candidate?.candidateId === candidate.candidateId);
+    try {
       await maintenanceMutation("/api/maintenance/archive/apply", {
         pageId: candidate.pageId,
         expectedRevisionId: candidate.revisionId,
         reason: `${t("Human-approved archive review")}: ${candidate.reason}`,
       });
       state.archive.applied += 1;
-      const record = state.archive.analyses.find(({ analysis }) => analysis.candidate?.candidateId === candidate.candidateId);
-      if (record) record.applied = true;
+      if (record) {
+        record.applied = true;
+        record.applyIssue = null;
+      }
       state.archive.selected.delete(candidate.candidateId);
+    } catch (error) {
+      const message = error.message || String(error);
+      if (record) record.applyIssue = message;
+      failures.push({ candidateId: candidate.candidateId, message });
     }
+    renderArchiveSession();
+  }
+  try {
     resetGovernance({ status: "archived", scope: state.governance.scope });
-  } catch (error) {
-    state.archive.issue = error.message || String(error);
-    showError(error);
   } finally {
     state.archive.busy = false;
     state.archive.activity = null;
+    state.archive.operation = null;
+    state.archive.issue = failures.length
+      ? (currentLanguage === "zh"
+        ? `${formatNumber(failures.length)} 个归档提案未能应用；成功项已保留，失败项仍可重试。`
+        : `${formatNumber(failures.length)} archive proposals could not be applied. Successful items were kept and failed items remain available to retry.`)
+      : null;
     renderArchiveSession();
   }
 }
@@ -2006,6 +2089,7 @@ function resetMaintenanceSession() {
   state.maintenance.selected.clear();
   state.maintenance.relationDraftStates.clear();
   state.maintenance.relationReviewStates.clear();
+  state.maintenance.applyStates.clear();
 }
 
 function renderMaintenanceStatus(status) {
@@ -2054,9 +2138,32 @@ function renderAutomationStatus() {
     metric(t("Ready regions"), formatNumber(automation.readyRegionCount), automation.readyRegionCount ? "info" : ""),
     metric(t("Pending relation review"), formatNumber(automation.pendingRelationReviewCount), automation.pendingRelationReviewCount ? "warning" : ""),
   );
+  const currentReport = automation.currentReport;
+  const progress = byId("maintenance-automation-progress");
+  progress.hidden = !currentReport;
+  if (currentReport) {
+    const proposed = (currentReport.summariesProposed || 0)
+      + (currentReport.packsProposed || 0)
+      + (currentReport.relationsProposed || 0)
+      + (currentReport.retentionLeasesProposed || 0);
+    const committed = (currentReport.summariesWritten || 0)
+      + (currentReport.packsCommitted || 0)
+      + (currentReport.relationsCommitted || 0)
+      + (currentReport.retentionLeasesWritten || 0);
+    byId("maintenance-automation-progress-title").textContent = automation.state === "running"
+      ? (currentLanguage === "zh" ? "本轮实时进度" : "Live cycle progress")
+      : (currentLanguage === "zh" ? "上次失败前的部分进度" : "Partial progress before the last failure");
+    byId("maintenance-automation-progress-metrics").replaceChildren(
+      metric(t("Maintenance inventory"), formatNumber(currentReport.inspectedPages)),
+      metric(t("Model calls"), formatNumber(currentReport.workerCalls), currentReport.workerCalls ? "info" : ""),
+      metric(t("Proposals"), formatNumber(proposed), proposed ? "warning" : ""),
+      metric(t("Applied"), formatNumber(committed), committed ? "positive" : "", `${formatNumber(currentReport.deferred || 0)} ${t("Deferred")}`),
+    );
+  }
   const completed = automation.lastCompletedAt;
-  byId("maintenance-automation-detail").textContent = completed
-    ? `${t("Last completed")}: ${formatTime(completed)}`
+  const started = automation.lastStartedAt;
+  byId("maintenance-automation-detail").textContent = started || completed
+    ? [started ? `${currentLanguage === "zh" ? "最近开始" : "Last started"}: ${formatTime(started)}` : "", completed ? `${t("Last completed")}: ${formatTime(completed)}` : ""].filter(Boolean).join(" · ")
     : t("Awaiting the first Runtime heartbeat.");
   const error = byId("maintenance-automation-error");
   error.hidden = !automation.lastError;
@@ -2370,7 +2477,7 @@ function maintenanceSelectionCheckbox(candidate) {
   const stagedSuppression = candidate.operation === "relation"
     && relationDraftState(candidate) === "suppressed";
   checkbox.checked = !stagedSuppression && state.maintenance.selected.has(candidate.candidateId);
-  checkbox.disabled = stagedSuppression;
+  checkbox.disabled = stagedSuppression || state.maintenance.applyStates.get(candidate.candidateId)?.status === "running";
   checkbox.setAttribute("aria-label", `Select ${candidate.candidateId}`);
   if (stagedSuppression) checkbox.title = t("Will not be suggested when applied");
   checkbox.addEventListener("change", () => {
@@ -2385,6 +2492,17 @@ function maintenanceSelectionCheckbox(candidate) {
     renderMaintenanceSession();
   });
   return checkbox;
+}
+
+function maintenanceApplyStateNode(candidate) {
+  const applyState = state.maintenance.applyStates.get(candidate.candidateId);
+  if (!applyState) return null;
+  const label = applyState.status === "running"
+    ? (currentLanguage === "zh" ? "正在应用" : "Applying")
+    : (currentLanguage === "zh" ? "应用失败，可重试" : "Apply failed; retry available");
+  const node = element("span", `maintenance-apply-state ${applyState.status}`, label);
+  if (applyState.message) node.title = applyState.message;
+  return node;
 }
 
 function relationDraftState(candidate) {
@@ -2564,6 +2682,8 @@ function maintenanceCandidateRow(candidate) {
     }
     content.append(element("strong", "", formatSize(candidate.contentChars)));
   }
+  const applyState = maintenanceApplyStateNode(candidate);
+  if (applyState) change.append(applyState);
   row.append(selectCell, source, change, inputs, content);
   return row;
 }
@@ -2599,6 +2719,8 @@ function summaryProposalCard(candidate) {
   heading.append(selection, source, open);
   const metadata = element("div", "maintenance-summary-metadata");
   metadata.textContent = `${t("Summary route")} · ${formatSize(candidate.contentChars)} ${t("Page")}`;
+  const applyState = maintenanceApplyStateNode(candidate);
+  if (applyState) metadata.append(" · ", applyState);
   card.append(heading, metadata, element("div", "maintenance-summary-content", candidate.content));
   return card;
 }
@@ -2619,6 +2741,8 @@ function relationProposalCard(candidate) {
   else if (reviewState === "rejected") aside.append(element("span", "maintenance-relation-state rejected", t("Rejected for this review")));
   else if (reviewState === "reviewed") aside.append(element("span", "maintenance-relation-state reviewed", t("Reviewed")));
   if (draftState === "suppressed") aside.append(element("span", "maintenance-relation-state suppressed", t("Will not be suggested when applied")));
+  const applyState = maintenanceApplyStateNode(candidate);
+  if (applyState) aside.append(applyState);
 
   const body = element("div", "maintenance-relation-proposal-body");
   const pages = element("div", "maintenance-relation-proposal-pages");
@@ -2937,7 +3061,9 @@ function renderMaintenanceWorkflow() {
       ),
       metric(t("Proposals"), formatNumber(candidates.length), candidates.length ? "positive" : ""),
     ];
-  byId("maintenance-scan-metrics").replaceChildren(...metrics);
+  const metricGrid = byId("maintenance-scan-metrics");
+  metricGrid.classList.toggle("four-columns", metrics.length === 4);
+  metricGrid.replaceChildren(...metrics);
   byId("maintenance-candidate-status").textContent = stage === "review"
     ? `${formatNumber(candidates.length)} ${t("proposals")} · ${formatNumber(selectedCount)} ${currentLanguage === "zh" ? "已选" : "selected"}`
     : stage === "analyze"
@@ -2946,15 +3072,14 @@ function renderMaintenanceWorkflow() {
         : `${formatNumber(maintenanceProcessedCalls())} of ${formatNumber(estimatedCalls)} batches processed · ${formatNumber(candidates.length)} proposals available to review`)
       : `${formatNumber(scanGroups + scanPages)} ${currentLanguage === "zh" ? "扫描项" : "scanned items"}`;
 
-  const relationAnalysis = state.maintenance.analyses.relation;
-  const relationFailures = relationAnalysis?.batches?.filter((batch) => batch.status === "failed") || [];
+  const failedBatches = maintenanceFailedBatches();
   const issueDetails = issues.map((item) => item.message || String(item)).join("\n");
-  const relationProgress = relationAnalysis && relationAnalysis.batchCount > 0
+  const failureProgress = failedBatches.length
     ? (currentLanguage === "zh"
-      ? `关联分析已处理 ${formatNumber(relationAnalysis.batchesCompleted)} / ${formatNumber(relationAnalysis.batchCount)} 组；${formatNumber(relationFailures.length)} 组失败${state.maintenance.busy ? "，其余组仍在继续。" : "，其余组已继续完成分析。"}`
-      : `Relation analysis processed ${formatNumber(relationAnalysis.batchesCompleted)} of ${formatNumber(relationAnalysis.batchCount)} groups; ${formatNumber(relationFailures.length)} failed${state.maintenance.busy ? " and the remaining groups are still running." : " and the remaining groups continued."}`)
+      ? `${formatNumber(failedBatches.length)} 个批次失败；成功批次的提案已保留${state.maintenance.busy ? "，其余批次仍在继续。" : "。"}`
+      : `${formatNumber(failedBatches.length)} batches failed. Proposals from successful batches were retained${state.maintenance.busy ? " while remaining batches continue." : "."}`)
     : "";
-  const issue = [relationFailures.length ? relationProgress : "", issueDetails].filter(Boolean).join("\n");
+  const issue = [failureProgress, issueDetails].filter(Boolean).join("\n");
   const issueNode = byId("maintenance-issue");
   issueNode.hidden = !issue;
   issueNode.textContent = issue ? `${t("Analysis incomplete")}: ${issue}` : "";
@@ -2963,13 +3088,22 @@ function renderMaintenanceWorkflow() {
   const analysisLogSummary = byId("maintenance-analysis-log-summary");
   const analysisLogBody = byId("maintenance-analysis-log-body");
   const logLines = [];
-  if (relationAnalysis?.batches?.length) {
-    const completed = relationAnalysis.batches.filter((batch) => batch.status === "completed").length;
-    const failed = relationFailures.length;
+  for (const phase of maintenancePassPhases()) {
+    const analysis = state.maintenance.analyses[phase];
+    if (!analysis?.batches?.length) continue;
+    const progress = batchProgress(analysis.batches);
+    const phaseLabel = t(maintenancePhaseConfig(phase).label);
     logLines.push(currentLanguage === "zh"
-      ? `关联分析：${formatNumber(completed)} 组完成，${formatNumber(failed)} 组失败，共 ${formatNumber(relationAnalysis.batches.length)} 组。`
-      : `Relation analysis: ${formatNumber(completed)} complete, ${formatNumber(failed)} failed, ${formatNumber(relationAnalysis.batches.length)} total.`);
-    for (const batch of relationAnalysis.batches) {
+      ? `${phaseLabel}：${formatNumber(progress.completed)} 个完成，${formatNumber(progress.failed)} 个失败，${formatNumber(progress.running)} 个处理中，共 ${formatNumber(progress.total)} 个。`
+      : `${phaseLabel}: ${formatNumber(progress.completed)} complete, ${formatNumber(progress.failed)} failed, ${formatNumber(progress.running)} running, ${formatNumber(progress.total)} total.`);
+    const noteworthy = analysis.batches.filter((batch) => batch.status !== "completed" || batch.issue);
+    const visible = noteworthy.length
+      ? noteworthy.slice(0, 16)
+      : analysis.batches.slice(Math.max(0, analysis.batches.length - 5));
+    const itemLabel = phase === "summary"
+      ? (currentLanguage === "zh" ? "页面" : "Page")
+      : (currentLanguage === "zh" ? "批次" : "Batch");
+    for (const batch of visible) {
       const stateLabel = currentLanguage === "zh"
         ? ({ pending: "等待", running: "处理中", completed: "完成", failed: "失败" }[batch.status] || batch.status)
         : batch.status;
@@ -2977,9 +3111,14 @@ function renderMaintenanceWorkflow() {
         ? ({ candidate: "形成提案", defer: "延后", no_candidate: "无提案", none: "无提案" }[batch.decision] || batch.decision)
         : batch.decision;
       const label = currentLanguage === "zh"
-        ? `第 ${batch.batchIndex + 1} 组 · ${stateLabel}${decisionLabel ? ` · ${decisionLabel}` : ""}${batch.issue ? ` · ${batch.issue}` : ""}`
-        : `Group ${batch.batchIndex + 1} · ${batch.status}${batch.decision ? ` · ${batch.decision}` : ""}${batch.issue ? ` · ${batch.issue}` : ""}`;
+        ? `第 ${batch.batchIndex + 1} ${itemLabel} · ${stateLabel}${decisionLabel ? ` · ${decisionLabel}` : ""}${batch.issue ? ` · ${batch.issue}` : ""}`
+        : `${itemLabel} ${batch.batchIndex + 1} · ${batch.status}${batch.decision ? ` · ${batch.decision}` : ""}${batch.issue ? ` · ${batch.issue}` : ""}`;
       logLines.push(label);
+    }
+    if (noteworthy.length > visible.length) {
+      logLines.push(currentLanguage === "zh"
+        ? `另有 ${formatNumber(noteworthy.length - visible.length)} 个待处理或失败批次未展开。`
+        : `${formatNumber(noteworthy.length - visible.length)} additional pending or failed batches are not expanded.`);
     }
   }
   analysisLog.hidden = logLines.length === 0;
@@ -3073,20 +3212,33 @@ function emptyMaintenanceAnalysis(scan) {
     deferredGroups: 0,
     candidates: [],
     issues: [],
+    batches: Array.from({ length: scan.estimatedModelCalls }, (_, batchIndex) => ({
+      batchIndex,
+      status: "pending",
+      attempts: 0,
+      workerCalls: 0,
+      analyzedGroupCount: 0,
+      overlapRetries: 0,
+      noCandidateGroups: 0,
+      deferredGroups: 0,
+      candidateIds: [],
+      candidates: [],
+      issues: [],
+      issue: null,
+    })),
   };
 }
 
-function appendMaintenanceAnalysisBatch(analysis, batch) {
-  analysis.analyzedAt = batch.analyzedAt;
-  analysis.batchCount = batch.batchCount;
-  analysis.batchesCompleted += 1;
-  analysis.analyzedGroupCount += batch.analyzedGroupCount;
-  analysis.workerCalls += batch.workerCalls;
-  analysis.overlapRetries += batch.overlapRetries || 0;
-  analysis.noCandidateGroups += batch.noCandidateGroups;
-  analysis.deferredGroups += batch.deferredGroups;
-  analysis.candidates.push(...batch.candidates);
-  if (batch.issue) analysis.issues.push({ ...batch.issue, batchIndex: batch.batchIndex });
+function refreshMaintenanceAnalysisTotals(analysis) {
+  const progress = batchProgress(analysis.batches);
+  analysis.batchesCompleted = progress.processed;
+  analysis.workerCalls = analysis.batches.reduce((total, batch) => total + (batch.workerCalls || 0), 0);
+  analysis.analyzedGroupCount = analysis.batches.reduce((total, batch) => total + (batch.analyzedGroupCount || 0), 0);
+  analysis.overlapRetries = analysis.batches.reduce((total, batch) => total + (batch.overlapRetries || 0), 0);
+  analysis.noCandidateGroups = analysis.batches.reduce((total, batch) => total + (batch.noCandidateGroups || 0), 0);
+  analysis.deferredGroups = analysis.batches.reduce((total, batch) => total + (batch.deferredGroups || 0), 0);
+  analysis.candidates = analysis.batches.flatMap((batch) => batch.candidates || []);
+  analysis.issues = analysis.batches.flatMap((batch) => batch.issues || []);
 }
 
 async function loadMaintenance({ reload = false } = {}) {
@@ -3094,6 +3246,26 @@ async function loadMaintenance({ reload = false } = {}) {
   else renderMaintenanceSession();
   renderArchiveSession();
   await loadRelationReviews();
+  scheduleMaintenanceStatusPoll();
+}
+
+function scheduleMaintenanceStatusPoll() {
+  if (maintenanceStatusPoll != null) window.clearTimeout(maintenanceStatusPoll);
+  maintenanceStatusPoll = null;
+  if (state.activeView !== "maintenance") return;
+  const delay = state.maintenance.status?.automation?.state === "running" ? 2_000 : 15_000;
+  maintenanceStatusPoll = window.setTimeout(async () => {
+    try {
+      state.maintenance.status = await api("/api/maintenance");
+      state.maintenance.loaded = true;
+      renderAutomationStatus();
+    } catch (_) {
+      // A status poll is advisory; the next scheduled read can recover without
+      // replacing the operator's current review state with an error screen.
+    } finally {
+      scheduleMaintenanceStatusPoll();
+    }
+  }, delay);
 }
 
 async function requestMaintenanceScan() {
@@ -3105,7 +3277,7 @@ async function applyMaintenanceCandidates(candidates, onProgress) {
   const appliedCandidateIds = [];
   const skipped = [];
   for (const [index, candidate] of candidates.entries()) {
-    onProgress?.({ index, total: candidates.length, applied, skipped });
+    onProgress?.({ index, total: candidates.length, applied, skipped, candidate, status: "running" });
     try {
       if (candidate.operation === "summary") {
         await maintenanceMutation("/api/maintenance/summaries/apply", {
@@ -3135,10 +3307,12 @@ async function applyMaintenanceCandidates(candidates, onProgress) {
       }
       applied += 1;
       appliedCandidateIds.push(candidate.candidateId);
+      onProgress?.({ index: index + 1, total: candidates.length, applied, skipped, candidate, status: "applied" });
     } catch (error) {
-      skipped.push({ candidateId: candidate.candidateId, message: error.message || String(error) });
+      const failure = { candidateId: candidate.candidateId, message: error.message || String(error) };
+      skipped.push(failure);
+      onProgress?.({ index: index + 1, total: candidates.length, applied, skipped, candidate, status: "failed", error: failure.message });
     }
-    onProgress?.({ index: index + 1, total: candidates.length, applied, skipped });
   }
   return { applied, appliedCandidateIds, skipped };
 }
@@ -3148,7 +3322,7 @@ async function applyRelationSuppressions(candidates, onProgress) {
   const appliedCandidateIds = [];
   const skipped = [];
   for (const [index, candidate] of candidates.entries()) {
-    onProgress?.({ index, total: candidates.length, applied, skipped });
+    onProgress?.({ index, total: candidates.length, applied, skipped, candidate, status: "running" });
     try {
       await maintenanceMutation("/api/maintenance/relations/suppress", {
         candidateId: candidate.candidateId,
@@ -3156,10 +3330,12 @@ async function applyRelationSuppressions(candidates, onProgress) {
       });
       applied += 1;
       appliedCandidateIds.push(candidate.candidateId);
+      onProgress?.({ index: index + 1, total: candidates.length, applied, skipped, candidate, status: "applied" });
     } catch (error) {
-      skipped.push({ candidateId: candidate.candidateId, message: error.message || String(error) });
+      const failure = { candidateId: candidate.candidateId, message: error.message || String(error) };
+      skipped.push(failure);
+      onProgress?.({ index: index + 1, total: candidates.length, applied, skipped, candidate, status: "failed", error: failure.message });
     }
-    onProgress?.({ index: index + 1, total: candidates.length, applied, skipped });
   }
   return { applied, appliedCandidateIds, skipped };
 }
@@ -3232,13 +3408,28 @@ function summaryFailedBatches() {
     .filter((batch) => batch.status === "failed");
 }
 
+function packFailedBatches() {
+  return (state.maintenance.analyses.pack?.batches || [])
+    .filter((batch) => batch.status === "failed");
+}
+
 function relationFailedBatches() {
   return (state.maintenance.analyses.relation?.batches || [])
     .filter((batch) => batch.status === "failed");
 }
 
+function topicFailedBatches() {
+  return (state.maintenance.analyses.topic?.batches || [])
+    .filter((batch) => batch.status === "failed");
+}
+
 function maintenanceFailedBatches() {
-  return [...summaryFailedBatches(), ...relationFailedBatches()];
+  return [
+    ...packFailedBatches(),
+    ...summaryFailedBatches(),
+    ...relationFailedBatches(),
+    ...topicFailedBatches(),
+  ];
 }
 
 function maintenanceProcessedCalls() {
@@ -3260,7 +3451,7 @@ function syncMaintenanceAnalyzeProgress() {
 }
 
 function refreshSummaryAnalysisTotals(analysis) {
-  analysis.batchesCompleted = analysis.batches.filter((batch) => batch.status === "completed").length;
+  analysis.batchesCompleted = batchProgress(analysis.batches).processed;
   analysis.workerCalls = analysis.batches.reduce((total, batch) => total + batch.workerCalls, 0);
   analysis.noCandidatePages = analysis.batches.reduce((total, batch) => total + batch.noCandidatePages, 0);
   analysis.deferredPages = analysis.batches.reduce((total, batch) => total + batch.deferredPages, 0);
@@ -3281,7 +3472,9 @@ function emptyRelationAnalysis(scan) {
       groupId: group.groupId,
       status: "pending",
       attempts: 0,
+      workerCalls: 0,
       decision: null,
+      candidateIds: [],
       issue: null,
     })),
   };
@@ -3290,13 +3483,38 @@ function emptyRelationAnalysis(scan) {
 function emptyTopicAnalysis(scan) {
   return {
     analyzedAt: null,
+    scanId: scan.scanId,
     batchCount: scan.estimatedModelCalls,
     batchesCompleted: 0,
     workerCalls: 0,
     noCandidateGroups: 0,
     deferredGroups: 0,
     issues: [],
+    batches: scan.groups.map((group, batchIndex) => ({
+      batchIndex,
+      groupId: group.groupId,
+      status: "pending",
+      attempts: 0,
+      workerCalls: 0,
+      decision: null,
+      candidateIds: [],
+      issue: null,
+    })),
   };
+}
+
+function refreshGroupAnalysisTotals(analysis) {
+  analysis.batchesCompleted = batchProgress(analysis.batches).processed;
+  analysis.workerCalls = analysis.batches.reduce((total, batch) => total + (batch.workerCalls || 0), 0);
+  analysis.noCandidateGroups = analysis.batches.filter((batch) => (
+    batch.status === "completed" && ["none", "no_candidate"].includes(batch.decision)
+  )).length;
+  analysis.deferredGroups = analysis.batches.filter((batch) => (
+    batch.status === "failed" || batch.decision === "defer"
+  )).length;
+  analysis.issues = analysis.batches
+    .filter((batch) => batch.issue)
+    .map((batch) => ({ batchIndex: batch.batchIndex, groupId: batch.groupId, message: batch.issue }));
 }
 
 function resetCurrentMaintenanceWork() {
@@ -3306,6 +3524,7 @@ function resetCurrentMaintenanceWork() {
   state.maintenance.selected.clear();
   state.maintenance.relationDraftStates.clear();
   state.maintenance.relationReviewStates.clear();
+  state.maintenance.applyStates.clear();
 }
 
 async function scanMaintenance() {
@@ -3337,26 +3556,55 @@ async function scanMaintenance() {
   }
 }
 
-async function analyzePackingPhase(scan) {
-  const analysis = emptyMaintenanceAnalysis(scan);
-  state.maintenance.analyses.pack = analysis;
+async function analyzePackingPhase(scan, { retryFailed = false } = {}) {
+  let analysis = state.maintenance.analyses.pack;
+  if (!retryFailed || !analysis || analysis.scanId !== scan.scanId) {
+    analysis = emptyMaintenanceAnalysis(scan);
+    state.maintenance.analyses.pack = analysis;
+  }
   // Mechanical Pack merges are valid proposals with zero model calls. Keep
   // them in the same review queue as model-selected Pack candidates so a zero
   // worker count can never look like this pass was skipped.
-  for (let batchIndex = 0; batchIndex < analysis.batchCount; batchIndex += 1) {
-    state.maintenance.activity.current = batchIndex + 1;
+  const indexes = runnableBatchIndexes(analysis.batches, { retryFailed });
+  const retryStart = retryFailed ? state.maintenance.activity.current : 0;
+  for (const [progressIndex, batchIndex] of indexes.entries()) {
+    const batchState = analysis.batches[batchIndex];
+    if (!batchState) continue;
+    beginBatch(batchState);
+    batchState.issues = [];
+    batchState.candidates = [];
+    state.maintenance.activity.current = retryFailed ? retryStart + progressIndex : maintenanceProcessedCalls();
     byId("maintenance-status").textContent = `${t("Analyzing")} ${t("Pack")} ${formatNumber(batchIndex + 1)} / ${formatNumber(analysis.batchCount)}`;
     renderMaintenanceSession();
-    const batch = await maintenanceMutation("/api/maintenance/analyze", {
-      scanId: scan.scanId,
-      batchIndex,
-    });
-    appendMaintenanceAnalysisBatch(analysis, batch);
-    appendMaintenanceCandidates("pack", batch.candidates);
-    syncMaintenanceAnalyzeProgress();
+    try {
+      const result = await maintenanceMutation("/api/maintenance/analyze", {
+        scanId: scan.scanId,
+        batchIndex,
+      });
+      replaceMaintenanceBatchCandidates("pack", batchState, result.candidates || []);
+      analysis.analyzedAt = result.analyzedAt;
+      batchState.workerCalls += result.workerCalls || 0;
+      batchState.analyzedGroupCount = result.analyzedGroupCount || 0;
+      batchState.overlapRetries = result.overlapRetries || 0;
+      batchState.noCandidateGroups = result.noCandidateGroups || 0;
+      batchState.deferredGroups = result.deferredGroups || 0;
+      batchState.candidates = result.candidates || [];
+      batchState.issues = result.issue
+        ? [{ ...result.issue, batchIndex, message: result.issue.message || String(result.issue) }]
+        : [];
+      if (batchState.issues.length) failBatch(batchState, batchState.issues[0].message);
+      else completeBatch(batchState);
+    } catch (error) {
+      batchState.workerCalls += 1;
+      batchState.deferredGroups = 1;
+      batchState.issues = [{ batchIndex, message: error.message || String(error) }];
+      failBatch(batchState, error);
+    }
+    refreshMaintenanceAnalysisTotals(analysis);
+    if (retryFailed) state.maintenance.activity.current = retryStart + progressIndex + 1;
+    else syncMaintenanceAnalyzeProgress();
     renderMaintenanceSession();
   }
-  state.maintenance.analyses.pack = analysis;
 }
 
 async function analyzeSummaryPhase(scan, { retryFailed = false } = {}) {
@@ -3366,19 +3614,17 @@ async function analyzeSummaryPhase(scan, { retryFailed = false } = {}) {
     state.maintenance.analyses.summary = analysis;
   }
   const batches = maintenanceBatches(scan.pages);
-  const batchIndexes = retryFailed
-    ? analysis.batches.filter((batch) => batch.status === "failed").map((batch) => batch.batchIndex)
-    : analysis.batches.filter((batch) => batch.status !== "completed").map((batch) => batch.batchIndex);
+  const batchIndexes = runnableBatchIndexes(analysis.batches, { retryFailed });
+  const retryStart = retryFailed ? state.maintenance.activity.current : 0;
   for (const [progressIndex, index] of batchIndexes.entries()) {
     const batch = batches[index];
     const batchState = analysis.batches[index];
     if (!batch || !batchState) continue;
-    batchState.status = "running";
-    batchState.attempts += 1;
+    beginBatch(batchState);
     batchState.issues = [];
     batchState.deferredPages = 0;
     batchState.noCandidatePages = 0;
-    state.maintenance.activity.current = retryFailed ? progressIndex : maintenanceProcessedCalls();
+    state.maintenance.activity.current = retryFailed ? retryStart + progressIndex : maintenanceProcessedCalls();
     byId("maintenance-status").textContent = `${t("Analyzing")} ${t("Summary")} ${formatNumber(index + 1)} / ${formatNumber(batches.length)}`;
     renderMaintenanceSession();
     try {
@@ -3396,15 +3642,16 @@ async function analyzeSummaryPhase(scan, { retryFailed = false } = {}) {
         batchIndex: index,
         message: issue.message || String(issue),
       }));
-      batchState.status = batchState.issues.length ? "failed" : "completed";
+      if (batchState.issues.length) failBatch(batchState, batchState.issues[0].message);
+      else completeBatch(batchState);
     } catch (error) {
       batchState.workerCalls += 1;
       batchState.deferredPages = batch.length;
       batchState.issues = [{ batchIndex: index, message: error.message || String(error) }];
-      batchState.status = "failed";
+      failBatch(batchState, error);
     }
     refreshSummaryAnalysisTotals(analysis);
-    if (retryFailed) state.maintenance.activity.current = progressIndex + 1;
+    if (retryFailed) state.maintenance.activity.current = retryStart + progressIndex + 1;
     else syncMaintenanceAnalyzeProgress();
     renderMaintenanceSession();
   }
@@ -3416,19 +3663,17 @@ async function analyzeRelationPhase(scan, { retryFailed = false } = {}) {
     analysis = emptyRelationAnalysis(scan);
     state.maintenance.analyses.relation = analysis;
   }
-  const indexes = retryFailed
-    ? analysis.batches.filter((batch) => batch.status === "failed").map((batch) => batch.batchIndex)
-    : analysis.batches.filter((batch) => batch.status !== "completed").map((batch) => batch.batchIndex);
+  const indexes = runnableBatchIndexes(analysis.batches, { retryFailed });
+  const retryStart = retryFailed ? state.maintenance.activity.current : 0;
   for (const [progressIndex, index] of indexes.entries()) {
     const group = scan.groups[index];
     const batch = analysis.batches[index];
     if (!group || !batch) continue;
-    if (batch.status === "failed") analysis.deferredGroups = Math.max(0, analysis.deferredGroups - 1);
-    batch.status = "running";
-    batch.attempts += 1;
+    beginBatch(batch);
     batch.decision = null;
     batch.issue = null;
     analysis.issues = analysis.issues.filter((issue) => issue.batchIndex !== index);
+    state.maintenance.activity.current = retryFailed ? retryStart + progressIndex : maintenanceProcessedCalls();
     byId("maintenance-status").textContent = `${t("Analyzing")} ${t("Relations")} ${formatNumber(index + 1)} / ${formatNumber(scan.groups.length)}`;
     renderMaintenanceSession();
     try {
@@ -3437,37 +3682,44 @@ async function analyzeRelationPhase(scan, { retryFailed = false } = {}) {
         groupId: group.groupId,
       });
       analysis.analyzedAt = result.analyzedAt;
-      analysis.workerCalls += 1;
+      batch.workerCalls = (batch.workerCalls || 0) + 1;
       if (result.candidate) {
-        appendMaintenanceCandidates("relation", [result.candidate]);
+        replaceMaintenanceBatchCandidates("relation", batch, [result.candidate]);
         batch.decision = "candidate";
       } else if (result.decision === "defer") {
-        analysis.deferredGroups += 1;
+        replaceMaintenanceBatchCandidates("relation", batch, []);
         batch.decision = "defer";
       } else {
-        analysis.noCandidateGroups += 1;
+        replaceMaintenanceBatchCandidates("relation", batch, []);
         batch.decision = result.decision || "none";
       }
-      batch.status = "completed";
+      completeBatch(batch);
     } catch (error) {
-      analysis.workerCalls += 1;
-      analysis.deferredGroups += 1;
-      batch.status = "failed";
-      batch.issue = error.message || String(error);
-      analysis.issues.push({ batchIndex: index, groupId: group.groupId, message: batch.issue });
+      batch.workerCalls = (batch.workerCalls || 0) + 1;
+      failBatch(batch, error);
     }
-    analysis.batchesCompleted = analysis.batches.filter((item) => item.status === "completed" || item.status === "failed").length;
-    if (retryFailed) state.maintenance.activity.current = progressIndex + 1;
+    refreshGroupAnalysisTotals(analysis);
+    if (retryFailed) state.maintenance.activity.current = retryStart + progressIndex + 1;
     else syncMaintenanceAnalyzeProgress();
     renderMaintenanceSession();
   }
 }
 
-async function analyzeTopicPhase(scan) {
-  const analysis = emptyTopicAnalysis(scan);
-  state.maintenance.analyses.topic = analysis;
-  for (const [index, group] of scan.groups.entries()) {
-    state.maintenance.activity.current += 1;
+async function analyzeTopicPhase(scan, { retryFailed = false } = {}) {
+  let analysis = state.maintenance.analyses.topic;
+  if (!retryFailed || !analysis || analysis.scanId !== scan.scanId) {
+    analysis = emptyTopicAnalysis(scan);
+    state.maintenance.analyses.topic = analysis;
+  }
+  const indexes = runnableBatchIndexes(analysis.batches, { retryFailed });
+  const retryStart = retryFailed ? state.maintenance.activity.current : 0;
+  for (const [progressIndex, index] of indexes.entries()) {
+    const group = scan.groups[index];
+    const batch = analysis.batches[index];
+    if (!group || !batch) continue;
+    beginBatch(batch);
+    batch.decision = null;
+    state.maintenance.activity.current = retryFailed ? retryStart + progressIndex : maintenanceProcessedCalls();
     byId("maintenance-status").textContent = `${t("Analyzing")} ${t("Extract Topic Page")} ${formatNumber(index + 1)} / ${formatNumber(scan.groups.length)}`;
     renderMaintenanceSession();
     try {
@@ -3476,17 +3728,22 @@ async function analyzeTopicPhase(scan) {
         groupId: group.groupId,
       });
       analysis.analyzedAt = result.analyzedAt;
-      analysis.workerCalls += 1;
-      if (result.candidate) appendMaintenanceCandidates("topic", [result.candidate]);
-      else if (result.decision === "defer") analysis.deferredGroups += 1;
-      else analysis.noCandidateGroups += 1;
+      batch.workerCalls += 1;
+      if (result.candidate) {
+        replaceMaintenanceBatchCandidates("topic", batch, [result.candidate]);
+        batch.decision = "candidate";
+      } else {
+        replaceMaintenanceBatchCandidates("topic", batch, []);
+        batch.decision = result.decision === "defer" ? "defer" : (result.decision || "none");
+      }
+      completeBatch(batch);
     } catch (error) {
-      analysis.workerCalls += 1;
-      analysis.deferredGroups += 1;
-      analysis.issues.push({ batchIndex: index, message: error.message || String(error) });
+      batch.workerCalls += 1;
+      failBatch(batch, error);
     }
-    analysis.batchesCompleted += 1;
-    syncMaintenanceAnalyzeProgress();
+    refreshGroupAnalysisTotals(analysis);
+    if (retryFailed) state.maintenance.activity.current = retryStart + progressIndex + 1;
+    else syncMaintenanceAnalyzeProgress();
     renderMaintenanceSession();
   }
 }
@@ -3533,14 +3790,16 @@ async function analyzeMaintenance() {
 
 async function retryFailedMaintenanceBatches() {
   if (state.maintenance.busy || maintenanceWorkflowStage() !== "review") return;
+  const packFailures = packFailedBatches();
   const summaryFailures = summaryFailedBatches();
   const relationFailures = relationFailedBatches();
-  if (summaryFailures.length === 0 && relationFailures.length === 0) return;
+  const topicFailures = topicFailedBatches();
+  if (packFailures.length + summaryFailures.length + relationFailures.length + topicFailures.length === 0) return;
   state.maintenance.busy = true;
   state.maintenance.activity = {
     kind: "analyze",
     current: 0,
-    total: summaryFailures.length + relationFailures.length,
+    total: packFailures.length + summaryFailures.length + relationFailures.length + topicFailures.length,
     retry: true,
   };
   byId("maintenance-status").textContent = t("Preparing");
@@ -3550,6 +3809,10 @@ async function retryFailedMaintenanceBatches() {
       phase,
       state.maintenance.analyses[phase]?.workerCalls || 0,
     ]));
+    if (packFailures.length) {
+      const scan = maintenanceScanForPhase("pack");
+      if (scan) await analyzePackingPhase(scan, { retryFailed: true });
+    }
     if (summaryFailures.length) {
       const scan = maintenanceScanForPhase("summary");
       if (scan) await analyzeSummaryPhase(scan, { retryFailed: true });
@@ -3557,6 +3820,10 @@ async function retryFailedMaintenanceBatches() {
     if (relationFailures.length) {
       const scan = maintenanceScanForPhase("relation");
       if (scan) await analyzeRelationPhase(scan, { retryFailed: true });
+    }
+    if (topicFailures.length) {
+      const scan = maintenanceScanForPhase("topic");
+      if (scan) await analyzeTopicPhase(scan, { retryFailed: true });
     }
     for (const phase of maintenancePassPhases()) {
       const analysis = state.maintenance.analyses[phase];
@@ -3608,10 +3875,28 @@ async function optimizeMaintenanceSelection() {
       byId("maintenance-status").textContent = `Optimizing ${formatNumber(index)} of ${formatNumber(totalCandidates.length)} · ${formatNumber(applied)} applied · ${formatNumber(skipped.length)} skipped`;
       renderMaintenanceSession();
     };
-    const appliedResult = await applyMaintenanceCandidates(candidates, ({ index, applied, skipped }) => {
+    const reflectCandidateProgress = ({ candidate, status, error }) => {
+      if (!candidate) return;
+      if (status === "applied") {
+        state.maintenance.applyStates.delete(candidate.candidateId);
+        state.maintenance.selected.delete(candidate.candidateId);
+        state.maintenance.pendingCandidates = state.maintenance.pendingCandidates
+          .filter((item) => item.candidateId !== candidate.candidateId);
+        const packAnalysis = state.maintenance.analyses.pack;
+        if (packAnalysis) packAnalysis.candidates = packAnalysis.candidates
+          .filter((item) => item.candidateId !== candidate.candidateId);
+        state.maintenance.relationDraftStates.delete(candidate.candidateId);
+        state.maintenance.relationReviewStates.delete(candidate.candidateId);
+      } else {
+        state.maintenance.applyStates.set(candidate.candidateId, { status, message: error || null });
+      }
+    };
+    const appliedResult = await applyMaintenanceCandidates(candidates, ({ index, applied, skipped, candidate, status, error }) => {
+      reflectCandidateProgress({ candidate, status, error });
       reportProgress(index, applied, skipped);
     });
-    const suppressionResult = await applyRelationSuppressions(suppressions, ({ index, applied, skipped }) => {
+    const suppressionResult = await applyRelationSuppressions(suppressions, ({ index, applied, skipped, candidate, status, error }) => {
+      reflectCandidateProgress({ candidate, status, error });
       reportProgress(candidates.length + index, appliedResult.applied + applied, [
         ...appliedResult.skipped,
         ...skipped,
@@ -3622,18 +3907,6 @@ async function optimizeMaintenanceSelection() {
       appliedCandidateIds: [...appliedResult.appliedCandidateIds, ...suppressionResult.appliedCandidateIds],
       skipped: [...appliedResult.skipped, ...suppressionResult.skipped],
     };
-    state.maintenance.selected.clear();
-    const consumed = new Set([...result.appliedCandidateIds, ...result.skipped.map((item) => item.candidateId)]);
-    if (maintenanceWorkflowStage() === "review") {
-      const analysis = state.maintenance.analyses.pack;
-      if (analysis) analysis.candidates = analysis.candidates.filter((candidate) => !consumed.has(candidate.candidateId));
-      state.maintenance.pendingCandidates = state.maintenance.pendingCandidates
-        .filter((candidate) => !consumed.has(candidate.candidateId));
-    }
-    for (const candidateId of consumed) {
-      state.maintenance.relationDraftStates.delete(candidateId);
-      state.maintenance.relationReviewStates.delete(candidateId);
-    }
     const byCandidateId = new Map(totalCandidates.map((candidate) => [candidate.candidateId, candidate]));
     for (const candidateId of result.appliedCandidateIds) {
       const candidate = byCandidateId.get(candidateId);
@@ -3784,6 +4057,7 @@ async function runMaintenancePrimaryAction() {
 
 async function activateView(name, { reload = false } = {}) {
   state.activeView = name;
+  scheduleMaintenanceStatusPoll();
   document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === name));
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === `view-${name}`));
   if (name === "pages" && (reload || !state.pages.loaded)) await loadPages();
@@ -3925,6 +4199,7 @@ byId("maintenance-cancel").addEventListener("click", () => cancelMaintenanceSess
 byId("maintenance-start-new").addEventListener("click", () => startMaintenanceSession().catch(showError));
 byId("archive-start").addEventListener("click", () => startArchiveSession().catch(showError));
 byId("archive-analyze").addEventListener("click", () => analyzeArchiveCandidates().catch(showError));
+byId("archive-retry-failed").addEventListener("click", () => analyzeArchiveCandidates({ retryFailed: true }).catch(showError));
 byId("archive-apply").addEventListener("click", () => applyArchiveSelection().catch(showError));
 byId("archive-rescan").addEventListener("click", () => scanArchiveCandidates().catch(showError));
 byId("archive-finish").addEventListener("click", finishArchiveSession);
@@ -3937,8 +4212,3 @@ byId("health-window").addEventListener("change", () => healthView.load({ reload:
 refresh();
 loadEnrollment();
 window.setInterval(() => loadEnrollment(), 3000);
-window.setInterval(() => {
-  if (state.activeView === "maintenance" && !state.maintenance.busy) {
-    loadMaintenance({ reload: true }).catch(showError);
-  }
-}, 15_000);

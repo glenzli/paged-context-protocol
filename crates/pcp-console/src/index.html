@@ -165,6 +165,10 @@
           <div><div class="maintenance-automation-title"><h3 data-i18n="Automatic maintenance">Automatic maintenance</h3><span id="maintenance-automation-state" class="status-pill"></span></div><p data-i18n="Runtime updates this status; relation proposals still require approval.">Runtime updates this status; relation proposals still require approval.</p></div>
         </div>
         <div id="maintenance-automation-metrics" class="metrics maintenance-automation-metrics"></div>
+        <section id="maintenance-automation-progress" class="maintenance-automation-progress" hidden>
+          <h4 id="maintenance-automation-progress-title"></h4>
+          <div id="maintenance-automation-progress-metrics" class="metrics maintenance-automation-metrics"></div>
+        </section>
         <p id="maintenance-automation-detail" class="muted"></p>
         <p id="maintenance-automation-error" class="maintenance-issue" hidden></p>
       </section>
@@ -278,14 +282,19 @@
             <li id="archive-step-analyze"><span>2</span><div><strong data-i18n="Analyze suggestions">Analyze suggestions</strong><small id="archive-step-analyze-status"></small></div></li>
             <li id="archive-step-review"><span>3</span><div><strong data-i18n="Review and apply">Review and apply</strong><small id="archive-step-review-status"></small></div></li>
           </ol>
-          <div id="archive-scan-metrics" class="metrics maintenance-stage-metrics"></div>
+          <div id="archive-scan-metrics" class="metrics maintenance-stage-metrics four-columns"></div>
           <p id="archive-issue" class="maintenance-issue" hidden></p>
           <div class="maintenance-actions">
             <button id="archive-analyze" class="primary-button" type="button" disabled data-i18n="Analyze suggestions">Analyze suggestions</button>
             <button id="archive-apply" class="warning-button" type="button" disabled data-i18n="Archive selected">Archive selected</button>
+            <button id="archive-retry-failed" class="secondary-button" type="button" hidden data-i18n="Retry failed batches">Retry failed batches</button>
             <button id="archive-rescan" class="secondary-button" type="button" disabled data-i18n="Rescan this stage">Rescan this stage</button>
             <button id="archive-finish" class="secondary-button" type="button" disabled data-i18n="End session">End session</button>
           </div>
+          <details id="archive-analysis-log" class="maintenance-analysis-log" hidden>
+            <summary><span data-i18n="Analysis log">Analysis log</span><span id="archive-analysis-log-summary"></span></summary>
+            <pre id="archive-analysis-log-body"></pre>
+          </details>
           <section id="archive-proposals" hidden>
             <div class="section-heading section-heading-copy">
               <label class="maintenance-select-all-label"><input id="archive-select-all" type="checkbox" aria-label="Select all archive candidates" data-i18n-aria-label="Select all archive candidates"><span data-i18n="Archive proposals">Archive proposals</span></label>
@@ -581,6 +590,6 @@
   </dialog>
 
   <div id="error" class="error" hidden></div>
-  <script type="module" src="/app.js?v=20260823.1"></script>
+  <script type="module" src="/app.js?v=20260823.2"></script>
 </body>
 </html>

@@ -4,7 +4,7 @@ export function buildQueryRequest({ method, query, scope, topK, intentEffort }) 
   return payload;
 }
 
-export function createQueryView({ request, byId, element, showError, t, formatNumber, openPage }) {
+export function createQueryView({ request, byId, element, showError, t, formatNumber, openPage, openPageIcon }) {
   let method = "semantic_search";
   let busy = false;
   let busyStartedAt = null;
@@ -184,10 +184,11 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
         element("span", "muted", entry.namespace),
       );
       const actions = element("div", "context-pack-entry-actions");
-      const open = element("button", "icon-button context-pack-reference-button", "↗");
+      const open = element("button", "icon-button context-pack-reference-button");
       open.type = "button";
       open.title = t("Open source page");
       open.setAttribute("aria-label", t("Open source page"));
+      open.append(openPageIcon());
       open.addEventListener("click", () => openPage(entry.pageId).catch(showError));
       actions.append(open);
       header.append(identity, actions);
@@ -228,10 +229,17 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
     const action = method === "match_intent"
       ? t("Intent match in progress")
       : t("Semantic search in progress");
-    const detail = method === "match_intent"
+    return `${action} · ${formatNumber(elapsedSeconds)} ${t("seconds")}`;
+  }
+
+  function busyDetail() {
+    const action = method === "match_intent"
       ? t("The Router is retrieving and reviewing bounded candidates.")
       : t("Finding independently relevant pages.");
-    return `${action} · ${detail} · ${formatNumber(elapsedSeconds)} ${t("seconds")}`;
+    const stability = result
+      ? t("The previous completed context pack stays visible until this atomic request completes.")
+      : t("Ranking and budget assembly return as one stable context pack; unstable intermediate ranks are not shown.");
+    return `${action} ${stability}`;
   }
 
   function renderBusyPresentation() {
@@ -244,11 +252,13 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
       existing?.remove();
       return;
     }
-    const progress = existing || element("div", "loading context-query-progress");
+    const progress = existing || element("div", "context-query-progress");
     progress.id = "context-query-progress";
     progress.setAttribute("role", "status");
     progress.setAttribute("aria-live", "polite");
-    progress.textContent = busyMessage();
+    const copy = element("span", "context-query-progress-copy");
+    copy.append(element("strong", "", busyMessage()), element("span", "", busyDetail()));
+    progress.replaceChildren(element("span", "context-query-progress-indicator"), copy);
     if (!existing) target.prepend(progress);
     byId("query-status").textContent = busyMessage();
   }

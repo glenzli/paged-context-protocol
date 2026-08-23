@@ -340,6 +340,7 @@ fn router(state: AppState) -> Router {
         .route("/health-view.js", get(health_view_js))
         .route("/retention-view.js", get(retention_view_js))
         .route("/query-view.js", get(query_view_js))
+        .route("/progressive-operation.js", get(progressive_operation_js))
         .route("/styles.css", get(styles_css))
         .route("/api/health", get(health))
         .route("/api/runtime", get(runtime_status))
@@ -492,6 +493,13 @@ async fn index() -> Response {
 
 async fn app_js() -> Response {
     static_asset("text/javascript; charset=utf-8", include_str!("app.js"))
+}
+
+async fn progressive_operation_js() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("progressive-operation.js"),
+    )
 }
 
 async fn page_inspector_js() -> Response {

@@ -18,12 +18,13 @@ use pcp_core::{
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 
+use super::ledger::MaintenanceLedger;
 use super::{
     AnalyzeMaintenancePacksRequest, AnalyzeMaintenanceRelationRequest,
     AnalyzeMaintenanceSummariesRequest, AnalyzeMaintenanceSummaryRequest,
     ApplyMaintenancePackRequest, ApplyMaintenanceRelationRequest, ApplyMaintenanceSummaryRequest,
-    CommandSemanticWorker, MaintenanceAutomationState, MaintenanceConfig, MaintenanceMode,
-    MaintenanceRunAudit, MaintenanceWorkerConfig, MaintenanceWorkerRequest,
+    CommandSemanticWorker, MaintenanceAutomationState, MaintenanceConfig, MaintenanceCycleReport,
+    MaintenanceMode, MaintenanceRunAudit, MaintenanceWorkerConfig, MaintenanceWorkerRequest,
     MaintenanceWorkerResponse, PackingCandidateGroup, PackingMaintenanceConfig,
     RelationCandidatePage, RelationMaintenanceConfig, RetentionMaintenanceConfig,
     RetentionMilestone, RuntimeMaintainer, SemanticMaintenanceWorker, SummaryMaintenanceConfig,
@@ -3317,4 +3318,52 @@ async fn command_worker_closes_stdin_before_waiting_for_the_child() {
         "cat echoes a request, not a valid response"
     );
     assert!(!result.unwrap_err().to_string().contains("timed out"));
+}
+
+#[tokio::test]
+async fn scheduler_status_exposes_live_progress_and_retains_failed_partial_report() {
+    let fixture = Fixture::open("scheduler-live-progress").await;
+    let config = fixture.config();
+    let mut ledger = MaintenanceLedger::default();
+
+    ledger.start_scheduled_cycle();
+    ledger.update_scheduled_cycle(MaintenanceCycleReport {
+        inspected_pages: 12,
+        worker_calls: 2,
+        summaries_proposed: 1,
+        deferred: 1,
+        ..MaintenanceCycleReport::default()
+    });
+    let running = ledger.automation_status(&config);
+    assert!(matches!(running.state, MaintenanceAutomationState::Running));
+    let progress = running.current_report.expect("live cycle report");
+    assert_eq!(progress.inspected_pages, 12);
+    assert_eq!(progress.worker_calls, 2);
+
+    ledger.fail_scheduled_cycle("worker response was incomplete");
+    let failed = ledger.automation_status(&config);
+    assert!(matches!(failed.state, MaintenanceAutomationState::Failed));
+    assert_eq!(
+        failed
+            .current_report
+            .expect("failed partial report")
+            .summaries_proposed,
+        1
+    );
+
+    ledger.start_scheduled_cycle();
+    ledger.complete_scheduled_cycle(MaintenanceCycleReport {
+        inspected_pages: 13,
+        ..MaintenanceCycleReport::default()
+    });
+    let completed = ledger.automation_status(&config);
+    assert!(completed.current_report.is_none());
+    assert_eq!(
+        completed
+            .last_report
+            .expect("completed report")
+            .inspected_pages,
+        13
+    );
+    fixture.close().await;
 }
