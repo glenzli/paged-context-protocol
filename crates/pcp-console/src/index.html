@@ -138,7 +138,7 @@
             <strong data-i18n="Query failed">Query failed</strong>
             <span id="context-query-error-message"></span>
           </div>
-          <button id="context-query-retry" type="button" class="compact-button" data-i18n="Try again">Try again</button>
+          <button id="context-query-retry" type="button" class="compact-button warning-button" data-i18n="Try again">Try again</button>
         </div>
       </form>
       <section id="context-query-audit" class="context-query-audit" aria-live="polite" hidden></section>
@@ -220,12 +220,16 @@
           </div>
           <div id="maintenance-scan-metrics" class="metrics maintenance-stage-metrics"></div>
           <p id="maintenance-issue" class="maintenance-issue" hidden></p>
+          <details id="maintenance-analysis-log" class="maintenance-analysis-log" hidden>
+            <summary><span data-i18n="Analysis log">Analysis log</span><span id="maintenance-analysis-log-summary" class="muted"></span></summary>
+            <pre id="maintenance-analysis-log-body"></pre>
+          </details>
           <div class="maintenance-actions">
             <button id="maintenance-primary" class="primary-button" type="button" disabled></button>
-            <button id="maintenance-skip" type="button" disabled data-i18n="Skip this stage">Skip this stage</button>
-            <button id="maintenance-retry-failed" type="button" disabled hidden data-i18n="Retry failed batches">Retry failed batches</button>
-            <button id="maintenance-rescan" type="button" disabled data-i18n="Rescan this stage">Rescan this stage</button>
-            <button id="maintenance-cancel" type="button" disabled data-i18n="End session">End session</button>
+            <button id="maintenance-skip" class="secondary-button" type="button" disabled data-i18n="Skip this stage">Skip this stage</button>
+            <button id="maintenance-retry-failed" class="warning-button" type="button" disabled hidden data-i18n="Retry failed batches">Retry failed batches</button>
+            <button id="maintenance-rescan" class="secondary-button" type="button" disabled data-i18n="Rescan this stage">Rescan this stage</button>
+            <button id="maintenance-cancel" class="secondary-button" type="button" disabled data-i18n="End session">End session</button>
           </div>
           <div id="maintenance-proposals" hidden>
             <div class="section-heading section-heading-copy">
@@ -233,6 +237,7 @@
               <span id="maintenance-selection-status" class="muted"></span>
             </div>
             <div id="maintenance-summary-cards" class="maintenance-summary-cards" hidden></div>
+            <div id="maintenance-relation-cards" class="maintenance-relation-cards" hidden></div>
             <div id="maintenance-table-wrap" class="table-wrap">
               <table class="maintenance-table">
                 <thead><tr><th class="maintenance-select"></th><th data-i18n="Source">Source</th><th data-i18n="Change">Change</th><th data-i18n="Inputs">Inputs</th><th data-i18n="Content">Content</th></tr></thead>
@@ -265,7 +270,7 @@
             <h4 data-i18n="Review archive candidates">Review archive candidates</h4>
             <p data-i18n="Candidates are conservatively identified from current structural evidence. PCP does not store per-Page access metrics, so no usage value is invented.">Candidates are conservatively identified from current structural evidence. PCP does not store per-Page access metrics, so no usage value is invented.</p>
           </div>
-          <button id="archive-start" class="compact-button" type="button" data-i18n="Scan candidates">Scan candidates</button>
+          <button id="archive-start" class="secondary-button" type="button" data-i18n="Scan candidates">Scan candidates</button>
         </section>
         <section id="archive-workflow" class="maintenance-archive-workflow" hidden>
           <ol id="archive-steps" class="maintenance-steps maintenance-archive-steps" aria-label="Archive review stages">
@@ -277,9 +282,9 @@
           <p id="archive-issue" class="maintenance-issue" hidden></p>
           <div class="maintenance-actions">
             <button id="archive-analyze" class="primary-button" type="button" disabled data-i18n="Analyze suggestions">Analyze suggestions</button>
-            <button id="archive-apply" type="button" disabled data-i18n="Archive selected">Archive selected</button>
-            <button id="archive-rescan" type="button" disabled data-i18n="Rescan this stage">Rescan this stage</button>
-            <button id="archive-finish" type="button" disabled data-i18n="End session">End session</button>
+            <button id="archive-apply" class="warning-button" type="button" disabled data-i18n="Archive selected">Archive selected</button>
+            <button id="archive-rescan" class="secondary-button" type="button" disabled data-i18n="Rescan this stage">Rescan this stage</button>
+            <button id="archive-finish" class="secondary-button" type="button" disabled data-i18n="End session">End session</button>
           </div>
           <section id="archive-proposals" hidden>
             <div class="section-heading section-heading-copy">
@@ -295,17 +300,17 @@
             <span id="archive-report-status" class="muted" aria-live="polite"></span>
           </div>
           <div id="archive-report-metrics" class="metrics"></div>
-          <button id="archive-start-new" class="compact-button" type="button" data-i18n="Review archive candidates">Review archive candidates</button>
+          <button id="archive-start-new" class="secondary-button" type="button" data-i18n="Review archive candidates">Review archive candidates</button>
         </section>
         <details id="maintenance-archive-library" class="maintenance-archive-library">
           <summary><span data-i18n="Archived Pages">Archived Pages</span><span id="governance-status" class="muted" aria-live="polite"></span></summary>
           <div class="governance-controls">
             <label class="governance-scope-control"><span data-i18n="Scope">Scope</span><select id="governance-scope"><option value="" data-i18n="All authorized scopes">All authorized scopes</option></select></label>
-            <button id="governance-refresh" type="button" class="compact-button" data-i18n="Refresh">Refresh</button>
+            <button id="governance-refresh" type="button" class="compact-button secondary-button" data-i18n="Refresh">Refresh</button>
           </div>
           <p class="control-note" data-i18n="Archive is reversible and auditable. It does not delete content, summaries, provenance, or asserted relations.">Archive is reversible and auditable. It does not delete content, summaries, provenance, or asserted relations.</p>
           <div id="governance-results" class="governance-results" aria-live="polite"></div>
-          <div class="list-footer"><button id="governance-more" type="button" class="compact-button" hidden data-i18n="Load more">Load more</button></div>
+          <div class="list-footer"><button id="governance-more" type="button" class="compact-button secondary-button" hidden data-i18n="Load more">Load more</button></div>
         </details>
       </section>
 
@@ -430,7 +435,7 @@
       </div>
       <div class="list-footer">
         <span id="access-loaded" class="muted"></span>
-        <button id="access-more" type="button" hidden data-i18n="Load more">Load more</button>
+        <button id="access-more" class="compact-button secondary-button" type="button" hidden data-i18n="Load more">Load more</button>
       </div>
     </section>
   </main>
@@ -438,10 +443,10 @@
   <dialog id="page-dialog">
     <header class="dialog-header">
       <div class="dialog-identity">
-        <button id="dialog-back" class="icon-button" type="button" aria-label="Back" title="Back" data-i18n-aria-label="Back" data-i18n-title="Back" hidden>←</button>
+        <button id="dialog-back" class="icon-button" type="button" aria-label="Back" title="Back" data-i18n-aria-label="Back" data-i18n-title="Back" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
         <div><strong id="dialog-title" data-i18n="Page">Page</strong><div id="dialog-subtitle" class="muted"></div></div>
       </div>
-      <button id="dialog-close" type="button" data-i18n="Close">Close</button>
+      <button id="dialog-close" class="icon-button dialog-close-button" type="button" aria-label="Close" title="Close" data-i18n-aria-label="Close" data-i18n-title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
     </header>
     <nav class="detail-tabs" aria-label="Page views" data-i18n-aria-label="Page views">
       <button class="detail-tab active" type="button" data-detail-view="summary" data-i18n="Overview">Overview</button>
@@ -459,8 +464,10 @@
     <header class="dialog-header">
       <div><strong data-i18n="Relation comparison">Relation comparison</strong><div id="relation-comparison-subtitle" class="muted"></div></div>
       <div class="dialog-header-actions">
-        <button id="relation-comparison-mark-reviewed" class="icon-button relation-comparison-review-button" type="button" aria-label="Mark reviewed" title="Mark reviewed" data-i18n-aria-label="Mark reviewed" data-i18n-title="Mark reviewed" hidden>✓</button>
-        <button id="relation-comparison-close" type="button" data-i18n="Close">Close</button>
+        <button id="relation-comparison-mark-reviewed" class="icon-button relation-comparison-review-button" type="button" aria-label="Mark reviewed" title="Mark reviewed" data-i18n-aria-label="Mark reviewed" data-i18n-title="Mark reviewed" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l4 4L19 6"/></svg></button>
+        <button id="relation-comparison-accept" class="icon-button relation-comparison-accept-button" type="button" aria-label="Accept" title="Accept" data-i18n-aria-label="Accept" data-i18n-title="Accept" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/><circle cx="12" cy="12" r="10"/></svg></button>
+        <button id="relation-comparison-reject" class="icon-button relation-comparison-reject-button" type="button" aria-label="Reject" title="Reject" data-i18n-aria-label="Reject" data-i18n-title="Reject" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8l8 8M16 8l-8 8"/><circle cx="12" cy="12" r="10"/></svg></button>
+        <button id="relation-comparison-close" class="icon-button dialog-close-button" type="button" aria-label="Close" title="Close" data-i18n-aria-label="Close" data-i18n-title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
       </div>
     </header>
     <section class="relation-comparison-rationale">
@@ -474,7 +481,7 @@
   <dialog id="topic-extraction-review-dialog" class="topic-extraction-review-dialog">
     <header class="dialog-header">
       <div><strong data-i18n="Topic extraction review">Topic extraction review</strong><div id="topic-extraction-review-subtitle" class="muted"></div></div>
-      <button id="topic-extraction-review-close" type="button" data-i18n="Close">Close</button>
+      <button id="topic-extraction-review-close" class="icon-button dialog-close-button" type="button" aria-label="Close" title="Close" data-i18n-aria-label="Close" data-i18n-title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
     </header>
     <section class="topic-extraction-review-rationale">
       <span class="topic-extraction-review-label" data-i18n="Why this Topic Page is worth creating">Why this Topic Page is worth creating</span>
@@ -499,7 +506,7 @@
   <dialog id="enrollment-dialog" class="enrollment-dialog">
     <header class="dialog-header">
       <div><strong data-i18n="Client access">Client access</strong><div class="muted" data-i18n="Applications requesting access to this PCP Store">Applications requesting access to this PCP Store</div></div>
-      <button id="enrollment-close" type="button" data-i18n="Close">Close</button>
+      <button id="enrollment-close" class="icon-button dialog-close-button" type="button" aria-label="Close" title="Close" data-i18n-aria-label="Close" data-i18n-title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
     </header>
     <div class="enrollment-content">
       <section>
@@ -520,7 +527,7 @@
       </header>
       <p id="action-dialog-description" class="action-dialog-copy"></p>
       <footer class="action-dialog-actions">
-        <button id="action-dialog-cancel" type="submit" value="cancel" data-i18n="Cancel">Cancel</button>
+        <button id="action-dialog-cancel" class="secondary-button" type="submit" value="cancel" data-i18n="Cancel">Cancel</button>
         <button id="action-dialog-confirm" class="primary-button" type="submit" value="confirm" data-i18n="Continue">Continue</button>
       </footer>
     </form>
@@ -529,7 +536,7 @@
   <dialog id="preferences-dialog" class="preferences-dialog" aria-labelledby="preferences-title">
     <header class="dialog-header">
       <strong id="preferences-title" data-i18n="Settings">Settings</strong>
-      <button id="preferences-close" type="button" data-i18n="Close">Close</button>
+      <button id="preferences-close" class="icon-button dialog-close-button" type="button" aria-label="Close" title="Close" data-i18n-aria-label="Close" data-i18n-title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
     </header>
     <nav class="preferences-tabs" role="tablist" aria-label="Settings sections" data-i18n-aria-label="Settings sections">
       <button class="preferences-tab active" type="button" role="tab" aria-selected="true" data-preferences-tab="general" data-i18n="General">General</button>
@@ -574,6 +581,6 @@
   </dialog>
 
   <div id="error" class="error" hidden></div>
-  <script type="module" src="/app.js?v=20260819.1"></script>
+  <script type="module" src="/app.js?v=20260823.1"></script>
 </body>
 </html>

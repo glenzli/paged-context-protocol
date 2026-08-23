@@ -16,6 +16,8 @@ export function createPageInspector({ request, showError, formatTime, t = (value
   const relationComparisonReviewNote = document.getElementById("relation-comparison-review-note");
   const relationComparisonPages = document.getElementById("relation-comparison-pages");
   const relationComparisonMarkReviewed = document.getElementById("relation-comparison-mark-reviewed");
+  const relationComparisonAccept = document.getElementById("relation-comparison-accept");
+  const relationComparisonReject = document.getElementById("relation-comparison-reject");
   const topicExtractionDialog = document.getElementById("topic-extraction-review-dialog");
   const topicExtractionSubtitle = document.getElementById("topic-extraction-review-subtitle");
   const topicExtractionReason = document.getElementById("topic-extraction-review-reason");
@@ -35,6 +37,9 @@ export function createPageInspector({ request, showError, formatTime, t = (value
   let currentGraphDepth = 2;
   let currentGraphLimit = 120;
   let comparisonReviewAction = null;
+  let comparisonAcceptAction = null;
+  let comparisonRejectAction = null;
+  let comparisonScrollTop = 0;
 
   const relationFamilies = [
     ["all", "All connections"],
@@ -518,7 +523,29 @@ export function createPageInspector({ request, showError, formatTime, t = (value
     }
   }
 
-  function compareRelation({ pages, relationReason, reviewReason, onReviewed = null, reviewed = false }) {
+  function lockRelationComparisonScroll() {
+    comparisonScrollTop = window.scrollY;
+    document.body.style.setProperty("--relation-comparison-scroll-offset", `-${comparisonScrollTop}px`);
+    document.documentElement.classList.add("relation-comparison-open");
+  }
+
+  function unlockRelationComparisonScroll() {
+    document.documentElement.classList.remove("relation-comparison-open");
+    document.body.style.removeProperty("--relation-comparison-scroll-offset");
+    window.scrollTo(0, comparisonScrollTop);
+  }
+
+  function compareRelation({
+    pages,
+    relationReason,
+    reviewReason,
+    onReviewed = null,
+    reviewed = false,
+    onAccept = null,
+    onReject = null,
+    accepted = false,
+    rejected = false,
+  }) {
     if (!Array.isArray(pages) || pages.length !== 2) {
       const error = new Error(t("A relation comparison requires exactly two Pages."));
       showError(error);
@@ -529,16 +556,30 @@ export function createPageInspector({ request, showError, formatTime, t = (value
     relationComparisonReviewNote.hidden = !reviewReason;
     relationComparisonReviewNote.textContent = reviewReason || "";
     comparisonReviewAction = typeof onReviewed === "function" ? onReviewed : null;
+    comparisonAcceptAction = typeof onAccept === "function" ? onAccept : null;
+    comparisonRejectAction = typeof onReject === "function" ? onReject : null;
     relationComparisonMarkReviewed.hidden = !comparisonReviewAction;
     relationComparisonMarkReviewed.disabled = reviewed;
     relationComparisonMarkReviewed.classList.toggle("is-reviewed", reviewed);
     relationComparisonMarkReviewed.title = t(reviewed ? "Reviewed" : "Mark reviewed");
     relationComparisonMarkReviewed.setAttribute("aria-label", relationComparisonMarkReviewed.title);
+    relationComparisonAccept.hidden = !comparisonAcceptAction;
+    relationComparisonAccept.disabled = accepted;
+    relationComparisonAccept.classList.toggle("is-accepted", accepted);
+    relationComparisonAccept.title = t(accepted ? "Accepted" : "Accept");
+    relationComparisonAccept.setAttribute("aria-label", relationComparisonAccept.title);
+    relationComparisonReject.hidden = !comparisonRejectAction;
+    relationComparisonReject.disabled = rejected;
+    relationComparisonReject.classList.toggle("is-rejected", rejected);
+    relationComparisonReject.title = t(rejected ? "Rejected for this review" : "Reject");
+    relationComparisonReject.setAttribute("aria-label", relationComparisonReject.title);
     const left = comparisonPage(pages[0], "Left Page");
     const right = comparisonPage(pages[1], "Right Page");
     relationComparisonPages.replaceChildren(left.section, right.section);
-    if (!relationComparisonDialog.open) relationComparisonDialog.showModal();
-    document.documentElement.classList.add("relation-comparison-open");
+    if (!relationComparisonDialog.open) {
+      lockRelationComparisonScroll();
+      relationComparisonDialog.showModal();
+    }
     relationComparisonDialog.scrollTop = 0;
     return Promise.all([
       loadComparedRevision(pages[0], left.body),
@@ -605,9 +646,21 @@ export function createPageInspector({ request, showError, formatTime, t = (value
     comparisonReviewAction();
     relationComparisonDialog.close();
   });
+  relationComparisonAccept.addEventListener("click", () => {
+    if (!comparisonAcceptAction) return;
+    comparisonAcceptAction();
+    relationComparisonDialog.close();
+  });
+  relationComparisonReject.addEventListener("click", () => {
+    if (!comparisonRejectAction) return;
+    comparisonRejectAction();
+    relationComparisonDialog.close();
+  });
   relationComparisonDialog.addEventListener("close", () => {
     comparisonReviewAction = null;
-    document.documentElement.classList.remove("relation-comparison-open");
+    comparisonAcceptAction = null;
+    comparisonRejectAction = null;
+    unlockRelationComparisonScroll();
   });
   document.getElementById("topic-extraction-review-close").addEventListener("click", () => {
     topicExtractionDialog.close();

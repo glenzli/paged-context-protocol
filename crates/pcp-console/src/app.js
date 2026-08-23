@@ -1,4 +1,4 @@
-import { createPageInspector } from "/page-inspector.js?v=20260822.1";
+import { createPageInspector } from "/page-inspector.js?v=20260823.1";
 import { describePagePayload, pagePayloadPreviewText } from "/page-content.js?v=20260822.1";
 import { createHealthView } from "/health-view.js?v=20260816.3";
 import { createRetentionView } from "/retention-view.js?v=20260818.1";
@@ -86,6 +86,8 @@ const ZH_MESSAGES = {
   "Last completed": "最近完成",
   "Awaiting the first Runtime heartbeat.": "等待 Runtime 首次心跳。",
   "Approve": "批准",
+  "Accept": "接受",
+  "Accepted": "已接受",
   "Analyzing": "正在分析",
   "Batches completed": "已完成批次",
   "Pages completed": "已完成页面",
@@ -224,6 +226,10 @@ const ZH_MESSAGES = {
   "Review evidence": "审核依据",
   "Reviewed": "已审阅",
   "Mark reviewed": "标记已审阅",
+  "Rejected for this review": "本次拒绝",
+  "Undo rejection": "撤销拒绝",
+  "View relation Pages": "查看关联页面",
+  "Analysis log": "分析日志",
   "Undo no-suggest": "撤销不再建议",
   "Will not be suggested when applied": "将在应用时不再建议",
   "Reject": "拒绝",
@@ -865,6 +871,7 @@ const state = {
     // Manual relation decisions remain local to the current review session until
     // the operator explicitly applies the selection.
     relationDraftStates: new Map(),
+    relationReviewStates: new Map(),
     relationReviews: [],
   },
   archive: {
@@ -921,6 +928,30 @@ function suppressRelationIcon() {
     "m15 9 1.4-1.4a3 3 0 0 1 4.2 4.2l-3.5 3.5a3 3 0 0 1-4.2 0L11.5 14",
     "M4 4 20 20",
   ]) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", d);
+    svg.append(path);
+  }
+  return svg;
+}
+
+function acceptRelationIcon() {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  for (const d of ["M20 6 9 17l-5-5", "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20"]) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", d);
+    svg.append(path);
+  }
+  return svg;
+}
+
+function rejectRelationIcon() {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  for (const d of ["M8 8l8 8M16 8l-8 8", "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20"]) {
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     path.setAttribute("d", d);
     svg.append(path);
@@ -1018,7 +1049,7 @@ function enrollmentRow(item, pending) {
   );
   const actions = element("div", "enrollment-actions");
   if (pending) {
-    const reject = element("button", "", "Reject");
+    const reject = element("button", "secondary-button", "Reject");
     reject.type = "button";
     reject.addEventListener("click", async () => {
       reject.disabled = true;
@@ -1209,10 +1240,11 @@ function renderOverview(data) {
 
   byId("scope-rows").replaceChildren(...orderedScopes([...data.scopes]).map(({ scope, depth }) => {
     const row = document.createElement("tr");
-    const open = element("button", "quiet-button", "↗");
+    const open = element("button", "icon-button");
     open.type = "button";
     open.title = t("Open");
     open.setAttribute("aria-label", t("Open"));
+    open.append(openPageIcon());
     open.addEventListener("click", () => openScope(scope.namespace));
     const action = element("td", "action-cell");
     action.append(open);
@@ -1566,7 +1598,7 @@ function governanceCard(hit) {
   const heading = element("div", "governance-page-heading");
   const copy = element("div", "governance-page-copy");
   copy.append(element("strong", "governance-page-title", pageSnippet(hit)), governanceMeta(hit));
-  const open = element("button", "quiet-button icon-button");
+  const open = element("button", "icon-button");
   open.type = "button";
   open.title = t("Open in inspector");
   open.setAttribute("aria-label", t("Open in inspector"));
@@ -1581,7 +1613,7 @@ function governanceCard(hit) {
   reason.placeholder = archived ? t("Restore reason") : t("Archive reason");
   reason.setAttribute("aria-label", reason.placeholder);
 
-  const action = element("button", archived ? "compact-button" : "danger-button", archived ? t("Restore") : t("Archive"));
+  const action = element("button", archived ? "compact-button secondary-button" : "compact-button warning-button", archived ? t("Restore") : t("Archive"));
   action.type = "button";
   action.addEventListener("click", async () => {
     const reasonText = reason.value.trim();
@@ -1719,7 +1751,7 @@ function archiveProposalCard(candidate) {
     element("strong", "", `${candidate.kind} · ${scopeName(candidate.namespace)}`),
     element("span", "muted", `${formatTime(candidate.observedAt)} · ${formatSize(candidate.contentChars)}`),
   );
-  const open = element("button", "quiet-button icon-button");
+  const open = element("button", "icon-button");
   open.type = "button";
   open.title = t("Open in inspector");
   open.setAttribute("aria-label", t("Open in inspector"));
@@ -1973,6 +2005,7 @@ function resetMaintenanceSession() {
   state.maintenance.pendingCandidates = [];
   state.maintenance.selected.clear();
   state.maintenance.relationDraftStates.clear();
+  state.maintenance.relationReviewStates.clear();
 }
 
 function renderMaintenanceStatus(status) {
@@ -2097,10 +2130,14 @@ function compactRelationReviewPreview(value, limit = 220) {
   return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 1)}…`;
 }
 
-function relationComparisonButton(proposal, className = "subtle-button", {
+function relationComparisonButton(proposal, className = "secondary-button", {
   iconOnly = false,
   onReviewed = null,
   reviewed = false,
+  onAccept = null,
+  onReject = null,
+  accepted = false,
+  rejected = false,
 } = {}) {
   const label = t("Compare Pages");
   const compare = element("button", className, iconOnly ? undefined : label);
@@ -2115,12 +2152,16 @@ function relationComparisonButton(proposal, className = "subtle-button", {
       reviewReason: proposal.reviewReason,
       onReviewed,
       reviewed,
+      onAccept,
+      onReject,
+      accepted,
+      rejected,
     }).catch(() => {});
   });
   return compare;
 }
 
-function topicExtractionReviewButton(candidate, className = "subtle-button") {
+function topicExtractionReviewButton(candidate, className = "secondary-button") {
   const review = element("button", className, t("Review source Pages"));
   review.type = "button";
   review.addEventListener("click", () => {
@@ -2173,13 +2214,17 @@ function relationReviewCard(proposal) {
   });
   const actions = element("div", "maintenance-relation-review-actions");
   const approve = element("button", "primary-button", t("Approve"));
-  const reject = element("button", "", t("Reject"));
+  const reject = element("button", "warning-button", t("Reject"));
   const suppress = element("button", "danger-button", t("Do not suggest this relation again"));
   [approve, reject, suppress].forEach((button) => { button.type = "button"; });
   approve.addEventListener("click", () => resolveRelationReview(proposal.candidateId, "approve"));
   reject.addEventListener("click", () => resolveRelationReview(proposal.candidateId, "reject"));
   suppress.addEventListener("click", () => resolveRelationReview(proposal.candidateId, "suppress"));
-  actions.append(relationComparisonButton(proposal), approve, reject, suppress);
+  actions.append(relationComparisonButton(proposal, "compact-button compact-icon-button", {
+    iconOnly: true,
+    onAccept: () => resolveRelationReview(proposal.candidateId, "approve"),
+    onReject: () => resolveRelationReview(proposal.candidateId, "reject"),
+  }), approve, reject, suppress);
   card.append(heading, ...annotations, pages, actions);
   return card;
 }
@@ -2314,16 +2359,9 @@ function maintenanceEstimatedCalls(phase = maintenancePhase()) {
 }
 
 function maintenanceCandidates() {
-  if (maintenanceWorkflowStage() === "review") {
-    return state.maintenance.pendingCandidates;
-  }
-  const phase = maintenancePhase();
-  if (phase === "pack") {
-    return state.maintenance.pendingCandidates
-      .filter((candidate) => candidate.operation === "pack");
-  }
+  const passPhases = new Set(maintenancePassPhases());
   return state.maintenance.pendingCandidates
-    .filter((candidate) => candidate.operation === phase);
+    .filter((candidate) => passPhases.has(candidate.operation));
 }
 
 function maintenanceSelectionCheckbox(candidate) {
@@ -2338,6 +2376,12 @@ function maintenanceSelectionCheckbox(candidate) {
   checkbox.addEventListener("change", () => {
     if (checkbox.checked) state.maintenance.selected.add(candidate.candidateId);
     else state.maintenance.selected.delete(candidate.candidateId);
+    if (candidate.operation === "relation") {
+      state.maintenance.relationReviewStates.set(
+        candidate.candidateId,
+        checkbox.checked ? "accepted" : "rejected",
+      );
+    }
     renderMaintenanceSession();
   });
   return checkbox;
@@ -2347,9 +2391,27 @@ function relationDraftState(candidate) {
   return state.maintenance.relationDraftStates.get(candidate.candidateId) || null;
 }
 
+function relationReviewState(candidate) {
+  return state.maintenance.relationReviewStates.get(candidate.candidateId) || null;
+}
+
 function markRelationCandidateReviewed(candidate) {
   if (candidate.operation !== "relation" || relationDraftState(candidate) === "suppressed") return;
-  state.maintenance.relationDraftStates.set(candidate.candidateId, "reviewed");
+  state.maintenance.relationReviewStates.set(candidate.candidateId, "reviewed");
+  renderMaintenanceSession();
+}
+
+function acceptRelationCandidate(candidate) {
+  if (candidate.operation !== "relation" || relationDraftState(candidate) === "suppressed") return;
+  state.maintenance.selected.add(candidate.candidateId);
+  state.maintenance.relationReviewStates.set(candidate.candidateId, "accepted");
+  renderMaintenanceSession();
+}
+
+function rejectRelationCandidate(candidate) {
+  if (candidate.operation !== "relation" || relationDraftState(candidate) === "suppressed") return;
+  state.maintenance.selected.delete(candidate.candidateId);
+  state.maintenance.relationReviewStates.set(candidate.candidateId, "rejected");
   renderMaintenanceSession();
 }
 
@@ -2360,6 +2422,7 @@ function toggleRelationCandidateSuppression(candidate) {
   } else {
     state.maintenance.relationDraftStates.set(candidate.candidateId, "suppressed");
     state.maintenance.selected.delete(candidate.candidateId);
+    state.maintenance.relationReviewStates.delete(candidate.candidateId);
   }
   renderMaintenanceSession();
 }
@@ -2540,14 +2603,91 @@ function summaryProposalCard(candidate) {
   return card;
 }
 
+function relationProposalCard(candidate) {
+  const draftState = relationDraftState(candidate);
+  const reviewState = relationReviewState(candidate);
+  const card = element("article", `maintenance-relation-proposal${reviewState ? ` is-${reviewState}` : ""}${draftState === "suppressed" ? " is-suppressed" : ""}`);
+  const aside = element("div", "maintenance-relation-proposal-aside");
+  const selection = element("label", "maintenance-card-select");
+  selection.append(maintenanceSelectionCheckbox(candidate), element("span", "", t("Proposals")));
+  aside.append(
+    selection,
+    element("strong", "", candidate.namespace),
+    element("span", "muted", `${candidate.pages.length} ${t("Pages")}`),
+  );
+  if (reviewState === "accepted") aside.append(element("span", "maintenance-relation-state accepted", t("Accepted")));
+  else if (reviewState === "rejected") aside.append(element("span", "maintenance-relation-state rejected", t("Rejected for this review")));
+  else if (reviewState === "reviewed") aside.append(element("span", "maintenance-relation-state reviewed", t("Reviewed")));
+  if (draftState === "suppressed") aside.append(element("span", "maintenance-relation-state suppressed", t("Will not be suggested when applied")));
+
+  const body = element("div", "maintenance-relation-proposal-body");
+  const pages = element("div", "maintenance-relation-proposal-pages");
+  candidate.pages.forEach((page, index) => {
+    const item = element("div", "maintenance-relation-proposal-page");
+    const heading = element("div", "maintenance-relation-proposal-page-heading");
+    heading.append(
+      element("strong", "", `${t("Page")} ${index + 1}`),
+      element("span", "mono muted", page.pageId),
+    );
+    item.append(heading, element("div", "maintenance-relation-proposal-preview", compactRelationReviewPreview(page.preview || t("No preview"), 300)));
+    pages.append(item);
+  });
+  const rationale = element("div", "maintenance-relation-proposal-reason");
+  rationale.append(
+    element("span", "maintenance-relation-evidence-label", t("Relation evidence")),
+    element("span", "", candidate.relationReason || t("No relation rationale was supplied.")),
+  );
+  const actions = element("div", "maintenance-relation-proposal-actions");
+  const view = relationComparisonButton(candidate, "icon-button maintenance-relation-action-button maintenance-relation-view", {
+    iconOnly: true,
+    reviewed: reviewState === "reviewed",
+    onReviewed: draftState === "suppressed" ? null : () => markRelationCandidateReviewed(candidate),
+    onAccept: draftState === "suppressed" ? null : () => acceptRelationCandidate(candidate),
+    onReject: draftState === "suppressed" ? null : () => rejectRelationCandidate(candidate),
+    accepted: reviewState === "accepted",
+    rejected: reviewState === "rejected",
+  });
+  view.title = t("View relation Pages");
+  view.setAttribute("aria-label", view.title);
+  view.replaceChildren(openPageIcon());
+  const accept = element("button", `icon-button maintenance-relation-action-button maintenance-relation-accept${reviewState === "accepted" ? " is-active" : ""}`);
+  accept.type = "button";
+  accept.title = t("Accept");
+  accept.setAttribute("aria-label", t("Accept"));
+  accept.append(acceptRelationIcon());
+  accept.disabled = draftState === "suppressed";
+  accept.addEventListener("click", () => acceptRelationCandidate(candidate));
+  const reject = element("button", `icon-button maintenance-relation-action-button maintenance-relation-reject${reviewState === "rejected" ? " is-active" : ""}`);
+  reject.type = "button";
+  reject.title = t("Reject");
+  reject.setAttribute("aria-label", t("Reject"));
+  reject.append(rejectRelationIcon());
+  reject.disabled = draftState === "suppressed";
+  reject.addEventListener("click", () => rejectRelationCandidate(candidate));
+  actions.append(view, accept, reject);
+  if (reviewState === "rejected" || draftState === "suppressed") {
+    const suppress = element("button", "maintenance-relation-no-suggest", t(draftState === "suppressed" ? "Undo no-suggest" : "Do not suggest this relation again"));
+    suppress.type = "button";
+    suppress.addEventListener("click", () => toggleRelationCandidateSuppression(candidate));
+    actions.append(suppress);
+  }
+  body.append(pages, rationale, actions);
+  card.append(aside, body);
+  return card;
+}
+
 function renderMaintenanceProposals(candidates) {
   const summaryCandidates = candidates.filter((candidate) => candidate.operation === "summary");
-  const tableCandidates = candidates.filter((candidate) => candidate.operation !== "summary");
+  const relationCandidates = candidates.filter((candidate) => candidate.operation === "relation");
+  const tableCandidates = candidates.filter((candidate) => candidate.operation !== "summary" && candidate.operation !== "relation");
   const summaryCards = byId("maintenance-summary-cards");
+  const relationCards = byId("maintenance-relation-cards");
   const table = byId("maintenance-table-wrap");
   summaryCards.hidden = summaryCandidates.length === 0;
+  relationCards.hidden = relationCandidates.length === 0;
   table.hidden = tableCandidates.length === 0;
   if (summaryCandidates.length) summaryCards.replaceChildren(...summaryCandidates.map(summaryProposalCard));
+  if (relationCandidates.length) relationCards.replaceChildren(...relationCandidates.map(relationProposalCard));
   if (tableCandidates.length) renderMaintenanceCandidateRows(tableCandidates);
 }
 
@@ -2573,7 +2713,7 @@ function maintenanceStepStatus(phase) {
   if (!scan) return t("Waiting");
   const analysis = state.maintenance.analyses[phase];
   if (!analysis) return maintenanceWorkCount() ? t("Ready to analyze") : t("Ready to continue");
-  if (phase === "summary" && summaryFailedBatches().length) return t("Analysis incomplete");
+  if (maintenanceWorkflowStage() === "review" && maintenanceFailedBatches().length) return t("Analysis incomplete");
   const candidates = maintenanceCandidates();
   const selected = candidates.filter((candidate) => state.maintenance.selected.has(candidate.candidateId)).length;
   return selected ? t("Ready to apply") : t("Ready to continue");
@@ -2599,10 +2739,10 @@ function maintenancePhaseDescription() {
   if (!analysis) return currentLanguage === "zh"
       ? `扫描已发现 ${formatNumber(maintenanceWorkCount())} 个结构候选。它们不是已建议的变更；点击分析后才会调用模型判断是否应合并、摘要、凝练新页或关联。`
       : `The scan found ${formatNumber(maintenanceWorkCount())} structural candidates. They are not recommendations yet: analysis calls a model to decide whether to pack, summarize, extract a Topic Page, or relate them.`;
-  const failedBatches = phase === "summary" ? summaryFailedBatches() : [];
+  const failedBatches = maintenanceFailedBatches();
   if (failedBatches.length) return currentLanguage === "zh"
-    ? `${formatNumber(failedBatches.length)} 个摘要页面未完成。已完成的提案仍可应用；请重试失败页面，或重新扫描本阶段。`
-    : `${formatNumber(failedBatches.length)} summary Page${failedBatches.length === 1 ? " is" : "s are"} incomplete. Completed proposals remain available; retry failed Pages or rescan this stage.`;
+    ? `${formatNumber(failedBatches.length)} 个分析批次未完成。其他批次的提案仍然保留；可单独重试失败批次，或继续审阅已有结果。`
+    : `${formatNumber(failedBatches.length)} analysis batch${failedBatches.length === 1 ? " is" : "es are"} incomplete. Proposals from other batches remain available; retry only the failed batches or continue reviewing the available results.`;
   if (maintenanceCandidates().length) return t("Review the proposals below, select the changes to apply, then continue to the next stage.");
   return t("Analysis completed. No changes are recommended for this stage. Continue when you are ready.");
 }
@@ -2620,7 +2760,6 @@ function maintenancePrimaryLabel(action = currentMaintenanceAction()) {
   if (action === "start") return t("Start maintenance");
   if (action === "scan") return t("Scan candidates");
   if (action === "analyze") return t("Analyze suggestions");
-  if (action === "retry") return t("Retry failed pages");
   if (action === "apply") {
     const { candidates, suppressions } = maintenanceApplySelection();
     const count = candidates.length + suppressions.length;
@@ -2761,16 +2900,20 @@ function renderMaintenanceWorkflow() {
         : "Analyze only Pack merge proposals. Summary and relation analysis wait until this pass is applied or skipped and the inventory is refreshed.")
     : stage === "analyze" && pass === "semantic"
       ? (currentLanguage === "zh"
-        ? "模型评估摘要与关联候选，只提出建议；不会写入页面。应用或跳过本段后，凝练新页会在刷新后的关系结构上运行。"
-        : "The model evaluates summary and relation candidates without writing Pages. Topic extraction runs on the refreshed relation structure after this stage is applied or skipped.")
+        ? "模型逐批评估摘要与关联候选；提案一旦返回即可先审阅，但全部批次结束前不能应用，也不会写入页面。"
+        : "The model evaluates summary and relation candidates batch by batch. Returned proposals can be reviewed immediately, but applying stays locked and no Page is written until every batch finishes.")
     : stage === "analyze"
       ? (currentLanguage === "zh"
-        ? "模型基于已确认的关系结构评估凝练新页提案；只在你勾选后创建页面。"
-        : "The model evaluates Topic Page proposals from the confirmed relation structure; a Page is created only after you select it.")
+        ? "模型逐批评估提案；已返回的内容可以先审阅，但全部批次结束前不能应用。"
+        : "The model evaluates proposals batch by batch. Returned proposals can be reviewed immediately, but applying stays locked until every batch finishes.")
       : stage === "review" && candidates.length === 0
         ? (currentLanguage === "zh"
-          ? "扫描未发现可处理候选，无需调用模型或审阅提案；可直接继续下一维护段。"
-          : "The scan found no eligible candidates. No model call or proposal review is needed; continue directly to the next pass.")
+          ? (issues.length
+            ? "分析已结束，但没有形成可应用提案；失败批次可单独重试，其余批次没有建议变更。"
+            : "分析已结束，没有建议变更；可直接继续下一维护段。")
+          : (issues.length
+            ? "Analysis finished without an applicable proposal. Failed batches can be retried independently; the remaining batches recommended no change."
+            : "Analysis finished with no recommended change; continue directly to the next pass."))
       : (currentLanguage === "zh"
         ? "统一审阅所有建议。只会应用你勾选的项目，每项写入前都会重新校验当前版本。"
         : "Review every suggestion together. Only selected items are applied, and each write revalidates the current revision.");
@@ -2784,28 +2927,77 @@ function renderMaintenanceWorkflow() {
     : [
       metric(t("Scanned candidate groups"), formatNumber(scanGroups)),
       metric(t("Scanned eligible pages"), formatNumber(scanPages)),
-      metric(t("Model calls"), formatNumber(modelCalls), modelCalls ? "info" : ""),
-      metric(t("Proposals"), formatNumber(stage === "review" ? candidates.length : 0), candidates.length ? "info" : ""),
+      metric(
+        t("Model calls"),
+        formatNumber(modelCalls),
+        modelCalls ? "info" : "",
+        currentLanguage === "zh"
+          ? "包含成功、失败与重试的调用尝试；各批次结果见下方日志。"
+          : "Includes successful, failed, and retried attempts; see the batch log below.",
+      ),
+      metric(t("Proposals"), formatNumber(candidates.length), candidates.length ? "positive" : ""),
     ];
   byId("maintenance-scan-metrics").replaceChildren(...metrics);
   byId("maintenance-candidate-status").textContent = stage === "review"
     ? `${formatNumber(candidates.length)} ${t("proposals")} · ${formatNumber(selectedCount)} ${currentLanguage === "zh" ? "已选" : "selected"}`
     : stage === "analyze"
-      ? `${formatNumber(modelCalls)} ${t("Model calls")} · ${formatNumber(estimatedCalls)} ${t("estimated model calls")}`
+      ? (currentLanguage === "zh"
+        ? `已处理 ${formatNumber(maintenanceProcessedCalls())} / ${formatNumber(estimatedCalls)} 批 · ${formatNumber(candidates.length)} 个提案可审阅`
+        : `${formatNumber(maintenanceProcessedCalls())} of ${formatNumber(estimatedCalls)} batches processed · ${formatNumber(candidates.length)} proposals available to review`)
       : `${formatNumber(scanGroups + scanPages)} ${currentLanguage === "zh" ? "扫描项" : "scanned items"}`;
 
-  const issue = issues.map((item) => item.message || String(item)).join("\n");
+  const relationAnalysis = state.maintenance.analyses.relation;
+  const relationFailures = relationAnalysis?.batches?.filter((batch) => batch.status === "failed") || [];
+  const issueDetails = issues.map((item) => item.message || String(item)).join("\n");
+  const relationProgress = relationAnalysis && relationAnalysis.batchCount > 0
+    ? (currentLanguage === "zh"
+      ? `关联分析已处理 ${formatNumber(relationAnalysis.batchesCompleted)} / ${formatNumber(relationAnalysis.batchCount)} 组；${formatNumber(relationFailures.length)} 组失败${state.maintenance.busy ? "，其余组仍在继续。" : "，其余组已继续完成分析。"}`
+      : `Relation analysis processed ${formatNumber(relationAnalysis.batchesCompleted)} of ${formatNumber(relationAnalysis.batchCount)} groups; ${formatNumber(relationFailures.length)} failed${state.maintenance.busy ? " and the remaining groups are still running." : " and the remaining groups continued."}`)
+    : "";
+  const issue = [relationFailures.length ? relationProgress : "", issueDetails].filter(Boolean).join("\n");
   const issueNode = byId("maintenance-issue");
   issueNode.hidden = !issue;
   issueNode.textContent = issue ? `${t("Analysis incomplete")}: ${issue}` : "";
 
+  const analysisLog = byId("maintenance-analysis-log");
+  const analysisLogSummary = byId("maintenance-analysis-log-summary");
+  const analysisLogBody = byId("maintenance-analysis-log-body");
+  const logLines = [];
+  if (relationAnalysis?.batches?.length) {
+    const completed = relationAnalysis.batches.filter((batch) => batch.status === "completed").length;
+    const failed = relationFailures.length;
+    logLines.push(currentLanguage === "zh"
+      ? `关联分析：${formatNumber(completed)} 组完成，${formatNumber(failed)} 组失败，共 ${formatNumber(relationAnalysis.batches.length)} 组。`
+      : `Relation analysis: ${formatNumber(completed)} complete, ${formatNumber(failed)} failed, ${formatNumber(relationAnalysis.batches.length)} total.`);
+    for (const batch of relationAnalysis.batches) {
+      const stateLabel = currentLanguage === "zh"
+        ? ({ pending: "等待", running: "处理中", completed: "完成", failed: "失败" }[batch.status] || batch.status)
+        : batch.status;
+      const decisionLabel = currentLanguage === "zh"
+        ? ({ candidate: "形成提案", defer: "延后", no_candidate: "无提案", none: "无提案" }[batch.decision] || batch.decision)
+        : batch.decision;
+      const label = currentLanguage === "zh"
+        ? `第 ${batch.batchIndex + 1} 组 · ${stateLabel}${decisionLabel ? ` · ${decisionLabel}` : ""}${batch.issue ? ` · ${batch.issue}` : ""}`
+        : `Group ${batch.batchIndex + 1} · ${batch.status}${batch.decision ? ` · ${batch.decision}` : ""}${batch.issue ? ` · ${batch.issue}` : ""}`;
+      logLines.push(label);
+    }
+  }
+  analysisLog.hidden = logLines.length === 0;
+  analysisLogSummary.textContent = logLines.length ? logLines[0] : "";
+  analysisLogBody.textContent = logLines.slice(1).join("\n");
+
   const proposals = byId("maintenance-proposals");
-  proposals.hidden = stage !== "review" || candidates.length === 0;
+  proposals.hidden = !["analyze", "review"].includes(stage) || candidates.length === 0;
   if (!proposals.hidden) {
+    proposals.classList.toggle("is-live", stage === "analyze");
     renderMaintenanceProposals(candidates);
-    byId("maintenance-selection-status").textContent = currentLanguage === "zh"
-      ? `已选 ${formatNumber(selectedCount)} / ${formatNumber(candidates.length)}`
-      : `${formatNumber(selectedCount)} of ${formatNumber(candidates.length)} selected`;
+    byId("maintenance-selection-status").textContent = stage === "analyze"
+      ? (currentLanguage === "zh"
+        ? `分析仍在继续 · 已选 ${formatNumber(selectedCount)} / ${formatNumber(candidates.length)} · 完成前不能应用`
+        : `Analysis is still running · ${formatNumber(selectedCount)} of ${formatNumber(candidates.length)} selected · applying is locked`)
+      : (currentLanguage === "zh"
+        ? `已选 ${formatNumber(selectedCount)} / ${formatNumber(candidates.length)}`
+        : `${formatNumber(selectedCount)} of ${formatNumber(candidates.length)} selected`);
   }
 
   const primary = byId("maintenance-primary");
@@ -2818,8 +3010,10 @@ function renderMaintenanceWorkflow() {
   skip.hidden = stage !== "review" || candidates.length === 0;
   skip.disabled = state.maintenance.busy;
   const retryFailed = byId("maintenance-retry-failed");
-  retryFailed.hidden = true;
-  retryFailed.disabled = true;
+  const failedBatchCount = maintenanceFailedBatches().length;
+  retryFailed.hidden = stage !== "review" || failedBatchCount === 0;
+  retryFailed.disabled = state.maintenance.busy || failedBatchCount === 0;
+  retryFailed.textContent = `${t("Retry failed batches")} (${formatNumber(failedBatchCount)})`;
   const cancel = byId("maintenance-cancel");
   cancel.disabled = state.maintenance.busy;
   const selectAll = byId("maintenance-select-all");
@@ -2979,13 +3173,33 @@ function maintenanceBatches(items, batchSize = SUMMARY_REVIEW_BATCH_SIZE) {
 }
 
 function appendMaintenanceCandidates(operation, candidates) {
+  const candidateIds = [];
   for (const candidate of candidates || []) {
     const proposal = { ...candidate, operation };
     const existing = state.maintenance.pendingCandidates.findIndex((item) => item.candidateId === proposal.candidateId);
     if (existing >= 0) state.maintenance.pendingCandidates.splice(existing, 1, proposal);
-    else state.maintenance.pendingCandidates.push(proposal);
-    state.maintenance.selected.add(proposal.candidateId);
+    else {
+      state.maintenance.pendingCandidates.push(proposal);
+      state.maintenance.selected.add(proposal.candidateId);
+    }
+    candidateIds.push(proposal.candidateId);
   }
+  return candidateIds;
+}
+
+function replaceMaintenanceBatchCandidates(operation, batch, candidates) {
+  const previousCandidateIds = new Set(batch.candidateIds || []);
+  const candidateIds = appendMaintenanceCandidates(operation, candidates);
+  const nextCandidateIds = new Set(candidateIds);
+  for (const candidateId of previousCandidateIds) {
+    if (nextCandidateIds.has(candidateId)) continue;
+    state.maintenance.pendingCandidates = state.maintenance.pendingCandidates
+      .filter((candidate) => candidate.candidateId !== candidateId);
+    state.maintenance.selected.delete(candidateId);
+    state.maintenance.relationDraftStates.delete(candidateId);
+    state.maintenance.relationReviewStates.delete(candidateId);
+  }
+  batch.candidateIds = candidateIds;
 }
 
 function emptySummaryAnalysis(scan) {
@@ -3007,6 +3221,7 @@ function emptySummaryAnalysis(scan) {
       workerCalls: 0,
       noCandidatePages: 0,
       deferredPages: 0,
+      candidateIds: [],
       issues: [],
     })),
   };
@@ -3015,6 +3230,33 @@ function emptySummaryAnalysis(scan) {
 function summaryFailedBatches() {
   return (state.maintenance.analyses.summary?.batches || [])
     .filter((batch) => batch.status === "failed");
+}
+
+function relationFailedBatches() {
+  return (state.maintenance.analyses.relation?.batches || [])
+    .filter((batch) => batch.status === "failed");
+}
+
+function maintenanceFailedBatches() {
+  return [...summaryFailedBatches(), ...relationFailedBatches()];
+}
+
+function maintenanceProcessedCalls() {
+  return maintenancePassPhases().reduce((total, phase) => {
+    const analysis = state.maintenance.analyses[phase];
+    if (!analysis) return total;
+    if (Array.isArray(analysis.batches)) {
+      return total + analysis.batches.filter((batch) => (
+        batch.status === "completed" || batch.status === "failed"
+      )).length;
+    }
+    return total + (analysis.batchesCompleted || 0);
+  }, 0);
+}
+
+function syncMaintenanceAnalyzeProgress() {
+  if (state.maintenance.activity?.kind !== "analyze" || state.maintenance.activity.retry) return;
+  state.maintenance.activity.current = maintenanceProcessedCalls();
 }
 
 function refreshSummaryAnalysisTotals(analysis) {
@@ -3034,6 +3276,14 @@ function emptyRelationAnalysis(scan) {
     noCandidateGroups: 0,
     deferredGroups: 0,
     issues: [],
+    batches: scan.groups.map((group, batchIndex) => ({
+      batchIndex,
+      groupId: group.groupId,
+      status: "pending",
+      attempts: 0,
+      decision: null,
+      issue: null,
+    })),
   };
 }
 
@@ -3055,6 +3305,7 @@ function resetCurrentMaintenanceWork() {
   state.maintenance.pendingCandidates = [];
   state.maintenance.selected.clear();
   state.maintenance.relationDraftStates.clear();
+  state.maintenance.relationReviewStates.clear();
 }
 
 async function scanMaintenance() {
@@ -3102,6 +3353,7 @@ async function analyzePackingPhase(scan) {
     });
     appendMaintenanceAnalysisBatch(analysis, batch);
     appendMaintenanceCandidates("pack", batch.candidates);
+    syncMaintenanceAnalyzeProgress();
     renderMaintenanceSession();
   }
   state.maintenance.analyses.pack = analysis;
@@ -3126,8 +3378,7 @@ async function analyzeSummaryPhase(scan, { retryFailed = false } = {}) {
     batchState.issues = [];
     batchState.deferredPages = 0;
     batchState.noCandidatePages = 0;
-    batchState.workerCalls = 0;
-    state.maintenance.activity.current = progressIndex + 1;
+    state.maintenance.activity.current = retryFailed ? progressIndex : maintenanceProcessedCalls();
     byId("maintenance-status").textContent = `${t("Analyzing")} ${t("Summary")} ${formatNumber(index + 1)} / ${formatNumber(batches.length)}`;
     renderMaintenanceSession();
     try {
@@ -3135,9 +3386,9 @@ async function analyzeSummaryPhase(scan, { retryFailed = false } = {}) {
         scanId: scan.scanId,
         pages: batch.map((item) => ({ pageId: item.pageId, revisionId: item.revisionId })),
       });
-      appendMaintenanceCandidates("summary", result.candidates);
+      replaceMaintenanceBatchCandidates("summary", batchState, result.candidates);
       analysis.analyzedAt = result.analyzedAt;
-      batchState.workerCalls = result.workerCalls || 0;
+      batchState.workerCalls += result.workerCalls || 0;
       batchState.noCandidatePages = result.noCandidatePages || 0;
       batchState.deferredPages = result.deferredPages || 0;
       batchState.issues = (result.issues || []).map((issue) => ({
@@ -3147,20 +3398,37 @@ async function analyzeSummaryPhase(scan, { retryFailed = false } = {}) {
       }));
       batchState.status = batchState.issues.length ? "failed" : "completed";
     } catch (error) {
+      batchState.workerCalls += 1;
       batchState.deferredPages = batch.length;
       batchState.issues = [{ batchIndex: index, message: error.message || String(error) }];
       batchState.status = "failed";
     }
     refreshSummaryAnalysisTotals(analysis);
+    if (retryFailed) state.maintenance.activity.current = progressIndex + 1;
+    else syncMaintenanceAnalyzeProgress();
     renderMaintenanceSession();
   }
 }
 
-async function analyzeRelationPhase(scan) {
-  const analysis = emptyRelationAnalysis(scan);
-  state.maintenance.analyses.relation = analysis;
-  for (const [index, group] of scan.groups.entries()) {
-    state.maintenance.activity.current = index + 1;
+async function analyzeRelationPhase(scan, { retryFailed = false } = {}) {
+  let analysis = state.maintenance.analyses.relation;
+  if (!retryFailed || !analysis) {
+    analysis = emptyRelationAnalysis(scan);
+    state.maintenance.analyses.relation = analysis;
+  }
+  const indexes = retryFailed
+    ? analysis.batches.filter((batch) => batch.status === "failed").map((batch) => batch.batchIndex)
+    : analysis.batches.filter((batch) => batch.status !== "completed").map((batch) => batch.batchIndex);
+  for (const [progressIndex, index] of indexes.entries()) {
+    const group = scan.groups[index];
+    const batch = analysis.batches[index];
+    if (!group || !batch) continue;
+    if (batch.status === "failed") analysis.deferredGroups = Math.max(0, analysis.deferredGroups - 1);
+    batch.status = "running";
+    batch.attempts += 1;
+    batch.decision = null;
+    batch.issue = null;
+    analysis.issues = analysis.issues.filter((issue) => issue.batchIndex !== index);
     byId("maintenance-status").textContent = `${t("Analyzing")} ${t("Relations")} ${formatNumber(index + 1)} / ${formatNumber(scan.groups.length)}`;
     renderMaintenanceSession();
     try {
@@ -3170,15 +3438,27 @@ async function analyzeRelationPhase(scan) {
       });
       analysis.analyzedAt = result.analyzedAt;
       analysis.workerCalls += 1;
-      if (result.candidate) appendMaintenanceCandidates("relation", [result.candidate]);
-      else if (result.decision === "defer") analysis.deferredGroups += 1;
-      else analysis.noCandidateGroups += 1;
+      if (result.candidate) {
+        appendMaintenanceCandidates("relation", [result.candidate]);
+        batch.decision = "candidate";
+      } else if (result.decision === "defer") {
+        analysis.deferredGroups += 1;
+        batch.decision = "defer";
+      } else {
+        analysis.noCandidateGroups += 1;
+        batch.decision = result.decision || "none";
+      }
+      batch.status = "completed";
     } catch (error) {
       analysis.workerCalls += 1;
       analysis.deferredGroups += 1;
-      analysis.issues.push({ batchIndex: index, message: error.message || String(error) });
+      batch.status = "failed";
+      batch.issue = error.message || String(error);
+      analysis.issues.push({ batchIndex: index, groupId: group.groupId, message: batch.issue });
     }
-    analysis.batchesCompleted += 1;
+    analysis.batchesCompleted = analysis.batches.filter((item) => item.status === "completed" || item.status === "failed").length;
+    if (retryFailed) state.maintenance.activity.current = progressIndex + 1;
+    else syncMaintenanceAnalyzeProgress();
     renderMaintenanceSession();
   }
 }
@@ -3206,6 +3486,7 @@ async function analyzeTopicPhase(scan) {
       analysis.issues.push({ batchIndex: index, message: error.message || String(error) });
     }
     analysis.batchesCompleted += 1;
+    syncMaintenanceAnalyzeProgress();
     renderMaintenanceSession();
   }
 }
@@ -3238,7 +3519,6 @@ async function analyzeMaintenance() {
     }
     state.maintenance.workflowStage = "review";
     state.maintenance.phase = maintenancePassPhases()[0];
-    for (const candidate of maintenanceCandidates()) state.maintenance.selected.add(candidate.candidateId);
   } catch (error) {
     const analysis = state.maintenance.analyses[maintenancePhase()];
     if (analysis) analysis.issues.push({ message: error.message || String(error) });
@@ -3251,24 +3531,43 @@ async function analyzeMaintenance() {
   }
 }
 
-async function retryFailedSummaryBatches() {
-  const scan = maintenanceScanForPhase();
-  const failed = summaryFailedBatches();
-  if (state.maintenance.busy || maintenancePhase() !== "summary" || !scan || failed.length === 0) return;
+async function retryFailedMaintenanceBatches() {
+  if (state.maintenance.busy || maintenanceWorkflowStage() !== "review") return;
+  const summaryFailures = summaryFailedBatches();
+  const relationFailures = relationFailedBatches();
+  if (summaryFailures.length === 0 && relationFailures.length === 0) return;
   state.maintenance.busy = true;
-  state.maintenance.activity = { kind: "analyze", current: 0, total: failed.length };
-  byId("maintenance-status").textContent = `${t("Preparing")} ${t("Summary")}`;
+  state.maintenance.activity = {
+    kind: "analyze",
+    current: 0,
+    total: summaryFailures.length + relationFailures.length,
+    retry: true,
+  };
+  byId("maintenance-status").textContent = t("Preparing");
   renderMaintenanceSession();
   try {
-    const previousCalls = state.maintenance.analyses.summary?.workerCalls || 0;
-    await analyzeSummaryPhase(scan, { retryFailed: true });
-    for (const candidate of maintenanceCandidates()) state.maintenance.selected.add(candidate.candidateId);
-    const analysis = state.maintenance.analyses.summary;
-    const outcome = maintenanceOutcome();
-    outcome.analyzedAt = analysis?.analyzedAt || outcome.analyzedAt || new Date().toISOString();
-    outcome.modelCalls += Math.max(0, (analysis?.workerCalls || 0) - previousCalls);
-    outcome.proposals = maintenanceCandidates().length;
-    outcome.issues = [...(analysis?.issues || [])];
+    const previousCalls = new Map(maintenancePassPhases().map((phase) => [
+      phase,
+      state.maintenance.analyses[phase]?.workerCalls || 0,
+    ]));
+    if (summaryFailures.length) {
+      const scan = maintenanceScanForPhase("summary");
+      if (scan) await analyzeSummaryPhase(scan, { retryFailed: true });
+    }
+    if (relationFailures.length) {
+      const scan = maintenanceScanForPhase("relation");
+      if (scan) await analyzeRelationPhase(scan, { retryFailed: true });
+    }
+    for (const phase of maintenancePassPhases()) {
+      const analysis = state.maintenance.analyses[phase];
+      const outcome = maintenanceOutcome(phase);
+      if (!analysis || !outcome) continue;
+      outcome.analyzedAt = analysis.analyzedAt || outcome.analyzedAt || new Date().toISOString();
+      outcome.modelCalls += Math.max(0, (analysis.workerCalls || 0) - (previousCalls.get(phase) || 0));
+      outcome.proposals = state.maintenance.pendingCandidates
+        .filter((candidate) => candidate.operation === phase).length;
+      outcome.issues = [...(analysis.issues || [])];
+    }
   } catch (error) {
     byId("maintenance-status").textContent = `${t("Analysis failed")}: ${error.message || String(error)}`;
     showError(error);
@@ -3331,7 +3630,10 @@ async function optimizeMaintenanceSelection() {
       state.maintenance.pendingCandidates = state.maintenance.pendingCandidates
         .filter((candidate) => !consumed.has(candidate.candidateId));
     }
-    for (const candidateId of consumed) state.maintenance.relationDraftStates.delete(candidateId);
+    for (const candidateId of consumed) {
+      state.maintenance.relationDraftStates.delete(candidateId);
+      state.maintenance.relationReviewStates.delete(candidateId);
+    }
     const byCandidateId = new Map(totalCandidates.map((candidate) => [candidate.candidateId, candidate]));
     for (const candidateId of result.appliedCandidateIds) {
       const candidate = byCandidateId.get(candidateId);
@@ -3476,7 +3778,6 @@ async function runMaintenancePrimaryAction() {
   if (action === "start") return startMaintenanceSession();
   if (action === "scan") return scanMaintenance();
   if (action === "analyze") return analyzeMaintenance();
-  if (action === "retry") return retryFailedSummaryBatches();
   if (action === "apply") return optimizeMaintenanceSelection();
   return advanceMaintenancePhase();
 }
@@ -3618,7 +3919,7 @@ byId("pages-next").addEventListener("click", () => loadPages({ page: state.pages
 byId("maintenance-start").addEventListener("click", () => startMaintenanceSession().catch(showError));
 byId("maintenance-primary").addEventListener("click", () => runMaintenancePrimaryAction().catch(showError));
 byId("maintenance-skip").addEventListener("click", () => skipMaintenancePhase().catch(showError));
-byId("maintenance-retry-failed").addEventListener("click", () => retryFailedSummaryBatches().catch(showError));
+byId("maintenance-retry-failed").addEventListener("click", () => retryFailedMaintenanceBatches().catch(showError));
 byId("maintenance-rescan").addEventListener("click", () => rescanMaintenancePhase().catch(showError));
 byId("maintenance-cancel").addEventListener("click", () => cancelMaintenanceSession().catch(showError));
 byId("maintenance-start-new").addEventListener("click", () => startMaintenanceSession().catch(showError));
