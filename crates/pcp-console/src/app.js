@@ -909,66 +909,41 @@ function element(tag, className, text) {
   return node;
 }
 
-function openPageIcon() {
+function strokeIcon(paths, className = "") {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("aria-hidden", "true");
-  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("d", "M5 19 19 5M8 5h11v11");
-  svg.append(path);
+  if (className) svg.setAttribute("class", className);
+  for (const d of paths) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", d);
+    svg.append(path);
+  }
   return svg;
+}
+
+function openPageIcon() {
+  return strokeIcon(["M5 19 19 5M8 5h11v11"]);
 }
 
 function relationCompareIcon() {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("aria-hidden", "true");
-  for (const d of ["M4 5h6v14H4z", "M14 5h6v14h-6z", "M10 12h4", "m2-2 2 2-2 2"]) {
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", d);
-    svg.append(path);
-  }
-  return svg;
+  return strokeIcon(["M4 5h6v14H4z", "M14 5h6v14h-6z", "M10 12h4", "m2-2 2 2-2 2"]);
 }
 
 function suppressRelationIcon() {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("aria-hidden", "true");
-  for (const d of [
+  return strokeIcon([
     "m9 15-1.4 1.4a3 3 0 0 1-4.2-4.2l3.5-3.5a3 3 0 0 1 4.2 0L12.5 10",
     "m15 9 1.4-1.4a3 3 0 0 1 4.2 4.2l-3.5 3.5a3 3 0 0 1-4.2 0L11.5 14",
     "M4 4 20 20",
-  ]) {
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", d);
-    svg.append(path);
-  }
-  return svg;
+  ]);
 }
 
 function acceptRelationIcon() {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("aria-hidden", "true");
-  for (const d of ["M20 6 9 17l-5-5", "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20"]) {
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", d);
-    svg.append(path);
-  }
-  return svg;
+  return strokeIcon(["M20 6 9 17l-5-5", "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20"]);
 }
 
 function rejectRelationIcon() {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("aria-hidden", "true");
-  for (const d of ["M8 8l8 8M16 8l-8 8", "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20"]) {
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", d);
-    svg.append(path);
-  }
-  return svg;
+  return strokeIcon(["M8 8l8 8M16 8l-8 8", "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20"]);
 }
 
 function formatNumber(value) {
@@ -1349,9 +1324,9 @@ function pageResult(hit) {
   result.dataset.pageId = hit.pageId;
   const open = element("button", "page-link");
   open.type = "button";
-  open.append(
-    element("strong", "page-title", pageSnippet(hit)),
-  );
+  const indicator = element("span", "page-open-indicator");
+  indicator.append(openPageIcon());
+  open.append(element("strong", "page-title", pageSnippet(hit)), indicator);
   open.addEventListener("click", () => pageInspector.open(hit.pageId));
   result.append(open, pageResultMeta(hit));
   return result;
@@ -1431,9 +1406,9 @@ function pageSourceLabel(hit) {
 
 function pageStructureTags(hit) {
   const tags = [];
-  if (hit.sourceSpan) tags.push(["⌁", t("Source stream")]);
-  if (hit.summaryRevisionId) tags.push(["≡", t("Summary route")]);
-  if (hit.previewPayload?.mediaType === "application/vnd.pcp.packed-page+json") tags.push(["▣", t("Packed")]);
+  if (hit.sourceSpan) tags.push([["M5 7h11", "m-3-3 3 3-3 3", "M19 17H8", "m3 3-3-3 3-3"], t("Source stream")]);
+  if (hit.summaryRevisionId) tags.push([["M5 7h14", "M5 12h10", "M5 17h7"], t("Summary route")]);
+  if (hit.previewPayload?.mediaType === "application/vnd.pcp.packed-page+json") tags.push([["M4 5h16v14H4z", "M8 9h8", "M8 13h8", "M8 17h5"], t("Packed")]);
   return tags;
 }
 
@@ -1442,14 +1417,14 @@ function pageRelationSignal(hit) {
   const signal = element("span", `page-signal${stats?.total ? "" : " page-signal-empty"}`);
   if (!stats) {
     signal.title = t("Unavailable");
-    signal.append(element("span", "page-signal-icon", "↔"), element("span", "", "–"));
+    signal.append(strokeIcon(["M8 8h8", "m-2-2 2 2-2 2", "M16 16H8", "m2 2-2-2 2-2"], "page-meta-icon"), element("span", "", "–"));
     return signal;
   }
   signal.title = stats.total > 0
     ? `${formatNumber(stats.total)} ${t("Direct links")} · ${formatNumber(stats.incoming)} ${t("in")} · ${formatNumber(stats.outgoing)} ${t("out")}`
     : t("No direct links");
   signal.append(
-    element("span", "page-signal-icon", "↔"),
+    strokeIcon(["M8 8h8", "m-2-2 2 2-2 2", "M16 16H8", "m2 2-2-2 2-2"], "page-meta-icon"),
     element("strong", "", formatNumber(stats.total)),
     element("span", "page-signal-direction", `↓ ${formatNumber(stats.incoming)}`),
     element("span", "page-signal-direction", `↑ ${formatNumber(stats.outgoing)}`),
@@ -1470,10 +1445,10 @@ function pageResultMeta(hit) {
     return item;
   }));
   meta.append(pageRelationSignal(hit));
-  meta.append(...pageStructureTags(hit).map(([icon, label]) => {
+  meta.append(...pageStructureTags(hit).map(([paths, label]) => {
     const tag = element("span", "page-structure-tag");
     tag.title = label;
-    tag.append(element("span", "", icon), document.createTextNode(label));
+    tag.append(strokeIcon(paths, "page-meta-icon"), document.createTextNode(label));
     return tag;
   }));
   return meta;
