@@ -141,8 +141,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   -webkit-backdrop-filter: saturate(180%) blur(24px);
   backdrop-filter: saturate(180%) blur(24px);
 }
-.title-block, .headline, .topbar-end, .topbar-actions { display: flex; align-items: center; }
-.title-block { min-width: 0; gap: 13px; }
+.title-block, .brand-lockup, .headline, .topbar-end, .topbar-actions { display: flex; align-items: center; }
+.title-block { min-width: 0; gap: 14px; }
+.brand-lockup { flex: 0 0 auto; gap: 9px; }
+.brand-mark { display: block; width: 27px; height: 27px; flex: 0 0 auto; border-radius: 7px; filter: drop-shadow(0 2px 4px rgba(10, 75, 140, .14)); }
 .topbar-end { min-width: 0; gap: 14px; }
 .headline { gap: 12px; }
 .topbar-actions { flex: 0 0 auto; gap: 5px; }

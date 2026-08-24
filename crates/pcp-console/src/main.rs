@@ -359,6 +359,7 @@ fn router(state: AppState) -> Router {
             "/maintenance-operation-state.js",
             get(maintenance_operation_state_js),
         )
+        .route("/pcp-icon.png", get(pcp_icon_png))
         .route("/styles.css", get(styles_css))
         .route("/api/health", get(health))
         .route("/api/runtime", get(runtime_status))
@@ -527,6 +528,14 @@ fn static_asset(content_type: &'static str, contents: &'static str) -> Response 
         .into_response()
 }
 
+fn static_binary_asset(content_type: &'static str, contents: &'static [u8]) -> Response {
+    Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, CONSOLE_STATIC_CACHE_CONTROL)
+        .body(Body::from(contents))
+        .expect("build static binary asset response")
+}
+
 async fn index() -> Response {
     static_asset("text/html; charset=utf-8", include_str!("index.html"))
 }
@@ -625,6 +634,10 @@ async fn query_view_js() -> Response {
 
 async fn styles_css() -> Response {
     static_asset("text/css; charset=utf-8", include_str!("styles.css"))
+}
+
+async fn pcp_icon_png() -> Response {
+    static_binary_asset("image/png", include_bytes!("../../../assets/pcp-icon.png"))
 }
 
 async fn health(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
