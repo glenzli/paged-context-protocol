@@ -81,6 +81,29 @@ and `match_intent` is represented by the current Topic Page. A Topic update publ
 it suppresses a source from default candidates only while that current Revision still lists the same
 source Revision.
 
+A maintenance worker's consolidation recommendation must also include a short,
+source-grounded reason. The reason is review material for Console; it is not a
+stored Topic field and does not participate in Topic identity.
+
+### 2.1 Content governance: archive and restore
+
+`archive_page(page_id, expected_revision_id, reason)` is a human governance
+operation protected by `manage_lifecycle`. Using CAS, it moves the Page and its
+current Revision from `active` to `archived` together and records the actor,
+reason, old and new state, and time. Archiving **does not delete** Payload,
+Revisions, Relations, Summaries, or Provenance. Exact `read_pages` remains
+available for review, and governance interfaces may explicitly list
+`lifecycleStatus=archived`. Default Search, semantic and intent recall, graph
+expansion candidates, and maintenance inventory consume only active Pages, so an
+archived Page does not re-enter ordinary context through those paths.
+
+`restore_archived_page(page_id, expected_revision_id, reason)` may move only a
+currently archived Page back to active and follows the same CAS and audit
+requirements. Archive is not Topic extraction: a Topic creates a front-door Page
+while retaining sources as high-relevance evidence, whereas archive creates no new
+retrieval entry point. `purge` is permanent deletion and requires a separate
+recovery, retention, and confirmation contract; it is not part of v0.8.
+
 Typical recall is:
 
 ```text
@@ -124,6 +147,10 @@ Search returns bounded candidates rather than truth, is paginated, and identifie
 Runtime maintainers and local administration tools may use the complete Core operations: advanced sealed or revisioned Page writes, CAS revision, atomic `pack_pages(pages[{page_id, revision_id}], idempotency_key?)`, logical `extract_topic(source_pages[{page_id, revision_id}], title, content)`, Summary and validity writes, Page Relations, Scope management, audit, bounded retention planning, explicit collection, and finite idempotent Revision retention leases. These implement Identity-wide maintenance policy and are not part of the ordinary tenant contract.
 
 An implementation may carry both operation sets over one RPC transport, but it MUST enforce the boundary through session permissions and an operation allowlist. The interface split does not require another socket or deployment unit.
+
+If an implementation provides background or model-assisted maintenance, automation MUST NOT expand the permissions already held by the execution session. An inference provider may only recommend an outcome within the bounded candidates, budget, and operation type supplied by Runtime. It MUST NOT call maintenance operations directly or commit a Store transaction. Uncommitted Summary, Pack, Relation, Topic, Archive, or retention candidates belong only to the maintenance ledger; they are not protocol facts about Pages, Relations, lifecycle, or retention. An implementation may automatically commit deterministic, validated low-risk operations under a pre-authorized maintenance policy, but Store MUST still revalidate exact current Revisions, authorization, and transaction invariants.
+
+`archive_page` and `restore_archived_page` are explicit lifecycle-governance operations. An Archive recommendation from a background scan, model, or local tool is not approval. Archiving requires a Principal with `manage_lifecycle` to accept the recommendation for the exact current Revision, supply a non-empty reason, and pass Store revalidation inside the transaction. Rejecting, skipping, or leaving a recommendation unresolved MUST NOT change lifecycle state. A stale candidate requires fresh review and MUST NOT silently reuse an earlier decision. Background maintenance and operator tools may share a durable review queue, but PCP does not prescribe its UI or background topology.
 
 ### 3.3 Control and observation planes
 

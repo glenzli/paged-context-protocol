@@ -49,6 +49,10 @@ Multi-tenant Source / Event
   Pages. A long-lived topic spanning several Pages can be logically extracted as a
   separate Topic Page that fronts default retrieval without deleting source evidence.
   Validity records whether information remains applicable.
+- **Content Governance**: A human may archive a low-durability Page so that it leaves
+  default retrieval, graph expansion, and maintenance inventory without deleting its
+  content, Relations, Summary, or Provenance. Only an authorized governance tool may
+  review it by ID and restore it. `purge` is not part of v0.8.
 - **Search, Read, and Projection**: Retrieval returns identifiable candidates before
   selected projections such as Summary, Payload, Sources, Relations, or History are
   read. The model or Host chooses the query path and admission timing.
@@ -70,8 +74,16 @@ a replaceable model as a semantic inference provider.
 `v0.8.0-draft` is the current protocol draft. It separates Identity, tenant
 Principal, and Scope; assigns global maintenance authority to Runtime; and accepts
 text and external-media sources through a minimal SourceRef and simplified ingest
-API. v0.8 is not compatible with v0.7 Stores; migration will re-import original
-tenant-held content.
+API. v0.8 is not compatible with v0.7 Stores; migration must create a new v0.8
+Store and re-import original tenant-held content rather than opening the old
+database directly.
+
+The current official implementation is ready for local external applications to
+reconnect and run continuously. New clients should connect through Infra Discovery,
+user-approved enrollment, and a generation-specific identity-bound RPC endpoint.
+An approved registration can rediscover and open a new session after Runtime
+restarts. “Ready to reconnect” describes the current official implementation; it
+does not freeze the v0.8 draft or provide v0.7 wire or Store compatibility.
 
 ### Official Implementation
 
@@ -101,7 +113,7 @@ normative. Conformance is defined by [`PROTOCOL-en.md`](PROTOCOL-en.md).
 | `pcp-runtime` | Identity-bound endpoints, approved client enrollment, and global maintenance coordinator |
 | `pcp-cli` | Inspection, retrieval, read, export, and retention operations |
 | `pcp-mcp` | Local stdio tool server built on the official Rust MCP SDK |
-| `pcp-console` | Independent read-only local Web Inspector |
+| `pcp-console` | Independent local Web Inspector and audited governance entry point |
 
 ### Implemented
 
@@ -111,7 +123,8 @@ normative. Conformance is defined by [`PROTOCOL-en.md`](PROTOCOL-en.md).
 - Runtime-RPC `semantic_search` and budgeted `match_intent` context queries. Results are
   structured Page/Revision entries; callers assemble their own prompts without a fixed Context Pack prefix.
 - Stable-`pageId` anchored graph slices with bounded depth, nodes, and edges, ACL-filtered at every hop; no whole-store graph export.
-- Summary, logical Topic extraction, Validity, Relation, Provenance, lossless sealed-Page packing, and access audit.
+- Summary, logical Topic extraction, human-approved archive/restore, Validity, Relation,
+  Provenance, lossless sealed-Page packing, and access audit.
 - Allowed access events are committed in bounded batches of at most 512 events or
   one second, with at least 500 ms between automatic commits; overload applies
   backpressure instead of silently dropping events. Denied and failed events use a
@@ -219,9 +232,10 @@ sh scripts/install-macos.sh
 The installed `com.glenzli.pcp-console` LaunchAgent starts `pcp-console
 --managed`. The Console exposes a restart control only for that child and waits
 for its stable operator socket before reporting success. The generated
-`config/runtime.toml` keeps maintenance disabled until PCP is explicitly
-configured with a worker; when enabled, the Runtime owns cadence and ledger
-state even when the worker binary belongs to a tenant.
+`config/runtime.toml` template keeps maintenance disabled. After an independently
+authorized worker is configured, an operator may enable observe or apply mode for
+that deployment. Runtime always owns cadence, triggers, and ledger state; a tenant
+call cannot temporarily take them over.
 
 To import an existing Store before first launch, use PCP's consistent SQLite
 backup path. Supplying the enrollment state preserves approved registrations.
@@ -236,13 +250,28 @@ sh scripts/import-store.sh \
 
 The maintenance coordinator is optional and defaults to observation without
 applying changes. A configured semantic worker may return Summary content, an
-ordered packing candidate, a two-Page `related_to` candidate, retention
-milestones, `no_candidate`, or `defer`. It cannot write the Store directly.
-Runtime owns candidates, budgets, relation type, basis Revisions, and commit
-authority; Store revalidates authorization, exact current Revisions, source
-continuity, external references, and atomicity. Packing and Relation maintenance
-are independently opt-in. The maintainer never performs automatic Revision
-collection. The official Runtime can use an independently authorized
+ordered packing candidate, a source-grounded Topic proposal, a two-Page
+`related_to` candidate, an Archive recommendation, a retention milestone,
+`no_candidate`, or `defer`; it cannot write the Store directly. Background
+maintenance and Console **Run now** use the same incremental convergence
+controller and persistent typed review inbox. In apply mode, validated low-risk
+work such as packing and Summary writes may apply automatically. General
+Relations, Topics, and Archive recommendations must be accepted by a human before
+they affect retrieval or lifecycle state.
+
+Luna is the default low-cost worker. One Sol second opinion is allowed only for
+configured semantic operations when Luna returns an explicit, evidence-complete
+`defer`; invalid output, stale candidates, schema errors, and transport failures
+do not escalate. Runtime owns candidates, budgets, relation type, basis Revisions,
+and commit authority. Store revalidates authorization, exact current Revisions,
+source continuity, external references, and atomicity. Packing and Relation
+maintenance are independently opt-in, and the maintainer never performs automatic
+Revision collection.
+
+External writes interrupt idle waiting and restart the quiet-period calculation.
+Repeated empty checks back off from the base interval to a configured maximum;
+productive cycles continue at a short interval, while failures use a separate
+bounded backoff. The official Runtime can use an independently authorized
 [Infer Runtime](https://github.com/glenzli/infer-runtime) consumer or a local
 command worker.
 
@@ -301,8 +330,10 @@ mode does not pretend to provide those Runtime-owned inference capabilities.
 
 The Console should use a dedicated `audit` endpoint. Its Store Inspector is
 read-only and exposes Page, Relation, access-timeline, Retention, and Health
-views; control-plane actions approve, reject, or revoke local client
-registrations, plus Runtime restart when Console owns that Runtime. Health presents storage shape, activity, recall, packing,
+views. Its local governance entry point performs archive/restore with an explicit
+reason and requires `manage_lifecycle`. Control-plane actions approve, reject, or
+revoke local client registrations, plus Runtime restart when Console owns that
+Runtime. Health presents storage shape, activity, recall, packing,
 graph, and operations separately rather than as an opaque score. Operational
 telemetry excludes query text and Page content.
 Its query page renders the Runtime RPC's structured result and only builds a local inspection

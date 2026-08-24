@@ -55,7 +55,12 @@ PCP 不规定固定 Router、Intent Focus、四级变焦、Chain-of-Thought、XM
 
 `v0.8.0-draft` 是当前协议草案。它明确区分 Identity、租户 Principal 和 Scope，把全局维护权归入
 Runtime，并以最小 SourceRef 与简化 ingest 接口接收文本和外部媒体来源。v0.8 不兼容 v0.7 Store；
-正式迁移将从租户保留的原始内容重新导入。
+迁移必须建立新的 v0.8 Store，并从租户保留的原始内容重新导入，不能直接打开旧数据库。
+
+当前官方实现已经具备供外部本机应用重新接入和持续运行的条件。新客户端应通过 Infra Discovery、
+用户批准的 enrollment 和 generation-specific 身份绑定 RPC 端点接入；已经批准的 registration 可在
+Runtime 重启后重新发现并打开新会话。这里的“可接入”描述官方实现的当前运行形态，不表示 v0.8 草案已经
+冻结，也不提供 v0.7 wire 或 Store 兼容性。
 
 ### 官方实现
 
@@ -173,8 +178,9 @@ sh scripts/install-macos.sh
 
 安装后的 LaunchAgent 为 `com.glenzli.pcp-console`，执行 `pcp-console --managed`。Console 只对自己
 启动的 Runtime 显示重启控制，并在稳定 operator socket 就绪后才报告成功。生成的
-`config/runtime.toml` 默认关闭 maintenance；显式配置 worker 后，worker 即使属于某个租户，cadence 与
-ledger state 仍由 PCP Runtime 维护。
+`config/runtime.toml` 模板默认关闭 maintenance；部署者显式配置独立授权的 worker 后，可以为具体实例
+启用 observe 或 apply 模式。无论 worker 由谁提供，cadence、触发条件与 ledger state 都由 PCP Runtime
+维护，不能由租户调用临时接管。
 
 首次启动前可通过 PCP 的一致性 SQLite backup 导入已有 Store；同时传入 enrollment state 可保留已经批准的
 注册：

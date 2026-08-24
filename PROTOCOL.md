@@ -277,6 +277,17 @@ Runtime maintainer 与本机管理工具可以使用完整 Core 接口：
 这些操作实现 Identity 范围内的全局维护策略，不属于普通租户合同。实现可以在同一个 RPC transport 上承载
 两组操作，但必须以会话权限和操作 allowlist 执行边界；接口分层不要求增加 socket 或部署单元。
 
+实现若提供后台或模型辅助维护，自动化不得扩大调用会话已经拥有的权限。推理 Provider 只能在 Runtime
+给出的有界候选、预算和操作类型内返回建议；它不得直接调用维护接口，也不得自行提交 Store 事务。尚未提交的
+Summary、Pack、Relation、Topic、Archive 或 retention 候选只属于 maintenance ledger，不是 Page、Relation、
+生命周期或保留状态的协议事实。实现可以在预先授权的维护策略内自动提交确定性、可验证的低风险操作，但仍须
+由 Store 重验精确当前 Revision、权限和事务不变量。
+
+`archive_page` 与 `restore_archived_page` 是显式生命周期治理动作。Archive 建议无论来自后台扫描、模型还是
+本机工具，都不得被视为批准；归档必须由具有 `manage_lifecycle` 权限的主体针对精确当前 Revision 明确接受，
+提供非空理由，并由 Store 在事务内重验。拒绝、跳过或未处理的建议不得改变生命周期；候选过期时必须重新审阅，
+不得静默套用旧决定。实现可以让后台维护与人工工具共享持久审阅队列，但 PCP 不规定其 UI 或后台拓扑。
+
 ### 3.3 控制面与观测面
 
 Runtime Discovery、授权注册、批准与 `open_session` 属于 Runtime 控制协议；Health、Observer snapshot、
