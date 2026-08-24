@@ -4,7 +4,12 @@ export function buildQueryRequest({ method, query, scope, topK, intentEffort }) 
   return payload;
 }
 
-export function createQueryView({ request, byId, element, showError, t, formatNumber, openPage, openPageIcon }) {
+export function querySubmitLabel(method, busy) {
+  if (!busy) return "Build context pack";
+  return method === "match_intent" ? "Matching intent…" : "Searching context…";
+}
+
+export function createQueryView({ request, byId, element, showError, t, formatNumber, openPage, openPageIcon, searchIcon }) {
   let method = "semantic_search";
   let busy = false;
   let busyStartedAt = null;
@@ -26,10 +31,11 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
       ? t("Intent matching lets the Router expand and review bounded candidates before it assembles a context pack.")
       : t("Semantic retrieval returns independently relevant pages; asserted structure only makes bounded ranking adjustments.");
     const submit = byId("context-query-submit");
+    const submitLabel = t(querySubmitLabel(method, busy));
     submit.disabled = busy;
-    submit.textContent = busy
-      ? t(method === "match_intent" ? "Matching intent…" : "Searching context…")
-      : t("Build context pack");
+    submit.replaceChildren(searchIcon());
+    submit.title = submitLabel;
+    submit.setAttribute("aria-label", submitLabel);
     submit.classList.toggle("is-loading", busy);
     submit.setAttribute("aria-busy", busy ? "true" : "false");
   }

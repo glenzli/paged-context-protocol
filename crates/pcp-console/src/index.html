@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PCP Console</title>
-  <link rel="stylesheet" href="/styles.css?v=20260824.1">
+  <link rel="stylesheet" href="/styles.css?v=20260824.10">
   <link rel="stylesheet" href="/page-content.css?v=20260816.3">
 </head>
 <body>
@@ -19,19 +19,12 @@
         <span><b id="headline-content">-</b> <span data-i18n="content">content</span></span>
       </div>
       <div class="topbar-actions" role="toolbar" data-i18n-aria-label="Console controls" aria-label="Console controls">
-        <button id="enrollment-open" class="topbar-icon-button" type="button" hidden aria-label="Client access" title="Client access" data-i18n-aria-label="Client access" data-i18n-title="Client access">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 21a8 8 0 0 0-16 0"/><circle cx="10" cy="7" r="4"/><path d="M22 21a8 8 0 0 0-6-7.75"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        <button id="enrollment-open" class="topbar-icon-button" type="button" hidden data-icon="access" aria-label="Client access" title="Client access" data-i18n-aria-label="Client access" data-i18n-title="Client access">
           <span id="enrollment-badge" class="count-badge" hidden></span>
         </button>
-        <button id="runtime-restart" class="topbar-icon-button" type="button" hidden aria-label="Restart Runtime" title="Restart Runtime" data-i18n-aria-label="Restart Runtime" data-i18n-title="Restart Runtime">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
-        </button>
-        <button id="refresh" class="topbar-icon-button" type="button" aria-label="Refresh" title="Refresh" data-i18n-aria-label="Refresh" data-i18n-title="Refresh">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 0-15.5-6.2L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 15.5 6.2L21 16"/><path d="M21 21v-5h-5"/></svg>
-        </button>
-        <button id="preferences-open" class="topbar-icon-button" type="button" aria-label="Appearance and language" title="Appearance and language" data-i18n-aria-label="Appearance and language" data-i18n-title="Appearance and language">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="10" x2="10" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></svg>
-        </button>
+        <button id="runtime-restart" class="topbar-icon-button" type="button" hidden data-icon="restart" aria-label="Restart Runtime" title="Restart Runtime" data-i18n-aria-label="Restart Runtime" data-i18n-title="Restart Runtime"></button>
+        <button id="refresh" class="topbar-icon-button" type="button" data-icon="refresh" aria-label="Refresh" title="Refresh" data-i18n-aria-label="Refresh" data-i18n-title="Refresh"></button>
+        <button id="preferences-open" class="topbar-icon-button" type="button" data-icon="settings" aria-label="Appearance and language" title="Appearance and language" data-i18n-aria-label="Appearance and language" data-i18n-title="Appearance and language"></button>
       </div>
     </div>
   </header>
@@ -130,7 +123,7 @@
           <label id="context-query-effort-control" class="context-query-select" hidden><span data-i18n="Retrieval effort">Retrieval effort</span><select id="context-query-effort"><option value="low" data-i18n="Low">Low</option><option value="medium" selected data-i18n="Medium">Medium</option><option value="high" data-i18n="High">High</option></select></label>
           <label class="context-query-select"><span data-i18n="Scope">Scope</span><select id="context-query-scope"><option value="" data-i18n="All authorized scopes">All authorized scopes</option></select></label>
           <label class="context-query-select"><span data-i18n="Top results">Top results</span><select id="context-query-top-k"><option value="6" selected>6</option><option value="12">12</option><option value="20">20</option></select></label>
-          <button id="context-query-submit" class="primary-button" type="submit" data-i18n="Build context pack">Build context pack</button>
+          <button id="context-query-submit" class="primary-button compact-icon-button query-submit-icon-button" type="submit" data-icon="search" aria-label="Build context pack" title="Build context pack" data-i18n-aria-label="Build context pack" data-i18n-title="Build context pack"></button>
         </div>
         <p id="context-query-method-note" class="control-note"></p>
         <div id="context-query-error" class="context-query-error" role="alert" hidden>
@@ -160,6 +153,17 @@
           <p class="view-description" data-i18n="PCP advances maintenance one bounded job at a time. Safe structural work is applied automatically; uncertain semantic and governance decisions collect here for review.">PCP advances maintenance one bounded job at a time. Safe structural work is applied automatically; uncertain semantic and governance decisions collect here for review.</p>
         </div>
       </div>
+      <nav class="maintenance-workspace-tabs" role="tablist" aria-label="Maintenance workspaces" data-i18n-aria-label="Maintenance workspaces">
+        <button id="maintenance-convergence-tab" class="maintenance-workspace-tab" type="button" role="tab" aria-selected="true" aria-controls="maintenance-convergence-panel" data-maintenance-workspace="convergence">
+          <span data-i18n="Convergence maintenance">Convergence maintenance</span>
+          <span id="maintenance-convergence-tab-state" class="status-pill" aria-live="polite"></span>
+        </button>
+        <button id="maintenance-governance-tab" class="maintenance-workspace-tab" type="button" role="tab" aria-selected="false" aria-controls="maintenance-governance-panel" data-maintenance-workspace="governance" tabindex="-1">
+          <span data-i18n="Content governance">Content governance</span>
+          <span id="maintenance-archive-availability" class="status-pill" aria-live="polite" data-i18n="Optional">Optional</span>
+        </button>
+      </nav>
+      <div id="maintenance-convergence-panel" class="maintenance-workspace-panel" role="tabpanel" aria-labelledby="maintenance-convergence-tab">
       <section id="maintenance-scene-alert" class="maintenance-scene-alert" role="alert" aria-live="assertive" hidden>
         <span class="maintenance-scene-alert-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24"><path d="M12 3 2.8 20h18.4L12 3Z"/><path d="M12 9v5"/><path d="M12 17.5h.01"/></svg>
@@ -169,7 +173,7 @@
           <p id="maintenance-scene-alert-summary"></p>
           <code id="maintenance-scene-alert-detail"></code>
         </div>
-        <button id="maintenance-scene-alert-retry" class="warning-button" type="button" data-i18n="Retry maintenance">Retry maintenance</button>
+        <button id="maintenance-scene-alert-retry" class="warning-button semantic-button" type="button" data-icon="retry"><span data-i18n="Retry maintenance">Retry maintenance</span></button>
       </section>
       <section id="maintenance-automation-status" class="maintenance-automation-status" hidden>
         <div class="section-heading section-heading-copy">
@@ -195,8 +199,8 @@
         <footer id="maintenance-review-session-actions" class="maintenance-review-session-actions" hidden>
           <span id="maintenance-review-session-summary" class="muted" data-i18n="No decision has been written yet.">No decision has been written yet.</span>
           <div>
-            <button id="maintenance-review-undo-all" class="compact-button secondary-button" type="button" data-i18n="Undo all">Undo all</button>
-            <button id="maintenance-review-commit" class="primary-button" type="button" data-i18n="Finish review and apply">Finish review and apply</button>
+            <button id="maintenance-review-undo-all" class="compact-button secondary-button semantic-button" type="button" data-icon="undo"><span data-i18n="Undo all">Undo all</span></button>
+            <button id="maintenance-review-commit" class="primary-button semantic-button" type="button" data-icon="apply"><span data-i18n="Finish review and apply">Finish review and apply</span></button>
           </div>
         </footer>
       </section>
@@ -205,7 +209,10 @@
           <div class="maintenance-convergence-title"><h3 data-i18n="Converge memory maintenance">Converge memory maintenance</h3><span id="maintenance-convergence-state" class="status-pill" aria-live="polite"></span></div>
           <p data-i18n="Run now progressively processes one bounded job per response. You can review accumulated decisions immediately while the remaining work continues.">Run now progressively processes one bounded job per response. You can review accumulated decisions immediately while the remaining work continues.</p>
         </div>
-        <div class="maintenance-start-actions"><button id="maintenance-start" class="primary-button" type="button" disabled data-i18n="Run now">Run now</button><button id="maintenance-manual-start" class="secondary-button" type="button" disabled data-i18n="Manual staged review">Manual staged review</button></div>
+        <div class="maintenance-start-actions">
+          <button id="maintenance-start" class="primary-button compact-icon-button maintenance-entry-icon-button" type="button" disabled data-icon="run" aria-label="Run now" title="Run now" data-i18n-aria-label="Run now" data-i18n-title="Run now"></button>
+          <button id="maintenance-manual-start" class="secondary-button compact-icon-button maintenance-entry-icon-button" type="button" disabled data-icon="manual" aria-label="Manual staged review" title="Manual staged review" data-i18n-aria-label="Manual staged review" data-i18n-title="Manual staged review"></button>
+        </div>
       </section>
 
       <section id="maintenance-workflow" hidden>
@@ -249,12 +256,17 @@
             <summary><span data-i18n="Analysis log">Analysis log</span><span id="maintenance-analysis-log-summary" class="muted"></span></summary>
             <pre id="maintenance-analysis-log-body"></pre>
           </details>
+          <div id="maintenance-operation-state" class="maintenance-operation-state" role="status" aria-live="polite" hidden>
+            <span class="maintenance-operation-spinner" aria-hidden="true"></span>
+            <div><strong id="maintenance-operation-title"></strong><small id="maintenance-operation-detail"></small></div>
+            <span id="maintenance-operation-progress" class="status-pill status-info" hidden></span>
+          </div>
           <div class="maintenance-actions">
-            <button id="maintenance-primary" class="primary-button" type="button" disabled></button>
-            <button id="maintenance-skip" class="secondary-button" type="button" disabled data-i18n="Skip this stage">Skip this stage</button>
-            <button id="maintenance-retry-failed" class="warning-button" type="button" disabled hidden data-i18n="Retry failed batches">Retry failed batches</button>
-            <button id="maintenance-rescan" class="secondary-button" type="button" disabled data-i18n="Rescan this stage">Rescan this stage</button>
-            <button id="maintenance-cancel" class="secondary-button" type="button" disabled data-i18n="End session">End session</button>
+            <button id="maintenance-primary" class="primary-button compact-icon-button maintenance-action-icon-button" type="button" disabled aria-label="Run maintenance action"></button>
+            <button id="maintenance-skip" class="secondary-button compact-icon-button maintenance-action-icon-button" type="button" disabled data-icon="skip" aria-label="Skip this stage" data-i18n-aria-label="Skip this stage"></button>
+            <button id="maintenance-retry-failed" class="warning-button compact-icon-button maintenance-action-icon-button" type="button" disabled hidden data-icon="retry" aria-label="Retry failed batches" data-i18n-aria-label="Retry failed batches"></button>
+            <button id="maintenance-rescan" class="secondary-button compact-icon-button maintenance-action-icon-button" type="button" disabled data-icon="rescan" aria-label="Rescan this stage" data-i18n-aria-label="Rescan this stage"></button>
+            <button id="maintenance-cancel" class="secondary-button compact-icon-button maintenance-action-icon-button" type="button" disabled data-icon="end" aria-label="End session" data-i18n-aria-label="End session"></button>
           </div>
           <div id="maintenance-proposals" hidden>
             <div class="section-heading section-heading-copy">
@@ -274,11 +286,12 @@
           <span id="maintenance-report-status" class="muted" aria-live="polite"></span>
         </div>
         <div id="maintenance-report-metrics" class="metrics"></div>
-        <button id="maintenance-start-new" class="primary-button" type="button" data-i18n="Run now">Run now</button>
+        <button id="maintenance-start-new" class="primary-button compact-icon-button maintenance-entry-icon-button" type="button" data-icon="run" aria-label="Run now" title="Run now" data-i18n-aria-label="Run now" data-i18n-title="Run now"></button>
       </section>
+      </div>
 
-      <details id="maintenance-archive" class="maintenance-archive maintenance-advanced-tools">
-        <summary><span data-i18n="Advanced manual archive review">Advanced manual archive review</span><span class="muted" data-i18n="Optional">Optional</span></summary>
+      <div id="maintenance-governance-panel" class="maintenance-workspace-panel" role="tabpanel" aria-labelledby="maintenance-governance-tab" hidden>
+      <section id="maintenance-archive" class="maintenance-archive">
         <div class="section-heading section-heading-copy">
           <div>
             <h3 data-i18n="Content governance">Content governance</h3>
@@ -291,7 +304,7 @@
             <h4 data-i18n="Review archive candidates">Review archive candidates</h4>
             <p data-i18n="Candidates are conservatively identified from current structural evidence. PCP does not store per-Page access metrics, so no usage value is invented.">Candidates are conservatively identified from current structural evidence. PCP does not store per-Page access metrics, so no usage value is invented.</p>
           </div>
-          <button id="archive-start" class="secondary-button" type="button" data-i18n="Scan candidates">Scan candidates</button>
+          <button id="archive-start" class="secondary-button compact-icon-button maintenance-entry-icon-button" type="button" data-icon="scan" aria-label="Scan candidates" title="Scan candidates" data-i18n-aria-label="Scan candidates" data-i18n-title="Scan candidates"></button>
         </section>
         <section id="archive-workflow" class="maintenance-archive-workflow" hidden>
           <ol id="archive-steps" class="maintenance-steps maintenance-archive-steps" aria-label="Archive review stages">
@@ -301,12 +314,17 @@
           </ol>
           <div id="archive-scan-metrics" class="metrics maintenance-stage-metrics four-columns"></div>
           <p id="archive-issue" class="maintenance-issue" hidden></p>
+          <div id="archive-operation-state" class="maintenance-operation-state" role="status" aria-live="polite" hidden>
+            <span class="maintenance-operation-spinner" aria-hidden="true"></span>
+            <div><strong id="archive-operation-title"></strong><small id="archive-operation-detail"></small></div>
+            <span id="archive-operation-progress" class="status-pill status-info" hidden></span>
+          </div>
           <div class="maintenance-actions">
-            <button id="archive-analyze" class="primary-button" type="button" disabled data-i18n="Analyze suggestions">Analyze suggestions</button>
-            <button id="archive-apply" class="warning-button" type="button" disabled data-i18n="Archive selected">Archive selected</button>
-            <button id="archive-retry-failed" class="secondary-button" type="button" hidden data-i18n="Retry failed batches">Retry failed batches</button>
-            <button id="archive-rescan" class="secondary-button" type="button" disabled data-i18n="Rescan this stage">Rescan this stage</button>
-            <button id="archive-finish" class="secondary-button" type="button" disabled data-i18n="End session">End session</button>
+            <button id="archive-analyze" class="primary-button compact-icon-button maintenance-action-icon-button" type="button" disabled data-icon="analyze" aria-label="Analyze suggestions" data-i18n-aria-label="Analyze suggestions"></button>
+            <button id="archive-apply" class="warning-button compact-icon-button maintenance-action-icon-button" type="button" disabled data-icon="archive" aria-label="Archive selected" data-i18n-aria-label="Archive selected"></button>
+            <button id="archive-retry-failed" class="secondary-button compact-icon-button maintenance-action-icon-button" type="button" hidden data-icon="retry" aria-label="Retry failed batches" data-i18n-aria-label="Retry failed batches"></button>
+            <button id="archive-rescan" class="secondary-button compact-icon-button maintenance-action-icon-button" type="button" disabled data-icon="rescan" aria-label="Rescan this stage" data-i18n-aria-label="Rescan this stage"></button>
+            <button id="archive-finish" class="secondary-button compact-icon-button maintenance-action-icon-button" type="button" disabled data-icon="end" aria-label="End session" data-i18n-aria-label="End session"></button>
           </div>
           <details id="archive-analysis-log" class="maintenance-analysis-log" hidden>
             <summary><span data-i18n="Analysis log">Analysis log</span><span id="archive-analysis-log-summary"></span></summary>
@@ -326,19 +344,20 @@
             <span id="archive-report-status" class="muted" aria-live="polite"></span>
           </div>
           <div id="archive-report-metrics" class="metrics"></div>
-          <button id="archive-start-new" class="secondary-button" type="button" data-i18n="Review archive candidates">Review archive candidates</button>
+          <button id="archive-start-new" class="secondary-button compact-icon-button maintenance-entry-icon-button" type="button" data-icon="scan" aria-label="Review archive candidates" title="Review archive candidates" data-i18n-aria-label="Review archive candidates" data-i18n-title="Review archive candidates"></button>
         </section>
         <details id="maintenance-archive-library" class="maintenance-archive-library">
           <summary><span data-i18n="Archived Pages">Archived Pages</span><span id="governance-status" class="muted" aria-live="polite"></span></summary>
           <div class="governance-controls">
             <label class="governance-scope-control"><span data-i18n="Scope">Scope</span><select id="governance-scope"><option value="" data-i18n="All authorized scopes">All authorized scopes</option></select></label>
-            <button id="governance-refresh" type="button" class="compact-button secondary-button" data-i18n="Refresh">Refresh</button>
+            <button id="governance-refresh" type="button" class="compact-button compact-icon-button secondary-button" data-icon="refresh" aria-label="Refresh" title="Refresh" data-i18n-aria-label="Refresh" data-i18n-title="Refresh"></button>
           </div>
           <p class="control-note" data-i18n="Archive is reversible and auditable. It does not delete content, summaries, provenance, or asserted relations.">Archive is reversible and auditable. It does not delete content, summaries, provenance, or asserted relations.</p>
           <div id="governance-results" class="governance-results" aria-live="polite"></div>
           <div class="list-footer"><button id="governance-more" type="button" class="compact-button secondary-button" hidden data-i18n="Load more">Load more</button></div>
         </details>
-      </details>
+      </section>
+      </div>
 
     </section>
 
@@ -602,13 +621,13 @@
             <label><span data-i18n="Quiet period (minutes)">Quiet period (minutes)</span><input id="maintenance-settings-quiet" type="number" min="1" required></label>
             <label><span data-i18n="Maximum wait (minutes)">Maximum wait (minutes)</span><input id="maintenance-settings-max-wait" type="number" min="1" required></label>
           </div>
-          <button id="maintenance-settings-save" class="primary-button" type="submit" data-i18n="Save and restart Runtime">Save and restart Runtime</button>
+          <button id="maintenance-settings-save" class="primary-button semantic-button" type="submit" data-icon="restart"><span data-i18n="Save and restart Runtime">Save and restart Runtime</span></button>
         </form>
       </section>
     </div>
   </dialog>
 
   <div id="error" class="error" hidden></div>
-  <script type="module" src="/app.js?v=20260824.1"></script>
+  <script type="module" src="/app.js?v=20260824.6"></script>
 </body>
 </html>

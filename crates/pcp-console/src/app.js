@@ -2,7 +2,8 @@ import { createPageInspector } from "/page-inspector.js?v=20260823.1";
 import { describePagePayload, pagePayloadPreviewText } from "/page-content.js?v=20260822.1";
 import { createHealthView } from "/health-view.js?v=20260816.3";
 import { createRetentionView } from "/retention-view.js?v=20260818.1";
-import { createQueryView } from "/query-view.js?v=20260823.2";
+import { createQueryView } from "/query-view.js?v=20260824.1";
+import { hydrateIcons, hydrateIconTooltips, icon, pathIcon } from "/ui-icons.js?v=20260824.7";
 import {
   RELATION_DECISION,
   partitionMaintenanceDecisions,
@@ -19,7 +20,13 @@ import {
   convergencePhase,
   convergenceSettled,
   mergeConvergenceReport,
-} from "/maintenance-convergence.js?v=20260824.1";
+  reconcileConvergenceStatus,
+} from "/maintenance-convergence.js?v=20260824.2";
+import {
+  MAINTENANCE_OWNER,
+  maintenanceControllerOwner as resolveMaintenanceControllerOwner,
+  maintenanceTargetBlocked,
+} from "/maintenance-operation-state.js?v=20260824.1";
 import {
   REVIEW_DECISION,
   partitionReviewSession,
@@ -29,6 +36,9 @@ import {
   stageReviewDecision,
   undoReviewDecision,
 } from "/maintenance-review-session.js?v=20260824.1";
+
+hydrateIcons(document);
+hydrateIconTooltips(document);
 
 const DEFAULT_PAGE_LIMIT = 20;
 const PAGE_LIMIT_OPTIONS = new Set([10, 20, 30]);
@@ -40,7 +50,9 @@ const THEME_STORAGE_KEY = "pcp-console.theme";
 const LANGUAGE_STORAGE_KEY = "pcp-console.language";
 const PAGE_LIMIT_STORAGE_KEY = "pcp-console.pages-per-page";
 const REVIEW_SESSION_STORAGE_KEY = "pcp-console.maintenance-review-session.v1";
+const MAINTENANCE_WORKSPACE_STORAGE_KEY = "pcp-console.maintenance-workspace.v1";
 let maintenanceStatusPoll = null;
+let maintenanceConvergenceActive = false;
 const ZH_MESSAGES = {
   "24 hours": "24 小时",
   "7 days": "7 天",
@@ -61,6 +73,7 @@ const ZH_MESSAGES = {
   "Analysis failed": "分析失败",
   "Analysis incomplete": "分析未完成",
   "Automatic maintenance": "自动维护",
+  "Automatic maintenance in progress": "自动维护进行中",
   "Settings": "设置",
   "General": "通用",
   "Settings sections": "设置分区",
@@ -115,6 +128,9 @@ const ZH_MESSAGES = {
   "Run now": "立即运行",
   "Awaiting run": "等待运行",
   "Run in progress": "正在运行",
+  "Maintenance controller occupied": "维护控制器占用中",
+  "Maintenance workspaces": "维护工作区",
+  "Convergence maintenance": "收敛维护",
   "Awaiting review": "等待审阅",
   "Converged": "已收敛",
   "Needs attention": "需要处理",
@@ -165,6 +181,7 @@ const ZH_MESSAGES = {
   "Accepted": "已接受",
   "Apply decisions": "应用决策",
   "Analyzing": "正在分析",
+  "Optimizing": "正在应用",
   "Batches completed": "已完成批次",
   "Pages completed": "已完成页面",
   "Failed batches": "失败批次",
@@ -192,6 +209,7 @@ const ZH_MESSAGES = {
   "By workflow": "按工作流",
   "Intent matching": "意图匹配",
   "Manual maintenance": "手动维护",
+  "Manual maintenance in progress": "分阶段维护进行中",
   "Automatic maintenance": "自动维护",
   "No model usage was observed in this window": "此时间范围内未记录模型用量",
   "Recent query calls": "最近查询调用",
@@ -218,6 +236,7 @@ const ZH_MESSAGES = {
   "Archive selected": "归档所选",
   "Archive proposals": "归档提案",
   "Archive review complete": "归档审阅完成",
+  "Archive review in progress": "归档审阅进行中",
   "Select all archive candidates": "选择全部归档候选",
   "Select archive candidate": "选择归档候选",
   "Available after maintenance": "将在当前维护会话结束后可用",
@@ -935,6 +954,7 @@ const state = {
   maintenance: {
     loaded: false,
     busy: false,
+    workspaceTab: readPreference(MAINTENANCE_WORKSPACE_STORAGE_KEY, "convergence"),
     activity: null,
     status: null,
     session: {
@@ -978,6 +998,7 @@ const state = {
     busy: false,
     activity: null,
     operation: null,
+    operationProgress: null,
     scan: null,
     analyses: [],
     selected: new Set(),
@@ -998,53 +1019,132 @@ function element(tag, className, text) {
   return node;
 }
 
-function strokeIcon(paths, className = "") {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("aria-hidden", "true");
-  if (className) svg.setAttribute("class", className);
-  for (const d of paths) {
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", d);
-    svg.append(path);
+function setSemanticButton(button, label, iconName = button.dataset.icon, { iconOnly = false } = {}) {
+  if (!iconName) throw new Error(`Missing semantic icon for ${button.id || label}`);
+  button.dataset.icon = iconName;
+  button.replaceChildren(icon(iconName));
+  if (!iconOnly) button.append(element("span", "", label));
+  if (iconOnly) {
+    button.title = label;
+    button.setAttribute("aria-label", label);
   }
-  return svg;
 }
 
-function openPageIcon() {
-  return strokeIcon(["M5 19 19 5M8 5h11v11"]);
+function maintenanceControllerOwner() {
+  return resolveMaintenanceControllerOwner({
+    convergenceActive: maintenanceConvergenceActive,
+    convergenceRunning: state.maintenance.convergence.running,
+    manualSessionActive: maintenanceSessionActive(),
+    manualBusy: state.maintenance.busy,
+    archiveSessionActive: archiveSessionActive(),
+    archiveBusy: state.archive.busy,
+    automationState: state.maintenance.status?.automation?.state,
+  });
 }
 
-function relationCompareIcon() {
-  return strokeIcon(["M4 5h6v14H4z", "M14 5h6v14h-6z", "M10 12h4", "m2-2 2 2-2 2"]);
+function maintenanceOwnerLabel(owner) {
+  return t({
+    [MAINTENANCE_OWNER.CONVERGENCE]: "Run in progress",
+    [MAINTENANCE_OWNER.MANUAL]: "Manual maintenance in progress",
+    [MAINTENANCE_OWNER.ARCHIVE]: "Archive review in progress",
+    [MAINTENANCE_OWNER.AUTOMATIC]: "Automatic maintenance in progress",
+  }[owner] || "Maintenance controller occupied");
 }
 
-function suppressRelationIcon() {
-  return strokeIcon([
-    "m9 15-1.4 1.4a3 3 0 0 1-4.2-4.2l3.5-3.5a3 3 0 0 1 4.2 0L12.5 10",
-    "m15 9 1.4-1.4a3 3 0 0 1 4.2 4.2l-3.5 3.5a3 3 0 0 1-4.2 0L11.5 14",
-    "M4 4 20 20",
-  ]);
+function maintenanceBlockedReason(target) {
+  const owner = maintenanceControllerOwner();
+  if (!maintenanceTargetBlocked(owner, target)) return null;
+  const ownerLabel = maintenanceOwnerLabel(owner);
+  return currentLanguage === "zh"
+    ? `${ownerLabel}；完成后此操作会自动恢复`
+    : `${ownerLabel}; this action becomes available when it finishes`;
 }
 
-function acceptRelationIcon() {
-  return strokeIcon(["M5 12.5 9.5 17 19 7"]);
+function setIconAction(button, label, iconName, { loading = false } = {}) {
+  setSemanticButton(button, label, iconName, { iconOnly: true });
+  button.classList.add("compact-icon-button", "maintenance-action-icon-button");
+  button.classList.toggle("is-loading", loading);
+  button.setAttribute("aria-busy", loading ? "true" : "false");
 }
 
-function rejectRelationIcon() {
-  return strokeIcon([
-    "m8.5 15.5-1.6 1.6a3.5 3.5 0 0 1-5-5l3.2-3.2a3.5 3.5 0 0 1 4.5-.4",
-    "m15.5 8.5 1.6-1.6a3.5 3.5 0 0 1 5 5l-3.2 3.2a3.5 3.5 0 0 1-4.5.4",
-    "M8.8 12h6.4",
-  ]);
+function setEntryAvailability(button, label, { disabled = false, reason = null } = {}) {
+  button.disabled = disabled;
+  button.setAttribute("aria-label", reason ? `${label} · ${reason}` : label);
 }
 
-function skipRelationIcon() {
-  return strokeIcon(["M12 7v5l3 2", "M12 21a9 9 0 1 0-9-9"]);
+function renderOperationState(prefix, { active = false, title = "", detail = "", current = 0, total = 0 } = {}) {
+  const node = byId(`${prefix}-operation-state`);
+  node.hidden = !active;
+  if (!active) return;
+  byId(`${prefix}-operation-title`).textContent = title;
+  byId(`${prefix}-operation-detail`).textContent = detail;
+  const progress = byId(`${prefix}-operation-progress`);
+  progress.hidden = !(total > 0);
+  progress.textContent = total > 0 ? `${formatNumber(current)} / ${formatNumber(total)}` : "";
 }
 
-function undoIcon() {
-  return strokeIcon(["M9 7 4 12l5 5", "M5 12h8a6 6 0 0 1 6 6"]);
+function setMaintenanceWorkspaceTab(nextTab, { focus = false } = {}) {
+  const workspaceTab = nextTab === "governance" ? "governance" : "convergence";
+  state.maintenance.workspaceTab = workspaceTab;
+  writePreference(MAINTENANCE_WORKSPACE_STORAGE_KEY, workspaceTab);
+  document.querySelectorAll("[data-maintenance-workspace]").forEach((tab) => {
+    const selected = tab.dataset.maintenanceWorkspace === workspaceTab;
+    tab.setAttribute("aria-selected", selected ? "true" : "false");
+    tab.tabIndex = selected ? 0 : -1;
+    if (selected && focus) tab.focus();
+  });
+  byId("maintenance-convergence-panel").hidden = workspaceTab !== "convergence";
+  byId("maintenance-governance-panel").hidden = workspaceTab !== "governance";
+}
+
+function copyStatusPill(source, target) {
+  target.textContent = source.textContent;
+  target.className = source.className;
+}
+
+function renderMaintenanceControllerAvailability() {
+  const owner = maintenanceControllerOwner();
+  const convergenceReason = maintenanceBlockedReason(MAINTENANCE_OWNER.CONVERGENCE);
+  const manualReason = maintenanceBlockedReason(MAINTENANCE_OWNER.MANUAL);
+  const archiveReason = maintenanceBlockedReason(MAINTENANCE_OWNER.ARCHIVE);
+  setEntryAvailability(byId("maintenance-start"), t("Run now"), {
+    disabled: !maintenanceAvailable() || state.maintenance.busy || Boolean(convergenceReason),
+    reason: convergenceReason,
+  });
+  setEntryAvailability(byId("maintenance-manual-start"), t("Manual staged review"), {
+    disabled: !maintenanceAvailable() || state.maintenance.busy || Boolean(manualReason),
+    reason: manualReason,
+  });
+  setEntryAvailability(byId("archive-start"), t("Scan candidates"), {
+    disabled: state.archive.busy || Boolean(archiveReason),
+    reason: archiveReason,
+  });
+  const availability = byId("maintenance-archive-availability");
+  availability.className = `status-pill${archiveReason ? " status-warning" : archiveSessionActive() ? " status-info" : archiveSessionComplete() ? " status-positive" : ""}`;
+  availability.textContent = archiveReason
+    ? maintenanceOwnerLabel(owner)
+    : archiveSessionActive()
+      ? t("Archive review in progress")
+      : archiveSessionComplete()
+        ? t("Completed")
+        : t("Optional");
+  return owner;
+}
+
+function maintenanceKindIconName(kind) {
+  return ({ pack: "pack", summary: "summary", relation: "relation", topic: "topic", archive: "archive" })[kind] || "manual";
+}
+
+function maintenanceKindBadge(kind, label = t(maintenanceReviewKindLabel(kind))) {
+  const badge = element("span", `maintenance-review-kind maintenance-review-kind-${kind || "unknown"}`);
+  badge.append(icon(maintenanceKindIconName(kind)), element("span", "", label));
+  return badge;
+}
+
+function maintenanceProposalKindBadge(kind, label) {
+  const badge = element("span", "maintenance-proposal-kind");
+  badge.append(icon(maintenanceKindIconName(kind)), element("span", "", label));
+  return badge;
 }
 
 function formatNumber(value) {
@@ -1238,7 +1338,8 @@ const queryView = createQueryView({
   showError,
   t,
   formatNumber,
-  openPageIcon,
+  searchIcon: () => icon("search"),
+  openPageIcon: () => icon("open"),
   openPage: (pageId) => pageInspector.open(pageId),
 });
 const healthView = createHealthView({ request: api, showError, formatNumber, t });
@@ -1340,7 +1441,7 @@ function renderOverview(data) {
     open.type = "button";
     open.title = t("Open");
     open.setAttribute("aria-label", t("Open"));
-    open.append(openPageIcon());
+    open.append(icon("open"));
     open.addEventListener("click", () => openScope(scope.namespace));
     const action = element("td", "action-cell");
     action.append(open);
@@ -1433,7 +1534,7 @@ function pageResult(hit) {
   const open = element("button", "page-link");
   open.type = "button";
   const indicator = element("span", "page-open-indicator");
-  indicator.append(openPageIcon());
+  indicator.append(icon("open"));
   open.append(element("span", "page-title", pageSnippet(hit)), indicator);
   open.addEventListener("click", () => pageInspector.open(hit.pageId));
   result.append(open, pageResultMeta(hit));
@@ -1525,14 +1626,14 @@ function pageRelationSignal(hit) {
   const signal = element("span", `page-signal${stats?.total ? "" : " page-signal-empty"}`);
   if (!stats) {
     signal.title = t("Unavailable");
-    signal.append(strokeIcon(["M8 8h8", "m-2-2 2 2-2 2", "M16 16H8", "m2 2-2-2 2-2"], "page-meta-icon"), element("span", "", "–"));
+    signal.append(pathIcon(["M8 8h8", "m-2-2 2 2-2 2", "M16 16H8", "m2 2-2-2 2-2"], "page-meta-icon"), element("span", "", "–"));
     return signal;
   }
   signal.title = stats.total > 0
     ? `${formatNumber(stats.total)} ${t("Direct links")} · ${formatNumber(stats.incoming)} ${t("in")} · ${formatNumber(stats.outgoing)} ${t("out")}`
     : t("No direct links");
   signal.append(
-    strokeIcon(["M8 8h8", "m-2-2 2 2-2 2", "M16 16H8", "m2 2-2-2 2-2"], "page-meta-icon"),
+    pathIcon(["M8 8h8", "m-2-2 2 2-2 2", "M16 16H8", "m2 2-2-2 2-2"], "page-meta-icon"),
     element("strong", "", formatNumber(stats.total)),
     element("span", "page-signal-direction", `↓ ${formatNumber(stats.incoming)}`),
     element("span", "page-signal-direction", `↑ ${formatNumber(stats.outgoing)}`),
@@ -1556,7 +1657,7 @@ function pageResultMeta(hit) {
   meta.append(...pageStructureTags(hit).map(([paths, label]) => {
     const tag = element("span", "page-structure-tag");
     tag.title = label;
-    tag.append(strokeIcon(paths, "page-meta-icon"), document.createTextNode(label));
+    tag.append(pathIcon(paths, "page-meta-icon"), document.createTextNode(label));
     return tag;
   }));
   return meta;
@@ -1698,7 +1799,7 @@ function governanceCard(hit) {
   open.type = "button";
   open.title = t("Open in inspector");
   open.setAttribute("aria-label", t("Open in inspector"));
-  open.append(openPageIcon());
+  open.append(icon("open"));
   open.addEventListener("click", () => pageInspector.open(hit.pageId));
   heading.append(copy, open);
 
@@ -1798,6 +1899,7 @@ function resetArchiveSession() {
   state.archive.busy = false;
   state.archive.activity = null;
   state.archive.operation = null;
+  state.archive.operationProgress = null;
   state.archive.scan = null;
   state.archive.analyses = [];
   state.archive.selected.clear();
@@ -1824,18 +1926,26 @@ function refreshArchiveAnalysisTotals() {
   )).length;
 }
 
-function renderArchiveSteps(stage, { scanning = false } = {}) {
+function renderArchiveSteps(stage, { operation = null } = {}) {
   const states = {
     scan: [t("Completed"), t("Waiting"), t("Waiting")],
-    analyze: [t("Completed"), t("In progress"), t("Waiting")],
+    analyze: [t("Completed"), t("Ready to analyze"), t("Waiting")],
     review: [t("Completed"), t("Completed"), t("Ready to apply")],
   };
-  if (scanning) states.scan[0] = t("In progress");
+  const runningStage = operation === "scan"
+    ? "scan"
+    : ["analyze", "retry"].includes(operation)
+      ? "analyze"
+      : operation === "apply"
+        ? "review"
+        : null;
+  if (runningStage) states[stage][["scan", "analyze", "review"].indexOf(runningStage)] = t("In progress");
   const steps = ["scan", "analyze", "review"];
   steps.forEach((name, index) => {
     const node = byId(`archive-step-${name}`);
     node.classList.toggle("active", name === stage);
-    node.classList.toggle("completed", !scanning && index < steps.indexOf(stage));
+    node.classList.toggle("running", name === runningStage);
+    node.classList.toggle("completed", operation !== "scan" && index < steps.indexOf(stage));
     byId(`archive-step-${name}-status`).textContent = states[stage][index];
   });
 }
@@ -1846,7 +1956,7 @@ function archiveProposalCard(candidate) {
     const row = element("article", `maintenance-review-settled-row tone-${decision === "archive" ? "reject" : "defer"}`);
     const stateNode = element("span", "maintenance-review-settled-state");
     stateNode.append(
-      decision === "archive" ? rejectRelationIcon() : skipRelationIcon(),
+      icon(decision === "archive" ? "archive" : "retain"),
       element("strong", "", decision === "archive" ? t("Archive") : t("Retained")),
     );
     const summary = element("span", "maintenance-review-settled-summary", compactRelationReviewPreview(candidate.preview || candidate.pageId, 180));
@@ -1860,9 +1970,9 @@ function archiveProposalCard(candidate) {
         : t("Pending commit"),
     );
     if (record?.applyIssue) pending.title = record.applyIssue;
-    const undo = element("button", "compact-button maintenance-review-undo", t("Undo"));
+    const undo = element("button", "compact-button compact-icon-button maintenance-review-undo");
     undo.type = "button";
-    undo.prepend(undoIcon());
+    setSemanticButton(undo, t("Undo"), "undo", { iconOnly: true });
     undo.disabled = state.archive.operation === "apply";
     undo.addEventListener("click", () => {
       state.archive.selected.delete(candidate.candidateId);
@@ -1870,7 +1980,7 @@ function archiveProposalCard(candidate) {
       renderArchiveSession();
     });
     row.append(
-      element("span", "maintenance-review-kind maintenance-review-kind-archive", t("Archive")),
+      maintenanceKindBadge("archive", t("Archive")),
       stateNode,
       summary,
       pending,
@@ -1889,7 +1999,7 @@ function archiveProposalCard(candidate) {
   open.type = "button";
   open.title = t("Open in inspector");
   open.setAttribute("aria-label", t("Open in inspector"));
-  open.append(openPageIcon());
+  open.append(icon("open"));
   open.addEventListener("click", () => pageInspector.open(candidate.pageId));
   heading.append(copy, open);
   const preview = element("p", "archive-candidate-preview", candidate.preview);
@@ -1902,17 +2012,17 @@ function archiveProposalCard(candidate) {
     signals.append(failed);
   }
   const actions = element("div", "maintenance-proposal-actions");
-  const archive = element("button", "compact-button maintenance-proposal-reject", t("Archive"));
+  const archive = element("button", "compact-button compact-icon-button maintenance-proposal-reject");
   archive.type = "button";
-  archive.prepend(rejectRelationIcon());
+  setSemanticButton(archive, t("Archive"), "archive", { iconOnly: true });
   archive.addEventListener("click", () => {
     state.archive.selected.add(candidate.candidateId);
     state.archive.decisions.set(candidate.candidateId, "archive");
     renderArchiveSession();
   });
-  const retain = element("button", "compact-button maintenance-proposal-skip", t("Retained"));
+  const retain = element("button", "compact-button compact-icon-button maintenance-proposal-skip");
   retain.type = "button";
-  retain.prepend(skipRelationIcon());
+  setSemanticButton(retain, t("Retained"), "retain", { iconOnly: true });
   retain.addEventListener("click", () => {
     state.archive.selected.delete(candidate.candidateId);
     state.archive.decisions.set(candidate.candidateId, "retain");
@@ -1930,11 +2040,11 @@ function renderArchiveWorkflow() {
   const analyzed = progress.processed;
   const attempts = state.archive.analyses.reduce((total, batch) => total + (batch.attempts || 0), 0);
   const candidates = archiveCandidates();
-  const stage = !scan ? "scan" : analyzed < total ? "analyze" : "review";
-  const scanning = state.archive.busy && !scan;
+  const stage = state.archive.operation === "scan" ? "scan" : !scan ? "scan" : analyzed < total ? "analyze" : "review";
+  const scanning = state.archive.operation === "scan";
   const selectedCount = candidates.filter((candidate) => state.archive.selected.has(candidate.candidateId)).length;
   const reviewedCount = candidates.filter((candidate) => state.archive.decisions.has(candidate.candidateId)).length;
-  renderArchiveSteps(stage, { scanning });
+  renderArchiveSteps(stage, { operation: state.archive.operation });
   byId("archive-scan-metrics").replaceChildren(
     metric(t("Candidates"), scanning ? "—" : formatNumber(total)),
     metric(t("Eligible Pages"), scanning ? "—" : formatNumber(scan?.eligiblePages || 0)),
@@ -1955,20 +2065,41 @@ function renderArchiveWorkflow() {
       : scanning
         ? t("Scanning candidates")
         : `${formatNumber(analyzed)} / ${formatNumber(total)} ${t("Analyzed")}`;
+  const operationLabel = {
+    scan: t("Scanning candidates"),
+    analyze: t("Analyze suggestions"),
+    retry: t("Retry failed batches"),
+    apply: t("Archive selected"),
+  }[state.archive.operation] || t("Working");
+  renderOperationState("archive", {
+    active: state.archive.busy,
+    title: operationLabel,
+    detail: state.archive.activity || (currentLanguage === "zh" ? "正在占用内容治理维护控制器" : "Using the content-governance maintenance controller"),
+    current: state.archive.operationProgress?.current || 0,
+    total: state.archive.operationProgress?.total || 0,
+  });
   const analyze = byId("archive-analyze");
   analyze.disabled = state.archive.busy || !scan || !state.archive.analyses.some((batch) => batch.status === "pending");
-  analyze.textContent = analyzed ? t("Continue analysis") : t("Analyze suggestions");
+  setIconAction(analyze, analyzed ? t("Continue analysis") : t("Analyze suggestions"), "analyze", {
+    loading: state.archive.operation === "analyze",
+  });
   const apply = byId("archive-apply");
   apply.disabled = state.archive.busy || stage !== "review" || selectedCount === 0;
-  apply.textContent = `${t("Archive selected")} (${formatNumber(selectedCount)})`;
+  setIconAction(apply, `${t("Archive selected")} (${formatNumber(selectedCount)})`, "archive", {
+    loading: state.archive.operation === "apply",
+  });
   const rescan = byId("archive-rescan");
   rescan.disabled = state.archive.busy;
+  setIconAction(rescan, t("Rescan this stage"), "rescan", { loading: state.archive.operation === "scan" });
   const finish = byId("archive-finish");
   finish.disabled = state.archive.busy || stage !== "review";
+  setIconAction(finish, t("End session"), "end");
   const retry = byId("archive-retry-failed");
   retry.hidden = progress.failed === 0;
   retry.disabled = state.archive.busy || progress.failed === 0;
-  retry.textContent = `${t("Retry failed batches")} (${formatNumber(progress.failed)})`;
+  setIconAction(retry, `${t("Retry failed batches")} (${formatNumber(progress.failed)})`, "retry", {
+    loading: state.archive.operation === "retry",
+  });
   const analysisLog = byId("archive-analysis-log");
   analysisLog.hidden = !state.archive.analyses.length;
   byId("archive-analysis-log-summary").textContent = currentLanguage === "zh"
@@ -2006,12 +2137,16 @@ function renderArchiveReport() {
 }
 
 function renderArchiveSession() {
+  const owner = renderMaintenanceControllerAvailability();
+  renderMaintenanceConvergenceState();
+  const blocked = maintenanceTargetBlocked(owner, MAINTENANCE_OWNER.ARCHIVE);
+  const blockedReason = blocked ? maintenanceBlockedReason(MAINTENANCE_OWNER.ARCHIVE) : null;
   byId("archive-idle").hidden = !(!archiveSessionActive() && !archiveSessionComplete());
   byId("archive-workflow").hidden = !archiveSessionActive();
   byId("archive-report").hidden = !archiveSessionComplete();
-  byId("archive-start").disabled = state.archive.busy || maintenanceSessionActive();
   if (!archiveSessionActive() && !archiveSessionComplete()) {
-    byId("archive-status").textContent = maintenanceSessionActive() ? t("Available after maintenance") : "";
+    byId("archive-status").textContent = blocked ? blockedReason : "";
+    renderOperationState("archive", { active: false });
   }
   if (archiveSessionActive()) renderArchiveWorkflow();
   if (archiveSessionComplete()) renderArchiveReport();
@@ -2022,10 +2157,12 @@ async function scanArchiveCandidates() {
   state.archive.busy = true;
   state.archive.activity = t("Scanning candidates");
   state.archive.operation = "scan";
+  state.archive.operationProgress = { current: 0, total: 1 };
   state.archive.issue = null;
   renderArchiveSession();
   try {
     const scan = await maintenanceMutation("/api/maintenance/archive/scan", {});
+    state.archive.operationProgress.current = 1;
     state.archive.scan = scan;
     state.archive.analyses = (scan.pages || []).map((scanPage, batchIndex) => ({
       batchIndex,
@@ -2052,12 +2189,13 @@ async function scanArchiveCandidates() {
     state.archive.busy = false;
     state.archive.activity = null;
     state.archive.operation = null;
+    state.archive.operationProgress = null;
     renderArchiveSession();
   }
 }
 
 async function startArchiveSession() {
-  if (state.archive.busy || maintenanceSessionActive()) return;
+  if (state.archive.busy || maintenanceTargetBlocked(maintenanceControllerOwner(), MAINTENANCE_OWNER.ARCHIVE)) return;
   resetArchiveSession();
   state.archive.state = "active";
   renderArchiveSession();
@@ -2070,7 +2208,8 @@ async function analyzeArchiveCandidates({ retryFailed = false } = {}) {
   const indexes = runnableBatchIndexes(state.archive.analyses, { retryFailed });
   if (!indexes.length) return;
   state.archive.busy = true;
-  state.archive.operation = "analyze";
+  state.archive.operation = retryFailed ? "retry" : "analyze";
+  state.archive.operationProgress = { current: 0, total: indexes.length };
   state.archive.issue = null;
   for (const [progressIndex, batchIndex] of indexes.entries()) {
     const batch = state.archive.analyses[batchIndex];
@@ -2079,6 +2218,7 @@ async function analyzeArchiveCandidates({ retryFailed = false } = {}) {
     beginBatch(batch);
     batch.applyIssue = null;
     state.archive.activity = `${t("Analyzing")} ${formatNumber(progressIndex + 1)} / ${formatNumber(indexes.length)}`;
+    state.archive.operationProgress.current = progressIndex;
     renderArchiveSession();
     try {
       const analysis = await maintenanceMutation("/api/maintenance/archive/analyze", {
@@ -2091,11 +2231,13 @@ async function analyzeArchiveCandidates({ retryFailed = false } = {}) {
       failBatch(batch, error);
     }
     refreshArchiveAnalysisTotals();
+    state.archive.operationProgress.current = progressIndex + 1;
     renderArchiveSession();
   }
   state.archive.busy = false;
   state.archive.activity = null;
   state.archive.operation = null;
+  state.archive.operationProgress = null;
   renderArchiveSession();
 }
 
@@ -2110,10 +2252,12 @@ async function applyArchiveSelection() {
   if (!confirmed) return;
   state.archive.busy = true;
   state.archive.operation = "apply";
+  state.archive.operationProgress = { current: 0, total: selected.length };
   state.archive.issue = null;
   const failures = [];
   for (const [index, candidate] of selected.entries()) {
     state.archive.activity = `${t("Archiving")} ${formatNumber(index + 1)} / ${formatNumber(selected.length)}`;
+    state.archive.operationProgress.current = index;
     renderArchiveSession();
     const record = state.archive.analyses.find(({ analysis }) => analysis?.candidate?.candidateId === candidate.candidateId);
     try {
@@ -2134,6 +2278,7 @@ async function applyArchiveSelection() {
       if (record) record.applyIssue = message;
       failures.push({ candidateId: candidate.candidateId, message });
     }
+    state.archive.operationProgress.current = index + 1;
     renderArchiveSession();
   }
   try {
@@ -2142,6 +2287,7 @@ async function applyArchiveSelection() {
     state.archive.busy = false;
     state.archive.activity = null;
     state.archive.operation = null;
+    state.archive.operationProgress = null;
     state.archive.issue = failures.length
       ? (currentLanguage === "zh"
         ? `${formatNumber(failures.length)} 个归档提案未能应用；成功项已保留，失败项仍可重试。`
@@ -2233,9 +2379,22 @@ function resetMaintenanceSession() {
   state.maintenance.applyStates.clear();
 }
 
+function reconcileMaintenanceConvergence(status) {
+  state.maintenance.convergence = reconcileConvergenceStatus(state.maintenance.convergence, {
+    operationActive: maintenanceConvergenceActive,
+    automationState: status.automation?.state,
+    pendingReviewCount: Math.max(
+      state.maintenance.relationReviews.length,
+      status.automation?.pendingReviewCount || 0,
+    ),
+    observedAt: new Date().toISOString(),
+  });
+}
+
 function renderMaintenanceStatus(status) {
   state.maintenance.status = status;
   state.maintenance.loaded = true;
+  reconcileMaintenanceConvergence(status);
   renderAutomationStatus();
   renderMaintenanceSession();
 }
@@ -2266,8 +2425,14 @@ function maintenanceSceneErrorCopy(error) {
 
 function renderMaintenanceConvergenceState() {
   const error = maintenanceSceneError();
+  const owner = maintenanceControllerOwner();
+  const occupiedOwner = !state.maintenance.convergence.running
+    && owner
+    && owner !== MAINTENANCE_OWNER.CONVERGENCE;
   const phase = error
     ? "failed"
+    : occupiedOwner
+      ? "occupied"
     : convergencePhase(state.maintenance.convergence, state.maintenance.relationReviews.length);
   const labels = {
     waiting: "Awaiting run",
@@ -2275,6 +2440,7 @@ function renderMaintenanceConvergenceState() {
     review: "Awaiting review",
     settled: "Converged",
     failed: "Needs attention",
+    occupied: "Maintenance controller occupied",
   };
   const tones = {
     waiting: "warning",
@@ -2282,10 +2448,12 @@ function renderMaintenanceConvergenceState() {
     review: "warning",
     settled: "positive",
     failed: "warning",
+    occupied: "info",
   };
   const stateNode = byId("maintenance-convergence-state");
-  stateNode.textContent = t(labels[phase]);
+  stateNode.textContent = occupiedOwner ? maintenanceOwnerLabel(occupiedOwner) : t(labels[phase]);
   stateNode.className = `status-pill status-${tones[phase]}`;
+  copyStatusPill(stateNode, byId("maintenance-convergence-tab-state"));
 
   const alert = byId("maintenance-scene-alert");
   alert.hidden = !error;
@@ -2432,6 +2600,7 @@ function renderAutomationStatus() {
   // Keeping the old footer hidden avoids two competing error locations.
   error.hidden = true;
   error.textContent = "";
+  renderMaintenanceControllerAvailability();
   renderMaintenanceConvergenceState();
 }
 
@@ -2514,7 +2683,7 @@ function relationComparisonButton(proposal, className = "secondary-button", {
   const label = t("Compare Pages");
   const compare = element("button", className, iconOnly ? undefined : label);
   compare.type = "button";
-  if (iconOnly) compare.append(relationCompareIcon());
+  if (iconOnly) compare.append(icon("compare"));
   compare.title = label;
   compare.setAttribute("aria-label", label);
   compare.addEventListener("click", () => {
@@ -2534,8 +2703,9 @@ function relationComparisonButton(proposal, className = "secondary-button", {
 }
 
 function topicExtractionReviewButton(candidate, className = "secondary-button") {
-  const review = element("button", className, t("Review source Pages"));
+  const review = element("button", `${className} semantic-button`);
   review.type = "button";
+  review.append(icon("compare"), element("span", "", t("Review source Pages")));
   review.addEventListener("click", () => {
     pageInspector.reviewTopic(candidate).catch(() => {});
   });
@@ -2597,7 +2767,7 @@ function renderRelationReviews() {
     byId("maintenance-review-session-summary").textContent = currentLanguage === "zh"
       ? `${formatNumber(counts.total)} 个决定尚未写入；完成前均可撤销。`
       : `${formatNumber(counts.total)} decisions are not written yet and remain reversible until completion.`;
-    byId("maintenance-review-commit").textContent = `${t("Finish review and apply")} (${formatNumber(counts.total)})`;
+    setSemanticButton(byId("maintenance-review-commit"), `${t("Finish review and apply")} (${formatNumber(counts.total)})`, "apply");
     byId("maintenance-review-commit").disabled = state.maintenance.reviewCommitBusy;
     byId("maintenance-review-undo-all").disabled = state.maintenance.reviewCommitBusy;
   }
@@ -2691,23 +2861,23 @@ function maintenanceReviewSettledRow(review, staged) {
   const row = element("article", `maintenance-review-settled-row tone-${staged.decision}`);
   const stateNode = element("span", "maintenance-review-settled-state");
   stateNode.append(
-    staged.decision === REVIEW_DECISION.ACCEPT ? acceptRelationIcon()
-      : staged.decision === REVIEW_DECISION.DEFER ? skipRelationIcon()
-        : staged.decision === REVIEW_DECISION.SUPPRESS ? suppressRelationIcon()
-          : rejectRelationIcon(),
+    icon(staged.decision === REVIEW_DECISION.ACCEPT ? "accept"
+      : staged.decision === REVIEW_DECISION.DEFER ? "defer"
+        : staged.decision === REVIEW_DECISION.SUPPRESS ? "suppress"
+          : "reject"),
     element("strong", "", reviewDecisionLabel(staged.decision)),
   );
   const summary = element("span", "maintenance-review-settled-summary", maintenanceReviewSummary(review));
   summary.title = summary.textContent;
   const pending = element("span", "maintenance-review-settled-pending", staged.error || t("Pending commit"));
   if (staged.error) pending.classList.add("has-error");
-  const undo = element("button", "compact-button maintenance-review-undo", t("Undo"));
+  const undo = element("button", "compact-button compact-icon-button maintenance-review-undo");
   undo.type = "button";
-  undo.prepend(undoIcon());
+  setSemanticButton(undo, t("Undo"), "undo", { iconOnly: true });
   undo.disabled = state.maintenance.reviewCommitBusy;
   undo.addEventListener("click", () => undoMaintenanceReview(review.candidateId));
   row.append(
-    element("span", `maintenance-review-kind maintenance-review-kind-${review.payload?.kind || "unknown"}`, t(maintenanceReviewKindLabel(review.payload?.kind))),
+    maintenanceKindBadge(review.payload?.kind),
     stateNode,
     summary,
     pending,
@@ -2716,11 +2886,17 @@ function maintenanceReviewSettledRow(review, staged) {
   return row;
 }
 
-function reviewDecisionButton(review, decision, label, icon, tone = "") {
-  const button = element("button", `compact-button maintenance-review-decision${tone ? ` tone-${tone}` : ""}`);
+function reviewDecisionButton(review, decision, label, iconNode, tone = "", { iconOnly = true } = {}) {
+  const button = element("button", `compact-button maintenance-review-decision${iconOnly ? " compact-icon-button" : ""}${tone ? ` tone-${tone}` : ""}`);
   button.type = "button";
   button.disabled = state.maintenance.reviewCommitBusy;
-  button.append(icon, element("span", "", label));
+  button.append(iconNode);
+  if (iconOnly) {
+    button.title = label;
+    button.setAttribute("aria-label", label);
+  } else {
+    button.append(element("span", "", label));
+  }
   button.addEventListener("click", () => stageMaintenanceReview(review, decision));
   return button;
 }
@@ -2732,7 +2908,7 @@ function maintenanceReviewCard(review) {
   const heading = element("div", "maintenance-relation-review-card-heading");
   const metadata = element("div", "maintenance-review-metadata");
   metadata.append(
-    element("span", `maintenance-review-kind maintenance-review-kind-${payload.kind || "unknown"}`, t(maintenanceReviewKindLabel(payload.kind))),
+    maintenanceKindBadge(payload.kind),
     element("span", "muted", review.origin === "automatic" ? t("Automatic maintenance") : t("Manual maintenance")),
     element("span", "muted", formatTime(review.proposedAt)),
   );
@@ -2760,19 +2936,20 @@ function maintenanceReviewCard(review) {
     review,
     REVIEW_DECISION.ACCEPT,
     t(payload.kind === "archive" ? "Archive" : "Accept"),
-    acceptRelationIcon(),
+    icon(payload.kind === "archive" ? "archive" : "accept"),
     payload.kind === "archive" ? "archive" : "accept",
   );
-  const reject = reviewDecisionButton(review, REVIEW_DECISION.REJECT, t("Reject"), rejectRelationIcon(), "reject");
-  const defer = reviewDecisionButton(review, REVIEW_DECISION.DEFER, t("Skip for now"), skipRelationIcon(), "defer");
+  const reject = reviewDecisionButton(review, REVIEW_DECISION.REJECT, t("Reject"), icon("reject"), "reject");
+  const defer = reviewDecisionButton(review, REVIEW_DECISION.DEFER, t("Skip for now"), icon("defer"), "defer");
   actions.append(accept, reject, defer);
   if (payload.kind === "relation") {
     const suppress = reviewDecisionButton(
       review,
       REVIEW_DECISION.SUPPRESS,
       t("Do not suggest this relation again"),
-      suppressRelationIcon(),
+      icon("suppress"),
       "suppress",
+      { iconOnly: false },
     );
     actions.append(suppress);
   }
@@ -3102,10 +3279,10 @@ function maintenanceProposalSettledRow(candidate, decision) {
   const row = element("article", `maintenance-review-settled-row tone-${visualDecision}`);
   const stateNode = element("span", "maintenance-review-settled-state");
   stateNode.append(
-    visualDecision === "accept" ? acceptRelationIcon()
-      : visualDecision === "defer" ? skipRelationIcon()
-        : visualDecision === "suppress" ? suppressRelationIcon()
-          : rejectRelationIcon(),
+    icon(visualDecision === "accept" ? "accept"
+      : visualDecision === "defer" ? "defer"
+        : visualDecision === "suppress" ? "suppress"
+          : "reject"),
     element("strong", "", decision === "accepted"
       ? t("Accepted")
       : decision === "rejected"
@@ -3127,12 +3304,12 @@ function maintenanceProposalSettledRow(candidate, decision) {
         : t("Pending commit"),
   );
   if (applyState?.message) pending.title = applyState.message;
-  const undo = element("button", "compact-button maintenance-review-undo", t("Undo"));
+  const undo = element("button", "compact-button compact-icon-button maintenance-review-undo");
   undo.type = "button";
-  undo.prepend(undoIcon());
+  setSemanticButton(undo, t("Undo"), "undo", { iconOnly: true });
   undo.addEventListener("click", () => undoMaintenanceCandidateDecision(candidate));
   row.append(
-    element("span", `maintenance-review-kind maintenance-review-kind-${candidate.operation}`, maintenanceProposalKind(candidate)),
+    maintenanceKindBadge(candidate.operation, maintenanceProposalKind(candidate)),
     stateNode,
     summary,
     pending,
@@ -3143,21 +3320,21 @@ function maintenanceProposalSettledRow(candidate, decision) {
 
 function maintenanceProposalActions(candidate, { allowReject = false } = {}) {
   const actions = element("div", "maintenance-proposal-actions");
-  const accept = element("button", "compact-button maintenance-proposal-accept", t("Accept"));
+  const accept = element("button", "compact-button compact-icon-button maintenance-proposal-accept");
   accept.type = "button";
-  accept.prepend(acceptRelationIcon());
+  setSemanticButton(accept, t("Accept"), "accept", { iconOnly: true });
   accept.addEventListener("click", () => acceptMaintenanceCandidate(candidate));
   actions.append(accept);
   if (allowReject) {
-    const reject = element("button", "compact-button maintenance-proposal-reject", t("Reject"));
+    const reject = element("button", "compact-button compact-icon-button maintenance-proposal-reject");
     reject.type = "button";
-    reject.prepend(rejectRelationIcon());
+    setSemanticButton(reject, t("Reject"), "reject", { iconOnly: true });
     reject.addEventListener("click", () => rejectRelationCandidate(candidate));
     actions.append(reject);
   }
-  const skip = element("button", "compact-button maintenance-proposal-skip", t("Skip for now"));
+  const skip = element("button", "compact-button compact-icon-button maintenance-proposal-skip");
   skip.type = "button";
-  skip.prepend(skipRelationIcon());
+  setSemanticButton(skip, t("Skip for now"), "defer", { iconOnly: true });
   skip.addEventListener("click", () => skipMaintenanceCandidate(candidate));
   actions.append(skip);
   return actions;
@@ -3168,7 +3345,7 @@ function summaryProposalCard(candidate) {
   if (reviewState) return maintenanceProposalSettledRow(candidate, reviewState);
   const card = element("article", "maintenance-summary-card");
   const heading = element("div", "maintenance-summary-card-heading");
-  const label = element("strong", "maintenance-proposal-kind", t("Summary proposal"));
+  const label = maintenanceProposalKindBadge("summary", t("Summary proposal"));
   const source = element("div", "maintenance-summary-source");
   source.append(
     element("strong", "", candidate.namespace),
@@ -3178,7 +3355,7 @@ function summaryProposalCard(candidate) {
   open.type = "button";
   open.title = t("Open page");
   open.setAttribute("aria-label", t("Open page"));
-  open.append(openPageIcon());
+  open.append(icon("open"));
   open.addEventListener("click", () => pageInspector.open(candidate.pageId));
   heading.append(label, source, open);
   const metadata = element("div", "maintenance-summary-metadata");
@@ -3197,7 +3374,7 @@ function relationProposalCard(candidate) {
   const card = element("article", "maintenance-relation-proposal");
   const aside = element("div", "maintenance-relation-proposal-aside");
   aside.append(
-    element("span", "maintenance-relation-proposal-kind", t("Relation proposal")),
+    maintenanceProposalKindBadge("relation", t("Relation proposal")),
     element("strong", "", candidate.namespace),
     element("span", "muted", `${candidate.pages.length} ${t("Pages")}`),
   );
@@ -3230,9 +3407,10 @@ function relationProposalCard(candidate) {
   });
   view.title = t("View relation Pages");
   view.setAttribute("aria-label", view.title);
-  view.replaceChildren(openPageIcon());
-  const suppress = element("button", "maintenance-relation-no-suggest", t("Do not suggest this relation again"));
+  view.replaceChildren(icon("compare"));
+  const suppress = element("button", "maintenance-relation-no-suggest semantic-button");
   suppress.type = "button";
+  suppress.append(icon("suppress"), element("span", "", t("Do not suggest this relation again")));
   suppress.addEventListener("click", () => toggleRelationCandidateSuppression(candidate));
   actions.append(suppress, view, maintenanceProposalActions(candidate, { allowReject: true }));
   body.append(pages, rationale, actions);
@@ -3247,7 +3425,7 @@ function genericProposalCard(candidate) {
   const header = element("div", "maintenance-generic-card-heading");
   const title = element("div", "maintenance-generic-card-title");
   title.append(
-    element("span", "maintenance-proposal-kind", maintenanceProposalKind(candidate)),
+    maintenanceProposalKindBadge(candidate.operation, maintenanceProposalKind(candidate)),
     element("strong", "", candidate.operation === "topic" ? candidate.title : candidate.namespace),
   );
   const meta = candidate.operation === "topic"
@@ -3302,14 +3480,24 @@ function renderMaintenanceProposals(candidates) {
   if (genericCandidates.length) genericCards.replaceChildren(...genericCandidates.map(genericProposalCard));
 }
 
-function updateMaintenanceButton(button, label, loading, activity) {
+function maintenanceActionIcon(action, activity) {
+  if (activity?.kind === "scan") return "scan";
+  if (activity?.kind === "analyze") return "analyze";
+  if (activity?.kind === "optimize") return "apply";
+  return ({ start: "run", scan: "scan", analyze: "analyze", apply: "apply", advance: "skip" })[action] || "run";
+}
+
+function updateMaintenanceButton(button, label, loading, activity, action) {
   const progress = loading && activity?.total > 0
     ? ` ${formatNumber(activity.current)} of ${formatNumber(activity.total)}`
     : "";
   const activeLabel = t({ scan: "Scanning", analyze: "Analyzing", optimize: "Optimizing" }[activity?.kind]) || label;
-  button.textContent = loading ? `${activeLabel}${progress}` : label;
-  button.classList.toggle("is-loading", loading);
-  button.setAttribute("aria-busy", loading ? "true" : "false");
+  setIconAction(
+    button,
+    loading ? `${activeLabel}${progress}` : label,
+    maintenanceActionIcon(action, activity),
+    { loading },
+  );
 }
 
 function maintenanceStepStatus(phase) {
@@ -3404,7 +3592,9 @@ function renderMaintenanceSteps() {
     const step = byId(`maintenance-step-${stage}`);
     const config = maintenanceStageConfig(stage);
     const activeConfig = maintenanceStageConfig();
+    const running = maintenanceSessionActive() && stage === activeStage && state.maintenance.busy;
     step.classList.toggle("active", maintenanceSessionActive() && stage === activeStage);
+    step.classList.toggle("running", running);
     step.classList.toggle("completed", maintenanceSessionComplete() || (maintenanceSessionActive() && config.order < activeConfig.order));
     const status = maintenanceSessionComplete() || config.order < activeConfig.order
       ? t("Completed")
@@ -3628,22 +3818,45 @@ function renderMaintenanceWorkflow() {
         : `${formatNumber(reviewedCount)} of ${formatNumber(candidates.length)} reviewed · ${formatNumber(unresolvedCount)} remaining`);
   }
 
+  const activity = state.maintenance.activity && typeof state.maintenance.activity === "object"
+    ? state.maintenance.activity
+    : null;
+  const operationTitle = activity
+    ? (t({ scan: "Scanning", analyze: "Analyzing", optimize: "Optimizing" }[activity.kind]) || t("Working"))
+    : "";
+  renderOperationState("maintenance", {
+    active: state.maintenance.busy,
+    title: operationTitle,
+    detail: currentLanguage === "zh"
+      ? `${t(passConfig.label)} · ${t(stageConfig.label)}正在执行；完成后其他操作会自动恢复`
+      : `${t(passConfig.label)} · ${t(stageConfig.label)} is running; other actions resume when it finishes`,
+    current: activity?.current || 0,
+    total: activity?.total || 0,
+  });
   const primary = byId("maintenance-primary");
   const action = currentMaintenanceAction();
-  updateMaintenanceButton(primary, maintenancePrimaryLabel(action), state.maintenance.busy, state.maintenance.activity);
+  const primaryLoading = state.maintenance.busy && !["retry", "rescan"].includes(activity?.trigger);
+  updateMaintenanceButton(primary, maintenancePrimaryLabel(action), primaryLoading, activity, action);
   primary.disabled = !maintenanceAvailable() || state.maintenance.busy;
   const rescan = byId("maintenance-rescan");
   rescan.disabled = state.maintenance.busy;
+  setIconAction(rescan, t("Rescan this stage"), "rescan", {
+    loading: state.maintenance.busy && activity?.trigger === "rescan",
+  });
   const skip = byId("maintenance-skip");
   skip.hidden = stage !== "review" || candidates.length === 0;
   skip.disabled = state.maintenance.busy;
+  setIconAction(skip, t("Skip this stage"), "skip");
   const retryFailed = byId("maintenance-retry-failed");
   const failedBatchCount = maintenanceFailedBatches().length;
   retryFailed.hidden = stage !== "review" || failedBatchCount === 0;
   retryFailed.disabled = state.maintenance.busy || failedBatchCount === 0;
-  retryFailed.textContent = `${t("Retry failed batches")} (${formatNumber(failedBatchCount)})`;
+  setIconAction(retryFailed, `${t("Retry failed batches")} (${formatNumber(failedBatchCount)})`, "retry", {
+    loading: state.maintenance.busy && activity?.trigger === "retry",
+  });
   const cancel = byId("maintenance-cancel");
   cancel.disabled = state.maintenance.busy;
+  setIconAction(cancel, t("End session"), "end");
   if (!state.maintenance.busy) {
     byId("maintenance-status").textContent = `${t(stageConfig.label)} · ${stage === "review" && candidates.length ? t("Ready to apply") : t("Ready to continue")}`;
   }
@@ -3675,15 +3888,17 @@ function renderMaintenanceReport() {
 function renderMaintenanceSession() {
   renderMaintenanceConvergenceState();
   const idle = !maintenanceSessionActive() && !maintenanceSessionComplete();
+  const owner = renderMaintenanceControllerAvailability();
   byId("maintenance-idle").hidden = !idle;
+  byId("maintenance-idle").classList.toggle("is-occupied", Boolean(idle && owner));
   byId("maintenance-workflow").hidden = !maintenanceSessionActive();
   byId("maintenance-report").hidden = !maintenanceSessionComplete();
-  byId("maintenance-start").disabled = !maintenanceAvailable() || state.maintenance.busy || archiveSessionActive();
-  byId("maintenance-manual-start").disabled = !maintenanceAvailable() || state.maintenance.busy || archiveSessionActive();
   if (idle) {
     const convergence = state.maintenance.convergence;
     byId("maintenance-status").textContent = convergence.running
       ? state.maintenance.activity || t("Working")
+      : owner
+        ? maintenanceOwnerLabel(owner)
       : maintenanceSceneError()
         ? t("Needs attention")
       : convergence.completedAt
@@ -3757,6 +3972,7 @@ function scheduleMaintenanceStatusPoll() {
     try {
       state.maintenance.status = await api("/api/maintenance");
       state.maintenance.loaded = true;
+      reconcileMaintenanceConvergence(state.maintenance.status);
       renderAutomationStatus();
     } catch (_) {
       // A status poll is advisory; the next scheduled read can recover without
@@ -4048,11 +4264,11 @@ function resetCurrentMaintenanceWork() {
   state.maintenance.applyStates.clear();
 }
 
-async function scanMaintenance() {
+async function scanMaintenance({ trigger = "primary" } = {}) {
   if (state.maintenance.busy || !maintenanceAvailable()) return;
   resetCurrentMaintenanceWork();
   state.maintenance.busy = true;
-  state.maintenance.activity = { kind: "scan", current: 0, total: 1 };
+  state.maintenance.activity = { kind: "scan", current: 0, total: 1, trigger };
   byId("maintenance-status").textContent = `${t("Scanning")} ${t(maintenancePassConfig().label)}`;
   renderMaintenanceSession();
   try {
@@ -4274,7 +4490,7 @@ async function analyzeMaintenance() {
   state.maintenance.busy = true;
   const total = maintenancePassPhases()
     .reduce((count, phase) => count + maintenanceEstimatedCalls(phase), 0);
-  state.maintenance.activity = { kind: "analyze", current: 0, total };
+  state.maintenance.activity = { kind: "analyze", current: 0, total, trigger: "primary" };
   byId("maintenance-status").textContent = t("Preparing");
   renderMaintenanceSession();
   try {
@@ -4322,6 +4538,7 @@ async function retryFailedMaintenanceBatches() {
     current: 0,
     total: packFailures.length + summaryFailures.length + relationFailures.length + topicFailures.length,
     retry: true,
+    trigger: "retry",
   };
   byId("maintenance-status").textContent = t("Preparing");
   renderMaintenanceSession();
@@ -4386,7 +4603,7 @@ async function optimizeMaintenanceSelection() {
   if (!confirmed) return;
 
   state.maintenance.busy = true;
-  state.maintenance.activity = { kind: "optimize", current: 0, total: totalCandidates.length };
+  state.maintenance.activity = { kind: "optimize", current: 0, total: totalCandidates.length, trigger: "primary" };
   byId("maintenance-status").textContent = `Optimizing 0 of ${formatNumber(totalCandidates.length)}`;
   renderMaintenanceSession();
   let result = { applied: 0, appliedCandidateIds: [], skipped: [] };
@@ -4477,14 +4694,20 @@ async function optimizeMaintenanceSelection() {
 }
 
 async function runMaintenanceConvergence() {
-  if (state.maintenance.busy || !maintenanceAvailable() || archiveSessionActive()) return;
+  if (
+    maintenanceConvergenceActive
+    || state.maintenance.busy
+    || !maintenanceAvailable()
+    || maintenanceTargetBlocked(maintenanceControllerOwner(), MAINTENANCE_OWNER.CONVERGENCE)
+  ) return;
+  maintenanceConvergenceActive = true;
   state.maintenance.busy = true;
   state.maintenance.activity = t("Working");
   state.maintenance.convergence = { running: true, report: null, steps: 0, completedAt: null, error: null };
-  renderMaintenanceSession();
-  renderAutomationStatus();
   const maxSteps = 512;
   try {
+    renderMaintenanceSession();
+    renderAutomationStatus();
     for (let step = 0; step < maxSteps; step += 1) {
       state.maintenance.activity = currentLanguage === "zh"
         ? `正在推进第 ${formatNumber(step + 1)} 个工作单元`
@@ -4515,12 +4738,13 @@ async function runMaintenanceConvergence() {
     await Promise.all([loadRelationReviews(), loadOverview()]);
     renderMaintenanceStatus(await api("/api/maintenance"));
   } catch (error) {
-    state.maintenance.convergence.running = false;
     state.maintenance.convergence.error = {
       message: error.message || String(error),
       occurredAt: new Date().toISOString(),
     };
   } finally {
+    state.maintenance.convergence.running = false;
+    maintenanceConvergenceActive = false;
     state.maintenance.busy = false;
     state.maintenance.activity = null;
     renderMaintenanceSession();
@@ -4529,13 +4753,17 @@ async function runMaintenanceConvergence() {
 }
 
 async function startMaintenanceSession() {
-  if (state.maintenance.busy || !maintenanceAvailable() || archiveSessionActive()) return;
+  if (
+    state.maintenance.busy
+    || !maintenanceAvailable()
+    || maintenanceTargetBlocked(maintenanceControllerOwner(), MAINTENANCE_OWNER.MANUAL)
+  ) return;
   resetMaintenanceSession();
   state.maintenance.session.state = "active";
   state.maintenance.session.startedAt = new Date().toISOString();
   byId("maintenance-status").textContent = t("Maintenance session started");
   renderMaintenanceSession();
-  await scanMaintenance();
+  await scanMaintenance({ trigger: "primary" });
 }
 
 async function advanceMaintenancePhase() {
@@ -4611,7 +4839,7 @@ async function rescanMaintenancePhase() {
     });
     if (!confirmed) return;
   }
-  await scanMaintenance();
+  await scanMaintenance({ trigger: "rescan" });
 }
 
 async function cancelMaintenanceSession() {
@@ -4705,6 +4933,7 @@ async function loadRuntimeControl() {
 async function restartRuntime() {
   const control = byId("runtime-restart");
   control.disabled = true;
+  control.classList.add("is-loading");
   try {
     await api("/api/runtime/restart", {
       method: "POST",
@@ -4714,13 +4943,42 @@ async function restartRuntime() {
   } catch (error) {
     showError(error);
     await loadRuntimeControl().catch(() => {});
+  } finally {
+    control.classList.remove("is-loading");
+  }
+}
+
+async function refreshFromControl() {
+  const control = byId("refresh");
+  control.disabled = true;
+  control.classList.add("is-loading");
+  try {
+    await refresh();
+  } finally {
+    control.classList.remove("is-loading");
+    control.disabled = false;
   }
 }
 
 document.querySelectorAll(".tab").forEach((tab) => {
   tab.addEventListener("click", () => activateView(tab.dataset.view).catch(showError));
 });
-byId("refresh").addEventListener("click", refresh);
+document.querySelectorAll("[data-maintenance-workspace]").forEach((tab) => {
+  tab.addEventListener("click", () => setMaintenanceWorkspaceTab(tab.dataset.maintenanceWorkspace));
+  tab.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const tabs = [...document.querySelectorAll("[data-maintenance-workspace]")];
+    const current = tabs.indexOf(tab);
+    const target = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? tabs.length - 1
+        : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+    setMaintenanceWorkspaceTab(tabs[target].dataset.maintenanceWorkspace, { focus: true });
+  });
+});
+byId("refresh").addEventListener("click", () => refreshFromControl().catch(showError));
 byId("runtime-restart").addEventListener("click", restartRuntime);
 byId("enrollment-open").addEventListener("click", () => {
   byId("enrollment-dialog").showModal();
@@ -4792,6 +5050,7 @@ byId("archive-start-new").addEventListener("click", () => startArchiveSession().
 byId("maintenance-settings-form").addEventListener("submit", (event) => saveMaintenanceSettings(event).catch(showError));
 byId("access-more").addEventListener("click", () => loadAccess({ append: true }).catch(showError));
 byId("health-window").addEventListener("change", () => healthView.load({ reload: true }).catch(showError));
+setMaintenanceWorkspaceTab(state.maintenance.workspaceTab);
 refresh();
 loadEnrollment();
 window.setInterval(() => loadEnrollment(), 3000);

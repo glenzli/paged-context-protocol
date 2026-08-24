@@ -334,6 +334,7 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/app.js", get(app_js))
+        .route("/ui-icons.js", get(ui_icons_js))
         .route("/page-inspector.js", get(page_inspector_js))
         .route("/page-content.js", get(page_content_js))
         .route("/page-content.css", get(page_content_css))
@@ -353,6 +354,10 @@ fn router(state: AppState) -> Router {
         .route(
             "/maintenance-convergence.js",
             get(maintenance_convergence_js),
+        )
+        .route(
+            "/maintenance-operation-state.js",
+            get(maintenance_operation_state_js),
         )
         .route("/styles.css", get(styles_css))
         .route("/api/health", get(health))
@@ -530,6 +535,13 @@ async fn app_js() -> Response {
     static_asset("text/javascript; charset=utf-8", include_str!("app.js"))
 }
 
+async fn ui_icons_js() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("ui-icons.js"),
+    )
+}
+
 async fn progressive_operation_js() -> Response {
     static_asset(
         "text/javascript; charset=utf-8",
@@ -555,6 +567,13 @@ async fn maintenance_convergence_js() -> Response {
     static_asset(
         "text/javascript; charset=utf-8",
         include_str!("maintenance-convergence.js"),
+    )
+}
+
+async fn maintenance_operation_state_js() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("maintenance-operation-state.js"),
     )
 }
 

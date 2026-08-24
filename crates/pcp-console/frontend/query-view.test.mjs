@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildQueryRequest } from "../src/query_view.js";
+import { buildQueryRequest, querySubmitLabel } from "../src/query_view.js";
 
 test("semantic retrieval omits Router-only effort instead of serializing null", () => {
   assert.deepEqual(
@@ -32,4 +32,10 @@ test("intent matching carries its selected Router effort", () => {
       intentEffort: "high",
     },
   );
+});
+
+test("query submit keeps its result meaning while exposing explicit busy labels", () => {
+  assert.equal(querySubmitLabel("semantic_search", false), "Build context pack");
+  assert.equal(querySubmitLabel("semantic_search", true), "Searching context…");
+  assert.equal(querySubmitLabel("match_intent", true), "Matching intent…");
 });

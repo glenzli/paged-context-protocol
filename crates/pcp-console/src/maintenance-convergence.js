@@ -37,3 +37,19 @@ export function convergencePhase(convergence, pendingReviewCount = 0) {
   if (convergence?.completedAt) return "settled";
   return "waiting";
 }
+
+export function reconcileConvergenceStatus(convergence, {
+  operationActive = false,
+  automationState = "not_started",
+  pendingReviewCount = 0,
+  observedAt = null,
+} = {}) {
+  if (!convergence?.running) return convergence;
+  if (operationActive || automationState === "running" || pendingReviewCount > 0) return convergence;
+  return {
+    ...convergence,
+    running: false,
+    completedAt: convergence.completedAt || observedAt,
+    error: null,
+  };
+}

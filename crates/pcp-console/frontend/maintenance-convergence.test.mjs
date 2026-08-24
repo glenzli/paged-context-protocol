@@ -5,6 +5,7 @@ import {
   convergencePhase,
   convergenceSettled,
   mergeConvergenceReport,
+  reconcileConvergenceStatus,
 } from "../src/maintenance-convergence.js";
 
 test("progressive convergence aggregates completed batches without summing inventory", () => {
@@ -33,4 +34,32 @@ test("convergence phase exposes waiting, running, review, settled, and failed st
   assert.equal(convergencePhase({ running: false, completedAt: "2026-08-24T00:00:00Z" }, 2), "review");
   assert.equal(convergencePhase({ running: false, completedAt: "2026-08-24T00:00:00Z" }), "settled");
   assert.equal(convergencePhase({ running: false, error: { message: "failed" } }), "failed");
+});
+
+test("an idle status refresh clears an orphaned running marker after review application", () => {
+  const observedAt = "2026-08-24T08:00:00Z";
+  assert.deepEqual(
+    reconcileConvergenceStatus(
+      { running: true, completedAt: null, error: { message: "stale" }, steps: 4 },
+      { automationState: "waiting", pendingReviewCount: 0, observedAt },
+    ),
+    { running: false, completedAt: observedAt, error: null, steps: 4 },
+  );
+});
+
+test("status refresh preserves a genuinely active or review-blocked convergence run", () => {
+  const running = { running: true, completedAt: null, error: null, steps: 2 };
+  assert.equal(reconcileConvergenceStatus(running, {
+    operationActive: true,
+    automationState: "waiting",
+    pendingReviewCount: 0,
+  }), running);
+  assert.equal(reconcileConvergenceStatus(running, {
+    automationState: "running",
+    pendingReviewCount: 0,
+  }), running);
+  assert.equal(reconcileConvergenceStatus(running, {
+    automationState: "waiting",
+    pendingReviewCount: 1,
+  }), running);
 });
