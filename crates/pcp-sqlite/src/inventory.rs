@@ -59,6 +59,15 @@ impl SqlitePcpStore {
                                ORDER BY relation.relation_type
                            )
                        ), '[]'),
+                       COALESCE((
+                           SELECT json_group_array(input_revision_id)
+                           FROM (
+                               SELECT provenance.input_revision_id
+                               FROM pcp_provenance_inputs provenance
+                               WHERE provenance.derived_revision_id = r.revision_id
+                               ORDER BY provenance.input_revision_id
+                           )
+                       ), '[]'),
                        EXISTS (
                            SELECT 1 FROM pcp_summaries summary_reference
                            WHERE summary_reference.target_revision_id = r.revision_id
@@ -117,6 +126,7 @@ impl SqlitePcpStore {
                     let source_span_json: Option<String> = row.get(7)?;
                     let facets_json: Option<String> = row.get(11)?;
                     let relation_types_json: String = row.get(15)?;
+                    let provenance_inputs_json: String = row.get(16)?;
                     Ok(DurablePageInventoryItem {
                         page_id: row.get(0)?,
                         revision_id: row.get(1)?,
@@ -140,7 +150,11 @@ impl SqlitePcpStore {
                         summary: row.get(14)?,
                         relation_types: serde_json::from_str(&relation_types_json)
                             .unwrap_or_default(),
-                        packing_protected: row.get(16)?,
+                        provenance_input_revision_ids: serde_json::from_str(
+                            &provenance_inputs_json,
+                        )
+                        .unwrap_or_default(),
+                        packing_protected: row.get(17)?,
                     })
                 })
                 .context("query durable PCP inventory")?

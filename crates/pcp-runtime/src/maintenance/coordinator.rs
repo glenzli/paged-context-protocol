@@ -3126,19 +3126,34 @@ fn relation_candidate_windows(
     }
     let window_size = config.candidate_window.max(2);
     let stride = (window_size / 2).max(1);
+    // Tenant-declared derivation inputs are the strongest available hint that two
+    // current Pages deserve relation review. Provenance remains an evidential
+    // dependency, not an asserted Relation, so this only moves the exact pair to
+    // the front of the candidate queue.
+    let mut windows = Vec::new();
+    let mut seen_windows = BTreeSet::new();
+    for window in provenance_relation_windows(&eligible_by_namespace) {
+        append_relation_window(&mut windows, &mut seen_windows, window);
+    }
     // A Pack boundary is often where a question, correction, and its explanation
     // become separate Pages. A broad recency window can bury that pair among many
     // otherwise related conversation Pages. Offer only high-signal boundaries as
     // their own two-Page review: they must be contiguous in the same source stream,
     // both be Pack Pages, and share a protected identifier such as OET or PCP.
     // This is a candidate-generation hint, never an asserted Relation.
-    let mut windows = source_boundary_relation_windows(&eligible_by_namespace);
+    for window in source_boundary_relation_windows(&eligible_by_namespace) {
+        append_relation_window(&mut windows, &mut seen_windows, window);
+    }
     for eligible in eligible_by_namespace.into_values() {
         let mut start = 0;
         while start < eligible.len() {
             let end = start.saturating_add(window_size).min(eligible.len());
             if end.saturating_sub(start) >= 2 {
-                windows.push(eligible[start..end].to_vec());
+                append_relation_window(
+                    &mut windows,
+                    &mut seen_windows,
+                    eligible[start..end].to_vec(),
+                );
             }
             if end == eligible.len() {
                 break;
@@ -3147,6 +3162,48 @@ fn relation_candidate_windows(
         }
     }
     windows
+}
+
+fn provenance_relation_windows(
+    eligible_by_namespace: &BTreeMap<String, Vec<pcp_store::DurablePageInventoryItem>>,
+) -> Vec<Vec<pcp_store::DurablePageInventoryItem>> {
+    let mut windows = Vec::new();
+    for pages in eligible_by_namespace.values() {
+        let pages_by_revision = pages
+            .iter()
+            .map(|page| (page.revision_id.as_str(), page))
+            .collect::<BTreeMap<_, _>>();
+        for derived in pages {
+            for input_revision_id in &derived.provenance_input_revision_ids {
+                let Some(input) = pages_by_revision.get(input_revision_id.as_str()) else {
+                    // Historical or out-of-scope inputs remain valid provenance,
+                    // but relation maintenance only proposes pairs for current
+                    // Page heads that are already eligible in this namespace.
+                    continue;
+                };
+                if input.page_id != derived.page_id {
+                    windows.push(vec![derived.clone(), (*input).clone()]);
+                }
+            }
+        }
+    }
+    windows
+}
+
+fn append_relation_window(
+    windows: &mut Vec<Vec<pcp_store::DurablePageInventoryItem>>,
+    seen_windows: &mut BTreeSet<String>,
+    window: Vec<pcp_store::DurablePageInventoryItem>,
+) {
+    let key = relation_window_key(
+        &window
+            .iter()
+            .map(|page| page.revision_id.clone())
+            .collect::<Vec<_>>(),
+    );
+    if seen_windows.insert(key) {
+        windows.push(window);
+    }
 }
 
 fn source_boundary_relation_windows(
@@ -4609,6 +4666,7 @@ mod relation_window_tests {
             summary_target_revision_id: None,
             summary: None,
             relation_types: Vec::new(),
+            provenance_input_revision_ids: Vec::new(),
             packing_protected: false,
         }
     }
@@ -4636,6 +4694,32 @@ mod relation_window_tests {
                 .map(|page| &page.namespace)
                 .all(|namespace| namespace == &window[0].namespace)
         }));
+    }
+
+    #[test]
+    fn provenance_inputs_are_prioritized_without_becoming_relations() {
+        let source = page("conversation:alpha", "source");
+        let mut derived = page("conversation:alpha", "derived");
+        derived.provenance_input_revision_ids = vec![source.revision_id.clone()];
+        let unrelated = page("conversation:alpha", "unrelated");
+        let config = RelationMaintenanceConfig {
+            enabled: true,
+            candidate_window: 3,
+            ..RelationMaintenanceConfig::default()
+        };
+
+        let windows = relation_candidate_windows(
+            &[unrelated, source.clone(), derived.clone()],
+            &config,
+            &BTreeSet::new(),
+        );
+
+        let prioritized = windows.first().expect("provenance candidate window");
+        assert_eq!(prioritized.len(), 2);
+        assert_eq!(prioritized[0].page_id, derived.page_id);
+        assert_eq!(prioritized[1].page_id, source.page_id);
+        assert!(derived.relation_types.is_empty());
+        assert!(source.relation_types.is_empty());
     }
 
     #[test]

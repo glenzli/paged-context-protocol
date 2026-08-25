@@ -84,7 +84,7 @@ Revision 不可变不等于永久保留。Store 可以按策略回收不再受�
 观察工具可以把首尾相接的 span 显示为虚拟邻接，但必须明确区别于持久 Relation 和 provenance。
 `sourceSpan` 本身不声称两个事件在语义上相关。
 
-### 1.4 SourceRef 与外部媒体
+### 1.4 SourceRef 与外部来源
 
 Page 是 PCP 内稳定的来源身份。原始内容由外部系统保管时，Revision 可以用一个最小 `SourceRef` 指向它：
 
@@ -97,13 +97,15 @@ Page 是 PCP 内稳定的来源身份。原始内容由外部系统保管时，R
 }
 ```
 
-- `providerId + locator` 只对保管方有解析意义；Runtime 不得把任意路径或 URL 当作受信任抓取指令。
+- `providerId + locator` 是租户定义的不透明坐标，只对保管方有解析意义；Runtime 不得把任意路径或 URL 当作受信任抓取指令，也不得假定来源采用 JSON、文件或某种媒体结构。
 - `mediaType` 和 `contentDigest` 可选。digest 用于核对返回内容，不另造第二套资产身份。
 - SourceRef 不承诺原件在线，也不记录可变 availability；解析失败时保留 Page 和已有语义表示。
 
-可检索的 OCR、转写、caption、布局、事件或领域解释应写成普通 Page/Revision，并以 exact provenance
-指回承载媒体引用的 Revision。图片不得被强制收缩为唯一 caption；不同任务可以产生多个可追溯表示。
-媒体字节托管、Provider 回调与自动提取不属于 v0.8 Core。
+PCP 只按授权把 SourceRef 和相关 Page/Revision 身份返回给租户；来源解析、搜索、展示、媒体字节托管与
+Provider 调用均由理解该来源结构的租户完成，不属于 Core 或 Runtime。可检索的 OCR、转写、caption、
+布局、事件或领域解释应由租户写成普通 Page/Revision，并以 exact provenance 指回承载 SourceRef 的
+Revision。图片不得被强制收缩为唯一 caption；不同任务可以产生多个可追溯表示。PCP 不定义
+source-provider、source render 或来源专用查询协议，以免 Runtime 膨胀为通用 Search Engine。
 
 ### 1.5 Relation
 
@@ -227,7 +229,7 @@ Relation 组织。时间邻近和主题连续性由 Runtime 的语义判断选�
 
 - `describe() -> identity_id, access, capabilities`
 - `list_scopes(query?, limit?, cursor?)`
-- `ingest_page(namespace, kind, payload?, source_refs?, observed_at?, source_span?, facets?, external_event_id?)`
+- `ingest_page(namespace, kind, payload?, source_refs?, based_on_revision_ids?, observed_at?, source_span?, facets?, external_event_id?)`
 - `search_pages(query, scopes, strategy?, limit?, cursor?)`
 - `read_pages(page_ids, revision_ids?, view?, max_chars?)`
 - `semantic_search(query, scopes?, result_limit?, context_budget_chars?)`
@@ -237,7 +239,10 @@ Relation 组织。时间邻近和主题连续性由 Runtime 的语义判断选�
 
 `ingest_page` 是租户唯一的持久写入口。Identity 由所连接的 Runtime 决定，不在 Page、Revision、Scope 或
 写请求中重复携带。Runtime 从认证会话填充 Actor、active lifecycle 与 sealed mutability，并隔离可选
-`sourceSpan.streamId`；调用方只提供来源事件本身。普通 `read` 会话只能检索和读取；`contribute` 会话
+`sourceSpan.streamId`；调用方只提供来源事件本身。可选 `basedOnRevisionIds` 表示租户确实用来产生新
+Page 的精确 PCP Revision。Runtime 以认证 Principal、Store 提交时间和受信操作名生成 provenance；
+调用方不能借此伪造 Actor 或完整 provenance。该字段可以提高后续关系候选的审阅优先级，但绝不自动
+建立 Relation；Relation 的 `basisRevisionIds` 仍只表示一条已审阅关系所依据的精确版本。普通 `read` 会话只能检索和读取；`contribute` 会话
 额外获得独立的 `ingest` 权限，但不因此获得高级 Page 写入或维护权限。
 
 Search 返回候选而不是真值，并必须有界、可分页、标明命中投影和当前 Revision。Relation、Summary、
@@ -304,8 +309,8 @@ Store/Runtime 负责：当前头索引、事务、权限执行、审计、Relati
 可以调用独立模型作为推理 Provider，但必须拥有任务生成、预算、验证、提交与维护 ledger；单个租户不应
 成为个人长期上下文的权威维护者。
 
-租户/Host 负责：捕获自己观察到的原始事件、来源内部确定知道的顺序或结构（包括可选 `sourceSpan`）、Page kind、SourceRef 与
-外部媒体保管；它可以提交反馈或候选，但不得假定自己拥有其他租户的数据或全局关系图。
+租户/Host 负责：捕获自己观察到的原始事件、来源内部确定知道的顺序或结构（包括可选 `sourceSpan`）、Page kind、SourceRef，
+以及外部来源的保管、解析、查询和展示；它可以提交真实的生成输入、反馈或候选，但不得假定自己拥有其他租户的数据或全局关系图。
 
 消费模型负责：提出查询、读取被授权的精确内容、判断当前任务相关性，并把 PCP 返回的有界结果组装进
 当前工作上下文。语义模型 Provider 只向 Runtime 提供判断能力，不直接拥有 Store 写权限或维护 cadence。

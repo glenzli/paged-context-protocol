@@ -35,7 +35,7 @@ Immutable does not mean retained forever. A Store may reclaim unprotected histor
 
 `createdAt` records Store commit time while optional `observedAt` records source-event time. They are not interchangeable. An optional `sourceSpan` is a closed range `{streamId, start, end}` in one producer-local event stream. Runtime namespaces an ordinary ingest stream by authenticated Principal. A SourceSpan proves order and coverage; it is not a Page Relation or a semantic-similarity assertion.
 
-### SourceRef and external media
+### SourceRef and external sources
 
 A Page is the stable PCP identity of its source. When another system retains the original, a Revision may point to it with one minimal `SourceRef`:
 
@@ -48,9 +48,9 @@ A Page is the stable PCP identity of its source. When another system retains the
 }
 ```
 
-`providerId + locator` has meaning only to the custodian; it is not permission for Runtime to fetch an arbitrary path or URL. `mediaType` and `contentDigest` are optional. The digest verifies returned content without creating a second asset identity. SourceRef does not promise availability; resolution failure leaves the Page and existing semantic representations intact.
+`providerId + locator` is a tenant-defined opaque coordinate meaningful only to the custodian. It is not permission for Runtime to fetch an arbitrary path or URL, and Runtime MUST NOT assume that the source is JSON, a file, or any particular media structure. `mediaType` and `contentDigest` are optional. The digest verifies returned content without creating a second asset identity. SourceRef does not promise availability; resolution failure leaves the Page and existing semantic representations intact.
 
-Searchable OCR, transcript, caption, layout, event, or domain interpretation is stored as an ordinary Page/Revision with exact provenance to the media-bearing Revision. One image may have several task-specific representations. Byte custody, provider callbacks, and automatic extraction are outside the v0.8 Core.
+PCP returns authorized SourceRefs and related Page/Revision identities to the tenant; only the tenant that understands the source structure resolves, searches, renders, or retrieves it. Searchable OCR, transcript, caption, layout, event, or domain interpretation is written by the tenant as an ordinary Page/Revision with exact provenance to the SourceRef-bearing Revision. One image may have several task-specific representations. Core and Runtime define no source-provider, source-render, or source-specific query protocol and MUST NOT grow into a general-purpose search engine for tenant sources.
 
 ### Relation
 
@@ -132,9 +132,9 @@ implement physical condensation.
 
 ### 3.1 Tenant data plane
 
-The normative ordinary-tenant surface is deliberately small: `describe() -> identityId, access, capabilities`, `list_scopes(query?, limit?, cursor?)`, `ingest_page(namespace, kind, payload?, source_refs?, observed_at?, source_span?, facets?, external_event_id?)`, bounded `search_pages(query, scopes, strategy?, limit?, cursor?)`, current or authorized exact `read_pages(page_ids, revision_ids?, view?, max_chars?)`, `semantic_search(query, scopes?, result_limit?, context_budget_chars?)`, `match_intent(query, scopes?, result_limit?, context_budget_chars?, intent_effort?)`, and anchored `expand_graph(anchor_page_ids, scopes?, max_depth?, max_nodes?, max_edges?, view?, max_chars?)`. Implementations may additionally expose bounded `browse_index(scopes?, view?, limit?, cursor?)` as a capability.
+The normative ordinary-tenant surface is deliberately small: `describe() -> identityId, access, capabilities`, `list_scopes(query?, limit?, cursor?)`, `ingest_page(namespace, kind, payload?, source_refs?, based_on_revision_ids?, observed_at?, source_span?, facets?, external_event_id?)`, bounded `search_pages(query, scopes, strategy?, limit?, cursor?)`, current or authorized exact `read_pages(page_ids, revision_ids?, view?, max_chars?)`, `semantic_search(query, scopes?, result_limit?, context_budget_chars?)`, `match_intent(query, scopes?, result_limit?, context_budget_chars?, intent_effort?)`, and anchored `expand_graph(anchor_page_ids, scopes?, max_depth?, max_nodes?, max_edges?, view?, max_chars?)`. Implementations may additionally expose bounded `browse_index(scopes?, view?, limit?, cursor?)` as a capability.
 
-`ingest_page` is the tenant's only durable write. Identity comes from the connected Runtime and is not repeated on every Page, Revision, Scope, or request. Runtime fills Actor, active lifecycle, and sealed mutability from the authenticated session and isolates an optional `sourceSpan.streamId`. A `read` session retrieves only; a `contribute` session additionally receives a distinct `ingest` permission and does not thereby gain advanced Page or maintenance writes.
+`ingest_page` is the tenant's only durable write. Identity comes from the connected Runtime and is not repeated on every Page, Revision, Scope, or request. Runtime fills Actor, active lifecycle, and sealed mutability from the authenticated session and isolates an optional `sourceSpan.streamId`. Optional `basedOnRevisionIds` identifies exact PCP Revisions actually used by the tenant to produce the new Page. Runtime creates the provenance event with the authenticated Principal, Store commit time, and trusted operation name; callers cannot use this input to forge an Actor or full provenance event. These inputs may prioritize later relation review, but MUST NOT create a Relation automatically. A Relation's `basisRevisionIds` remain the exact evidence for that separately reviewed assertion. A `read` session retrieves only; a `contribute` session additionally receives a distinct `ingest` permission and does not thereby gain advanced Page or maintenance writes.
 
 Search returns bounded candidates rather than truth, is paginated, and identifies the matched projection and current Revision. Authorized Relation, Summary, Validity, provenance, and SourceRef projections are read through the same tenant surface rather than separate mutation APIs. A caller holding an exact Revision ID may read that historical evidence when its Scope grants allow it, but historical Revisions do not re-enter default Search; raw access audit and history enumeration remain audit or operator concerns. The consuming model chooses queries and assembles the active working context.
 
@@ -162,7 +162,7 @@ The protocol defines the Identity boundary, Page and Revision identity, sealed/r
 
 Store and Runtime own transactions, current-head indexes, authorization enforcement, relation retraction, retention, GC roots, candidate discovery, and Identity-wide Summary, Validity, lossless-packing, semantic-relation, and retention policy. Runtime may invoke a separate model as an inference provider, but owns task generation, budgets, validation, commit authority, and the maintenance ledger.
 
-A tenant or Host captures its own source events, source-local ordering and deterministic structure including optional SourceSpans, Page kind, SourceRefs, and external-media custody. It may submit feedback or candidates but does not own the global relation graph. The consuming model chooses queries, reads authorized exact content, judges task relevance, and assembles the active working context.
+A tenant or Host captures its own source events, source-local ordering and deterministic structure including optional SourceSpans, Page kind, and SourceRefs. It owns external-source custody, parsing, search, and rendering, and may submit truthful generation inputs, feedback, or candidates, but it does not own the global relation graph. The consuming model chooses queries, reads authorized exact content, judges task relevance, and assembles the active working context.
 
 PCP does not define a fixed prompt, vector algorithm, summarization threshold, background-agent topology, or user-profile schema.
 

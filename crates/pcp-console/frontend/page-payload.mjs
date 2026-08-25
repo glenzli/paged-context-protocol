@@ -1,6 +1,4 @@
-const EXTERNAL_SIGNAL = "application/vnd.symbiont.external-signal+json";
 const PACKED_PAGE = "application/vnd.pcp.packed-page+json";
-const IMAGE_ASSET = "application/vnd.symbiont.image+json";
 
 export function normalizeMediaType(mediaType) {
   return String(mediaType || "").split(";", 1)[0].trim().toLowerCase();
@@ -13,31 +11,10 @@ export function describePagePayload(source, mediaType) {
 
   const value = parseJson(content, normalized);
   if (value === null) return { type: "raw", content };
-  if (normalized === EXTERNAL_SIGNAL && isRecord(value)) {
-    return {
-      type: "external_signal",
-      title: text(value.title),
-      summary: text(value.summary),
-      content: text(value.content),
-      eventAt: text(value.event_at),
-      qualificationNote: text(value.qualification_note),
-      reviewReason: text(value.review_reason),
-    };
-  }
   if (normalized === PACKED_PAGE && isRecord(value)) {
     return {
       type: "packed_page",
       entries: Array.isArray(value.entries) ? value.entries.map(packedEntry).filter(Boolean) : [],
-    };
-  }
-  if (normalized === IMAGE_ASSET && isRecord(value)) {
-    return {
-      type: "image_asset",
-      filename: text(value.filename),
-      mimeType: text(value.mimeType),
-      width: finiteNumber(value.width),
-      height: finiteNumber(value.height),
-      byteSize: finiteNumber(value.byteSize),
     };
   }
   return { type: "json", value };
@@ -46,20 +23,12 @@ export function describePagePayload(source, mediaType) {
 export function pagePayloadPreviewText(source, mediaType) {
   const presentation = describePagePayload(source, mediaType);
   switch (presentation.type) {
-    case "external_signal":
-      return joinPreview([presentation.title, presentation.content || presentation.summary]);
     case "packed_page":
       return presentation.entries
         .slice(0, 3)
         .map((entry) => joinPreview([roleLabel(entry.role), entry.content]))
         .filter(Boolean)
         .join(" · ");
-    case "image_asset": {
-      const dimensions = presentation.width && presentation.height
-        ? `${presentation.width} × ${presentation.height}`
-        : "";
-      return joinPreview([presentation.filename, dimensions, presentation.mimeType]);
-    }
     case "json":
       return firstUsefulText(presentation.value) || JSON.stringify(presentation.value);
     default:
@@ -107,10 +76,6 @@ function joinPreview(values) {
 
 function text(value) {
   return typeof value === "string" ? value.trim() : "";
-}
-
-function finiteNumber(value) {
-  return Number.isFinite(value) ? value : null;
 }
 
 function isRecord(value) {

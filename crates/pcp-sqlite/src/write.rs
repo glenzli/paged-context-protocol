@@ -50,6 +50,32 @@ impl SqlitePcpStore {
         request: WritePageRequest,
         allowed_scopes: Vec<String>,
     ) -> Result<WriteResult> {
+        self.write_page_with_default_provenance(request, allowed_scopes, "write", Vec::new())
+            .await
+    }
+
+    pub(crate) async fn write_ingested_page(
+        &self,
+        request: WritePageRequest,
+        allowed_scopes: Vec<String>,
+        based_on_revision_ids: Vec<String>,
+    ) -> Result<WriteResult> {
+        self.write_page_with_default_provenance(
+            request,
+            allowed_scopes,
+            "ingest",
+            based_on_revision_ids,
+        )
+        .await
+    }
+
+    async fn write_page_with_default_provenance(
+        &self,
+        request: WritePageRequest,
+        allowed_scopes: Vec<String>,
+        default_provenance_operation: &'static str,
+        default_provenance_inputs: Vec<String>,
+    ) -> Result<WriteResult> {
         validate_document(request.payload.as_ref(), &request.source_refs)?;
         validate_source_span(request.source_span.as_ref())?;
         let allowed_scopes = scope_set(allowed_scopes);
@@ -78,10 +104,10 @@ impl SqlitePcpStore {
             let revision_id = random_id(&transaction, "rev_")?;
             let provenance = complete_provenance(
                 request.provenance,
-                "write",
+                default_provenance_operation,
                 &request.created_by,
                 &timestamp,
-                Vec::new(),
+                default_provenance_inputs,
             )?;
             ensure_provenance_access(&transaction, &provenance, &allowed_scopes)?;
 

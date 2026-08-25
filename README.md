@@ -44,8 +44,8 @@
   Relations、History 等投影；模型或 Host 决定查询路径和进入注意力的时机。
 - **Pack 与 Retention**：来源连续、尚未被引用的细粒度 sealed Page 可以无损 pack 为一个 Page；历史
   Revision 只在依赖、租约和保留规则允许时回收。有损凝炼原始内容不属于 v0.8。
-- **外部媒体**：图片、音频与视频可由租户保管，PCP 保存最小、可校验的 SourceRef 及其
-  可检索语义表示；原件不可用时必须显式降级，不能静默丢失上下文。
+- **外部来源**：租户保管并理解自己的聊天记录、媒体或领域对象；PCP 只保存不透明、可校验的
+  SourceRef 并按授权返回坐标。来源解析、查询和展示仍由租户负责。
 
 PCP 不规定固定 Router、Intent Focus、四级变焦、Chain-of-Thought、XML 流程或模型状态机。消费模型
 决定当前任务查询、读取和物化什么；Runtime 负责 Identity 范围内的长期 Summary、Topic、Validity、Relation、
@@ -54,7 +54,7 @@ PCP 不规定固定 Router、Intent Focus、四级变焦、Chain-of-Thought、XM
 ## 当前状态
 
 `v0.8.0-draft` 是当前协议草案。它明确区分 Identity、租户 Principal 和 Scope，把全局维护权归入
-Runtime，并以最小 SourceRef 与简化 ingest 接口接收文本和外部媒体来源。v0.8 不兼容 v0.7 Store；
+Runtime，并以最小 SourceRef 与简化 ingest 接口接收文本和不透明外部来源。v0.8 不兼容 v0.7 Store；
 迁移必须建立新的 v0.8 Store，并从租户保留的原始内容重新导入，不能直接打开旧数据库。
 
 当前官方实现已经具备供外部本机应用重新接入和持续运行的条件。新客户端应通过 Infra Discovery、
@@ -99,14 +99,14 @@ PCP 仍是开放协议，允许独立实现。“官方”表示该实现由 PCP
   反压而不静默丢弃。denied/failed 进入 writer 后使用最多 100 ms 的安全合并窗口，并在调用返回前
   持久化。原始 allowed 日志保留 30 天、每批最多清理 5,000 条；安全相关事件不会被该策略自动清理。
 - 身份绑定的 embedded/RPC client、可发现且经用户批准的 Runtime 注册、CLI、MCP 与 Console。
-- 由 Runtime 注入 Identity/Actor 的简化 sealed `ingest_page`、支持连续来源区间的 `sourceSpan`，以及
-  仅包含 provider、locator、可选 media type 和 digest 的 SourceRef。
+- 由 Runtime 注入 Identity/Actor 的简化 sealed `ingest_page`、支持连续来源区间的 `sourceSpan`、
+  由 `basedOnRevisionIds` 生成的受信 provenance，以及仅包含 provider、locator、可选 media type 和 digest 的 SourceRef。
 - 确定性 Revision 保留规划、有限租约、受保护的显式回收，以及多维 Health 诊断。
 
 ### 尚未实现
 
-Durable Page deletion 当前不会出现在 Capabilities 的 `features` 中；cold storage、媒体字节托管、
-外部 Provider 解析、自动 OCR/转写，以及 Identity 全局 Validity 维护任务也尚未实现。
+Durable Page deletion 当前不会出现在 Capabilities 的 `features` 中；cold storage 与 Identity 全局
+Validity 维护任务尚未实现。外部来源托管、解析、查询、展示和自动 OCR/转写是租户责任，不是 Runtime 待补功能。
 
 ### 实现边界
 

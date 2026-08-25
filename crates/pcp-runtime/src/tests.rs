@@ -521,6 +521,7 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
                 content: "Producer fields are supplied by the authenticated Runtime.".to_owned(),
             }),
             source_refs: Vec::new(),
+            based_on_revision_ids: vec![packed.revision_id.clone()],
             facets: None,
             external_event_id: Some("runtime:test:ingest".to_owned()),
         })
@@ -530,7 +531,11 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
         .read_pages(ReadPagesRequest {
             page_ids: vec![ingested.page_id],
             revision_ids: Vec::new(),
-            projections: vec![Projection::Manifest, Projection::Payload],
+            projections: vec![
+                Projection::Manifest,
+                Projection::Payload,
+                Projection::Provenance,
+            ],
             max_chars: 1_024,
         })
         .await
@@ -541,6 +546,18 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
     assert_eq!(
         ingested_page.revision.created_by.actor_id,
         "host:runtime-test"
+    );
+    let provenance = ingested_page
+        .revision
+        .provenance
+        .first()
+        .expect("Runtime-authenticated ingest provenance");
+    assert_eq!(provenance.operation, "ingest");
+    assert_eq!(provenance.actor.actor_id, "host:runtime-test");
+    assert_eq!(provenance.timestamp, ingested_page.revision.created_at);
+    assert_eq!(
+        provenance.input_revision_ids,
+        vec![packed.revision_id.clone()]
     );
 
     server.abort();

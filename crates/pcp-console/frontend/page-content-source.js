@@ -67,35 +67,11 @@ export function renderPagePreview(target, source, mediaType = "text/markdown", o
   }
 
   target.classList.add("structured-page-content");
-  if (presentation.type === "external_signal") {
-    renderExternalSignal(target, presentation);
-  } else if (presentation.type === "packed_page") {
+  if (presentation.type === "packed_page") {
     renderPackedPage(target, presentation, options);
-  } else if (presentation.type === "image_asset") {
-    renderImageAsset(target, presentation, options);
   } else {
     renderJsonFields(target, presentation.value);
   }
-}
-
-function renderExternalSignal(target, signal) {
-  if (signal.title) target.append(element("h4", "structured-title", signal.title));
-  if (signal.summary) {
-    target.append(
-      element("div", "structured-label", "Summary"),
-      element("p", "structured-lead", signal.summary),
-    );
-  }
-  if (signal.content) {
-    const body = element("div", "structured-body");
-    renderPageContent(body, signal.content, "text/markdown");
-    target.append(element("div", "structured-label", "Observation"), body);
-  }
-  appendMetadata(target, [
-    ["Event", signal.eventAt],
-    ["Qualification", signal.qualificationNote],
-    ["Review", signal.reviewReason],
-  ]);
 }
 
 function renderPackedPage(target, packedPage, options = {}) {
@@ -176,27 +152,6 @@ function compactPreview(value, limit) {
   return compact.length > limit ? `${compact.slice(0, limit)}…` : compact;
 }
 
-function renderImageAsset(target, image, options) {
-  if (options.mediaUrl) {
-    const preview = document.createElement("img");
-    preview.className = "local-media-preview";
-    preview.src = options.mediaUrl;
-    preview.alt = image.filename || "Referenced image";
-    preview.loading = "lazy";
-    preview.decoding = "async";
-    preview.addEventListener("error", () => {
-      preview.replaceWith(element("div", "media-unavailable muted", "Local preview unavailable"));
-    }, { once: true });
-    target.append(preview);
-  }
-  target.append(element("h4", "structured-title", image.filename || "Image asset"));
-  appendMetadata(target, [
-    ["Media type", image.mimeType],
-    ["Dimensions", image.width && image.height ? `${image.width} × ${image.height}` : ""],
-    ["Size", image.byteSize === null ? "" : formatBytes(image.byteSize)],
-  ]);
-}
-
 function renderJsonFields(target, value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     target.append(element("pre", "", JSON.stringify(value, null, 2)));
@@ -223,27 +178,11 @@ function renderJsonFields(target, value) {
   target.append(details);
 }
 
-function appendMetadata(target, rows) {
-  const populated = rows.filter(([, value]) => value !== "" && value !== null && value !== undefined);
-  if (!populated.length) return;
-  const details = element("dl", "structured-metadata");
-  for (const [label, value] of populated) {
-    details.append(element("dt", "", label), element("dd", "", value));
-  }
-  target.append(details);
-}
-
 function element(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
   if (text !== undefined && text !== null) node.textContent = String(text);
   return node;
-}
-
-function formatBytes(bytes) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function isMarkdown(mediaType) {

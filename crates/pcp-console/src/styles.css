@@ -986,8 +986,6 @@ html.relation-comparison-open body { position: fixed; top: var(--relation-compar
   .packed-entry-header { grid-template-columns: 12px minmax(0, 1fr); }
   .packed-entry-preview { grid-column: 2; }
 }
-.local-media-preview { display: block; width: 100%; max-height: min(58vh, 720px); object-fit: contain; background: var(--surface-subtle); }
-.media-unavailable { padding: 28px 13px; text-align: center; background: var(--surface-subtle); }
 .rich-content > :first-child { margin-top: 0; }
 .rich-content > :last-child { margin-bottom: 0; }
 .rich-content p, .rich-content ul, .rich-content ol, .rich-content blockquote, .rich-content table, .rich-content pre { margin: 0 0 12px; }

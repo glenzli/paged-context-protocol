@@ -158,6 +158,7 @@ async fn enrollment_approves_identity_bound_session_and_survives_generation_chan
                 content: "A tenant can contribute a sealed source event.".to_owned(),
             }),
             source_refs: Vec::new(),
+            based_on_revision_ids: Vec::new(),
             facets: None,
             external_event_id: Some("enrollment:contribute:test".to_owned()),
         })

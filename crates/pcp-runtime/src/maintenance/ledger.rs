@@ -1027,6 +1027,7 @@ mod tests {
             summary_target_revision_id: None,
             summary: None,
             relation_types: Vec::new(),
+            provenance_input_revision_ids: Vec::new(),
             packing_protected: false,
         }
     }

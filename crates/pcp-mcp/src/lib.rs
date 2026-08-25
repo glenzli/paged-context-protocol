@@ -181,6 +181,10 @@ pub struct IngestPageParams {
     content: Option<String>,
     #[serde(default)]
     source_refs: Vec<SourceRef>,
+    /// Exact PCP Revisions used by the tenant to produce this source Page.
+    /// Runtime records trusted provenance; this does not create a Relation.
+    #[serde(default)]
+    based_on_revision_ids: Vec<String>,
     #[serde(default)]
     observed_at: Option<String>,
     #[serde(default)]
@@ -360,7 +364,7 @@ impl PcpMcpServer {
 
     #[tool(
         name = "pcp_ingest_page",
-        description = "Ingest one immutable source event into the authenticated PCP identity. Runtime supplies identity, actor, lifecycle, and sealed mutability. Provide text, sourceRefs, or both; sourceSpan enables later lossless packing.",
+        description = "Ingest one immutable source event into the authenticated PCP identity. Runtime supplies identity, actor, lifecycle, and sealed mutability. Provide text, opaque sourceRefs, or both; optional basedOnRevisionIds records trusted derivation provenance without asserting a Relation, and sourceSpan enables later lossless packing.",
         annotations(
             title = "Ingest PCP Source Page",
             read_only_hint = false,
@@ -391,6 +395,7 @@ impl PcpMcpServer {
                 source_span: params.source_span,
                 payload,
                 source_refs: params.source_refs,
+                based_on_revision_ids: params.based_on_revision_ids,
                 facets: None,
                 external_event_id: params.external_event_id,
             })
@@ -1290,6 +1295,7 @@ mod tests {
                 kind: "conversation_event".to_owned(),
                 content: Some("A tenant contributes one source event.".to_owned()),
                 source_refs: Vec::new(),
+                based_on_revision_ids: Vec::new(),
                 observed_at: None,
                 source_span: None,
                 external_event_id: Some("mcp:contribute:test".to_owned()),

@@ -21,9 +21,9 @@ during migration.
 
 | Layer | Owns | Does not own |
 | --- | --- | --- |
-| Tenant | Source events, source-local deterministic structure, Page kind, SourceRefs, external-media custody | Global relation graph, maintenance cadence, cross-tenant policy |
+| Tenant | Source events, source-local deterministic structure, Page kind, SourceRefs, and external-source custody, parsing, search, and rendering | Global relation graph, maintenance cadence, cross-tenant policy |
 | PCP protocol and Store | Identity boundary, stable Pages, immutable Revisions, Relations, authorization, exact reads, atomic commits | A fixed inference model or active prompt |
-| Runtime maintainer | Identity-wide candidate discovery, bounded convergence, typed review queue, budgets, timeout, cooldown, worker invocation, validation, commit authority, maintenance ledger | Tenant product behavior or media-byte custody |
+| Runtime maintainer | Identity-wide candidate discovery, bounded convergence, typed review queue, budgets, timeout, cooldown, worker invocation, validation, commit authority, maintenance ledger | Tenant product behavior or external-source custody, parsing, search, or rendering |
 | Inference worker | Summary, ordered packing-candidate, relation, Topic, archive-review, and milestone judgments requested by Runtime | Direct Store writes, content packing, Page-head advancement, scheduling, lifecycle mutation, or GC policy |
 
 The maintainer is disabled unless `[maintenance]` is present with
@@ -84,7 +84,7 @@ One cycle is bounded by `max_jobs_per_cycle`:
 3. The worker may select one ordered coherent episode from that exact window. Lossless packing does not require every Page to state the same fact: questions, answers, corrections, qualifications, and short reasoning transitions may stay together. It does not generate packed content.
 4. Runtime validates the selected IDs, aggregate input size, and at most one packed anchor and, in apply mode, calls `pack_pages`; Store rechecks exact heads, source continuity, identity pins, anchor count, retention, and transaction invariants. It then reloads the current-Page inventory before the next phase.
 5. A long unsummarized Page may be sent to the worker as `summarize_page`. Runtime reloads the inventory after a Summary write before relation work.
-6. Runtime may send overlapping bounded current-Page routing windows as `select_relation`. The request lists already related or previously reviewed pairs; the worker can return only two other offered Page IDs. Runtime fixes the relation to symmetric `related_to`, binds the exact current Revisions as basis, rejects stale or excluded pairs, and sends general semantic relations to review.
+6. Runtime may send overlapping bounded current-Page routing windows as `select_relation`. Exact current Page pairs connected by provenance inputs are offered before broad recency windows, but provenance never asserts a Relation. The request lists already related or previously reviewed pairs; the worker can return only two other offered Page IDs. Runtime fixes the relation to symmetric `related_to`, binds the exact current Revisions as basis, rejects stale or excluded pairs, and sends general semantic relations to review.
 7. After relation work quiesces, Runtime may ask for a source-grounded Topic front door. Valid Topic proposals and conservative archive recommendations are persisted as typed review items; archive is never applied automatically.
 8. Runtime obtains a bounded dry-run retention plan and may ask the worker whether any actual old candidate Revision is a semantic milestone.
 9. In apply mode only, validated low-risk Summary writes, packing, structurally low-risk Relations, or finite retention leases cross into the PCP commit API. Leases additionally require `maintenance.retention.write_leases = true`. Lease selection and physical collection remain separate operations; the current maintainer does not collect Revision payloads automatically.

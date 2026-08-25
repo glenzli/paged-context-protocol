@@ -763,14 +763,29 @@ impl PcpStore for SqlitePcpStore {
         access: &AccessSession,
         request: IngestPageRequest,
     ) -> Result<WriteResult> {
-        let observation = OperationObservation::start();
+        let observation =
+            OperationObservation::start().with_input_count(request.based_on_revision_ids.len());
         let target_scope = request.namespace.clone();
-        if let Err(error) = authorize_exact(access, &target_scope, AccessPermission::Ingest) {
+        let mut audit_scopes = vec![target_scope.clone()];
+        let authorization = async {
+            authorize_exact(access, &target_scope, AccessPermission::Ingest)?;
+            let provenance_scopes = authorize_revision_inputs(
+                self,
+                access,
+                &target_scope,
+                request.based_on_revision_ids.clone(),
+            )
+            .await?;
+            extend_unique(&mut audit_scopes, provenance_scopes);
+            Ok(())
+        }
+        .await;
+        if let Err(error) = authorization {
             return complete(
                 self,
                 access,
                 "ingest_page",
-                vec![target_scope],
+                audit_scopes,
                 Err(error),
                 true,
                 observation,
@@ -806,13 +821,18 @@ impl PcpStore for SqlitePcpStore {
             initial_relations: Vec::new(),
             idempotency_key: request.external_event_id,
         };
-        let result =
-            SqlitePcpStore::write_page(self, write_request, vec![target_scope.clone()]).await;
+        let result = self
+            .write_ingested_page(
+                write_request,
+                audit_scopes.clone(),
+                request.based_on_revision_ids,
+            )
+            .await;
         complete(
             self,
             access,
             "ingest_page",
-            vec![target_scope],
+            audit_scopes,
             result,
             false,
             observation,
@@ -1681,14 +1701,25 @@ async fn authorize_provenance(
     target_scope: &str,
     provenance: &[ProvenanceEvent],
 ) -> Result<Vec<String>> {
-    let source_scopes = store
-        .revision_namespaces(
-            provenance
-                .iter()
-                .flat_map(|event| event.input_revision_ids.iter().cloned())
-                .collect(),
-        )
-        .await?;
+    authorize_revision_inputs(
+        store,
+        access,
+        target_scope,
+        provenance
+            .iter()
+            .flat_map(|event| event.input_revision_ids.iter().cloned())
+            .collect(),
+    )
+    .await
+}
+
+async fn authorize_revision_inputs(
+    store: &SqlitePcpStore,
+    access: &AccessSession,
+    target_scope: &str,
+    input_revision_ids: Vec<String>,
+) -> Result<Vec<String>> {
+    let source_scopes = store.revision_namespaces(input_revision_ids).await?;
     for scope in &source_scopes {
         authorize_exact(access, scope, AccessPermission::ReadDetail)?;
     }

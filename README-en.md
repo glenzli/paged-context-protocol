@@ -59,9 +59,9 @@ Multi-tenant Source / Event
 - **Packing and Retention**: Fine-grained, source-contiguous, unreferenced sealed Pages
   may be packed losslessly into one Page. Historical Revisions are collected only when
   dependencies, leases, and retention rules permit. Lossy source condensation is outside v0.8.
-- **External Media**: Tenants may retain image, audio, or video bytes while PCP
-  stores a minimal verifiable SourceRef and searchable semantic representations. Missing
-  originals degrade explicitly instead of silently erasing context.
+- **External Sources**: Tenants retain and understand their own chat records,
+  media, or domain objects. PCP stores opaque verifiable SourceRefs and returns
+  authorized coordinates; tenants remain responsible for source parsing, search, and rendering.
 
 PCP does not prescribe a fixed Router, Intent Focus, zoom hierarchy,
 Chain-of-Thought, XML flow, or model state machine. A consuming model chooses what
@@ -73,7 +73,7 @@ a replaceable model as a semantic inference provider.
 
 `v0.8.0-draft` is the current protocol draft. It separates Identity, tenant
 Principal, and Scope; assigns global maintenance authority to Runtime; and accepts
-text and external-media sources through a minimal SourceRef and simplified ingest
+text and opaque external sources through a minimal SourceRef and simplified ingest
 API. v0.8 is not compatible with v0.7 Stores; migration must create a new v0.8
 Store and re-import original tenant-held content rather than opening the old
 database directly.
@@ -135,17 +135,17 @@ normative. Conformance is defined by [`PROTOCOL-en.md`](PROTOCOL-en.md).
 - Identity-bound embedded and RPC clients, discoverable user-approved Runtime
   enrollment, CLI, MCP, and Console.
 - Simplified sealed `ingest_page` with Runtime-injected Identity and Actor, optional
-  source-continuity `sourceSpan`, and a SourceRef containing only provider, locator,
-  optional media type, and digest.
+  source-continuity `sourceSpan`, trusted provenance from `basedOnRevisionIds`, and a
+  SourceRef containing only provider, locator, optional media type, and digest.
 - Deterministic Revision-retention planning, finite leases, protected explicit
   collection, and multidimensional Health diagnostics.
 
 ### Not Yet Implemented
 
 Durable Page deletion is currently absent from the Capabilities `features` list.
-Cold storage, media-byte custody, external provider resolution, and
-automatic OCR or transcription are not yet implemented. Identity-wide Validity
-maintenance is also still pending.
+Cold storage and Identity-wide Validity maintenance are still pending. External-source
+custody, parsing, search, rendering, and automatic OCR or transcription belong to
+tenants; they are not missing Runtime features.
 
 ### Implementation Boundary
 

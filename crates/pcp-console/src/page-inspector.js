@@ -127,9 +127,6 @@ export function createPageInspector({ request, showError, formatTime, t = (value
 
   function renderSummary(page) {
     const payload = page.revision.payload;
-    const mediaUrl = page.revision.sourceRefs?.length
-      ? `/api/pages/${encodeURIComponent(page.page.pageId)}/media/0`
-      : null;
     const summaryTarget = page.relations.find((relation) => (
       relation.relationType === "summarizes" && relation.fromPageId === page.page.pageId
     ))?.toPageId;
@@ -168,7 +165,6 @@ export function createPageInspector({ request, showError, formatTime, t = (value
       previewBlock(
         payload?.content || t("No content projection"),
         payload?.mediaType || "text/plain",
-        { mediaUrl },
       ),
     ));
     sections.push(detailSection(t("Page"), facts));

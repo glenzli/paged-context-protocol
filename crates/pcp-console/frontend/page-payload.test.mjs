@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { describePagePayload, pagePayloadPreviewText } from "./page-payload.mjs";
 
-test("presents an external signal as semantic fields", () => {
+test("keeps tenant-specific external signals as generic JSON", () => {
   const source = JSON.stringify({
     title: "Inference prices and infrastructure costs diverge",
     summary: "Unit prices are falling while capital costs remain high.",
@@ -13,21 +13,15 @@ test("presents an external signal as semantic fields", () => {
     review_reason: "Relevant external signal.",
   });
 
-  assert.deepEqual(
-    describePagePayload(source, "application/vnd.symbiont.external-signal+json"),
-    {
-      type: "external_signal",
-      title: "Inference prices and infrastructure costs diverge",
-      summary: "Unit prices are falling while capital costs remain high.",
-      content: "This tension is worth monitoring.",
-      eventAt: "2026-07-24",
-      qualificationNote: "Source links were not independently verified.",
-      reviewReason: "Relevant external signal.",
-    },
+  const presentation = describePagePayload(
+    source,
+    "application/vnd.symbiont.external-signal+json",
   );
+  assert.equal(presentation.type, "json");
+  assert.deepEqual(presentation.value, JSON.parse(source));
   assert.equal(
     pagePayloadPreviewText(source, "application/vnd.symbiont.external-signal+json"),
-    "Inference prices and infrastructure costs diverge — This tension is worth monitoring.",
+    "Inference prices and infrastructure costs diverge",
   );
 });
 
@@ -58,7 +52,7 @@ test("extracts readable conversation text from a packed Page", () => {
   );
 });
 
-test("summarizes image metadata without inventing an asset URL", () => {
+test("keeps tenant-specific image payloads as generic JSON", () => {
   const source = JSON.stringify({
     filename: "image.png",
     mimeType: "image/png",
@@ -67,10 +61,9 @@ test("summarizes image metadata without inventing an asset URL", () => {
     byteSize: 316702,
   });
 
-  assert.equal(
-    pagePayloadPreviewText(source, "application/vnd.symbiont.image+json"),
-    "image.png — 3224 × 1460 — image/png",
-  );
+  const presentation = describePagePayload(source, "application/vnd.symbiont.image+json");
+  assert.equal(presentation.type, "json");
+  assert.deepEqual(presentation.value, JSON.parse(source));
 });
 
 test("keeps malformed or unknown content available as a safe fallback", () => {

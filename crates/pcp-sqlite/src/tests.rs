@@ -10,13 +10,13 @@ use pcp_core::{
     AccessDecision, AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor,
     ActorType, ArchivePageRequest, AssessPageValidityRequest, BrowseIndexOrder,
     CollectRevisionRetentionRequest, CreateScopeRequest, ExtractTopicRequest, GraphEdgeDirection,
-    GraphEdgeKind, LifecycleStatus, LinkPagesRequest, ModelTokenUsage, PackPagesRequest,
-    PageMutability, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest, Projection,
-    ProvenanceEvent, PutRevisionRetentionLeaseRequest, QueryAuditEvent, QueryAuditMethod,
-    ReadPagesRequest, RestoreArchivedPageRequest, RetentionPolicy, RetentionProtectionReason,
-    RevisePageRequest, RouterTokenUsage, RuntimeUsageEvent, ScopeGrant, SearchFilters, SearchMode,
-    SearchPagesRequest, SearchTermMatch, SourceRef, SourceSpan, UnpackPageRequest,
-    ValidityStanding, WritePageRequest, WriteSummaryRequest,
+    GraphEdgeKind, IngestPageRequest, LifecycleStatus, LinkPagesRequest, ModelTokenUsage,
+    PackPagesRequest, PageMutability, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest,
+    Projection, ProvenanceEvent, PutRevisionRetentionLeaseRequest, QueryAuditEvent,
+    QueryAuditMethod, ReadPagesRequest, RestoreArchivedPageRequest, RetentionPolicy,
+    RetentionProtectionReason, RevisePageRequest, RouterTokenUsage, RuntimeUsageEvent, ScopeGrant,
+    SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch, SourceRef, SourceSpan,
+    UnpackPageRequest, ValidityStanding, WritePageRequest, WriteSummaryRequest,
 };
 use pcp_store::PcpStore;
 use rusqlite::{Connection, params};
@@ -1203,7 +1203,7 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
         operation: "derive".to_owned(),
         actor,
         timestamp: "2026-08-03T00:00:00Z".to_owned(),
-        input_revision_ids: vec![page_a.revision_id],
+        input_revision_ids: vec![page_a.revision_id.clone()],
         tool_or_model: Some("access-test".to_owned()),
     }];
     let derived = cross_scope_writer
@@ -1242,6 +1242,84 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
             .provenance
             .iter()
             .all(|event| event.input_revision_ids.is_empty())
+    );
+
+    let ingest_request = |external_event_id: &str| IngestPageRequest {
+        namespace: scope_b.clone(),
+        kind: "conversation_event".to_owned(),
+        observed_at: None,
+        source_span: None,
+        payload: Some(PagePayload {
+            media_type: "text/plain".to_owned(),
+            content: "Tenant material derived from an exact PCP Revision.".to_owned(),
+        }),
+        source_refs: Vec::new(),
+        based_on_revision_ids: vec![page_a.revision_id.clone()],
+        facets: None,
+        external_event_id: Some(external_event_id.to_owned()),
+    };
+    let restricted_ingester = pcp_client(
+        Arc::clone(&store),
+        AccessSession::new(
+            principal("client:restricted-ingester", AccessPrincipalType::Service),
+            "session:restricted-ingester",
+            vec![
+                ScopeGrant {
+                    namespace: scope_a.clone(),
+                    permissions: vec![AccessPermission::ReadDetail],
+                },
+                ScopeGrant {
+                    namespace: scope_b.clone(),
+                    permissions: vec![AccessPermission::Ingest],
+                },
+            ],
+        ),
+    );
+    assert!(
+        restricted_ingester
+            .ingest_page(ingest_request("access:ingest-derived-denied"))
+            .await
+            .is_err()
+    );
+    let cross_scope_ingester = pcp_client(
+        Arc::clone(&store),
+        AccessSession::new(
+            principal("client:cross-scope-ingester", AccessPrincipalType::Service),
+            "session:cross-scope-ingester",
+            vec![
+                ScopeGrant {
+                    namespace: scope_a.clone(),
+                    permissions: vec![AccessPermission::ReadDetail],
+                },
+                ScopeGrant {
+                    namespace: scope_b.clone(),
+                    permissions: vec![
+                        AccessPermission::Ingest,
+                        AccessPermission::DeriveAcrossScopes,
+                    ],
+                },
+            ],
+        ),
+    );
+    let ingested = cross_scope_ingester
+        .ingest_page(ingest_request("access:ingest-derived-allowed"))
+        .await
+        .expect("allow authenticated cross-Scope ingest derivation");
+    let ingested_page = admin
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![ingested.page_id],
+            revision_ids: Vec::new(),
+            projections: vec![Projection::Provenance],
+            max_chars: 4_000,
+        })
+        .await
+        .expect("read tenant ingest provenance");
+    let provenance = &ingested_page[0].revision.provenance[0];
+    assert_eq!(provenance.operation, "ingest");
+    assert_eq!(provenance.actor.actor_id, "client:cross-scope-ingester");
+    assert_eq!(
+        provenance.input_revision_ids,
+        vec![page_a.revision_id.clone()]
     );
 
     let (events, _) = admin
@@ -4775,6 +4853,82 @@ async fn durable_inventory_does_not_drop_pages_after_the_first_hundred() {
         .await
         .expect("read complete durable inventory");
     assert_eq!(inventory.len(), 105);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn durable_inventory_exposes_exact_provenance_inputs_for_maintenance() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-inventory-provenance-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
+        .await
+        .expect("open store");
+    let identity_id = store.identity_id().to_owned();
+    let namespace = "project:inventory-provenance".to_owned();
+    store
+        .create_scope(CreateScopeRequest {
+            namespace: namespace.clone(),
+            display_name: "Inventory provenance".to_owned(),
+            description: None,
+            parent_namespace: None,
+        })
+        .await
+        .expect("create scope");
+    let actor = Actor {
+        actor_type: ActorType::Model,
+        actor_id: "model:inventory-provenance".to_owned(),
+    };
+    let source = store
+        .write_page(
+            write_request(
+                &identity_id,
+                &namespace,
+                actor.clone(),
+                "Exact source material.",
+                "inventory-provenance:source",
+            ),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write source Page");
+    let mut derived_request = write_request(
+        &identity_id,
+        &namespace,
+        actor.clone(),
+        "Tenant-derived material.",
+        "inventory-provenance:derived",
+    );
+    derived_request.provenance = vec![ProvenanceEvent {
+        operation: "derive".to_owned(),
+        actor,
+        timestamp: "2026-08-25T00:00:00Z".to_owned(),
+        input_revision_ids: vec![source.revision_id.clone()],
+        tool_or_model: None,
+    }];
+    let derived = store
+        .write_page(derived_request, vec![namespace.clone()])
+        .await
+        .expect("write derived Page");
+
+    let inventory = store
+        .durable_page_inventory(vec![namespace], Vec::new())
+        .await
+        .expect("read provenance inventory");
+    let derived_item = inventory
+        .iter()
+        .find(|page| page.page_id == derived.page_id)
+        .expect("derived Page in inventory");
+    assert_eq!(
+        derived_item.provenance_input_revision_ids,
+        vec![source.revision_id]
+    );
+    assert!(derived_item.relation_types.is_empty());
 
     let _ = std::fs::remove_dir_all(root);
 }

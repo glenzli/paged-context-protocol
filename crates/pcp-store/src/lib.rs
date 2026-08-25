@@ -42,6 +42,10 @@ pub struct DurablePageInventoryItem {
     pub summary_target_revision_id: Option<String>,
     pub summary: Option<String>,
     pub relation_types: Vec<String>,
+    /// Exact Revisions recorded as provenance inputs for this current head.
+    /// Maintenance may prioritize these pairs, but they are not Relations.
+    #[serde(default)]
+    pub provenance_input_revision_ids: Vec<String>,
     #[serde(default)]
     pub packing_protected: bool,
 }

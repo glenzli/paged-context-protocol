@@ -73,6 +73,12 @@ pub struct IngestPageRequest {
     pub payload: Option<PagePayload>,
     #[serde(default)]
     pub source_refs: Vec<SourceRef>,
+    /// Exact PCP Revisions that the tenant used to produce this Page.
+    ///
+    /// Runtime authenticates the caller and records the corresponding
+    /// provenance event. These inputs do not assert a Page Relation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub based_on_revision_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facets: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

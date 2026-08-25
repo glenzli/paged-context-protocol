@@ -1,20 +1,11 @@
-use std::{
-    collections::HashMap,
-    env,
-    fs::{self, File},
-    io::Read,
-    net::SocketAddr,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     body::Body,
     extract::{Path, Query, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -24,8 +15,8 @@ use pcp_core::{
     Actor, ActorType, ArchivePageRequest, BrowseIndexOrder, IntentEffort, LifecycleStatus,
     PackPagesRequest, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest, Projection,
     QueryContextRequest, ReadPage, ReadPagesRequest, Relation, RestoreArchivedPageRequest,
-    RetentionPolicy, SearchFilters, SearchHit, SearchMode, SearchPagesRequest, SourceRef,
-    SourceSpan, UnpackPageRequest,
+    RetentionPolicy, SearchFilters, SearchHit, SearchMode, SearchPagesRequest, SourceSpan,
+    UnpackPageRequest,
 };
 use pcp_rpc::{EnrollmentAdminClient, EnrollmentAdminResponse, RemotePcpClient};
 use pcp_runtime::{
@@ -38,9 +29,7 @@ use pcp_runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tokio::{net::TcpListener, time::Instant};
-use url::Url;
 
 const DEFAULT_BIND: &str = "127.0.0.1:4318";
 const DEFAULT_PRINCIPAL_ID: &str = "operator:local";
@@ -53,8 +42,6 @@ const MAX_PAGE_LIMIT: u32 = 50;
 const PAGE_LIST_PREVIEW_CHARS: u32 = 32_000;
 const MAX_HISTORY_REVISIONS: usize = 20;
 const MAX_RETENTION_SAMPLE_LIMIT: u32 = 100;
-const MAX_LOCAL_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
-const LOCAL_MEDIA_ROOTS_ENV: &str = "PCP_CONSOLE_LOCAL_MEDIA_ROOTS";
 const CONSOLE_STATIC_CACHE_CONTROL: &str = "no-store";
 
 mod graph_view;
@@ -66,7 +53,6 @@ struct AppState {
     enrollment: EnrollmentAdminClient,
     runtime: Option<Arc<managed::ManagedRuntime>>,
     runtime_config: Option<PathBuf>,
-    local_media_roots: Arc<Vec<PathBuf>>,
 }
 
 #[derive(Debug)]
@@ -185,11 +171,6 @@ struct PageListMetadata {
     source_span: Option<SourceSpan>,
 }
 
-#[derive(Deserialize)]
-struct LocalSourceLocator {
-    uri: String,
-}
-
 #[derive(Default, Deserialize)]
 struct AccessQuery {
     cursor: Option<String>,
@@ -306,7 +287,6 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| DEFAULT_BIND.to_owned())
         .parse::<SocketAddr>()
         .context("parse PCP_CONSOLE_BIND")?;
-    let local_media_roots = local_media_roots()?;
     let listener = TcpListener::bind(bind)
         .await
         .with_context(|| format!("bind PCP Console at {bind}"))?;
@@ -318,7 +298,6 @@ async fn main() -> Result<()> {
             enrollment: EnrollmentAdminClient::new(enrollment_socket),
             runtime: runtime.clone(),
             runtime_config,
-            local_media_roots: Arc::new(local_media_roots),
         }),
     )
     .with_graceful_shutdown(shutdown_signal())
@@ -375,7 +354,6 @@ fn router(state: AppState) -> Router {
         .route("/api/pages/{page_id}/preview", get(page_preview))
         .route("/api/pages/{page_id}", get(page_detail))
         .route("/api/pages/{page_id}/raw", get(page_raw))
-        .route("/api/pages/{page_id}/media/{source_index}", get(page_media))
         .route("/api/pages/{page_id}/graph", get(page_graph))
         .route("/api/pages/{page_id}/lineage", get(page_lineage))
         .route("/api/metrics", get(health_metrics))
@@ -1008,53 +986,6 @@ async fn page_raw(
     )
     .await?;
     Ok(Json(json!(page)))
-}
-
-async fn page_media(
-    State(state): State<AppState>,
-    Path((page_id, source_index)): Path<(String, usize)>,
-) -> Result<Response, ApiError> {
-    let page = read_one_page(
-        state.client.as_ref(),
-        page_id,
-        vec![Projection::Manifest, Projection::Sources],
-        1_000,
-    )
-    .await?;
-    let source_ref = page
-        .revision
-        .source_refs
-        .get(source_index)
-        .cloned()
-        .context("PCP media SourceRef was not found")?;
-    let roots = state.local_media_roots.clone();
-    let (bytes, media_type, digest) =
-        tokio::task::spawn_blocking(move || read_local_media(&source_ref, roots.as_slice()))
-            .await
-            .context("join PCP local media read")??;
-
-    let mut response = Response::new(Body::from(bytes));
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_str(&media_type).context("encode PCP media content type")?,
-    );
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, max-age=300"),
-    );
-    response.headers_mut().insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    response.headers_mut().insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'none'; sandbox"),
-    );
-    response.headers_mut().insert(
-        header::ETAG,
-        HeaderValue::from_str(&format!("\"sha256-{digest}\"")).context("encode PCP media ETag")?,
-    );
-    Ok(response)
 }
 
 async fn page_graph(
@@ -1936,117 +1867,6 @@ fn selected_scopes(client: &RemotePcpClient, selected: Option<&str>) -> Vec<Stri
     scopes
 }
 
-fn local_media_roots() -> Result<Vec<PathBuf>> {
-    let Some(configured) = env::var_os(LOCAL_MEDIA_ROOTS_ENV) else {
-        return Ok(Vec::new());
-    };
-    let mut roots = env::split_paths(&configured)
-        .map(|path| {
-            fs::canonicalize(&path)
-                .with_context(|| format!("resolve PCP Console local media root {}", path.display()))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    roots.sort();
-    roots.dedup();
-    Ok(roots)
-}
-
-fn read_local_media(
-    source_ref: &SourceRef,
-    allowed_roots: &[PathBuf],
-) -> Result<(Vec<u8>, String, String)> {
-    anyhow::ensure!(
-        !allowed_roots.is_empty(),
-        "PCP Console local media preview is disabled; configure {LOCAL_MEDIA_ROOTS_ENV}"
-    );
-    let media_type = source_ref
-        .media_type
-        .as_deref()
-        .context("PCP local media SourceRef has no mediaType")?;
-    anyhow::ensure!(
-        matches!(
-            media_type,
-            "image/png" | "image/jpeg" | "image/webp" | "image/gif" | "image/avif"
-        ),
-        "PCP Console does not render this local media type"
-    );
-    let expected_digest = source_ref
-        .content_digest
-        .as_deref()
-        .and_then(|digest| digest.strip_prefix("sha256:"))
-        .context("PCP local media SourceRef requires a sha256 contentDigest")?;
-    anyhow::ensure!(
-        expected_digest.len() == 64 && expected_digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "PCP local media SourceRef has an invalid sha256 contentDigest"
-    );
-    let locator: LocalSourceLocator =
-        serde_json::from_str(&source_ref.locator).context("decode PCP local media locator")?;
-    let url = Url::parse(&locator.uri).context("parse PCP local media URI")?;
-    anyhow::ensure!(
-        url.scheme() == "file",
-        "PCP Console does not fetch remote media"
-    );
-    let original_path = url
-        .to_file_path()
-        .map_err(|_| anyhow::anyhow!("PCP local media URI is not a valid file path"))?;
-    let link_metadata = fs::symlink_metadata(&original_path)
-        .with_context(|| format!("inspect PCP local media {}", original_path.display()))?;
-    anyhow::ensure!(
-        !link_metadata.file_type().is_symlink(),
-        "PCP local media file cannot be a symlink"
-    );
-    let canonical_path = fs::canonicalize(&original_path)
-        .with_context(|| format!("resolve PCP local media {}", original_path.display()))?;
-    anyhow::ensure!(
-        allowed_roots
-            .iter()
-            .any(|root| canonical_path.starts_with(root)),
-        "PCP local media file is outside configured roots"
-    );
-
-    let mut file = File::open(&canonical_path)
-        .with_context(|| format!("open PCP local media {}", canonical_path.display()))?;
-    let metadata = file.metadata().context("read PCP local media metadata")?;
-    anyhow::ensure!(
-        metadata.is_file(),
-        "PCP local media source is not a regular file"
-    );
-    anyhow::ensure!(
-        metadata.len() <= MAX_LOCAL_MEDIA_BYTES,
-        "PCP local media exceeds the preview size limit"
-    );
-    ensure_current_user_owned(&metadata)?;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.read_to_end(&mut bytes)
-        .context("read PCP local media bytes")?;
-    anyhow::ensure!(
-        bytes.len() as u64 == metadata.len(),
-        "PCP local media changed while being read"
-    );
-    let actual_digest = format!("{:x}", Sha256::digest(&bytes));
-    anyhow::ensure!(
-        actual_digest.eq_ignore_ascii_case(expected_digest),
-        "PCP local media contentDigest does not match"
-    );
-    Ok((bytes, media_type.to_owned(), actual_digest))
-}
-
-#[cfg(unix)]
-fn ensure_current_user_owned(metadata: &fs::Metadata) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
-
-    anyhow::ensure!(
-        metadata.uid() == unsafe { libc::geteuid() },
-        "PCP local media file is not owned by the Console user"
-    );
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn ensure_current_user_owned(_metadata: &fs::Metadata) -> Result<()> {
-    anyhow::bail!("PCP local media preview requires owner-aware filesystem metadata")
-}
-
 async fn read_one_page(
     client: &RemotePcpClient,
     page_id: String,
@@ -2148,18 +1968,6 @@ mod tests {
         );
     }
 
-    fn local_source_ref(path: &std::path::Path, digest: &str) -> SourceRef {
-        SourceRef {
-            provider_id: "test-local-media".to_owned(),
-            locator: json!({
-                "uri": Url::from_file_path(path).expect("test file URL").to_string()
-            })
-            .to_string(),
-            media_type: Some("image/png".to_owned()),
-            content_digest: Some(format!("sha256:{digest}")),
-        }
-    }
-
     fn relation(relation_id: &str, from_page_id: &str, to_page_id: &str) -> Relation {
         Relation {
             relation_id: relation_id.to_owned(),
@@ -2226,41 +2034,5 @@ mod tests {
                 outgoing: 1,
             }
         );
-    }
-
-    #[test]
-    fn local_media_requires_allowed_path_and_matching_digest() {
-        let unique = format!(
-            "pcp-console-media-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("test clock")
-                .as_nanos()
-        );
-        let root = env::temp_dir().join(unique);
-        let outside = root.join("outside");
-        let allowed = root.join("allowed");
-        fs::create_dir_all(&outside).expect("create outside test directory");
-        fs::create_dir_all(&allowed).expect("create allowed test directory");
-        let image = allowed.join("sample.png");
-        let bytes = b"bounded image bytes";
-        fs::write(&image, bytes).expect("write test image");
-        let digest = format!("{:x}", Sha256::digest(bytes));
-        let source_ref = local_source_ref(&image, &digest);
-        let allowed = fs::canonicalize(&allowed).expect("canonical allowed root");
-
-        let (loaded, media_type, loaded_digest) =
-            read_local_media(&source_ref, std::slice::from_ref(&allowed))
-                .expect("read allowed local media");
-        assert_eq!(loaded, bytes);
-        assert_eq!(media_type, "image/png");
-        assert_eq!(loaded_digest, digest);
-
-        let outside = fs::canonicalize(&outside).expect("canonical outside root");
-        assert!(read_local_media(&source_ref, &[outside]).is_err());
-        let mismatched = local_source_ref(&image, &"0".repeat(64));
-        assert!(read_local_media(&mismatched, &[allowed]).is_err());
-        fs::remove_dir_all(&root).expect("remove local media test directory");
     }
 }
