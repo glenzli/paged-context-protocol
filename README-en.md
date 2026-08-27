@@ -50,6 +50,10 @@ New clients can discover Runtime through [Infra Discovery](https://github.com/gl
 - Embedded and RPC clients, approved enrollment, CLI, MCP, Console, a maintenance coordinator, and read-only infrastructure observation.
 - Deterministic Revision-retention planning, finite leases, and protected explicit collection.
 
+![PCP Console showing synthetic Pages](assets/console-pages.png)
+
+*The Pages view shows Page kinds, Scopes, source spans, and direct relations. All content is synthetic demo data.*
+
 ### Current Boundaries
 
 - Durable Page deletion, cold storage, and Identity-wide Validity maintenance are not implemented; `purge` is outside v0.8.

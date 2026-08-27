@@ -50,6 +50,10 @@ PCP 不规定 Router、提示词格式、Chain-of-Thought 或模型状态机。�
 - embedded/RPC client、授权注册、CLI、MCP、Console、维护协调器和只读设施观测。
 - 确定性 Revision 保留规划、有限租约和受保护的显式回收。
 
+![PCP Console 使用合成演示数据展示 Page 列表](assets/console-pages.png)
+
+*Pages 视图展示 Page 类型、Scope、来源区间和直接关系。内容均为合成演示数据。*
+
 ### 当前边界
 
 - Durable Page deletion、cold storage 和 Identity 全局 Validity 维护尚未实现；`purge` 不属于 v0.8。
