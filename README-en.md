@@ -1,163 +1,80 @@
-# Paged-Context-Protocol (PCP) - v0.8.0-draft
+# Paged-Context-Protocol (PCP) · v0.8.0-draft
 
 [中文](README.md) | **English**
 
 ![Paged-Context-Protocol banner](assets/banner.png)
 
-An open protocol and its official implementation for deciding what user-owned
-information enters model attention, when it enters, and with what identity and
-evidence.
+> **Protocol draft and development preview.** The v0.8 protocol, APIs, and Store format may still change. v0.8 is not compatible with v0.7 Stores; migration requires a new Store populated from tenant-held source material.
 
-## Overview
+PCP is an open protocol with a project-maintained Rust implementation for storing, organizing, and retrieving long-lived context across applications, sessions, and models. It represents content as stable Pages and immutable Revisions with Scopes, Relations, and Provenance, then returns bounded results for the current task.
 
-Frontier models can search files, call tools, and manage long active contexts,
-yet continuity across sessions, projects, and models is still commonly reduced
-to coarse summaries or closed product Memory. For long-lived, high-density work,
-the problem is not only whether information can be stored, but whether the right
-material can be found, traced, and selectively admitted into finite attention.
+PCP can serve as the context layer for one application or let several tenants contribute separate Scopes under one Identity. A product may use it for long-term memory, project knowledge, session continuity, or a combination of these. The protocol does not distinguish a “context store” from a “memory product,” nor does it prescribe how those capabilities are named or presented.
 
-**PCP defines a user-owned Identity and the paging
-boundary between that space and model attention.** It is not a particular context
-manager, Memory product, or Storage format, and it does not require all history to
-be packed into one prompt. Context is an information continuum across time; the
-model's active window is only a temporary working set.
+## Design Scope
 
 ```text
-Multi-tenant Source / Event
-  -> Identity + Scope                       (association boundary and authorization)
-  -> stable Page + immutable Revision       (identity and storage)
-  -> Relation / Provenance / Summary        (organization and evidence)
-  -> Search / Read / Projection             (selection and materialization)
-  -> Active working context                 (model attention)
+Tenant-held sources
+  -> Identity + Scope                    identity, authorization, association
+  -> Page + immutable Revision           stable records and content versions
+  -> Relation + Provenance + Summary     organization, evidence, derivation
+  -> Search + Read + Projection          bounded retrieval and reading
+  -> current working context of a Host or model
 ```
 
-## Protocol Core
+- **Page and Revision**: A Page is an independently retrievable record; a Revision is an immutable content snapshot. Source records are normally `sealed`, while maintained records may be `revisioned`.
+- **Identity, Tenant, and Scope**: One Store/Runtime serves one durable Identity. Tenants can read and write only authorized Scopes, and the server injects request identity.
+- **Relation and Provenance**: Relations connect stable Pages. Relation evidence and derivation refer to exact Revisions. Temporal adjacency or textual similarity does not create a domain relation by itself.
+- **Search, Read, and Projection**: Search returns candidates before a caller reads Payload, Summary, Sources, Relations, or History projections. The Host decides which results enter its current context.
+- **Maintenance and governance**: Runtime may maintain Summaries, Topics, Validity, Relations, lossless packing, and retention. Changes requiring judgment use a shared review path; deployment policy determines whether validated low-risk work applies automatically.
+- **External sources**: Tenants retain and understand their own chat records, media, or domain objects. PCP stores a minimal SourceRef and optional digest, then returns authorized source coordinates. Source parsing, search, and rendering remain tenant responsibilities.
 
-- **Page and Revision**: A Page is the smallest semantic segment worth recalling
-  independently; a Revision is an immutable content snapshot. Raw Pages are normally `sealed`, while maintained
-  Pages may be `revisioned`.
-- **Identity, Tenant, and Scope**: One Store/Runtime serves one durable Identity.
-  Multiple tenants may contribute to one association space while reading only
-  their authorized Scopes.
-- **Scope and Access**: A unified address space is not global injection. Search,
-  read, derivation, and write operations remain constrained by Scope and a
-  server-injected access identity.
-- **Relation and Provenance**: Relations connect stable Pages, while relation
-  evidence and provenance refer to exact Revisions. Temporal adjacency or textual
-  similarity does not automatically become a domain edge.
-- **Summary, Topic, and Validity**: Summaries are optional, sparse, traceable derived
-  Pages. A long-lived topic spanning several Pages can be logically extracted as a
-  separate Topic Page that fronts default retrieval without deleting source evidence.
-  Validity records whether information remains applicable.
-- **Content Governance**: A human may archive a low-durability Page so that it leaves
-  default retrieval, graph expansion, and maintenance inventory without deleting its
-  content, Relations, Summary, or Provenance. Only an authorized governance tool may
-  review it by ID and restore it. `purge` is not part of v0.8.
-- **Search, Read, and Projection**: Retrieval returns identifiable candidates before
-  selected projections such as Summary, Payload, Sources, Relations, or History are
-  read. The model or Host chooses the query path and admission timing.
-- **Packing and Retention**: Fine-grained, source-contiguous, unreferenced sealed Pages
-  may be packed losslessly into one Page. Historical Revisions are collected only when
-  dependencies, leases, and retention rules permit. Lossy source condensation is outside v0.8.
-- **External Sources**: Tenants retain and understand their own chat records,
-  media, or domain objects. PCP stores opaque verifiable SourceRefs and returns
-  authorized coordinates; tenants remain responsible for source parsing, search, and rendering.
+PCP does not prescribe a Router, prompt format, Chain-of-Thought, or model state machine. It defines boundaries for durable records, authorization, sources, retrieval, and maintenance. SQLite, semantic models, Console interactions, and Host workflows are implementation choices.
 
-PCP does not prescribe a fixed Router, Intent Focus, zoom hierarchy,
-Chain-of-Thought, XML flow, or model state machine. A consuming model chooses what
-the current task queries, reads, and materializes. Runtime owns Identity-wide
-Summary, Topic, Validity, Relation, lossless packing, and retention maintenance and may call
-a replaceable model as a semantic inference provider.
+## Current Implementation
 
-## Current Status
+This repository contains the specification and the project-maintained Rust implementation. Local applications can connect through an embedded client or Runtime RPC. The workspace also provides a CLI, MCP server, and local Console.
 
-`v0.8.0-draft` is the current protocol draft. It separates Identity, tenant
-Principal, and Scope; assigns global maintenance authority to Runtime; and accepts
-text and opaque external sources through a minimal SourceRef and simplified ingest
-API. v0.8 is not compatible with v0.7 Stores; migration must create a new v0.8
-Store and re-import original tenant-held content rather than opening the old
-database directly.
-
-The current official implementation is ready for local external applications to
-reconnect and run continuously. New clients should connect through Infra Discovery,
-user-approved enrollment, and a generation-specific identity-bound RPC endpoint.
-An approved registration can rediscover and open a new session after Runtime
-restarts. “Ready to reconnect” describes the current official implementation; it
-does not freeze the v0.8 draft or provide v0.7 wire or Store compatibility.
-
-### Official Implementation
-
-This repository is both the canonical home of the PCP specification and the
-project-maintained official Rust implementation. It covers the Store, embedded
-and remote clients, Unix-socket RPC, Runtime, automatic discovery and approved
-client enrollment, CLI, MCP, Console, maintenance, and observation as an
-end-to-end deployable PCP system.
-
-PCP remains an open protocol that permits independent implementations. “Official”
-means that this implementation is maintained and released by the PCP project; it
-does not make SQLite, one retrieval algorithm, one model, or a Host workflow
-normative. Conformance is defined by [`PROTOCOL-en.md`](PROTOCOL-en.md).
+New clients can discover Runtime through [Infra Discovery](https://github.com/glenzli/infra-protocol), request a Principal, access mode, and Scopes, then receive an identity-bound endpoint for the current generation after approval. An approved registration can rediscover Runtime and open a new session after a restart.
 
 ![PCP Console showing a local Store overview with synthetic demo data](assets/console-overview.png)
 
-> Actual PCP Console interface shown with synthetic demo data. No real Page content,
-> Scope, or client identity is included.
+*Local Store overview in PCP Console. The screenshot uses synthetic data and contains no real Page, Scope, or client identity.*
+
+### Implemented
+
+- Stable Pages, immutable Revisions, `sealed`/`revisioned` behavior, and CAS updates.
+- `exact`, `text`, `graph`, `temporal`, and `auto` retrieval with bounded Projection reads.
+- Runtime-RPC `semantic_search`, `match_intent`, and explicit-anchor graph expansion.
+- Summary, Topic, Validity, Relation, Provenance, archive/restore, lossless sealed-Page packing, and access audit.
+- Runtime-injected Identity and Actor for `ingest_page`, with optional `sourceSpan`, `basedOnRevisionIds`, and a minimal SourceRef.
+- Embedded and RPC clients, approved enrollment, CLI, MCP, Console, a maintenance coordinator, and read-only infrastructure observation.
+- Deterministic Revision-retention planning, finite leases, and protected explicit collection.
+
+### Current Boundaries
+
+- Durable Page deletion, cold storage, and Identity-wide Validity maintenance are not implemented; `purge` is outside v0.8.
+- External-source custody, parsing, retrieval, rendering, OCR, and transcription belong to tenants.
+- Semantic queries require an explicitly configured Provider. An unavailable Provider produces an unavailable result rather than an automatic keyword fallback.
+- Local Unix-socket mode `0600` is an OS-user boundary and does not defend against a hostile process running as the same user.
+- Public conformance is defined by [`PROTOCOL-en.md`](PROTOCOL-en.md), not by a specific backend or interface in this repository.
+
+## Repository Layout
 
 | Crate | Role |
 | --- | --- |
 | `pcp-core` | Core objects, requests, projections, and capability types |
 | `pcp-store` | Database-independent Store contract with `AccessSession` |
-| `pcp-client` | Tenant-facing `PcpTenantApi`, privileged Runtime `PcpApi`, and embedded client |
-| `pcp-rpc` | Local Unix-socket wire, remote client, and server transport |
-| `pcp-sqlite` | SQLite Page/Revision Store, retrieval, audit, and retention |
-| `pcp-runtime` | Identity-bound endpoints, approved client enrollment, and global maintenance coordinator |
+| `pcp-client` | Tenant `PcpTenantApi`, privileged `PcpApi`, and embedded client |
+| `pcp-rpc` | Unix-socket wire, remote client, and server transport |
+| `pcp-sqlite` | SQLite Store, retrieval, audit, and retention |
+| `pcp-runtime` | Identity-bound endpoints, client enrollment, and maintenance coordinator |
 | `pcp-cli` | Inspection, retrieval, read, export, and retention operations |
-| `pcp-mcp` | Local stdio tool server built on the official Rust MCP SDK |
-| `pcp-console` | Independent local Web Inspector and audited governance entry point |
-
-### Implemented
-
-- Stable Pages, immutable Revisions, `sealed`/`revisioned` behavior, and CAS updates.
-- Head-only default retrieval, `auto`, `exact`, `text`, `graph`, and `temporal`
-  modes, plus bounded Projection reads.
-- Runtime-RPC `semantic_search` and budgeted `match_intent` context queries. Results are
-  structured Page/Revision entries; callers assemble their own prompts without a fixed Context Pack prefix.
-- Stable-`pageId` anchored graph slices with bounded depth, nodes, and edges, ACL-filtered at every hop; no whole-store graph export.
-- Summary, logical Topic extraction, human-approved archive/restore, Validity, Relation,
-  Provenance, lossless sealed-Page packing, and access audit.
-- Allowed access events are committed in bounded batches of at most 512 events or
-  one second, with at least 500 ms between automatic commits; overload applies
-  backpressure instead of silently dropping events. Denied and failed events use a
-  security coalescing window of at most 100 ms once admitted to the writer and are
-  durable before the call returns. Raw allowed events are retained for 30 days and
-  pruned in batches of at most 5,000; this policy never automatically removes
-  security-relevant events.
-- Identity-bound embedded and RPC clients, discoverable user-approved Runtime
-  enrollment, CLI, MCP, and Console.
-- Simplified sealed `ingest_page` with Runtime-injected Identity and Actor, optional
-  source-continuity `sourceSpan`, trusted provenance from `basedOnRevisionIds`, and a
-  SourceRef containing only provider, locator, optional media type, and digest.
-- Deterministic Revision-retention planning, finite leases, protected explicit
-  collection, and multidimensional Health diagnostics.
-
-### Not Yet Implemented
-
-Durable Page deletion is currently absent from the Capabilities `features` list.
-Cold storage and Identity-wide Validity maintenance are still pending. External-source
-custody, parsing, search, rendering, and automatic OCR or transcription belong to
-tenants; they are not missing Runtime features.
-
-### Implementation Boundary
-
-The official implementation does not put a fixed semantic model or Router in the Store
-contract. Runtime owns semantic-query and intent-match providers, budgets, validation,
-and commit authority. If a required provider is absent, the method is explicitly unavailable
-rather than silently falling back to keyword search. Console is a debugging and review client
-of this same RPC contract, not another holder of provider credentials.
+| `pcp-mcp` | Local stdio MCP server |
+| `pcp-console` | Local Store Inspector, review, and governance entry point |
 
 ## Quick Start
 
-The workspace currently uses Rust 2024 edition:
+The workspace uses Rust 2024 edition:
 
 ```bash
 cargo test --workspace
@@ -169,20 +86,11 @@ PCP_STORE_PATH=data/context.sqlite3 \
   cargo run -p pcp-cli -- retention-plan 30 2 100
 ```
 
-`retention-plan` is a dry run. Its arguments are minimum age in days, recent
-Revisions retained per Page, and candidate limit. Physical collection uses the
-separate `retention-collect --confirm` command and replans exact Revision IDs
-before submission.
+`retention-plan` is a dry run. Physical collection uses `retention-collect --confirm` and replans exact Revision IDs before submission.
 
 ## Deployment
 
-`PcpTenantApi` is the ordinary tenant boundary and exposes the descriptor,
-authorized Scopes, `ingest_page`, Search, Read, and optional browse. `PcpApi` is
-the privileged superset used by Runtime maintainers and local administration
-tools; it includes advanced writes, Relations, Summaries, logical Topic extraction, Validity, packing,
-retention, and audit. A Host may embed a Store or use Runtime for an independent
-lifecycle and server-injected identity. The tenant surface is the same in both
-deployment shapes.
+`PcpTenantApi` is the ordinary tenant interface. It exposes the descriptor, authorized Scopes, `ingest_page`, Search, Read, and optional browse. `PcpApi` is the privileged superset for Runtime maintainers and local administration tools. A Host can embed a Store or connect to a separate Runtime:
 
 ```text
 Tenant Host --> PcpTenantApi --> EmbeddedPcpClient --> PcpStore
@@ -191,54 +99,26 @@ Codex --------> MCP -----------> PcpTenantApi
 Runtime/CLI -------------------> PcpApi
 ```
 
-For multiple clients, start the broker from
-[`examples/runtime.toml`](examples/runtime.toml). These static endpoints may
-remain available while clients migrate to automatic discovery and enrollment:
+Start a multi-client Runtime:
 
 ```bash
 cargo build --release -p pcp-runtime
 target/release/pcp-runtime --config examples/runtime.toml
 ```
 
-Each Unix socket maps to one fixed Principal injected by Runtime; requests cannot
-choose their own identity. Socket mode is `0600`. This is a local-user boundary,
-not protection from a hostile process already running as the same OS user. Strong
-isolation requires separate endpoints, minimal Scopes, and separate model contexts,
-because Storage authorization cannot retract information already visible to a model.
+Each RPC endpoint binds one Principal injected by Runtime; requests cannot select their own identity. Isolate tenants or model contexts with separate endpoints and minimal Scopes.
 
-Runtime also advertises approved client enrollment through
-[Infra Discovery](https://github.com/glenzli/infra-protocol). A local client
-requests a Principal, access mode, and Scopes; after approval in Console it
-receives an identity-bound RPC endpoint for the current generation. Following a
-Runtime restart, it rediscovers and reopens the durable registration instead of
-relying on a hard-coded socket path.
+### Managed macOS Service
 
-See [`crates/pcp-runtime/ENROLLMENT.md`](crates/pcp-runtime/ENROLLMENT.md) for the
-complete contract and [Symbiont](https://github.com/glenzli/symbiont-d) migration
-sequence.
-
-### PCP-Owned Local Service
-
-On macOS, PCP ships its own managed Console service. The Console owns the
-`pcp-runtime` child, its Runtime configuration, Store, sockets, enrollment
-state, maintenance ledger, and Console deep link under
-`~/Library/Application Support/PCP` by default. Tenants discover and enroll;
-they do not launch, restart, or configure Runtime.
+PCP can use its local Console service to manage `pcp-runtime`, the Store, sockets, enrollment state, and maintenance ledger. The default data directory is `~/Library/Application Support/PCP`:
 
 ```bash
 sh scripts/install-macos.sh
 ```
 
-The installed `com.glenzli.pcp-console` LaunchAgent starts `pcp-console
---managed`. The Console exposes a restart control only for that child and waits
-for its stable operator socket before reporting success. The generated
-`config/runtime.toml` template keeps maintenance disabled. After an independently
-authorized worker is configured, an operator may enable observe or apply mode for
-that deployment. Runtime always owns cadence, triggers, and ledger state; a tenant
-call cannot temporarily take them over.
+LaunchAgent `com.glenzli.pcp-console` starts `pcp-console --managed`. The generated Runtime configuration keeps automatic maintenance disabled by default. After configuring a separately authorized worker, an operator may select observe or apply mode.
 
-To import an existing Store before first launch, use PCP's consistent SQLite
-backup path. Supplying the enrollment state preserves approved registrations.
+An existing Store and enrollment state can be imported before first launch:
 
 ```bash
 sh scripts/import-store.sh \
@@ -246,54 +126,9 @@ sh scripts/import-store.sh \
   --enrollment-state /absolute/path/to/pcp-enrollments.json
 ```
 
-### Runtime Maintenance
+### MCP
 
-The maintenance coordinator is optional and defaults to observation without
-applying changes. A configured semantic worker may return Summary content, an
-ordered packing candidate, a source-grounded Topic proposal, a two-Page
-`related_to` candidate, an Archive recommendation, a retention milestone,
-`no_candidate`, or `defer`; it cannot write the Store directly. Background
-maintenance and Console **Run now** use the same incremental convergence
-controller and persistent typed review inbox. In apply mode, validated low-risk
-work such as packing and Summary writes may apply automatically. General
-Relations, Topics, and Archive recommendations must be accepted by a human before
-they affect retrieval or lifecycle state.
-
-Luna is the default low-cost worker. One Sol second opinion is allowed only for
-configured semantic operations when Luna returns an explicit, evidence-complete
-`defer`; invalid output, stale candidates, schema errors, and transport failures
-do not escalate. Runtime owns candidates, budgets, relation type, basis Revisions,
-and commit authority. Store revalidates authorization, exact current Revisions,
-source continuity, external references, and atomicity. Packing and Relation
-maintenance are independently opt-in, and the maintainer never performs automatic
-Revision collection.
-
-External writes interrupt idle waiting and restart the quiet-period calculation.
-Repeated empty checks back off from the base interval to a configured maximum;
-productive cycles continue at a short interval, while failures use a separate
-bounded backoff. The official Runtime can use an independently authorized
-[Infer Runtime](https://github.com/glenzli/infer-runtime) consumer or a local
-command worker.
-
-See [`crates/pcp-runtime/README.md`](crates/pcp-runtime/README.md).
-
-### Infrastructure Observation
-
-Runtime advertises a read-only observer capability through
-[Infra Discovery](https://github.com/glenzli/infra-protocol).
-[Infra Sentinel](https://github.com/glenzli/infra-sentinel) reads a versioned,
-aggregate-only, redacted snapshot over an owner-only Unix socket: uptime,
-24-hour calls, failures and denials, current Page count, and optional p95 latency
-and telemetry coverage. Page content, queries, Scope names, raw audit, and
-maintenance actions are excluded. Console is only an optional PCP snapshot deep
-link, not part of discovery or the observer data interface.
-
-See [`crates/pcp-runtime/OBSERVER.md`](crates/pcp-runtime/OBSERVER.md) for the
-contract and Python wire example.
-
-### Codex / MCP
-
-MCP can open an embedded SQLite Store directly:
+MCP can open an embedded Store directly:
 
 ```bash
 cargo build --release -p pcp-mcp
@@ -305,7 +140,7 @@ codex mcp add pcp \
   -- /absolute/path/to/paged-context-protocol/target/release/pcp-mcp
 ```
 
-Alternatively, MCP can connect to an identity-bound Runtime:
+It can also connect to an identity-bound Runtime:
 
 ```bash
 codex mcp add pcp \
@@ -314,30 +149,13 @@ codex mcp add pcp \
   -- /absolute/path/to/paged-context-protocol/target/release/pcp-mcp
 ```
 
-`PCP_ACCESS_MODE` may be `observe`, `read`, `contribute`, `audit`, `write`, or
-`admin`. An ordinary writable tenant should use `contribute`: it adds only
-`ingest_page` to Read and does not grant revision, Summary, Relation, Validity,
-or packing authority. `write` and `admin` are privileged modes for Runtime
-maintainers and local administration tools. `observe` can read aggregate Health
-only; it cannot list or read Pages, search, read raw audit events, or invoke
-maintenance actions. Cross-Scope derivation always requires a separate opt-in.
-`pcp_whoami` reports the server-injected Principal and grants.
-When connected to Runtime, MCP also provides `pcp_semantic_search` (semantic retrieval), `pcp_match_intent` (Router
-intent matching), and `pcp_expand_graph` (an explicit-anchor bounded graph slice). Embedded Store
-mode does not pretend to provide those Runtime-owned inference capabilities.
+An ordinary writable tenant should use `contribute`, which adds only `ingest_page` to Read. `write` and `admin` are reserved for maintainers and local administration tools. See [`crates/pcp-runtime/ENROLLMENT.md`](crates/pcp-runtime/ENROLLMENT.md) for access modes and the enrollment contract.
 
-### Console
+### Maintenance, Console, and Observation
 
-The Console should use a dedicated `audit` endpoint. Its Store Inspector is
-read-only and exposes Page, Relation, access-timeline, Retention, and Health
-views. Its local governance entry point performs archive/restore with an explicit
-reason and requires `manage_lifecycle`. Control-plane actions approve, reject, or
-revoke local client registrations, plus Runtime restart when Console owns that
-Runtime. Health presents storage shape, activity, recall, packing,
-graph, and operations separately rather than as an opaque score. Operational
-telemetry excludes query text and Page content.
-Its query page renders the Runtime RPC's structured result and only builds a local inspection
-preview; it does not carry a second retrieval implementation.
+Background maintenance and manual Console runs use the same persistent review queue. A worker produces candidates; Runtime and Store retain control of budgets, authorization, current-Revision checks, and commits. Relation, Topic, and Archive proposals requiring judgment are reviewed before application. Scheduling, model escalation, and failure backoff are documented in [`crates/pcp-runtime/README.md`](crates/pcp-runtime/README.md).
+
+Console should connect through a dedicated `audit` endpoint. It provides read-only Store inspection, query previews, enrollment management, maintenance review, and authorized archive/restore. Runtime's infrastructure observer returns aggregate, redacted operational data only; see [`crates/pcp-runtime/OBSERVER.md`](crates/pcp-runtime/OBSERVER.md).
 
 ```bash
 cargo build --release -p pcp-console
@@ -347,16 +165,12 @@ PCP_CONSOLE_BIND=127.0.0.1:4318 \
   target/release/pcp-console
 ```
 
-Console and Runtime default to `pcp-enrollment-admin.sock` beside their static
-endpoint. If the operator endpoint and the broker's first endpoint use different
-directories, set the same absolute `PCP_ENROLLMENT_ADMIN_SOCKET` for both.
+## Documentation
 
-## Specification and History
-
-- Current specification: [PROTOCOL-en.md](PROTOCOL-en.md)
-- Chinese specification: [PROTOCOL.md](PROTOCOL.md)
-- Runtime notes: [crates/pcp-runtime/README.md](crates/pcp-runtime/README.md)
-- PCP Runtime observer contract: [crates/pcp-runtime/OBSERVER.md](crates/pcp-runtime/OBSERVER.md)
-- PCP Runtime enrollment contract: [crates/pcp-runtime/ENROLLMENT.md](crates/pcp-runtime/ENROLLMENT.md)
-- Historical generations and deprecation rationale: [deprecated/](deprecated/README.md)
-- License: [MIT](LICENSE)
+- [Current specification](PROTOCOL-en.md)
+- [Chinese specification](PROTOCOL.md)
+- [Runtime notes](crates/pcp-runtime/README.md)
+- [Enrollment contract](crates/pcp-runtime/ENROLLMENT.md)
+- [Observer contract](crates/pcp-runtime/OBSERVER.md)
+- [Historical generations and deprecation rationale](deprecated/README.md)
+- [MIT License](LICENSE)
