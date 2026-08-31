@@ -1,6 +1,8 @@
 const ADDITIVE_REPORT_FIELDS = [
   "workerCalls",
   "jobsAdvanced",
+  "reconciliationsCommitted",
+  "reconciliationsProposed",
   "summariesWritten",
   "summariesProposed",
   "packsCommitted",

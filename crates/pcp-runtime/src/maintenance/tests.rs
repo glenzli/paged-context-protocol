@@ -10,10 +10,11 @@ use async_trait::async_trait;
 use pcp_client::{EmbeddedPcpClient, PcpApi};
 use pcp_core::{
     AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    CreateScopeRequest, LifecycleStatus, LinkPagesRequest, PackPagesRequest, PageMutability,
-    PagePayload, PageRevisionRef, PlanRevisionRetentionRequest, Projection, ProvenanceEvent,
-    ReadPagesRequest, RetentionPolicy, RetentionProtectionReason, RevisePageRequest, SourceSpan,
-    WritePageRequest,
+    CreateScopeRequest, FeedbackAuthority, FeedbackKind, LifecycleStatus, LinkPagesRequest,
+    PackPagesRequest, PageMutability, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest,
+    Projection, ProvenanceEvent, ReadPagesRequest, ReconciliationDisposition, RetentionPolicy,
+    RetentionProtectionReason, RevisePageRequest, SourceSpan, SubmitFeedbackRequest,
+    ValidityStanding, WritePageRequest,
 };
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
@@ -25,11 +26,11 @@ use super::{
     AnalyzeMaintenanceSummaryRequest, ApplyMaintenancePackRequest, ApplyMaintenanceRelationRequest,
     ApplyMaintenanceSummaryRequest, CommandSemanticWorker, MaintenanceArchiveDecision,
     MaintenanceAutomationState, MaintenanceConfig, MaintenanceCycleReport, MaintenanceMode,
-    MaintenanceRunAudit, MaintenanceWakeReason, MaintenanceWorkerConfig, MaintenanceWorkerRequest,
-    MaintenanceWorkerResponse, PackingCandidateGroup, PackingMaintenanceConfig,
-    RelationCandidatePage, RelationMaintenanceConfig, RetentionMaintenanceConfig,
-    RetentionMilestone, RuntimeMaintainer, SemanticMaintenanceWorker, SummaryMaintenanceConfig,
-    WriteTriggeredMaintenanceConfig,
+    MaintenanceReviewPayload, MaintenanceRunAudit, MaintenanceWakeReason, MaintenanceWorkerConfig,
+    MaintenanceWorkerRequest, MaintenanceWorkerResponse, PackingCandidateGroup,
+    PackingMaintenanceConfig, ReconciliationMaintenanceConfig, RelationCandidatePage,
+    RelationMaintenanceConfig, RetentionMaintenanceConfig, RetentionMilestone, RuntimeMaintainer,
+    SemanticMaintenanceWorker, SummaryMaintenanceConfig, WriteTriggeredMaintenanceConfig,
     worker::{ArchiveWorkerDecision, PackingCandidatePage},
 };
 
@@ -199,6 +200,10 @@ impl FakeWorker {
     fn request_count(&self) -> usize {
         self.requests.lock().expect("fake worker requests").len()
     }
+
+    fn requests(&self) -> Vec<MaintenanceWorkerRequest> {
+        self.requests.lock().expect("fake worker requests").clone()
+    }
 }
 
 #[async_trait]
@@ -217,6 +222,282 @@ impl SemanticMaintenanceWorker for FakeWorker {
             .pop_front()
             .context("missing fake maintenance worker response")
     }
+}
+
+#[tokio::test]
+async fn reconciliation_resolves_each_challenged_revision_without_promoting_context_only_inputs() {
+    let fixture = Fixture::open("reconciliation-multi-target").await;
+    let first = fixture
+        .client
+        .write_page(fixture.page("First challenged statement.", "feedback-target:first"))
+        .await
+        .expect("write first challenged Page");
+    let second = fixture
+        .client
+        .write_page(fixture.page("Second challenged statement.", "feedback-target:second"))
+        .await
+        .expect("write second challenged Page");
+    let context = fixture
+        .client
+        .write_page(fixture.page(
+            "Context used by the tenant response.",
+            "feedback-target:context",
+        ))
+        .await
+        .expect("write context-only Page");
+    fixture
+        .client
+        .submit_feedback(SubmitFeedbackRequest {
+            namespace: fixture.namespace.clone(),
+            kind: FeedbackKind::Challenge,
+            authority: FeedbackAuthority::TenantAssertion,
+            payload: PagePayload {
+                media_type: "text/plain".to_owned(),
+                content: "The recalled statements need separate validity decisions.".to_owned(),
+            },
+            observed_at: None,
+            source_refs: Vec::new(),
+            challenged_revision_ids: vec![first.revision_id.clone(), second.revision_id.clone()],
+            used_revision_ids: vec![context.revision_id.clone()],
+            response_ref: Some("tenant:response:1".to_owned()),
+            external_event_id: Some("feedback:multi-target:1".to_owned()),
+        })
+        .await
+        .expect("submit explicit feedback");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::ReconcileFeedback {
+            target_revision_id: first.revision_id.clone(),
+            disposition: ReconciliationDisposition::Qualified,
+            rationale: "The tenant challenge narrows the first statement.".to_owned(),
+            scope: Some("Only within the recalled response.".to_owned()),
+            replacement_revision_id: None,
+        },
+        MaintenanceWorkerResponse::ReconcileFeedback {
+            target_revision_id: second.revision_id.clone(),
+            disposition: ReconciliationDisposition::Disputed,
+            rationale: "The second statement remains explicitly contested.".to_owned(),
+            scope: None,
+            replacement_revision_id: None,
+        },
+    ]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = false;
+    config.retention.enabled = false;
+    config.max_jobs_per_cycle = 2;
+    let mut maintainer =
+        RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let report = maintainer
+        .run_bounded_cycle()
+        .await
+        .expect("reconcile both targets");
+
+    assert_eq!(report.reconciliations_committed, 2);
+    assert!(
+        fixture
+            .client
+            .pending_feedback(vec![fixture.namespace.clone()], 10)
+            .await
+            .expect("read pending feedback")
+            .is_empty()
+    );
+    let requests = worker.requests();
+    assert_eq!(requests.len(), 2);
+    let offered = requests
+        .iter()
+        .map(|request| match request {
+            MaintenanceWorkerRequest::ReconcileFeedback {
+                signal, targets, ..
+            } => (
+                signal.challenged_revision_ids.clone(),
+                targets
+                    .iter()
+                    .map(|target| target.revision_id.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            _ => panic!("expected reconciliation request"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(offered[0].0.len(), 2);
+    assert_eq!(offered[1].0, vec![second.revision_id]);
+    assert!(
+        offered
+            .iter()
+            .all(|(_, targets)| targets.contains(&context.revision_id))
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn reconciliation_rejects_a_context_only_revision_selected_by_the_worker() {
+    let fixture = Fixture::open("reconciliation-context-only-selection").await;
+    let challenged = fixture
+        .client
+        .write_page(fixture.page("Challenged statement.", "feedback-invalid:challenged"))
+        .await
+        .expect("write challenged Page");
+    let context = fixture
+        .client
+        .write_page(fixture.page("Context-only statement.", "feedback-invalid:context"))
+        .await
+        .expect("write context-only Page");
+    fixture
+        .client
+        .submit_feedback(SubmitFeedbackRequest {
+            namespace: fixture.namespace.clone(),
+            kind: FeedbackKind::Challenge,
+            authority: FeedbackAuthority::TenantAssertion,
+            payload: PagePayload {
+                media_type: "text/plain".to_owned(),
+                content: "This feedback challenges only one exact Revision.".to_owned(),
+            },
+            observed_at: None,
+            source_refs: Vec::new(),
+            challenged_revision_ids: vec![challenged.revision_id],
+            used_revision_ids: vec![context.revision_id.clone()],
+            response_ref: None,
+            external_event_id: Some("feedback:invalid-target:1".to_owned()),
+        })
+        .await
+        .expect("submit explicit feedback");
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::ReconcileFeedback {
+            target_revision_id: context.revision_id,
+            disposition: ReconciliationDisposition::Disputed,
+            rationale: "Invalid model selection.".to_owned(),
+            scope: None,
+            replacement_revision_id: None,
+        },
+    ]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = false;
+    config.retention.enabled = false;
+    let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+
+    let error = maintainer
+        .run_once()
+        .await
+        .expect_err("context-only selection must fail");
+
+    assert!(format!("{error:#}").contains("context-only, not challenged"));
+    assert_eq!(
+        fixture
+            .client
+            .pending_feedback(vec![fixture.namespace.clone()], 10)
+            .await
+            .expect("read pending feedback")
+            .len(),
+        1
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn high_impact_reconciliation_waits_for_review_and_applies_atomically_on_approval() {
+    let fixture = Fixture::open("reconciliation-reviewed-retraction").await;
+    let challenged = fixture
+        .client
+        .write_page(fixture.page(
+            "A statement the subject explicitly withdrew.",
+            "feedback-review:target",
+        ))
+        .await
+        .expect("write challenged Page");
+    fixture
+        .client
+        .submit_feedback(SubmitFeedbackRequest {
+            namespace: fixture.namespace.clone(),
+            kind: FeedbackKind::Correction,
+            authority: FeedbackAuthority::SubjectOwner,
+            payload: PagePayload {
+                media_type: "text/plain".to_owned(),
+                content: "I withdraw the recalled statement.".to_owned(),
+            },
+            observed_at: None,
+            source_refs: Vec::new(),
+            challenged_revision_ids: vec![challenged.revision_id.clone()],
+            used_revision_ids: Vec::new(),
+            response_ref: Some("tenant:response:withdrawal".to_owned()),
+            external_event_id: Some("feedback:reviewed-retraction:1".to_owned()),
+        })
+        .await
+        .expect("submit explicit feedback");
+    let proposed = MaintenanceWorkerResponse::ReconcileFeedback {
+        target_revision_id: challenged.revision_id.clone(),
+        disposition: ReconciliationDisposition::Retracted,
+        rationale: "The subject explicitly withdrew the exact recalled Revision.".to_owned(),
+        scope: None,
+        replacement_revision_id: None,
+    };
+    let worker = Arc::new(FakeWorker::new(vec![proposed.clone(), proposed]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = false;
+    config.retention.enabled = false;
+    config.reconciliation.retry_after_seconds = 0;
+    let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+
+    let report = maintainer
+        .run_once()
+        .await
+        .expect("propose reviewed retraction");
+
+    assert_eq!(report.reconciliations_committed, 0);
+    assert_eq!(report.reconciliations_proposed, 1);
+    let reviews = maintainer.pending_reviews();
+    assert_eq!(reviews.len(), 1);
+    assert!(matches!(
+        reviews[0].payload,
+        MaintenanceReviewPayload::Reconciliation(_)
+    ));
+    maintainer
+        .resolve_review(
+            &reviews[0].candidate_id,
+            super::MaintenanceReviewStatus::Rejected,
+        )
+        .await
+        .expect("reject the first model proposal");
+    assert!(maintainer.pending_reviews().is_empty());
+    let retry = maintainer
+        .run_once()
+        .await
+        .expect("re-run rejected reconciliation proposal");
+    assert_eq!(retry.reconciliations_proposed, 1);
+    let reviews = maintainer.pending_reviews();
+    assert_eq!(reviews.len(), 1);
+    let result = maintainer
+        .approve_reconciliation_review(&reviews[0].candidate_id)
+        .await
+        .expect("approve reviewed retraction");
+    assert_eq!(result.disposition, ReconciliationDisposition::Retracted);
+    assert!(
+        fixture
+            .client
+            .pending_feedback(vec![fixture.namespace.clone()], 10)
+            .await
+            .expect("read pending feedback")
+            .is_empty()
+    );
+    let read = fixture
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: Vec::new(),
+            revision_ids: vec![challenged.revision_id],
+            projections: vec![Projection::Manifest, Projection::Validity],
+            max_chars: 0,
+        })
+        .await
+        .expect("read retracted validity");
+    assert_eq!(
+        read[0].validity.as_ref().map(|validity| &validity.standing),
+        Some(&ValidityStanding::Retracted)
+    );
+    fixture.close().await;
 }
 
 #[tokio::test]
@@ -3356,6 +3637,7 @@ async fn convergence_enqueues_a_typed_topic_review_after_relation_quiesces() {
             title: "PCP maintenance convergence".to_owned(),
             content: "PCP maintenance advances one bounded job at a time. Safe structural updates can apply automatically, while uncertain semantic decisions persist in a shared typed inbox for explicit operator review before they affect retrieval.".to_owned(),
             reason: "The two Pages define the shared controller and its review boundary.".to_owned(),
+            refresh_topic_page_id: None,
         },
     ]));
     let mut config = fixture.config();
@@ -3617,6 +3899,7 @@ impl Fixture {
             summary: SummaryMaintenanceConfig::default(),
             packing: PackingMaintenanceConfig::default(),
             relation: RelationMaintenanceConfig::default(),
+            reconciliation: ReconciliationMaintenanceConfig::default(),
             retention: RetentionMaintenanceConfig::default(),
         }
     }

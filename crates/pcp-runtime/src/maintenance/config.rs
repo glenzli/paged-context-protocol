@@ -52,6 +52,8 @@ pub struct MaintenanceConfig {
     #[serde(default)]
     pub relation: RelationMaintenanceConfig,
     #[serde(default)]
+    pub reconciliation: ReconciliationMaintenanceConfig,
+    #[serde(default)]
     pub retention: RetentionMaintenanceConfig,
 }
 
@@ -177,6 +179,7 @@ impl MaintenanceWorkerConfig {
                     "select_relation",
                     "extract_topic",
                     "assess_archive",
+                    "reconcile_feedback",
                 ];
                 anyhow::ensure!(
                     escalation_operations.iter().all(|operation| {
@@ -216,6 +219,24 @@ pub struct SummaryMaintenanceConfig {
     pub excluded_page_kinds: Vec<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReconciliationMaintenanceConfig {
+    pub enabled: bool,
+    pub max_input_chars: u32,
+    pub retry_after_seconds: u64,
+}
+
+impl Default for ReconciliationMaintenanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_input_chars: 32_000,
+            retry_after_seconds: 3_600,
+        }
+    }
+}
+
 /// A low-cost inventory heartbeat may discover writes, but semantic work begins
 /// only after a source region has accumulated and then gone quiet.
 #[derive(Clone, Debug, Deserialize)]
@@ -247,6 +268,7 @@ impl Default for SummaryMaintenanceConfig {
                 "pcp_summary".to_owned(),
                 "summary_projection".to_owned(),
                 "validity_assessment".to_owned(),
+                "feedback_signal".to_owned(),
                 "topic_summary".to_owned(),
                 "tombstone".to_owned(),
             ],
@@ -306,6 +328,7 @@ impl Default for RetentionMaintenanceConfig {
                 "pcp_summary".to_owned(),
                 "summary_projection".to_owned(),
                 "validity_assessment".to_owned(),
+                "feedback_signal".to_owned(),
                 "conversation_event".to_owned(),
                 "tombstone".to_owned(),
             ],
@@ -325,6 +348,7 @@ impl Default for PackingMaintenanceConfig {
                 "pcp_summary".to_owned(),
                 "summary_projection".to_owned(),
                 "validity_assessment".to_owned(),
+                "feedback_signal".to_owned(),
                 "topic_summary".to_owned(),
                 "tombstone".to_owned(),
             ],
@@ -349,6 +373,7 @@ impl Default for RelationMaintenanceConfig {
                 "pcp_summary".to_owned(),
                 "summary_projection".to_owned(),
                 "validity_assessment".to_owned(),
+                "feedback_signal".to_owned(),
                 "topic_summary".to_owned(),
                 "tombstone".to_owned(),
             ],
@@ -431,6 +456,14 @@ impl MaintenanceConfig {
         anyhow::ensure!(
             !self.relation.enabled || self.relation.retry_after_seconds > 0,
             "PCP relation retry_after_seconds must be positive"
+        );
+        anyhow::ensure!(
+            !self.reconciliation.enabled || self.reconciliation.max_input_chars > 0,
+            "PCP reconciliation max_input_chars must be positive"
+        );
+        anyhow::ensure!(
+            !self.reconciliation.enabled || self.reconciliation.retry_after_seconds > 0,
+            "PCP reconciliation retry_after_seconds must be positive"
         );
         anyhow::ensure!(
             !self.retention.enabled || self.retention.candidate_window > 0,
@@ -584,6 +617,7 @@ fn default_infer_escalation_operations() -> Vec<String> {
         "select_relation",
         "extract_topic",
         "assess_archive",
+        "reconcile_feedback",
     ]
     .into_iter()
     .map(str::to_owned)

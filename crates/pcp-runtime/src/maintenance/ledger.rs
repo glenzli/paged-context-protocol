@@ -505,6 +505,18 @@ impl MaintenanceLedger {
         escalated: bool,
     ) -> String {
         let candidate_id = payload.candidate_id().to_owned();
+        let retry_reconciliation = matches!(payload, MaintenanceReviewPayload::Reconciliation(_))
+            && self
+                .review_items
+                .get(&candidate_id)
+                .is_some_and(|item| item.status != MaintenanceReviewStatus::Pending);
+        if retry_reconciliation {
+            self.review_items.insert(
+                candidate_id.clone(),
+                MaintenanceReviewItem::pending(payload, origin, reason, model_attempts, escalated),
+            );
+            return candidate_id;
+        }
         self.review_items
             .entry(candidate_id.clone())
             .or_insert_with(|| {
@@ -971,7 +983,8 @@ mod tests {
     use super::*;
     use crate::maintenance::{
         MaintenanceMode, MaintenanceWorkerConfig, PackingMaintenanceConfig,
-        RelationMaintenanceConfig, RetentionMaintenanceConfig, SummaryMaintenanceConfig,
+        ReconciliationMaintenanceConfig, RelationMaintenanceConfig, RetentionMaintenanceConfig,
+        SummaryMaintenanceConfig,
     };
 
     fn scheduler_config() -> MaintenanceConfig {
@@ -1001,6 +1014,7 @@ mod tests {
             summary: SummaryMaintenanceConfig::default(),
             packing: PackingMaintenanceConfig::default(),
             relation: RelationMaintenanceConfig::default(),
+            reconciliation: ReconciliationMaintenanceConfig::default(),
             retention: RetentionMaintenanceConfig::default(),
         }
     }
@@ -1028,6 +1042,8 @@ mod tests {
             summary: None,
             relation_types: Vec::new(),
             provenance_input_revision_ids: Vec::new(),
+            topic_source_page_ids: Vec::new(),
+            superseded: false,
             packing_protected: false,
         }
     }

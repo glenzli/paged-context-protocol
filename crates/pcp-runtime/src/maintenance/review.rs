@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    MaintenanceArchiveCandidate, MaintenancePackCandidate, MaintenanceRelationCandidate,
-    MaintenanceRelationReviewProposal, MaintenanceSummaryCandidate, MaintenanceTopicCandidate,
+    MaintenanceArchiveCandidate, MaintenancePackCandidate, MaintenanceReconciliationCandidate,
+    MaintenanceRelationCandidate, MaintenanceRelationReviewProposal, MaintenanceSummaryCandidate,
+    MaintenanceTopicCandidate,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -31,6 +32,7 @@ pub enum MaintenanceReviewPayload {
     Relation(MaintenanceRelationCandidate),
     Topic(MaintenanceTopicCandidate),
     Archive(MaintenanceArchiveCandidate),
+    Reconciliation(MaintenanceReconciliationCandidate),
 }
 
 impl MaintenanceReviewPayload {
@@ -41,6 +43,7 @@ impl MaintenanceReviewPayload {
             Self::Relation(candidate) => &candidate.candidate_id,
             Self::Topic(candidate) => &candidate.candidate_id,
             Self::Archive(candidate) => &candidate.candidate_id,
+            Self::Reconciliation(candidate) => &candidate.candidate_id,
         }
     }
 }

@@ -5,11 +5,11 @@ use pcp_client::PcpApi;
 use pcp_core::{
     AccessAuditEvent, AccessPermission, AccessSession, Actor, ActorType, AssessPageValidityRequest,
     BrowseIndexOrder, Capabilities, CreateScopeRequest, ExpandGraphRequest, ExtractTopicRequest,
-    IngestPageRequest, IntentEffort, LifecycleStatus, LinkPagesRequest, PageMutability,
-    PagePayload, PageRevisionRef, Projection, ProvenanceEvent, QueryContextRequest, ReadPage,
-    ReadPagesRequest, Relation, RevisePageRequest, Scope, SearchFilters, SearchMode,
-    SearchPagesRequest, SearchResult, SearchTermMatch, SourceRef, SourceSpan, ValidityStanding,
-    WritePageRequest, WriteSummaryRequest,
+    FeedbackAuthority, FeedbackKind, IngestPageRequest, IntentEffort, LifecycleStatus,
+    LinkPagesRequest, PageMutability, PagePayload, PageRevisionRef, Projection, ProvenanceEvent,
+    QueryContextRequest, ReadPage, ReadPagesRequest, Relation, RevisePageRequest, Scope,
+    SearchFilters, SearchMode, SearchPagesRequest, SearchResult, SearchTermMatch, SourceRef,
+    SourceSpan, SubmitFeedbackRequest, ValidityStanding, WritePageRequest, WriteSummaryRequest,
 };
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -20,7 +20,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Serialize;
 
-const SERVER_INSTRUCTIONS: &str = "PCP is an identity-scoped durable graph of stable Pages with immutable Revisions. Call pcp_whoami before cross-Scope work. Prefer pcp_semantic_search for conservative semantic retrieval; use pcp_match_intent only when a Router review is justified, and pcp_search_pages only for deterministic inspection. Use pageId for stable identity and Relations; use revisionId for exact evidence and provenance. pcp_expand_graph returns only a bounded, anchored ACL-filtered slice, never the entire graph. Ordinary producers should use pcp_ingest_page; maintained interpretations use the advanced write and revise tools.";
+const SERVER_INSTRUCTIONS: &str = "PCP is an identity-scoped durable graph of stable Pages with immutable Revisions. Call pcp_whoami before cross-Scope work. Prefer pcp_semantic_search for conservative semantic retrieval; use pcp_match_intent only when a Router review is justified, and pcp_search_pages only for deterministic inspection. Use pageId for stable identity and Relations; use revisionId for exact evidence and provenance. pcp_expand_graph returns only a bounded, anchored ACL-filtered slice, never the entire graph. Ordinary producers should use pcp_ingest_page. When a user explicitly challenges recalled evidence, call pcp_submit_feedback with exact challenged and actually-used revision IDs; do not silently rewrite or delete the recalled Page. Maintained interpretations use the advanced write and revise tools.";
 
 #[derive(Clone)]
 pub struct PcpMcpServer {
@@ -195,6 +195,28 @@ pub struct IngestPageParams {
 
 #[derive(Debug, JsonSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SubmitFeedbackParams {
+    #[serde(default)]
+    scope: Option<String>,
+    kind: FeedbackKind,
+    #[serde(default = "default_feedback_authority")]
+    authority: FeedbackAuthority,
+    content: String,
+    challenged_revision_ids: Vec<String>,
+    #[serde(default)]
+    used_revision_ids: Vec<String>,
+    #[serde(default)]
+    response_ref: Option<String>,
+    #[serde(default)]
+    observed_at: Option<String>,
+    #[serde(default)]
+    source_refs: Vec<SourceRef>,
+    #[serde(default)]
+    external_event_id: Option<String>,
+}
+
+#[derive(Debug, JsonSchema, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WriteSummaryParams {
     target_page_id: String,
     target_revision_id: String,
@@ -206,6 +228,10 @@ pub struct WriteSummaryParams {
 #[derive(Debug, JsonSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractTopicParams {
+    /// Existing Topic head to refresh when the selected sources continue the
+    /// same stable subject.
+    #[serde(default)]
+    target_topic: Option<PageRevisionRef>,
     /// Ordered exact current source Page/revision pairs from one Scope.
     source_pages: Vec<PageRevisionRef>,
     title: String,
@@ -263,6 +289,16 @@ pub struct PageWriteResult {
     page_id: String,
     revision_id: String,
     created: bool,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackWriteResult {
+    feedback_page_id: String,
+    feedback_revision_id: String,
+    created: bool,
+    challenged_revision_ids: Vec<String>,
+    used_revision_ids: Vec<String>,
 }
 
 #[derive(Debug, JsonSchema, Serialize)]
@@ -405,6 +441,54 @@ impl PcpMcpServer {
             page_id: written.page_id,
             revision_id: written.revision_id,
             created: written.created,
+        }))
+    }
+
+    #[tool(
+        name = "pcp_submit_feedback",
+        description = "Record an explicit user or tenant challenge against exact recalled Revisions. challengedRevisionIds names the disputed evidence; usedRevisionIds records the full exact context actually used by the tenant response. PCP stores the feedback for reconciliation but does not dereference responseRef or tenant-owned sources.",
+        annotations(
+            title = "Submit PCP Feedback",
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    pub async fn pcp_submit_feedback(
+        &self,
+        Parameters(params): Parameters<SubmitFeedbackParams>,
+    ) -> Result<Json<FeedbackWriteResult>, McpError> {
+        let namespace = operation_scope(
+            self.client.as_ref(),
+            params.scope.as_deref(),
+            AccessPermission::Ingest,
+            "feedback submission",
+        )?;
+        let written = self
+            .client
+            .submit_feedback(SubmitFeedbackRequest {
+                namespace,
+                kind: params.kind,
+                authority: params.authority,
+                payload: PagePayload {
+                    media_type: "text/markdown".to_owned(),
+                    content: params.content,
+                },
+                observed_at: params.observed_at,
+                source_refs: params.source_refs,
+                challenged_revision_ids: params.challenged_revision_ids,
+                used_revision_ids: params.used_revision_ids,
+                response_ref: params.response_ref,
+                external_event_id: params.external_event_id,
+            })
+            .await
+            .map_err(|error| operation_error("submit PCP feedback", error))?;
+        Ok(Json(FeedbackWriteResult {
+            feedback_page_id: written.feedback_page_id,
+            feedback_revision_id: written.feedback_revision_id,
+            created: written.created,
+            challenged_revision_ids: written.challenged_revision_ids,
+            used_revision_ids: written.used_revision_ids,
         }))
     }
 
@@ -914,6 +998,7 @@ impl PcpMcpServer {
         let written = self
             .client
             .extract_topic(ExtractTopicRequest {
+                target_topic: params.target_topic,
                 source_pages: params.source_pages,
                 title: params.title,
                 content: params.content,
@@ -1062,6 +1147,10 @@ fn default_page_kind() -> String {
     "document".to_owned()
 }
 
+fn default_feedback_authority() -> FeedbackAuthority {
+    FeedbackAuthority::Unknown
+}
+
 fn parse_search_strategy(value: &str) -> Result<SearchMode, McpError> {
     match value {
         "auto" => Ok(SearchMode::Auto),
@@ -1177,13 +1266,17 @@ mod tests {
     use std::{sync::Arc, time::SystemTime};
 
     use pcp_client::{AccessMode, EmbeddedPcpClient, PcpApi};
-    use pcp_core::{AccessPrincipal, AccessPrincipalType, AccessSession, CreateScopeRequest};
+    use pcp_core::{
+        AccessPrincipal, AccessPrincipalType, AccessSession, CreateScopeRequest, FeedbackAuthority,
+        FeedbackKind,
+    };
     use pcp_sqlite::SqlitePcpStore;
     use pcp_store::PcpStore;
     use rmcp::{ServiceExt, handler::server::wrapper::Parameters, model::CallToolRequestParams};
 
     use super::{
-        AccessLogParams, IngestPageParams, PcpMcpServer, SearchPagesParams, WritePageParams,
+        AccessLogParams, IngestPageParams, PcpMcpServer, SearchPagesParams, SubmitFeedbackParams,
+        WritePageParams,
     };
 
     #[tokio::test]
@@ -1290,7 +1383,7 @@ mod tests {
             .expect("create authorized scope");
 
         let tenant = PcpMcpServer::new(contribute_client(store, vec![namespace.clone()]));
-        tenant
+        let ingested = tenant
             .pcp_ingest_page(Parameters(IngestPageParams {
                 scope: Some(namespace.clone()),
                 kind: "conversation_event".to_owned(),
@@ -1302,7 +1395,25 @@ mod tests {
                 external_event_id: Some("mcp:contribute:test".to_owned()),
             }))
             .await
-            .expect("ingest with contribute permission");
+            .expect("ingest with contribute permission")
+            .0;
+        let feedback = tenant
+            .pcp_submit_feedback(Parameters(SubmitFeedbackParams {
+                scope: Some(namespace.clone()),
+                kind: FeedbackKind::Challenge,
+                authority: FeedbackAuthority::TenantAssertion,
+                content: "The user explicitly challenged the recalled event.".to_owned(),
+                challenged_revision_ids: vec![ingested.revision_id.clone()],
+                used_revision_ids: vec![ingested.revision_id],
+                response_ref: Some("tenant:response:mcp-test".to_owned()),
+                observed_at: None,
+                source_refs: Vec::new(),
+                external_event_id: Some("mcp:feedback:test".to_owned()),
+            }))
+            .await
+            .expect("submit feedback with contribute permission")
+            .0;
+        assert!(feedback.created);
         assert!(
             tenant
                 .pcp_write_page(Parameters(WritePageParams {
@@ -1349,6 +1460,7 @@ mod tests {
         assert!(tools.iter().any(|tool| tool.name == "pcp_search_pages"));
         assert!(tools.iter().any(|tool| tool.name == "pcp_whoami"));
         assert!(tools.iter().any(|tool| tool.name == "pcp_access_log"));
+        assert!(tools.iter().any(|tool| tool.name == "pcp_submit_feedback"));
         assert!(tools.iter().any(|tool| {
             tool.name == "pcp_write_page"
                 && tool

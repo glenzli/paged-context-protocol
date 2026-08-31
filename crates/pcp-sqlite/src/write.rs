@@ -664,7 +664,7 @@ pub(crate) fn insert_page_relation(
     )
 }
 
-fn insert_revision_relation_with_basis(
+pub(crate) fn insert_revision_relation_with_basis(
     transaction: &Transaction<'_>,
     from_revision_id: &str,
     relation_type: &str,

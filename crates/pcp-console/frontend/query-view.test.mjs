@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildQueryRequest, querySubmitLabel } from "../src/query_view.js";
+import { buildQueryRequest, contextValidityLabel, querySubmitLabel } from "../src/query_view.js";
 
 test("semantic retrieval omits Router-only effort instead of serializing null", () => {
   assert.deepEqual(
@@ -38,4 +38,10 @@ test("query submit keeps its result meaning while exposing explicit busy labels"
   assert.equal(querySubmitLabel("semantic_search", false), "Build context pack");
   assert.equal(querySubmitLabel("semantic_search", true), "Searching context…");
   assert.equal(querySubmitLabel("match_intent", true), "Matching intent…");
+});
+
+test("context validity standings use explicit review labels", () => {
+  assert.equal(contextValidityLabel("qualified"), "Qualified");
+  assert.equal(contextValidityLabel("disputed"), "Disputed");
+  assert.equal(contextValidityLabel("custom"), "custom");
 });

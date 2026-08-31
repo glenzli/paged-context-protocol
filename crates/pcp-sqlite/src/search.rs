@@ -233,6 +233,19 @@ fn browse_index_once(
                      SELECT 1 FROM pcp_relation_retractions retraction
                      WHERE retraction.relation_id = newer.relation_id
                  )
+           )
+           AND NOT EXISTS (
+               SELECT 1
+               FROM pcp_validity_heads validity_head
+               JOIN pcp_pages validity_page
+                 ON validity_page.page_id = validity_head.assessment_page_id
+               JOIN pcp_validity_assessments validity_assessment
+                 ON validity_assessment.assessment_revision_id = validity_page.current_revision_id
+               JOIN pcp_revisions validity_revision
+                 ON validity_revision.revision_id = validity_assessment.assessment_revision_id
+               WHERE validity_head.target_page_id = p.page_id
+                 AND validity_assessment.target_revision_id = r.revision_id
+                 AND json_extract(validity_revision.facets_json, '$.standing') = 'retracted'
            )",
     );
     if !excluded_page_kinds.is_empty() {
@@ -1260,6 +1273,19 @@ fn append_effective_page_filter(sql: &mut String) {
                   SELECT 1 FROM pcp_relation_retractions retraction
                   WHERE retraction.relation_id = newer.relation_id
               )
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM pcp_validity_heads validity_head
+            JOIN pcp_pages validity_page
+              ON validity_page.page_id = validity_head.assessment_page_id
+            JOIN pcp_validity_assessments validity_assessment
+              ON validity_assessment.assessment_revision_id = validity_page.current_revision_id
+            JOIN pcp_revisions validity_revision
+              ON validity_revision.revision_id = validity_assessment.assessment_revision_id
+            WHERE validity_head.target_page_id = p.page_id
+              AND validity_assessment.target_revision_id = r.revision_id
+              AND json_extract(validity_revision.facets_json, '$.standing') = 'retracted'
         )",
     );
 }

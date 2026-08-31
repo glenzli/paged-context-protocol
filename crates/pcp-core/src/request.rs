@@ -263,6 +263,11 @@ pub struct WriteSummaryRequest {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractTopicRequest {
+    /// Existing current Topic head to refresh. Omit only when creating a new
+    /// stable subject. The Store rejects an exact logical-source duplicate
+    /// when this target is missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_topic: Option<PageRevisionRef>,
     /// Ordered exact source Revisions. They must be current, active Pages in
     /// one Scope at the time the extraction is committed.
     pub source_pages: Vec<PageRevisionRef>,

@@ -438,6 +438,16 @@ async fn dispatch(
         RpcOperation::AssessPageValidity(request) => {
             RpcValue::ValidityResult(client.assess_page_validity(request).await?)
         }
+        RpcOperation::SubmitFeedback(request) => {
+            RpcValue::FeedbackSubmission(client.submit_feedback(request).await?)
+        }
+        RpcOperation::PendingFeedback {
+            requested_scopes,
+            limit,
+        } => RpcValue::FeedbackSignals(client.pending_feedback(requested_scopes, limit).await?),
+        RpcOperation::ApplyReconciliation(request) => {
+            RpcValue::ReconciliationResult(client.apply_reconciliation(request).await?)
+        }
         RpcOperation::TombstoneDerivationCascade {
             root_revision_id,
             actor,

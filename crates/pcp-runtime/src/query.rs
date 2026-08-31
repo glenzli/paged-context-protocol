@@ -698,6 +698,7 @@ fn pack_entry(
         content,
         source_span,
         provenance_revision_ids,
+        validity: hit.validity.clone(),
     }
 }
 

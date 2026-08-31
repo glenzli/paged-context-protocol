@@ -4,14 +4,15 @@ use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessDecision, AccessPermission, AccessPrincipalType, AccessSession, Actor,
-    ActorType, ArchivePageRequest, AssessPageValidityRequest, Capabilities,
-    CollectRevisionRetentionRequest, CreateScopeRequest, ExtractTopicRequest, IngestPageRequest,
-    LifecycleStatus, LinkPagesRequest, OperationTelemetry, PackPagesRequest,
-    PageLifecycleTransitionResult, PageMutability, PlanRevisionRetentionRequest, Projection,
-    ProvenanceEvent, PutRevisionRetentionLeaseRequest, QueryAuditEvent, ReadPage, ReadPagesRequest,
-    Relation, RepairPageRequest, RestoreArchivedPageRequest, RevisePageRequest,
-    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, RuntimeUsageEvent,
-    Scope, SearchPagesRequest, SearchResult, UnpackPageRequest, WritePageRequest, WriteResult,
+    ActorType, ApplyReconciliationRequest, ArchivePageRequest, AssessPageValidityRequest,
+    Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest, ExtractTopicRequest,
+    FeedbackSignal, FeedbackSubmission, IngestPageRequest, LifecycleStatus, LinkPagesRequest,
+    OperationTelemetry, PackPagesRequest, PageLifecycleTransitionResult, PageMutability,
+    PlanRevisionRetentionRequest, Projection, ProvenanceEvent, PutRevisionRetentionLeaseRequest,
+    QueryAuditEvent, ReadPage, ReadPagesRequest, ReconciliationResult, Relation, RepairPageRequest,
+    RestoreArchivedPageRequest, RevisePageRequest, RevisionCollectionResult,
+    RevisionRetentionLease, RevisionRetentionPlan, RuntimeUsageEvent, Scope, SearchPagesRequest,
+    SearchResult, SubmitFeedbackRequest, UnpackPageRequest, WritePageRequest, WriteResult,
     WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::{
@@ -840,6 +841,62 @@ impl PcpStore for SqlitePcpStore {
         .await
     }
 
+    async fn submit_feedback(
+        &self,
+        access: &AccessSession,
+        request: SubmitFeedbackRequest,
+    ) -> Result<FeedbackSubmission> {
+        let observation = OperationObservation::start().with_input_count(
+            request.challenged_revision_ids.len() + request.used_revision_ids.len(),
+        );
+        let target_scope = request.namespace.clone();
+        let mut revision_ids = request.challenged_revision_ids.clone();
+        revision_ids.extend(request.used_revision_ids.iter().cloned());
+        revision_ids.sort();
+        revision_ids.dedup();
+        let mut scopes = vec![target_scope.clone()];
+        let authorization = async {
+            authorize_exact(access, &target_scope, AccessPermission::Ingest)?;
+            let revision_scopes =
+                authorize_revision_inputs(self, access, &target_scope, revision_ids).await?;
+            extend_unique(&mut scopes, revision_scopes);
+            Ok(())
+        }
+        .await;
+        if let Err(error) = authorization {
+            return complete(
+                self,
+                access,
+                "submit_feedback",
+                scopes,
+                Err(error),
+                true,
+                observation,
+            )
+            .await;
+        }
+        let actor = Actor {
+            actor_type: match access.principal.principal_type {
+                AccessPrincipalType::ModelClient => ActorType::Model,
+                AccessPrincipalType::Host
+                | AccessPrincipalType::Cli
+                | AccessPrincipalType::Service => ActorType::Tool,
+            },
+            actor_id: access.principal.principal_id.clone(),
+        };
+        let result = SqlitePcpStore::submit_feedback(self, request, actor, scopes.clone()).await;
+        complete(
+            self,
+            access,
+            "submit_feedback",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
+    }
+
     async fn write_page(
         &self,
         access: &AccessSession,
@@ -1574,6 +1631,111 @@ impl PcpStore for SqlitePcpStore {
             self,
             access,
             "assess_validity",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
+    }
+
+    async fn pending_feedback(
+        &self,
+        access: &AccessSession,
+        requested_scopes: Vec<String>,
+        limit: u32,
+    ) -> Result<Vec<FeedbackSignal>> {
+        let observation = OperationObservation::start();
+        let scopes = match authorize_scopes(
+            access,
+            &[AccessPermission::Assess, AccessPermission::ReadDetail],
+            &requested_scopes,
+        ) {
+            Ok(scopes) => scopes,
+            Err(error) => {
+                return complete(
+                    self,
+                    access,
+                    "pending_feedback",
+                    requested_scopes,
+                    Err(error),
+                    true,
+                    observation,
+                )
+                .await;
+            }
+        };
+        let result = SqlitePcpStore::pending_feedback(self, scopes.clone(), limit).await;
+        complete(
+            self,
+            access,
+            "pending_feedback",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
+    }
+
+    async fn apply_reconciliation(
+        &self,
+        access: &AccessSession,
+        request: ApplyReconciliationRequest,
+    ) -> Result<ReconciliationResult> {
+        let observation = OperationObservation::start().with_input_count(
+            2 + request.basis_revision_ids.len() + usize::from(request.replacement.is_some()),
+        );
+        let mut revision_ids = vec![
+            request.feedback_revision_id.clone(),
+            request.target.revision_id.clone(),
+        ];
+        revision_ids.extend(request.basis_revision_ids.iter().cloned());
+        if let Some(replacement) = request.replacement.as_ref() {
+            revision_ids.push(replacement.revision_id.clone());
+        }
+        revision_ids.sort();
+        revision_ids.dedup();
+        let scopes = match self.revision_namespaces(revision_ids).await {
+            Ok(scopes) => scopes,
+            Err(error) => {
+                return complete(
+                    self,
+                    access,
+                    "apply_reconciliation",
+                    Vec::new(),
+                    Err(error),
+                    false,
+                    observation,
+                )
+                .await;
+            }
+        };
+        let authorization = scopes.iter().try_for_each(|scope| {
+            authorize_exact(access, scope, AccessPermission::Assess)?;
+            authorize_exact(access, scope, AccessPermission::ReadDetail)?;
+            if request.replacement.is_some() {
+                authorize_exact(access, scope, AccessPermission::Link)?;
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+        if let Err(error) = authorization {
+            return complete(
+                self,
+                access,
+                "apply_reconciliation",
+                scopes,
+                Err(error),
+                true,
+                observation,
+            )
+            .await;
+        }
+        let result = SqlitePcpStore::apply_reconciliation(self, request, scopes.clone()).await;
+        complete(
+            self,
+            access,
+            "apply_reconciliation",
             scopes,
             result,
             false,

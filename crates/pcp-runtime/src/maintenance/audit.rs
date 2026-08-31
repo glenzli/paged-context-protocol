@@ -263,6 +263,7 @@ fn operation_name(request: &MaintenanceWorkerRequest) -> &'static str {
         MaintenanceWorkerRequest::AssessArchive { .. } => "assess_archive",
         MaintenanceWorkerRequest::SelectRelation { .. } => "select_relation",
         MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => "select_retention_milestones",
+        MaintenanceWorkerRequest::ReconcileFeedback { .. } => "reconcile_feedback",
     }
 }
 
@@ -276,6 +277,7 @@ fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
         MaintenanceWorkerResponse::ExtractTopic { .. } => "extract_topic",
         MaintenanceWorkerResponse::ArchiveReview { .. } => "archive_review",
         MaintenanceWorkerResponse::Retain { .. } => "retain",
+        MaintenanceWorkerResponse::ReconcileFeedback { .. } => "reconcile_feedback",
         MaintenanceWorkerResponse::NoCandidate => "no_candidate",
         MaintenanceWorkerResponse::Defer => "defer",
     }

@@ -428,6 +428,7 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 .maintenance-review-kind svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 .maintenance-review-kind-archive { background: var(--warning-soft); color: var(--warning); }
 .maintenance-review-kind-topic { background: color-mix(in srgb, var(--positive-soft) 84%, var(--surface)); color: var(--positive); }
+.maintenance-review-kind-reconciliation { background: color-mix(in srgb, var(--accent-soft) 74%, var(--surface)); color: var(--accent); }
 .maintenance-review-content { display: grid; gap: 9px; margin-top: 10px; }
 .maintenance-review-title { font-size: 15px; letter-spacing: -.01em; }
 .maintenance-review-preview, .maintenance-review-evidence, .maintenance-review-source { margin: 0; line-height: 1.55; overflow-wrap: anywhere; }
@@ -436,6 +437,14 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 .maintenance-review-source-list { display: grid; gap: 1px; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--line); }
 .maintenance-review-source { padding: 9px 11px; background: var(--surface); font-size: 13px; }
 .maintenance-review-signals { display: flex; flex-wrap: wrap; gap: 5px; }
+.maintenance-reconciliation-decision { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.maintenance-reconciliation-decision.disposition-superseded, .maintenance-reconciliation-decision.disposition-retracted { border-color: color-mix(in srgb, var(--warning) 40%, var(--line)); background: var(--warning-soft); }
+.maintenance-reconciliation-panel { display: grid; width: 100%; gap: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); text-align: left; }
+.maintenance-reconciliation-target { appearance: none; color: inherit; cursor: pointer; font: inherit; }
+.maintenance-reconciliation-target:hover { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); background: var(--accent-soft); }
+.maintenance-reconciliation-target:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.maintenance-reconciliation-panel .maintenance-review-preview { padding: 0; background: transparent; }
+.maintenance-reconciliation-label { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .02em; }
 .maintenance-review-reject { color: var(--warning); }
 .maintenance-archive-library > summary::before { content: ""; width: 6px; height: 6px; margin-bottom: 2px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; color: var(--muted); transform: rotate(-45deg); transition: transform .16s ease; }
 .maintenance-archive-library[open] > summary::before { transform: rotate(45deg); }
@@ -739,6 +748,8 @@ input:focus, select:focus { border-color: var(--accent); }
 .context-pack-reference-button { display: grid; width: 28px; min-width: 28px; min-height: 28px; place-items: center; padding: 0; font-size: 16px; line-height: 1; }
 .context-pack-entry-reason, .context-pack-entry-reference { margin-top: 8px; color: var(--muted); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
 .context-pack-entry-content { max-height: 300px; margin: 11px 0 0; overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: var(--card-radius); background: var(--surface-subtle); color: var(--text); font: 12px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.context-pack-entry-validity { display: grid; gap: 3px; margin-top: 10px; padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--line)); border-radius: 10px; background: var(--warning-soft); color: var(--text); font-size: 11px; line-height: 1.45; }
+.context-pack-entry-validity.standing-qualified { border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); background: var(--accent-soft); }
 .context-pack-entry-evidence { margin-top: 8px; color: var(--muted); font-size: 11px; }
 .context-pack-entry-evidence summary { cursor: pointer; user-select: none; }
 .context-pack-entry-evidence[open] summary { color: var(--text); }

@@ -185,6 +185,60 @@ pub(crate) fn migrate_clean_content_governance(
     Ok(())
 }
 
+pub(crate) fn migrate_clean_feedback_reconciliation(
+    connection: &mut Connection,
+    target_version: &str,
+) -> Result<()> {
+    let transaction = connection
+        .transaction()
+        .context("start PCP feedback reconciliation schema migration")?;
+    transaction
+        .execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS pcp_feedback_signals (
+                feedback_revision_id TEXT PRIMARY KEY REFERENCES pcp_revisions(revision_id),
+                feedback_page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
+                namespace TEXT NOT NULL REFERENCES pcp_scopes(namespace),
+                feedback_kind TEXT NOT NULL,
+                authority TEXT NOT NULL,
+                response_ref TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS pcp_feedback_targets (
+                feedback_revision_id TEXT NOT NULL
+                    REFERENCES pcp_feedback_signals(feedback_revision_id),
+                target_revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+                target_page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
+                target_role TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                disposition TEXT,
+                resolution_json TEXT,
+                resolved_at TEXT,
+                PRIMARY KEY (feedback_revision_id, target_role, target_revision_id),
+                UNIQUE (feedback_revision_id, target_role, position)
+            );
+            CREATE INDEX IF NOT EXISTS pcp_feedback_signals_pending
+                ON pcp_feedback_signals(status, created_at);
+            CREATE INDEX IF NOT EXISTS pcp_feedback_targets_target
+                ON pcp_feedback_targets(target_revision_id, target_role);
+            ",
+        )
+        .context("create PCP feedback reconciliation tables")?;
+    transaction
+        .execute(
+            "UPDATE pcp_metadata SET value = ?1 WHERE key = 'schema_version'",
+            [target_version],
+        )
+        .context("publish PCP feedback reconciliation schema version")?;
+    transaction
+        .commit()
+        .context("commit PCP feedback reconciliation schema migration")?;
+    Ok(())
+}
+
 fn clean_legacy_context_exposure(transaction: &Transaction<'_>) -> Result<()> {
     let mut statement = transaction
         .prepare(

@@ -8,15 +8,16 @@ use chrono::{Duration, SecondsFormat, Utc};
 use pcp_client::{AccessMode, EmbeddedPcpClient, PcpApi};
 use pcp_core::{
     AccessDecision, AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor,
-    ActorType, ArchivePageRequest, AssessPageValidityRequest, BrowseIndexOrder,
-    CollectRevisionRetentionRequest, CreateScopeRequest, ExtractTopicRequest, GraphEdgeDirection,
-    GraphEdgeKind, IngestPageRequest, LifecycleStatus, LinkPagesRequest, ModelTokenUsage,
-    PackPagesRequest, PageMutability, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest,
-    Projection, ProvenanceEvent, PutRevisionRetentionLeaseRequest, QueryAuditEvent,
-    QueryAuditMethod, ReadPagesRequest, RepairPageRequest, RestoreArchivedPageRequest,
-    RetentionPolicy, RetentionProtectionReason, RevisePageRequest, RouterTokenUsage,
-    RuntimeUsageEvent, ScopeGrant, SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch,
-    SourceRef, SourceSpan, UnpackPageRequest, ValidityStanding, WritePageRequest,
+    ActorType, ApplyReconciliationRequest, ArchivePageRequest, AssessPageValidityRequest,
+    BrowseIndexOrder, CollectRevisionRetentionRequest, CreateScopeRequest, ExtractTopicRequest,
+    FeedbackAuthority, FeedbackKind, GraphEdgeDirection, GraphEdgeKind, IngestPageRequest,
+    LifecycleStatus, LinkPagesRequest, ModelTokenUsage, PackPagesRequest, PageMutability,
+    PagePayload, PageRevisionRef, PlanRevisionRetentionRequest, Projection, ProvenanceEvent,
+    PutRevisionRetentionLeaseRequest, QueryAuditEvent, QueryAuditMethod, ReadPagesRequest,
+    ReconciliationDisposition, RepairPageRequest, RestoreArchivedPageRequest, RetentionPolicy,
+    RetentionProtectionReason, RevisePageRequest, RouterTokenUsage, RuntimeUsageEvent, ScopeGrant,
+    SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch, SourceRef, SourceSpan,
+    SubmitFeedbackRequest, UnpackPageRequest, ValidityStanding, WritePageRequest,
     WriteSummaryRequest,
 };
 use pcp_store::PcpStore;
@@ -523,6 +524,7 @@ async fn topic_extraction_preserves_sources_but_routes_retrieval_through_topic_p
     let topic = store
         .extract_topic(
             ExtractTopicRequest {
+                target_topic: None,
                 source_pages: vec![
                     PageRevisionRef {
                         page_id: first.page_id.clone(),
@@ -535,7 +537,7 @@ async fn topic_extraction_preserves_sources_but_routes_retrieval_through_topic_p
                 ],
                 title: "A long-lived topic".to_owned(),
                 content: "This front-door topic summary joins the definition, decision, and unresolved boundary.".to_owned(),
-                created_by: actor,
+                created_by: actor.clone(),
                 tool_or_model: Some("topic-extraction-test".to_owned()),
                 provenance: Vec::new(),
                 idempotency_key: Some("topic:extract".to_owned()),
@@ -544,6 +546,100 @@ async fn topic_extraction_preserves_sources_but_routes_retrieval_through_topic_p
         )
         .await
         .expect("extract topic");
+
+    let duplicate = store
+        .extract_topic(
+            ExtractTopicRequest {
+                target_topic: None,
+                source_pages: vec![
+                    PageRevisionRef {
+                        page_id: first.page_id.clone(),
+                        revision_id: first.revision_id.clone(),
+                    },
+                    PageRevisionRef {
+                        page_id: second.page_id.clone(),
+                        revision_id: second.revision_id.clone(),
+                    },
+                ],
+                title: "A duplicate topic".to_owned(),
+                content:
+                    "This must not become a second active Topic Page for the same logical sources."
+                        .to_owned(),
+                created_by: actor.clone(),
+                tool_or_model: Some("topic-extraction-test".to_owned()),
+                provenance: Vec::new(),
+                idempotency_key: Some("topic:duplicate".to_owned()),
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect_err("reject exact logical-source duplicate");
+    assert!(duplicate.to_string().contains("refresh that Topic"));
+
+    let refreshed = store
+        .extract_topic(
+            ExtractTopicRequest {
+                target_topic: Some(PageRevisionRef {
+                    page_id: topic.page_id.clone(),
+                    revision_id: topic.revision_id.clone(),
+                }),
+                source_pages: vec![
+                    PageRevisionRef {
+                        page_id: first.page_id.clone(),
+                        revision_id: first.revision_id.clone(),
+                    },
+                    PageRevisionRef {
+                        page_id: second.page_id.clone(),
+                        revision_id: second.revision_id.clone(),
+                    },
+                ],
+                title: "A refreshed long-lived topic".to_owned(),
+                content: "This refreshed front-door Topic keeps one Page identity while updating its grounded routing content."
+                    .to_owned(),
+                created_by: actor,
+                tool_or_model: Some("topic-extraction-test".to_owned()),
+                provenance: Vec::new(),
+                idempotency_key: Some("topic:refresh".to_owned()),
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("refresh existing Topic Page");
+    assert!(!refreshed.created);
+    assert_eq!(refreshed.page_id, topic.page_id);
+    assert_ne!(refreshed.revision_id, topic.revision_id);
+    let refreshed_page = store
+        .read_pages(
+            ReadPagesRequest {
+                page_ids: vec![topic.page_id.clone()],
+                revision_ids: Vec::new(),
+                projections: vec![Projection::Payload, Projection::History],
+                max_chars: 1_000,
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("read refreshed Topic Page")
+        .pop()
+        .expect("refreshed Topic exists");
+    assert_eq!(refreshed_page.history.len(), 2);
+    assert_eq!(
+        refreshed_page.revision.previous_revision_id.as_deref(),
+        Some(topic.revision_id.as_str())
+    );
+    let inventory = store
+        .durable_page_inventory(vec![namespace.clone()], Vec::new())
+        .await
+        .expect("read refreshed Topic inventory");
+    let topic_inventory = inventory
+        .iter()
+        .find(|page| page.page_id == refreshed.page_id)
+        .expect("refreshed Topic appears in inventory");
+    assert_eq!(
+        topic_inventory.topic_source_page_ids,
+        vec![first.page_id.clone(), second.page_id.clone()]
+    );
+    assert!(!topic_inventory.superseded);
 
     let library = store
         .browse_content_pages(
@@ -564,7 +660,12 @@ async fn topic_extraction_preserves_sources_but_routes_retrieval_through_topic_p
             .iter()
             .any(|hit| hit.page_id == unrelated.page_id)
     );
-    assert!(library.hits.iter().any(|hit| hit.page_id == topic.page_id));
+    assert!(
+        library
+            .hits
+            .iter()
+            .any(|hit| hit.page_id == refreshed.page_id)
+    );
 
     let retrieval = store
         .browse_retrieval_pages(
@@ -581,7 +682,7 @@ async fn topic_extraction_preserves_sources_but_routes_retrieval_through_topic_p
         retrieval
             .hits
             .iter()
-            .any(|hit| hit.page_id == topic.page_id)
+            .any(|hit| hit.page_id == refreshed.page_id)
     );
     assert!(
         retrieval
@@ -686,7 +787,7 @@ async fn migrates_clean_association_store_to_topic_extraction_schema() {
             |row| row.get(0),
         )
         .expect("read topic Store schema version");
-    assert_eq!(version, "0.8.0-clean.3");
+    assert_eq!(version, "0.8.0-clean.4");
     let table_count: u32 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master
@@ -831,7 +932,7 @@ async fn migrates_draft_store_to_minimal_clean_schema() {
             |row| row.get(0),
         )
         .expect("read migrated version");
-    assert_eq!(version, "0.8.0-clean.3");
+    assert_eq!(version, "0.8.0-clean.4");
     for (table, removed_column) in [
         ("pcp_relations", "from_revision_id"),
         ("pcp_summaries", "content"),
@@ -1074,7 +1175,7 @@ async fn migrates_clean_store_associations_without_erasing_exact_inputs() {
                 |row| row.get::<_, String>(0),
             )
             .expect("read cleaned Store version"),
-        "0.8.0-clean.3"
+        "0.8.0-clean.4"
     );
     assert_eq!(
         connection
@@ -3077,6 +3178,204 @@ async fn validity_is_revisioned_and_routes_before_detail() {
         first.assessment_revision_id
     );
 
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn explicit_feedback_reconciliation_is_atomic_and_changes_default_recall() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-feedback-reconciliation-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
+        .await
+        .expect("open feedback Store");
+    let identity_id = store.identity_id().to_owned();
+    let namespace = "conversation:feedback".to_owned();
+    store
+        .create_scope(CreateScopeRequest {
+            namespace: namespace.clone(),
+            display_name: "Feedback conversation".to_owned(),
+            description: None,
+            parent_namespace: None,
+        })
+        .await
+        .expect("create feedback Scope");
+    let actor = Actor {
+        actor_type: ActorType::Tool,
+        actor_id: "tenant:feedback-test".to_owned(),
+    };
+    let old = store
+        .write_page(
+            write_request(
+                &identity_id,
+                &namespace,
+                actor.clone(),
+                "The service always retries a cancelled request.",
+                "feedback:old",
+            ),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write challenged Page");
+    let replacement = store
+        .write_page(
+            write_request(
+                &identity_id,
+                &namespace,
+                actor.clone(),
+                "Cancelled requests remain cancelled; only deferred requests may retry.",
+                "feedback:replacement",
+            ),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("write replacement Page");
+    let feedback = store
+        .submit_feedback(
+            SubmitFeedbackRequest {
+                namespace: namespace.clone(),
+                kind: FeedbackKind::Correction,
+                authority: FeedbackAuthority::SubjectOwner,
+                payload: PagePayload {
+                    media_type: "text/markdown".to_owned(),
+                    content: "That recalled statement is wrong; cancellation is terminal."
+                        .to_owned(),
+                },
+                observed_at: None,
+                source_refs: Vec::new(),
+                challenged_revision_ids: vec![old.revision_id.clone()],
+                used_revision_ids: vec![old.revision_id.clone(), replacement.revision_id.clone()],
+                response_ref: Some("tenant://conversation/42/response/7".to_owned()),
+                external_event_id: Some("feedback:event:7".to_owned()),
+            },
+            actor.clone(),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("submit explicit feedback");
+    assert!(feedback.created);
+    let replay = store
+        .submit_feedback(
+            SubmitFeedbackRequest {
+                namespace: namespace.clone(),
+                kind: FeedbackKind::Correction,
+                authority: FeedbackAuthority::SubjectOwner,
+                payload: PagePayload {
+                    media_type: "text/markdown".to_owned(),
+                    content: "Duplicate transport delivery".to_owned(),
+                },
+                observed_at: None,
+                source_refs: Vec::new(),
+                challenged_revision_ids: vec![old.revision_id.clone()],
+                used_revision_ids: vec![old.revision_id.clone()],
+                response_ref: None,
+                external_event_id: Some("feedback:event:7".to_owned()),
+            },
+            actor.clone(),
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("replay feedback idempotently");
+    assert!(!replay.created);
+    assert_eq!(replay.feedback_revision_id, feedback.feedback_revision_id);
+
+    let pending = store
+        .pending_feedback(vec![namespace.clone()], 10)
+        .await
+        .expect("read pending feedback");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].challenged_revision_ids,
+        vec![old.revision_id.clone()]
+    );
+
+    let result = store
+        .apply_reconciliation(
+            ApplyReconciliationRequest {
+                feedback_revision_id: feedback.feedback_revision_id.clone(),
+                target: PageRevisionRef {
+                    page_id: old.page_id.clone(),
+                    revision_id: old.revision_id.clone(),
+                },
+                disposition: ReconciliationDisposition::Superseded,
+                rationale:
+                    "The tenant supplied a newer durable statement that narrows retry semantics."
+                        .to_owned(),
+                scope: None,
+                replacement: Some(PageRevisionRef {
+                    page_id: replacement.page_id.clone(),
+                    revision_id: replacement.revision_id.clone(),
+                }),
+                basis_revision_ids: vec![
+                    feedback.feedback_revision_id.clone(),
+                    replacement.revision_id.clone(),
+                ],
+                created_by: actor,
+                tool_or_model: Some("test-reconciler".to_owned()),
+                idempotency_key: Some("reconcile:event:7".to_owned()),
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("apply feedback reconciliation");
+    assert!(result.validity.is_some());
+    assert!(result.supersedes_relation.is_some());
+    assert!(
+        result
+            .supersedes_relation
+            .as_ref()
+            .expect("supersedes relation")
+            .basis_revision_ids
+            .contains(&feedback.feedback_revision_id)
+    );
+
+    let search = store
+        .search_pages(SearchPagesRequest {
+            query: "cancelled requests retry".to_owned(),
+            scopes: vec![namespace.clone()],
+            mode: SearchMode::Text,
+            term_match: SearchTermMatch::Any,
+            projections: pcp_core::default_search_projections(),
+            filters: SearchFilters::default(),
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .expect("search after reconciliation");
+    assert!(search.hits.iter().all(|hit| hit.page_id != old.page_id));
+    assert!(
+        search
+            .hits
+            .iter()
+            .any(|hit| hit.page_id == replacement.page_id)
+    );
+    let exact = store
+        .read_pages(
+            ReadPagesRequest {
+                page_ids: Vec::new(),
+                revision_ids: vec![old.revision_id],
+                projections: vec![Projection::Manifest, Projection::Validity],
+                max_chars: 2_000,
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("read superseded Revision exactly");
+    assert_eq!(
+        exact[0].validity.as_ref().map(|value| &value.standing),
+        Some(&ValidityStanding::Superseded)
+    );
+    assert!(
+        store
+            .pending_feedback(vec![namespace], 10)
+            .await
+            .expect("feedback resolved")
+            .is_empty()
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 

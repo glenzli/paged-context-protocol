@@ -2,7 +2,7 @@ use std::{path::PathBuf, process::Stdio, time::Duration};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use pcp_core::{ModelTokenUsage, ReadPage, SourceRef};
+use pcp_core::{FeedbackSignal, ModelTokenUsage, ReadPage, ReconciliationDisposition, SourceRef};
 use pcp_store::DurablePageInventoryItem;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -35,12 +35,22 @@ pub enum MaintenanceWorkerRequest {
     },
     ExtractTopic {
         pages: Vec<RelationCandidatePage>,
+        #[serde(default)]
+        existing_topics: Vec<ExistingTopicPage>,
         max_source_pages: usize,
     },
     /// A manual content-governance review. The worker can recommend archive,
     /// retain, or defer, but never changes lifecycle state itself.
     AssessArchive {
         page: ArchiveCandidatePage,
+    },
+    /// Reconcile one explicit tenant feedback signal against only the exact
+    /// Revisions supplied by the tenant. The worker cannot search or invent a
+    /// replacement outside this bounded set.
+    ReconcileFeedback {
+        signal: FeedbackSignal,
+        feedback: Box<MaintenanceDetailPage>,
+        targets: Vec<MaintenanceDetailPage>,
     },
     SelectRetentionMilestones {
         pages: Vec<MaintenanceRoutingPage>,
@@ -82,6 +92,19 @@ pub struct RelationCandidatePage {
     pub facets: Option<Value>,
     #[serde(default)]
     pub relation_types: Vec<String>,
+}
+
+/// Existing Topic front door offered to the semantic worker as a possible
+/// refresh target. Source Page identities are stable across source revisions;
+/// content remains a bounded routing projection.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExistingTopicPage {
+    pub page_id: String,
+    pub revision_id: String,
+    pub title: String,
+    pub routing_text: String,
+    pub source_page_ids: Vec<String>,
 }
 
 /// A bounded, reviewable view of an otherwise archive-eligible Page.  The
@@ -204,10 +227,21 @@ pub enum MaintenanceWorkerResponse {
         title: String,
         content: String,
         reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refresh_topic_page_id: Option<String>,
     },
     ArchiveReview {
         outcome: ArchiveWorkerDecision,
         reason: String,
+    },
+    ReconcileFeedback {
+        target_revision_id: String,
+        disposition: ReconciliationDisposition,
+        rationale: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replacement_revision_id: Option<String>,
     },
     Retain {
         milestones: Vec<RetentionMilestone>,

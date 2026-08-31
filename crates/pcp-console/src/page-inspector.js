@@ -606,7 +606,9 @@ export function createPageInspector({ request, showError, formatTime, t = (value
       showError(error);
       return Promise.resolve();
     }
-    topicExtractionSubtitle.textContent = `${candidate.namespace} · ${pages.length} ${t("Source Pages")}`;
+    topicExtractionSubtitle.textContent = candidate.refreshTarget
+      ? `${candidate.namespace} · ${pages.length} ${t("Source Pages")} · ${t("Refresh existing Topic Page")} · ${candidate.refreshTarget.title}`
+      : `${candidate.namespace} · ${pages.length} ${t("Source Pages")} · ${t("Create new Topic Page")}`;
     topicExtractionReason.textContent = candidate.reason || t("No Topic rationale was supplied.");
     topicExtractionTitle.textContent = candidate.title || t("Topic Page proposal");
     topicExtractionProposal.replaceChildren(previewBlock(candidate.content || t("No content projection"), "text/markdown"));

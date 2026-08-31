@@ -9,7 +9,7 @@ const STYLES_CSS = readFileSync(new URL("../src/styles.css", import.meta.url), "
 
 const REQUIRED_ICONS = [
   "restart", "refresh", "run", "search", "scan", "rescan", "analyze", "retry",
-  "pack", "summary", "relation", "topic", "archive", "accept", "reject",
+  "pack", "summary", "relation", "reconciliation", "topic", "archive", "accept", "reject",
   "defer", "suppress", "undo", "apply", "end",
 ];
 

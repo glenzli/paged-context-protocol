@@ -4,15 +4,16 @@ use pcp_client::{
     QueryAuditSummary, TombstoneCascadeResult, UnpackPageResult,
 };
 use pcp_core::{
-    AccessAuditEvent, AccessSession, Actor, ArchivePageRequest, AssessPageValidityRequest,
-    BrowseIndexOrder, Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest,
-    ExpandGraphRequest, ExtractTopicRequest, GraphSliceResponse, IngestPageRequest,
-    LinkPagesRequest, PackPagesRequest, PageLifecycleTransitionResult,
-    PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest,
-    Relation, RepairPageRequest, RestoreArchivedPageRequest, RevisePageRequest,
-    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope,
-    SearchPagesRequest, SearchResult, UnpackPageRequest, WritePageRequest, WriteResult,
-    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    AccessAuditEvent, AccessSession, Actor, ApplyReconciliationRequest, ArchivePageRequest,
+    AssessPageValidityRequest, BrowseIndexOrder, Capabilities, CollectRevisionRetentionRequest,
+    CreateScopeRequest, ExpandGraphRequest, ExtractTopicRequest, FeedbackSignal,
+    FeedbackSubmission, GraphSliceResponse, IngestPageRequest, LinkPagesRequest, PackPagesRequest,
+    PageLifecycleTransitionResult, PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest,
+    ReadPage, ReadPagesRequest, ReconciliationResult, Relation, RepairPageRequest,
+    RestoreArchivedPageRequest, RevisePageRequest, RevisionCollectionResult,
+    RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult,
+    SubmitFeedbackRequest, UnpackPageRequest, WritePageRequest, WriteResult, WriteSummaryRequest,
+    WriteSummaryResult, WriteValidityResult,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -104,6 +105,7 @@ pub(crate) enum RpcOperation {
         limit: u32,
     },
     IngestPage(IngestPageRequest),
+    SubmitFeedback(SubmitFeedbackRequest),
     WritePage(WritePageRequest),
     RevisePage(RevisePageRequest),
     RepairPage(RepairPageRequest),
@@ -124,6 +126,11 @@ pub(crate) enum RpcOperation {
         tool_or_model: Option<String>,
     },
     AssessPageValidity(AssessPageValidityRequest),
+    PendingFeedback {
+        requested_scopes: Vec<String>,
+        limit: u32,
+    },
+    ApplyReconciliation(ApplyReconciliationRequest),
     TombstoneDerivationCascade {
         root_revision_id: String,
         actor: Actor,
@@ -190,6 +197,9 @@ pub(crate) enum RpcValue {
     TopicExtractionResult(WriteResult),
     SummaryCandidate(Option<String>),
     ValidityResult(WriteValidityResult),
+    FeedbackSubmission(FeedbackSubmission),
+    FeedbackSignals(Vec<FeedbackSignal>),
+    ReconciliationResult(ReconciliationResult),
     TombstoneCascade(TombstoneCascadeResult),
     Inventory(Vec<DurablePageInventoryItem>),
     AccessLog {
@@ -248,7 +258,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use pcp_core::{PagePayload, PageRevisionRef, RepairPageRequest};
+    use pcp_core::{
+        Actor, ActorType, FeedbackAuthority, FeedbackKind, PagePayload, PageRevisionRef,
+        ReconciliationDisposition, RepairPageRequest,
+    };
 
     use super::*;
 
@@ -301,5 +314,60 @@ mod tests {
         assert_eq!(value["params"]["reason"], "Restore source context");
         assert!(value["params"].get("createdBy").is_none());
         assert!(value["params"].get("actor").is_none());
+    }
+
+    #[test]
+    fn feedback_and_reconciliation_have_stable_exact_revision_wire_shapes() {
+        let feedback = serde_json::to_value(RpcOperation::SubmitFeedback(SubmitFeedbackRequest {
+            namespace: "project:one".to_owned(),
+            kind: FeedbackKind::Challenge,
+            authority: FeedbackAuthority::TenantAssertion,
+            payload: PagePayload {
+                media_type: "text/plain".to_owned(),
+                content: "The recalled statement was challenged.".to_owned(),
+            },
+            observed_at: None,
+            source_refs: Vec::new(),
+            challenged_revision_ids: vec!["rev_challenged".to_owned()],
+            used_revision_ids: vec!["rev_challenged".to_owned(), "rev_context".to_owned()],
+            response_ref: Some("tenant:response:7".to_owned()),
+            external_event_id: Some("feedback:7".to_owned()),
+        }))
+        .expect("serialize submit_feedback RPC operation");
+        assert_eq!(feedback["type"], "submit_feedback");
+        assert_eq!(
+            feedback["params"]["challengedRevisionIds"],
+            serde_json::json!(["rev_challenged"])
+        );
+        assert_eq!(
+            feedback["params"]["usedRevisionIds"],
+            serde_json::json!(["rev_challenged", "rev_context"])
+        );
+        assert_eq!(feedback["params"]["authority"], "tenant_assertion");
+
+        let reconciliation = serde_json::to_value(RpcOperation::ApplyReconciliation(
+            ApplyReconciliationRequest {
+                feedback_revision_id: "rev_feedback".to_owned(),
+                target: PageRevisionRef {
+                    page_id: "pg_target".to_owned(),
+                    revision_id: "rev_challenged".to_owned(),
+                },
+                disposition: ReconciliationDisposition::Disputed,
+                rationale: "The exact claim remains contested.".to_owned(),
+                scope: None,
+                replacement: None,
+                basis_revision_ids: vec!["rev_feedback".to_owned(), "rev_challenged".to_owned()],
+                created_by: Actor {
+                    actor_type: ActorType::System,
+                    actor_id: "service:maintainer".to_owned(),
+                },
+                tool_or_model: Some("model:reconciler".to_owned()),
+                idempotency_key: Some("reconcile:7".to_owned()),
+            },
+        ))
+        .expect("serialize apply_reconciliation RPC operation");
+        assert_eq!(reconciliation["type"], "apply_reconciliation");
+        assert_eq!(reconciliation["params"]["target"]["pageId"], "pg_target");
+        assert_eq!(reconciliation["params"]["disposition"], "disputed");
     }
 }

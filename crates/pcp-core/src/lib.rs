@@ -1,6 +1,7 @@
 mod access;
 mod model;
 mod query;
+mod reconciliation;
 mod request;
 mod retention;
 
@@ -21,6 +22,10 @@ pub use query::{
     IntentEffort, IntentMatchAudit, ModelTokenUsage, QueryAuditEvent, QueryAuditMethod,
     QueryContextRequest, QueryContextResponse, QueryRelation, QueryVisibility, RouterTokenUsage,
     RuntimeUsageEvent,
+};
+pub use reconciliation::{
+    ApplyReconciliationRequest, FeedbackAuthority, FeedbackKind, FeedbackSignal, FeedbackStatus,
+    FeedbackSubmission, ReconciliationDisposition, ReconciliationResult, SubmitFeedbackRequest,
 };
 pub use request::{
     ArchivePageRequest, AssessPageValidityRequest, CreateScopeRequest, ExtractTopicRequest,

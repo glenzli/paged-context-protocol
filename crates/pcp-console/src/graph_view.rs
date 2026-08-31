@@ -522,6 +522,8 @@ mod tests {
                 summary: None,
                 relation_types: Vec::new(),
                 provenance_input_revision_ids: Vec::new(),
+                topic_source_page_ids: Vec::new(),
+                superseded: false,
                 packing_protected: false,
             }
         }

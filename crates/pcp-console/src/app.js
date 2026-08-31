@@ -120,6 +120,19 @@ const ZH_MESSAGES = {
   "Rejected for this review": "本次拒绝",
   "Deferred for now": "暂时延后",
   "Will be suppressed": "将不再建议",
+  "Feedback reconciliation": "反馈协调",
+  "Explicit feedback": "显式反馈",
+  "Challenged Page": "被质疑页面",
+  "Proposed disposition": "建议处置",
+  "No source change": "来源无需变更",
+  "Qualified": "限定有效",
+  "Disputed": "存在争议",
+  "Superseded": "已被取代",
+  "Retracted": "已撤回",
+  "Replacement Revision": "替代修订",
+  "Validity caveat": "有效性提示",
+  "Accept proposed decision": "接受建议处置",
+  "Reject this proposal": "退回此建议",
   "No decision has been written yet.": "当前尚未写入任何决定。",
   "Review decisions were applied": "审阅决定已应用",
   "Some review decisions could not be applied and remain reversible.": "部分审阅决定未能应用，仍保留为可撤销状态。",
@@ -161,6 +174,9 @@ const ZH_MESSAGES = {
   "Topic extraction review": "凝练新页审阅",
   "Topic Page proposal": "拟凝练主题页",
   "Why this Topic Page is worth creating": "为什么值得凝练为新页",
+  "Why this Topic Page is worth refreshing": "为什么值得刷新现有主题页",
+  "Refresh existing Topic Page": "刷新现有主题页",
+  "Create new Topic Page": "新建主题页",
   "No Topic rationale was supplied.": "未提供凝练判断依据。",
   "A Topic extraction review requires at least two Pages.": "凝练新页审阅至少需要两个页面。",
   "Source Pages": "来源页面",
@@ -1132,7 +1148,7 @@ function renderMaintenanceControllerAvailability() {
 }
 
 function maintenanceKindIconName(kind) {
-  return ({ pack: "pack", summary: "summary", relation: "relation", topic: "topic", archive: "archive" })[kind] || "manual";
+  return ({ pack: "pack", summary: "summary", relation: "relation", topic: "topic", archive: "archive", reconciliation: "reconciliation" })[kind] || "manual";
 }
 
 function maintenanceKindBadge(kind, label = t(maintenanceReviewKindLabel(kind))) {
@@ -2563,10 +2579,12 @@ function renderAutomationStatus() {
       + (currentReport.relationsProposed || 0)
       + (currentReport.topicsProposed || 0)
       + (currentReport.archivesProposed || 0)
+      + (currentReport.reconciliationsProposed || 0)
       + (currentReport.retentionLeasesProposed || 0);
     const committed = (currentReport.summariesWritten || 0)
       + (currentReport.packsCommitted || 0)
       + (currentReport.relationsCommitted || 0)
+      + (currentReport.reconciliationsCommitted || 0)
       + (currentReport.retentionLeasesWritten || 0);
     byId("maintenance-automation-progress-title").textContent = convergence.running
       ? (currentLanguage === "zh" ? `立即运行 · 已推进 ${formatNumber(convergence.steps)} 个工作单元` : `Run now · ${formatNumber(convergence.steps)} bounded jobs advanced`)
@@ -2780,6 +2798,7 @@ function maintenanceReviewKindLabel(kind) {
     relation: "Relations",
     topic: "Extract Topic Page",
     archive: "Archive",
+    reconciliation: "Feedback reconciliation",
   }[kind] || kind;
 }
 
@@ -2808,7 +2827,11 @@ function maintenanceReviewContent(review) {
     if (candidate.relationReason) body.append(element("p", "maintenance-review-evidence", candidate.relationReason));
     body.append(pages);
   } else if (payload.kind === "topic") {
+    const topicOperation = candidate.refreshTarget
+      ? `${t("Refresh existing Topic Page")} · ${candidate.refreshTarget.title}`
+      : t("Create new Topic Page");
     body.append(
+      element("span", "status-pill", topicOperation),
       element("strong", "maintenance-review-title", candidate.title),
       element("p", "maintenance-review-preview", candidate.content),
       element("span", "muted", `${formatNumber(candidate.pages?.length || 0)} ${t("Source Pages")}`),
@@ -2834,6 +2857,41 @@ function maintenanceReviewContent(review) {
     const signals = element("div", "maintenance-review-signals");
     (candidate.candidateSignals || []).forEach((signal) => signals.append(element("span", "status-pill", signal)));
     body.append(signals);
+  } else if (payload.kind === "reconciliation") {
+    const disposition = {
+      no_source_change: "No source change",
+      qualified: "Qualified",
+      disputed: "Disputed",
+      superseded: "Superseded",
+      retracted: "Retracted",
+    }[candidate.disposition] || candidate.disposition;
+    const decision = element("div", `maintenance-reconciliation-decision disposition-${candidate.disposition || "unknown"}`);
+    decision.append(
+      element("span", "muted", t("Proposed disposition")),
+      element("strong", "", t(disposition)),
+    );
+    const feedback = element("section", "maintenance-reconciliation-panel");
+    feedback.append(
+      element("span", "maintenance-reconciliation-label", t("Explicit feedback")),
+      element("p", "maintenance-review-preview", candidate.feedback?.content || candidate.feedback?.summary || "—"),
+    );
+    const target = element("button", "maintenance-reconciliation-panel maintenance-reconciliation-target");
+    target.type = "button";
+    target.append(
+      element("span", "maintenance-reconciliation-label", t("Challenged Page")),
+      element("p", "maintenance-review-preview", candidate.target?.content || candidate.target?.summary || "—"),
+      element("span", "mono muted", candidate.target?.revisionId || ""),
+    );
+    if (candidate.target?.pageId) {
+      target.addEventListener("click", () => pageInspector.open(candidate.target.pageId));
+    } else {
+      target.disabled = true;
+    }
+    body.append(decision, feedback, target, element("p", "maintenance-review-evidence", candidate.rationale));
+    if (candidate.scope) body.append(element("span", "status-pill", candidate.scope));
+    if (candidate.replacement?.revisionId) {
+      body.append(element("p", "maintenance-review-evidence", `${t("Replacement Revision")} · ${candidate.replacement.revisionId}`));
+    }
   }
   return body;
 }
@@ -2849,6 +2907,9 @@ function reviewDecisionLabel(decision) {
 
 function maintenanceReviewSummary(review) {
   const candidate = review.payload?.candidate || {};
+  if (review.payload?.kind === "reconciliation") {
+    return `${candidate.target?.pageId || review.candidateId} · ${candidate.disposition || ""}`;
+  }
   if (candidate.title) return candidate.title;
   if (candidate.pageId) return candidate.pageId;
   if (candidate.pages?.length) {
@@ -2935,11 +2996,11 @@ function maintenanceReviewCard(review) {
   const accept = reviewDecisionButton(
     review,
     REVIEW_DECISION.ACCEPT,
-    t(payload.kind === "archive" ? "Archive" : "Accept"),
+    t(payload.kind === "archive" ? "Archive" : payload.kind === "reconciliation" ? "Accept proposed decision" : "Accept"),
     icon(payload.kind === "archive" ? "archive" : "accept"),
     payload.kind === "archive" ? "archive" : "accept",
   );
-  const reject = reviewDecisionButton(review, REVIEW_DECISION.REJECT, t("Reject"), icon("reject"), "reject");
+  const reject = reviewDecisionButton(review, REVIEW_DECISION.REJECT, t(payload.kind === "reconciliation" ? "Reject this proposal" : "Reject"), icon("reject"), "reject");
   const defer = reviewDecisionButton(review, REVIEW_DECISION.DEFER, t("Skip for now"), icon("defer"), "defer");
   actions.append(accept, reject, defer);
   if (payload.kind === "relation") {
@@ -3434,10 +3495,16 @@ function genericProposalCard(candidate) {
   header.append(title, element("span", "muted", meta));
   const body = element("div", "maintenance-generic-card-body");
   if (candidate.operation === "topic") {
+    const topicOperation = candidate.refreshTarget
+      ? `${t("Refresh existing Topic Page")} · ${candidate.refreshTarget.title}`
+      : t("Create new Topic Page");
+    body.append(element("span", "status-pill", topicOperation));
     if (candidate.reason) {
       const rationale = element("div", "maintenance-relation-proposal-reason");
       rationale.append(
-        element("span", "maintenance-relation-evidence-label", t("Why this Topic Page is worth creating")),
+        element("span", "maintenance-relation-evidence-label", t(candidate.refreshTarget
+          ? "Why this Topic Page is worth refreshing"
+          : "Why this Topic Page is worth creating")),
         element("span", "", candidate.reason),
       );
       body.append(rationale);
@@ -4012,6 +4079,9 @@ async function applyMaintenanceCandidates(candidates, onProgress) {
           candidateId: candidate.candidateId,
           title: candidate.title,
           content: candidate.content,
+          refreshTarget: candidate.refreshTarget
+            ? { pageId: candidate.refreshTarget.pageId, revisionId: candidate.refreshTarget.revisionId }
+            : undefined,
           pages: candidate.pages.map((page) => ({ pageId: page.pageId, revisionId: page.revisionId })),
         });
       } else {

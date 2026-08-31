@@ -7,16 +7,17 @@ use std::{
 use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
-    AccessAuditEvent, AccessPermission, AccessPrincipal, AccessSession, AssessPageValidityRequest,
-    BrowseIndexOrder, Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest,
-    ExpandGraphRequest, ExtractTopicRequest, GraphEdgeDirection, GraphSliceEdge,
-    GraphSliceResponse, IngestPageRequest, IntentEffort, LinkPagesRequest, PackPagesRequest,
-    PlanRevisionRetentionRequest, Projection, PutRevisionRetentionLeaseRequest,
-    QueryContextRequest, QueryContextResponse, ReadPage, ReadPagesRequest, Relation,
-    RepairPageRequest, RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease,
-    RevisionRetentionPlan, Scope, ScopeGrant, SearchFilters, SearchMode, SearchPagesRequest,
-    SearchResult, SearchTermMatch, UnpackPageRequest, WritePageRequest, WriteResult,
-    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    AccessAuditEvent, AccessPermission, AccessPrincipal, AccessSession, ApplyReconciliationRequest,
+    AssessPageValidityRequest, BrowseIndexOrder, Capabilities, CollectRevisionRetentionRequest,
+    CreateScopeRequest, ExpandGraphRequest, ExtractTopicRequest, FeedbackSignal,
+    FeedbackSubmission, GraphEdgeDirection, GraphSliceEdge, GraphSliceResponse, IngestPageRequest,
+    IntentEffort, LinkPagesRequest, PackPagesRequest, PlanRevisionRetentionRequest, Projection,
+    PutRevisionRetentionLeaseRequest, QueryContextRequest, QueryContextResponse, ReadPage,
+    ReadPagesRequest, ReconciliationResult, Relation, RepairPageRequest, RevisePageRequest,
+    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope, ScopeGrant,
+    SearchFilters, SearchMode, SearchPagesRequest, SearchResult, SearchTermMatch,
+    SubmitFeedbackRequest, UnpackPageRequest, WritePageRequest, WriteResult, WriteSummaryRequest,
+    WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::PcpStore;
 pub use pcp_store::{
@@ -166,6 +167,9 @@ pub trait PcpTenantApi: Send + Sync {
     ) -> Result<ContentLibrarySummary>;
     async fn read_pages(&self, request: ReadPagesRequest) -> Result<Vec<ReadPage>>;
     async fn ingest_page(&self, request: IngestPageRequest) -> Result<WriteResult>;
+    /// Persist explicit user/tenant feedback against the exact Revisions that
+    /// were challenged and actually used by the tenant response.
+    async fn submit_feedback(&self, request: SubmitFeedbackRequest) -> Result<FeedbackSubmission>;
 
     /// Context assembly needs Runtime-owned providers; embedded Store clients
     /// fail closed rather than silently substituting a weaker mode.
@@ -362,6 +366,15 @@ pub trait PcpApi: PcpTenantApi {
         &self,
         request: AssessPageValidityRequest,
     ) -> Result<WriteValidityResult>;
+    async fn pending_feedback(
+        &self,
+        requested_scopes: Vec<String>,
+        limit: u32,
+    ) -> Result<Vec<FeedbackSignal>>;
+    async fn apply_reconciliation(
+        &self,
+        request: ApplyReconciliationRequest,
+    ) -> Result<ReconciliationResult>;
     async fn tombstone_derivation_cascade(
         &self,
         root_revision_id: String,
@@ -528,6 +541,11 @@ impl PcpTenantApi for EmbeddedPcpClient {
         let result = self.store.ingest_page(&self.access, request).await;
         self.observe_successful_write(result)
     }
+
+    async fn submit_feedback(&self, request: SubmitFeedbackRequest) -> Result<FeedbackSubmission> {
+        let result = self.store.submit_feedback(&self.access, request).await;
+        self.observe_successful_write(result)
+    }
 }
 
 #[async_trait]
@@ -680,6 +698,24 @@ impl PcpApi for EmbeddedPcpClient {
         request: AssessPageValidityRequest,
     ) -> Result<WriteValidityResult> {
         let result = self.store.assess_page_validity(&self.access, request).await;
+        self.observe_successful_write(result)
+    }
+
+    async fn pending_feedback(
+        &self,
+        requested_scopes: Vec<String>,
+        limit: u32,
+    ) -> Result<Vec<FeedbackSignal>> {
+        self.store
+            .pending_feedback(&self.access, requested_scopes, limit)
+            .await
+    }
+
+    async fn apply_reconciliation(
+        &self,
+        request: ApplyReconciliationRequest,
+    ) -> Result<ReconciliationResult> {
+        let result = self.store.apply_reconciliation(&self.access, request).await;
         self.observe_successful_write(result)
     }
 

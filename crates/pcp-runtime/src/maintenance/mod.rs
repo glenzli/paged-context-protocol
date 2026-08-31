@@ -4,6 +4,7 @@ mod coordinator;
 mod infer_worker;
 mod ledger;
 mod operator;
+mod reconciliation;
 mod review;
 mod worker;
 
@@ -14,8 +15,8 @@ use anyhow::Result;
 pub use audit::{MaintenanceRunAudit, MaintenanceRunAuditRecord, persist_audit};
 pub use config::{
     MaintenanceConfig, MaintenanceMode, MaintenanceWorkerConfig, PackingMaintenanceConfig,
-    RelationMaintenanceConfig, RetentionMaintenanceConfig, SummaryMaintenanceConfig,
-    WriteTriggeredMaintenanceConfig,
+    ReconciliationMaintenanceConfig, RelationMaintenanceConfig, RetentionMaintenanceConfig,
+    SummaryMaintenanceConfig, WriteTriggeredMaintenanceConfig,
 };
 pub use coordinator::{
     AnalyzeMaintenanceArchiveRequest, AnalyzeMaintenancePacksRequest,
@@ -31,7 +32,8 @@ pub use coordinator::{
     MaintenanceSummaryAnalysis, MaintenanceSummaryAnalysisIssue, MaintenanceSummaryBatchAnalysis,
     MaintenanceSummaryCandidate, MaintenanceSummaryScan, MaintenanceSummaryScanPage,
     MaintenanceTopicAnalysis, MaintenanceTopicCandidate, MaintenanceTopicInput,
-    MaintenanceTopicScan, MaintenanceTopicScanGroup, MaintenanceWorkScan, RuntimeMaintainer,
+    MaintenanceTopicRefreshTarget, MaintenanceTopicScan, MaintenanceTopicScanGroup,
+    MaintenanceWorkScan, RuntimeMaintainer,
 };
 pub use infer_worker::InferRuntimeSemanticWorker;
 pub use ledger::{
@@ -40,6 +42,7 @@ pub use ledger::{
     MaintenanceRelationReviewStatus, MaintenanceWakeReason,
 };
 pub use operator::MaintenanceOperator;
+pub use reconciliation::MaintenanceReconciliationCandidate;
 pub use review::{
     MaintenanceReviewItem, MaintenanceReviewOrigin, MaintenanceReviewPayload,
     MaintenanceReviewStatus,

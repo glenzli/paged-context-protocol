@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 
-const STORE_SCHEMA_VERSION: &str = "0.8.0-clean.3";
+const STORE_SCHEMA_VERSION: &str = "0.8.0-clean.4";
 const LEGACY_DRAFT_SCHEMA_VERSION: &str = "0.8.0-draft";
 const LEGACY_CLEAN_SCHEMA_VERSION: &str = "0.8.0-clean";
 const LEGACY_CLEAN_ASSOCIATIONS_SCHEMA_VERSION: &str = "0.8.0-clean.1";
 const LEGACY_CLEAN_TOPIC_EXTRACTIONS_SCHEMA_VERSION: &str = "0.8.0-clean.2";
+const LEGACY_CLEAN_CONTENT_GOVERNANCE_SCHEMA_VERSION: &str = "0.8.0-clean.3";
 
 pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
     connection
@@ -41,6 +42,12 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
         }
         Some(version) if version == LEGACY_CLEAN_TOPIC_EXTRACTIONS_SCHEMA_VERSION => {
             crate::migration::migrate_clean_content_governance(connection, STORE_SCHEMA_VERSION)?;
+        }
+        Some(version) if version == LEGACY_CLEAN_CONTENT_GOVERNANCE_SCHEMA_VERSION => {
+            crate::migration::migrate_clean_feedback_reconciliation(
+                connection,
+                STORE_SCHEMA_VERSION,
+            )?;
         }
         Some(version) => {
             anyhow::bail!("unsupported PCP Store schema {version}; expected {STORE_SCHEMA_VERSION}")
@@ -214,6 +221,33 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 PRIMARY KEY (actor_id, idempotency_key)
             );
 
+            CREATE TABLE IF NOT EXISTS pcp_feedback_signals (
+                feedback_revision_id TEXT PRIMARY KEY REFERENCES pcp_revisions(revision_id),
+                feedback_page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
+                namespace TEXT NOT NULL REFERENCES pcp_scopes(namespace),
+                feedback_kind TEXT NOT NULL,
+                authority TEXT NOT NULL,
+                response_ref TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS pcp_feedback_targets (
+                feedback_revision_id TEXT NOT NULL
+                    REFERENCES pcp_feedback_signals(feedback_revision_id),
+                target_revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+                target_page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
+                target_role TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                disposition TEXT,
+                resolution_json TEXT,
+                resolved_at TEXT,
+                PRIMARY KEY (feedback_revision_id, target_role, target_revision_id),
+                UNIQUE (feedback_revision_id, target_role, position)
+            );
+
             CREATE TABLE IF NOT EXISTS pcp_idempotency (
                 actor_id TEXT NOT NULL,
                 operation TEXT NOT NULL,
@@ -358,6 +392,10 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 ON pcp_topic_extraction_members(source_page_id, source_revision_id);
             CREATE INDEX IF NOT EXISTS pcp_validity_target
                 ON pcp_validity_assessments(target_revision_id, assessment_revision_id);
+            CREATE INDEX IF NOT EXISTS pcp_feedback_signals_pending
+                ON pcp_feedback_signals(status, created_at);
+            CREATE INDEX IF NOT EXISTS pcp_feedback_targets_target
+                ON pcp_feedback_targets(target_revision_id, target_role);
             CREATE INDEX IF NOT EXISTS pcp_retention_leases_revision
                 ON pcp_revision_retention_leases(revision_id, expires_at DESC);
             CREATE INDEX IF NOT EXISTS pcp_retention_leases_namespace

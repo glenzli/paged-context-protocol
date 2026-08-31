@@ -1302,6 +1302,10 @@ async fn accept_maintenance_review(
                     candidate_id: candidate.candidate_id,
                     title: candidate.title,
                     content: candidate.content,
+                    refresh_target: candidate.refresh_target.map(|target| PageRevisionRef {
+                        page_id: target.page_id,
+                        revision_id: target.revision_id,
+                    }),
                     pages: candidate
                         .pages
                         .into_iter()
@@ -1323,6 +1327,16 @@ async fn accept_maintenance_review(
                 })
                 .await?
         ),
+        MaintenanceReviewPayload::Reconciliation(_) => {
+            let result = operator
+                .approve_reconciliation_review(&candidate_id)
+                .await?;
+            return Ok(Json(json!({
+                "candidateId": candidate_id,
+                "status": "accepted",
+                "result": result,
+            })));
+        }
     };
     if !candidate_id.starts_with("mrr_") {
         operator

@@ -26,6 +26,7 @@ PCP 可以作为单个应用的上下文层，也可以让多个租户在同一�
 - **Relation 与 Provenance**：Relation 连接稳定 Page；关系依据和派生来源引用精确 Revision。时间相邻或文本相似不会自动形成领域关系。
 - **Search、Read 与 Projection**：检索先返回候选，再按需读取 Payload、Summary、Sources、Relations 或 History。Host 决定哪些结果进入当前上下文。
 - **维护与治理**：Runtime 可以维护 Summary、Topic、Validity、Relation、无损 packing 和 retention。需要判断的变更进入同一套审阅流程；低风险操作是否自动应用由部署配置决定。
+- **显式反馈**：租户可把一次召回中实际使用和被明确质疑的 Revision 分开提交。PCP 保存反馈与精确证据，后续由维护器评估 Validity 或 `supersedes`，不会静默改写原 Page。
 - **外部来源**：租户保管并理解自己的聊天记录、媒体或领域对象。PCP 保存最小 SourceRef 和可选 digest，并按授权返回来源坐标；来源解析、查询和展示仍由租户负责。
 
 PCP 不规定 Router、提示词格式、Chain-of-Thought 或模型状态机。它只定义持久记录、授权、来源、检索和维护边界。SQLite、语义模型、Console 交互和具体 Host 工作流属于实现选择。
@@ -47,6 +48,7 @@ PCP 不规定 Router、提示词格式、Chain-of-Thought 或模型状态机。�
 - Runtime RPC 的 `semantic_search`、`match_intent` 和显式锚点图扩展。
 - Summary、Topic、Validity、Relation、Provenance、archive/restore、无损 sealed-Page packing 和访问审计。
 - Runtime 注入 Identity 与 Actor 的 `ingest_page`，包括可选 `sourceSpan`、`basedOnRevisionIds` 和最小 SourceRef。
+- 租户 `submit_feedback`、逐目标反馈协调、Validity/`supersedes` 原子提交，以及 Luna→Sol→人工的有界升级路径。
 - embedded/RPC client、授权注册、CLI、MCP、Console、维护协调器和只读设施观测。
 - 确定性 Revision 保留规划、有限租约和受保护的显式回收。
 
@@ -94,7 +96,7 @@ PCP_STORE_PATH=data/context.sqlite3 \
 
 ## 部署
 
-`PcpTenantApi` 是普通租户接口，提供 descriptor、授权 Scope、`ingest_page`、Search、Read 和可选 browse。`PcpApi` 是 Runtime 维护器与本机管理工具使用的特权超集。Host 可以嵌入 Store，也可以连接独立 Runtime：
+`PcpTenantApi` 是普通租户接口，提供 descriptor、授权 Scope、`ingest_page`、`submit_feedback`、Search、Read 和可选 browse。`PcpApi` 是 Runtime 维护器与本机管理工具使用的特权超集。Host 可以嵌入 Store，也可以连接独立 Runtime：
 
 ```text
 Tenant Host --> PcpTenantApi --> EmbeddedPcpClient --> PcpStore
@@ -153,11 +155,11 @@ codex mcp add pcp \
   -- /absolute/path/to/paged-context-protocol/target/release/pcp-mcp
 ```
 
-普通可写租户应使用 `contribute`；它只在 Read 基础上增加 `ingest_page`。`repair` 是开发迁移使用的窄管理面：仅在 Read 基础上增加保留历史的 `repair_page`，不授予普通 Page 写入、修订、生命周期或 Scope 管理。应使用独立 Principal/credential，只在显式 apply 迁移期间打开。`write` 和 `admin` 仍仅用于维护器和本机管理工具。完整访问模式与 enrollment 合同见 [`crates/pcp-runtime/ENROLLMENT.md`](crates/pcp-runtime/ENROLLMENT.md)。
+普通可写租户应使用 `contribute`；它在 Read 基础上增加 `ingest_page` 和针对精确 Revision 的 `submit_feedback`。`repair` 是开发迁移使用的窄管理面：仅在 Read 基础上增加保留历史的 `repair_page`，不授予普通 Page 写入、修订、生命周期或 Scope 管理。应使用独立 Principal/credential，只在显式 apply 迁移期间打开。`write` 和 `admin` 仍仅用于维护器和本机管理工具。完整访问模式与 enrollment 合同见 [`crates/pcp-runtime/ENROLLMENT.md`](crates/pcp-runtime/ENROLLMENT.md)。
 
 ### 维护、Console 与观测
 
-后台维护与 Console 手动运行共用持久审阅队列。Worker 只产生候选，Runtime 和 Store 负责预算、授权、当前 Revision 校验与提交；需要人工判断的 Relation、Topic 和 Archive 建议在应用前审阅。调度、模型升级和失败退避见 [`crates/pcp-runtime/README.md`](crates/pcp-runtime/README.md)。
+后台维护与 Console 手动运行共用持久审阅队列。Worker 只产生候选，Runtime 和 Store 负责预算、授权、当前 Revision 校验与提交；需要人工判断的 Relation、Topic、Archive 和反馈协调建议在应用前审阅。反馈协调默认由低成本模型判断；只有不确定项才升级一次，更高影响的 `superseded`/`retracted` 仍需人工批准。调度、模型升级和失败退避见 [`crates/pcp-runtime/README.md`](crates/pcp-runtime/README.md)。
 
 Console 应连接独立的 `audit` endpoint。它提供只读 Store 检查、查询预览、注册管理、维护审阅和受权 archive/restore。Runtime 的设施 observer 只返回聚合且脱敏的运行数据；合同见 [`crates/pcp-runtime/OBSERVER.md`](crates/pcp-runtime/OBSERVER.md)。
 

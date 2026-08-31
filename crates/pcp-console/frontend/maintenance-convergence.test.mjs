@@ -10,14 +10,33 @@ import {
 
 test("progressive convergence aggregates completed batches without summing inventory", () => {
   const merged = mergeConvergenceReport(
-    { inspectedPages: 18, jobsAdvanced: 1, workerCalls: 1, packsCommitted: 1, reviewItemsProposed: 0 },
-    { inspectedPages: 20, jobsAdvanced: 1, workerCalls: 2, packsCommitted: 0, reviewItemsProposed: 1, escalatedDecisions: 1 },
+    {
+      inspectedPages: 18,
+      jobsAdvanced: 1,
+      workerCalls: 1,
+      packsCommitted: 1,
+      reconciliationsCommitted: 0,
+      reconciliationsProposed: 1,
+      reviewItemsProposed: 0,
+    },
+    {
+      inspectedPages: 20,
+      jobsAdvanced: 1,
+      workerCalls: 2,
+      packsCommitted: 0,
+      reconciliationsCommitted: 1,
+      reconciliationsProposed: 0,
+      reviewItemsProposed: 1,
+      escalatedDecisions: 1,
+    },
   );
 
   assert.equal(merged.inspectedPages, 20);
   assert.equal(merged.workerCalls, 3);
   assert.equal(merged.jobsAdvanced, 2);
   assert.equal(merged.packsCommitted, 1);
+  assert.equal(merged.reconciliationsCommitted, 1);
+  assert.equal(merged.reconciliationsProposed, 1);
   assert.equal(merged.reviewItemsProposed, 1);
   assert.equal(merged.escalatedDecisions, 1);
 });

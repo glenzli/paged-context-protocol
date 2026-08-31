@@ -230,6 +230,7 @@ Relation 组织。时间邻近和主题连续性由 Runtime 的语义判断选�
 - `describe() -> identity_id, access, capabilities`
 - `list_scopes(query?, limit?, cursor?)`
 - `ingest_page(namespace, kind, payload?, source_refs?, based_on_revision_ids?, observed_at?, source_span?, facets?, external_event_id?)`
+- `submit_feedback(namespace, kind, authority, payload, challenged_revision_ids, used_revision_ids?, response_ref?, source_refs?, observed_at?, external_event_id?)`
 - `search_pages(query, scopes, strategy?, limit?, cursor?)`
 - `read_pages(page_ids, revision_ids?, view?, max_chars?)`
 - `semantic_search(query, scopes?, result_limit?, context_budget_chars?)`
@@ -237,13 +238,19 @@ Relation 组织。时间邻近和主题连续性由 Runtime 的语义判断选�
 - `expand_graph(anchor_page_ids, scopes?, max_depth?, max_nodes?, max_edges?, view?, max_chars?)`
 - 可选 `browse_index(scopes?, view?, limit?, cursor?)`
 
-`ingest_page` 是租户唯一的持久写入口。Identity 由所连接的 Runtime 决定，不在 Page、Revision、Scope 或
+`ingest_page` 是租户写入普通来源 Page 的唯一入口。Identity 由所连接的 Runtime 决定，不在 Page、Revision、Scope 或
 写请求中重复携带。Runtime 从认证会话填充 Actor、active lifecycle 与 sealed mutability，并隔离可选
 `sourceSpan.streamId`；调用方只提供来源事件本身。可选 `basedOnRevisionIds` 表示租户确实用来产生新
 Page 的精确 PCP Revision。Runtime 以认证 Principal、Store 提交时间和受信操作名生成 provenance；
 调用方不能借此伪造 Actor 或完整 provenance。该字段可以提高后续关系候选的审阅优先级，但绝不自动
 建立 Relation；Relation 的 `basisRevisionIds` 仍只表示一条已审阅关系所依据的精确版本。普通 `read` 会话只能检索和读取；`contribute` 会话
 额外获得独立的 `ingest` 权限，但不因此获得高级 Page 写入或维护权限。
+
+`submit_feedback` 只记录一次明确的用户或租户反馈，不直接修改被召回 Page。`challengedRevisionIds` 必须列出
+被质疑的精确 Revision；`usedRevisionIds` 记录产生被质疑响应时实际使用的完整 PCP 证据，可以是前者的超集。
+`responseRef` 和 SourceRef 是租户拥有的不透明坐标，PCP 不负责反查、解析或渲染外部原始材料。一个反馈可以
+挑战多个 Revision，但每个目标必须独立得到协调结果；仅作为使用上下文的 Revision 不得被维护模型提升为处置
+目标。租户声明的 `authority` 是审阅上下文，不是 PCP 自行验证的事实。
 
 Search 返回候选而不是真值，并必须有界、可分页、标明命中投影和当前 Revision。Relation、Summary、
 Validity、provenance 与 SourceRef 可以作为被授权的读取投影返回；租户不需要对应的直接写接口。持有精确
@@ -273,6 +280,8 @@ Runtime maintainer 与本机管理工具可以使用完整 Core 接口：
 - `restore_archived_page(page_id, expected_revision_id, reason)`
 - `write_summary(target_page_id, target_revision_id, content)`
 - `assess_validity(target_page_id, target_revision_id, standing, evidence_revision_ids)`
+- `pending_feedback(scopes, limit)`
+- `apply_reconciliation(feedback_revision_id, target, disposition, rationale, scope?, replacement?, basis_revision_ids)`
 - `relate_pages(from_page_id, relation_type, to_page_id, basis_revision_ids?)`
 - `plan_revision_retention(scopes, policy)`
 - `collect_revision_retention(scopes, policy, confirmed_revision_ids)`
@@ -284,9 +293,14 @@ Runtime maintainer 与本机管理工具可以使用完整 Core 接口：
 
 实现若提供后台或模型辅助维护，自动化不得扩大调用会话已经拥有的权限。推理 Provider 只能在 Runtime
 给出的有界候选、预算和操作类型内返回建议；它不得直接调用维护接口，也不得自行提交 Store 事务。尚未提交的
-Summary、Pack、Relation、Topic、Archive 或 retention 候选只属于 maintenance ledger，不是 Page、Relation、
+Summary、Pack、Relation、Topic、Archive、反馈协调或 retention 候选只属于 maintenance ledger，不是 Page、Relation、
 生命周期或保留状态的协议事实。实现可以在预先授权的维护策略内自动提交确定性、可验证的低风险操作，但仍须
 由 Store 重验精确当前 Revision、权限和事务不变量。
+
+反馈协调必须以精确 feedback Revision 和被挑战 Revision 为原子边界。结果可以是 `no_source_change`、
+`qualified`、`disputed`、`superseded` 或 `retracted`；只有 `superseded` 可以同时给出一个已在反馈证据集合中的
+replacement Revision，并在同一事务中写入 Validity 与 `supersedes` Relation。低影响决定可以按部署策略自动
+应用；`superseded`、`retracted`、外部声明或仍不确定的判断应进入与其他维护任务共用的持久审阅队列。
 
 `archive_page` 与 `restore_archived_page` 是显式生命周期治理动作。Archive 建议无论来自后台扫描、模型还是
 本机工具，都不得被视为批准；归档必须由具有 `manage_lifecycle` 权限的主体针对精确当前 Revision 明确接受，

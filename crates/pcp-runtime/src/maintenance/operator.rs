@@ -218,6 +218,15 @@ impl MaintenanceOperator {
         self.maintainer.approve_relation_review(candidate_id).await
     }
 
+    pub async fn approve_reconciliation_review(
+        &mut self,
+        candidate_id: &str,
+    ) -> Result<pcp_core::ReconciliationResult> {
+        self.maintainer
+            .approve_reconciliation_review(candidate_id)
+            .await
+    }
+
     pub async fn reject_relation_review(
         &mut self,
         candidate_id: &str,

@@ -264,6 +264,7 @@ fn operation_name(request: &MaintenanceWorkerRequest) -> &'static str {
         MaintenanceWorkerRequest::SelectRelation { .. } => "select_relation",
         MaintenanceWorkerRequest::ExtractTopic { .. } => "extract_topic",
         MaintenanceWorkerRequest::AssessArchive { .. } => "assess_archive",
+        MaintenanceWorkerRequest::ReconcileFeedback { .. } => "reconcile_feedback",
         MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => "select_retention_milestones",
     }
 }
@@ -344,6 +345,7 @@ fn infer_request(
         | MaintenanceWorkerRequest::AnalyzePacking { .. }
         | MaintenanceWorkerRequest::ExtractTopic { .. }
         | MaintenanceWorkerRequest::AssessArchive { .. }
+        | MaintenanceWorkerRequest::ReconcileFeedback { .. }
         | MaintenanceWorkerRequest::SelectRelation { .. }
         | MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => {
             let deployment_id = deployment_override.unwrap_or_else(|| match request {
@@ -360,7 +362,11 @@ fn infer_request(
                 "subscription".to_owned(),
             );
             metadata.insert("infer.capability_floor".to_owned(), "advanced".to_owned());
-            let effort = if matches!(request, MaintenanceWorkerRequest::SelectRelation { .. }) {
+            let effort = if matches!(
+                request,
+                MaintenanceWorkerRequest::SelectRelation { .. }
+                    | MaintenanceWorkerRequest::ReconcileFeedback { .. }
+            ) {
                 "high"
             } else {
                 "medium"
@@ -403,6 +409,7 @@ fn intent_for(request: &MaintenanceWorkerRequest) -> &'static str {
         | MaintenanceWorkerRequest::AnalyzePacking { .. }
         | MaintenanceWorkerRequest::ExtractTopic { .. }
         | MaintenanceWorkerRequest::AssessArchive { .. }
+        | MaintenanceWorkerRequest::ReconcileFeedback { .. }
         | MaintenanceWorkerRequest::SelectRelation { .. }
         | MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => "reasoning.solve",
     }
@@ -424,12 +431,28 @@ fn instructions_for(request: &MaintenanceWorkerRequest) -> String {
                 .to_owned()
         }
         MaintenanceWorkerRequest::ExtractTopic { .. } => {
-            "Return exactly one JSON object and no markdown. Use either {\"decision\":\"extract_topic\",\"page_ids\":[\"pg_...\",\"pg_...\"],\"title\":\"...\",\"content\":\"...\",\"reason\":\"...\"}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. A Topic Page is a durable front door, not a chronological digest or a replacement for sources. Select 2..=max_source_pages supplied Pages only when they establish one narrow, stable subject that a future query should reach before expanding evidence. Temporal adjacency, a shared Scope, broad AI/tool/workspace themes, or superficial keyword overlap are insufficient. When selecting sources, write a specific 120-4000 Unicode-character Topic Page body grounded only in them and a concise title (1-160 chars). Also provide one concise, source-grounded reason (1-480 chars) explaining why these particular Pages jointly warrant a durable Topic Page. Preserve qualifications, uncertainty, and disagreement; do not invent missing connective claims. Return no_candidate when the window contains no clearly bounded subject."
+            "Return exactly one JSON object and no markdown. Use either {\"decision\":\"extract_topic\",\"page_ids\":[\"pg_...\",\"pg_...\"],\"title\":\"...\",\"content\":\"...\",\"reason\":\"...\",\"refresh_topic_page_id\":\"pg_...\"}, the same extract_topic form without refresh_topic_page_id, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. A Topic Page is a durable front door, not a chronological digest or a replacement for sources. Select 2..=max_source_pages supplied Pages only when they establish one narrow, stable subject that a future query should reach before expanding evidence. Compare the proposed subject with existing_topics. When an existing Topic already represents the same stable subject and its source Page identities substantially overlap the selected sources, set refresh_topic_page_id to that exact offered Page instead of creating a parallel Topic. If the selected logical source Page set exactly matches an existing Topic, refreshing is mandatory. Shared sources alone do not prove semantic identity: omit refresh_topic_page_id for a genuinely distinct narrow subtopic. Temporal adjacency, a shared Scope, broad AI/tool/workspace themes, or superficial keyword overlap are insufficient. When selecting sources, write a specific 120-4000 Unicode-character Topic Page body grounded only in them and a concise title (1-160 chars). Also provide one concise, source-grounded reason (1-480 chars) explaining why these particular Pages jointly warrant a durable Topic Page or refresh. Preserve qualifications, uncertainty, and disagreement; do not invent missing connective claims. Return no_candidate when the window contains no clearly bounded subject."
                 .to_owned()
         }
         MaintenanceWorkerRequest::AssessArchive { .. } => {
             "Return exactly one JSON object and no markdown: {\"decision\":\"archive_review\",\"outcome\":\"archive\",\"reason\":\"...\"}, {\"decision\":\"archive_review\",\"outcome\":\"retain\",\"reason\":\"...\"}, or {\"decision\":\"archive_review\",\"outcome\":\"defer\",\"reason\":\"...\"}. This is a human-reviewed content-governance decision: you never delete anything and you do not apply lifecycle changes. Treat candidate_signals only as reasons to inspect, never as a value score. Recommend archive for a low-durability transient record, routine status update, greeting, duplicate observation, or resolved conversational turn that adds no independent reusable evidence, decision, definition, unresolved question, source material, or useful retrieval entry point. Existing summaries and explicit relations are review context, not retention proof by themselves: a Page may still be archived when those links do not rely on its detail. Retain any Page with durable evidence, a specific decision, a stable concept, a useful counterexample, source material, or plausible future value. Defer when the evidence is ambiguous. Your reason must be one concise, grounded sentence naming the Page's actual role; never cite age, lack of visits, lexical similarity, an existing summary, or a relation as sufficient evidence by itself."
                 .to_owned()
+        }
+        MaintenanceWorkerRequest::ReconcileFeedback {
+            feedback, targets, ..
+        } => {
+            let source = std::iter::once(feedback.content.as_deref().unwrap_or_default())
+                .chain(targets.iter().filter_map(|page| page.content.as_deref()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let language = match summary_language_for_text(&source) {
+                SummaryLanguage::Chinese => "Write rationale and scope in Chinese prose. Preserve technical names and identifiers exactly.",
+                SummaryLanguage::English => "Write rationale and scope in English prose. Preserve technical names and identifiers exactly.",
+                SummaryLanguage::Unspecified => "Write rationale and scope in the dominant natural language of the supplied feedback and target Pages.",
+            };
+            format!(
+                "Return exactly one JSON object and no markdown. Use either {{\"decision\":\"reconcile_feedback\",\"target_revision_id\":\"rev_...\",\"disposition\":\"no_source_change|qualified|disputed|superseded|retracted\",\"rationale\":\"...\",\"scope\":null,\"replacement_revision_id\":null}}, or {{\"decision\":\"defer\"}}. Select exactly one target_revision_id from signal.challengedRevisionIds. signal.usedRevisionIds is context-only evidence and must never be selected as the target. This is a validity decision about the exact target Revision, not a judgment of the tenant's opaque source. no_source_change means the feedback does not change stored source validity; qualified means the claim remains useful only within a stated scope; disputed means credible conflict exists without a settled replacement; superseded requires replacement_revision_id naming another supplied Revision that directly replaces it; retracted means the target claim should leave default recall without a replacement. Never invent a Revision or infer source contents that PCP did not receive. Preserve uncertainty and prefer defer when evidence is insufficient. rationale must be concise and grounded. {language}"
+            )
         }
         MaintenanceWorkerRequest::SelectRelation { pages, .. } => {
             relation_instructions(pages)
@@ -698,7 +721,7 @@ fn extract_output_text(response: &ResponsesResult) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::maintenance::worker::ArchiveCandidatePage;
+    use crate::maintenance::worker::{ArchiveCandidatePage, ExistingTopicPage};
     use crate::maintenance::{MaintenanceDetailPage, RelationCandidatePage, RetentionMilestone};
 
     fn result(text: &str) -> ResponsesResult {
@@ -1059,6 +1082,13 @@ mod tests {
                 facets: None,
                 relation_types: Vec::new(),
             }],
+            existing_topics: vec![ExistingTopicPage {
+                page_id: "pg_topic".to_owned(),
+                revision_id: "rev_topic".to_owned(),
+                title: "Existing PCP topic".to_owned(),
+                routing_text: "An existing durable PCP retrieval boundary.".to_owned(),
+                source_page_ids: vec!["pg_1".to_owned(), "pg_2".to_owned()],
+            }],
             max_source_pages: 8,
         };
         let infer = infer_request(
@@ -1079,16 +1109,20 @@ mod tests {
                 .and_then(Value::as_str)
                 .is_some_and(|instructions| instructions.contains("durable front door")
                     && instructions.contains("2..=max_source_pages")
+                    && instructions.contains("refresh_topic_page_id")
                     && instructions.contains("Temporal adjacency"))
         );
         let decoded = decode_response(
-            &result("{\"decision\":\"extract_topic\",\"page_ids\":[\"pg_1\",\"pg_2\"],\"title\":\"PCP topic\",\"content\":\"A durable, source-grounded Topic Page for PCP retrieval.\",\"reason\":\"The two Pages establish one stable PCP retrieval boundary.\"}"),
+            &result("{\"decision\":\"extract_topic\",\"page_ids\":[\"pg_1\",\"pg_2\"],\"title\":\"PCP topic\",\"content\":\"A durable, source-grounded Topic Page for PCP retrieval.\",\"reason\":\"The two Pages establish one stable PCP retrieval boundary.\",\"refresh_topic_page_id\":\"pg_topic\"}"),
             &request,
         )
         .expect("decode Topic extraction response");
         assert!(matches!(
             decoded,
-            MaintenanceWorkerResponse::ExtractTopic { .. }
+            MaintenanceWorkerResponse::ExtractTopic {
+                refresh_topic_page_id: Some(ref page_id),
+                ..
+            } if page_id == "pg_topic"
         ));
     }
 

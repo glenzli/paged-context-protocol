@@ -211,6 +211,7 @@ actor_type = "model"
             "select_relation",
             "extract_topic",
             "assess_archive",
+            "reconcile_feedback",
         ]
     );
     let _ = std::fs::remove_dir_all(root);

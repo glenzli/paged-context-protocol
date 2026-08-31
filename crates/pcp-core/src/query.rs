@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AccessDecision, AccessPrincipal, GraphEdgeDirection, GraphEdgeKind, Projection, ReadPage,
-    SourceSpan,
+    AccessDecision, AccessPrincipal, GraphEdgeDirection, GraphEdgeKind, PageValidityHint,
+    Projection, ReadPage, SourceSpan,
 };
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -86,6 +86,10 @@ pub struct ContextPackEntry {
     pub source_span: Option<SourceSpan>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provenance_revision_ids: Vec<String>,
+    /// Current assessment for this exact Revision. Qualified and disputed
+    /// entries remain recallable, but consumers must preserve this caveat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validity: Option<PageValidityHint>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

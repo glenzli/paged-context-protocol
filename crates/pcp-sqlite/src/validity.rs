@@ -29,187 +29,196 @@ impl SqlitePcpStore {
             let transaction = connection
                 .transaction()
                 .context("start PCP validity assessment")?;
-            ensure_revision_access(&transaction, &request.target_revision_id, &allowed_scopes)?;
-            for revision_id in &request.basis_revision_ids {
-                ensure_revision_access(&transaction, revision_id, &allowed_scopes)?;
-            }
-
-            if let Some(existing) = lookup_idempotency(
-                &transaction,
-                &request.created_by.actor_id,
-                request.idempotency_key.as_deref(),
-            )? {
-                if existing.target_revision_id != request.target_revision_id {
-                    anyhow::bail!("validity idempotency key was already used for another Revision");
-                }
-                return Ok(existing);
-            }
-
-            let resolved_target_page: String = transaction.query_row(
-                "SELECT page_id FROM pcp_revisions WHERE revision_id = ?1",
-                [&request.target_revision_id],
-                |row| row.get(0),
-            )?;
-            anyhow::ensure!(
-                resolved_target_page == request.target_page_id,
-                "target Revision does not belong to target Page"
-            );
-            let current = current_assessment(&transaction, &request.target_page_id)?;
-            let current_revision_id = current
-                .as_ref()
-                .map(|(revision_id, _)| revision_id.clone());
-            match (&current_revision_id, &request.expected_assessment_revision_id) {
-                (None, None) => {}
-                (Some(_), None) => {}
-                (Some(current), Some(expected)) if current == expected => {}
-                (None, Some(expected)) => {
-                    anyhow::bail!(
-                        "validity conflict: expected {expected}, but the Revision has no assessment"
-                    );
-                }
-                (Some(current), Some(expected)) => {
-                    anyhow::bail!(
-                        "validity conflict: expected {expected}, current assessment Page is {current}",
-                    );
-                }
-            }
-
-            let assessment_id = random_id(&transaction, "rev_")?;
-            let physical_page_id = current
-                .as_ref()
-                .map(|(_, page_id)| page_id.clone())
-                .unwrap_or(random_id(&transaction, "pg_")?);
-            let assessed_at = now();
-            let namespace: String = transaction
-                .query_row(
-                    "SELECT namespace FROM pcp_revisions WHERE revision_id = ?1",
-                    [&request.target_revision_id],
-                    |row| row.get(0),
-                )
-                .context("read PCP assessment target metadata")?;
-            if current.is_none() {
-                transaction
-                    .execute(
-                    "INSERT INTO pcp_pages (
-                        page_id, current_revision_id, created_at, namespace,
-                        kind, mutability, lifecycle_status, updated_at
-                     ) VALUES (?1, NULL, ?2, ?3, 'validity_assessment',
-                               'revisioned', 'active', ?2)",
-                    params![physical_page_id, assessed_at, namespace],
-                )
-                    .context("create PCP validity Page")?;
-            }
-            let mut input_page_ids = request.basis_revision_ids.clone();
-            input_page_ids.push(request.target_revision_id.clone());
-            input_page_ids.sort();
-            input_page_ids.dedup();
-            let provenance = vec![ProvenanceEvent {
-                operation: "assess".to_owned(),
-                actor: request.created_by.clone(),
-                timestamp: assessed_at.clone(),
-                input_revision_ids: input_page_ids,
-                tool_or_model: request.tool_or_model.clone(),
-                reason: None,
-            }];
-            let payload = PagePayload {
-                media_type: "text/markdown".to_owned(),
-                content: request.rationale.trim().to_owned(),
-            };
-            let facets = json!({
-                "standing": request.standing.as_str(),
-                "scope": request.scope.clone(),
-            });
-            insert_revision(
-                &transaction,
-                &physical_page_id,
-                &assessment_id,
-                &namespace,
-                "active",
-                &assessed_at,
-                Some(&assessed_at),
-                None,
-                None,
-                None,
-                &request.created_by,
-                Some(&payload),
-                &[],
-                Some(&facets),
-                &provenance,
-            )?;
-            if current.is_none() {
-                insert_relation(
-                    &transaction,
-                    &assessment_id,
-                    "assesses",
-                    &request.target_revision_id,
-                    &request.created_by,
-                    &assessed_at,
-                )?;
-            }
-            let published = transaction
-                .execute(
-                    "UPDATE pcp_pages
-                     SET current_revision_id = ?2, updated_at = ?3
-                     WHERE page_id = ?1
-                       AND (current_revision_id = ?4 OR (current_revision_id IS NULL AND ?4 IS NULL))",
-                    params![physical_page_id, assessment_id, assessed_at, current_revision_id],
-                )
-                .context("publish PCP validity Revision")?;
-            anyhow::ensure!(published == 1, "validity Page changed during publication");
-            transaction
-                .execute(
-                    "
-                    INSERT INTO pcp_validity_assessments (
-                        assessment_revision_id, target_revision_id
-                    ) VALUES (?1, ?2)
-                    ",
-                    params![assessment_id, request.target_revision_id],
-                )
-                .context("insert PCP validity assessment")?;
-            transaction
-                .execute(
-                    "
-                    INSERT INTO pcp_validity_heads (
-                        target_page_id, assessment_page_id
-                    ) VALUES (?1, ?2)
-                    ON CONFLICT(target_page_id) DO UPDATE SET
-                        assessment_page_id = excluded.assessment_page_id
-                    ",
-                    params![request.target_page_id, physical_page_id],
-                )
-                .context("publish PCP validity assessment")?;
-            if let Some(key) = request.idempotency_key.as_deref() {
-                transaction
-                    .execute(
-                        "
-                        INSERT INTO pcp_validity_idempotency (
-                            actor_id, idempotency_key, target_revision_id,
-                            result_assessment_id, created_at
-                        ) VALUES (?1, ?2, ?3, ?4, ?5)
-                        ",
-                        params![
-                            request.created_by.actor_id,
-                            key,
-                            request.target_revision_id,
-                            assessment_id,
-                            assessed_at
-                        ],
-                    )
-                    .context("record PCP validity idempotency")?;
-            }
+            let result = assess_page_validity_tx(&transaction, &request, &allowed_scopes)?;
             transaction
                 .commit()
                 .context("commit PCP validity assessment")?;
-            Ok(WriteValidityResult {
-                target_page_id: request.target_page_id,
-                target_revision_id: request.target_revision_id,
-                assessment_page_id: physical_page_id,
-                assessment_revision_id: assessment_id,
-                created: true,
-            })
+            Ok(result)
         })
         .await
     }
+}
+
+pub(crate) fn assess_page_validity_tx(
+    transaction: &Transaction<'_>,
+    request: &AssessPageValidityRequest,
+    allowed_scopes: &HashSet<String>,
+) -> Result<WriteValidityResult> {
+    validate_assessment(request)?;
+    ensure_revision_access(transaction, &request.target_revision_id, allowed_scopes)?;
+    for revision_id in &request.basis_revision_ids {
+        ensure_revision_access(transaction, revision_id, allowed_scopes)?;
+    }
+
+    if let Some(existing) = lookup_idempotency(
+        transaction,
+        &request.created_by.actor_id,
+        request.idempotency_key.as_deref(),
+    )? {
+        if existing.target_revision_id != request.target_revision_id {
+            anyhow::bail!("validity idempotency key was already used for another Revision");
+        }
+        return Ok(existing);
+    }
+
+    let resolved_target_page: String = transaction.query_row(
+        "SELECT page_id FROM pcp_revisions WHERE revision_id = ?1",
+        [&request.target_revision_id],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        resolved_target_page == request.target_page_id,
+        "target Revision does not belong to target Page"
+    );
+    let current = current_assessment(transaction, &request.target_page_id)?;
+    let current_revision_id = current.as_ref().map(|(revision_id, _)| revision_id.clone());
+    match (
+        &current_revision_id,
+        &request.expected_assessment_revision_id,
+    ) {
+        (None, None) => {}
+        (Some(_), None) => {}
+        (Some(current), Some(expected)) if current == expected => {}
+        (None, Some(expected)) => {
+            anyhow::bail!(
+                "validity conflict: expected {expected}, but the Revision has no assessment"
+            );
+        }
+        (Some(current), Some(expected)) => {
+            anyhow::bail!(
+                "validity conflict: expected {expected}, current assessment Page is {current}",
+            );
+        }
+    }
+
+    let assessment_id = random_id(transaction, "rev_")?;
+    let physical_page_id = current
+        .as_ref()
+        .map(|(_, page_id)| page_id.clone())
+        .unwrap_or(random_id(transaction, "pg_")?);
+    let assessed_at = now();
+    let namespace: String = transaction
+        .query_row(
+            "SELECT namespace FROM pcp_revisions WHERE revision_id = ?1",
+            [&request.target_revision_id],
+            |row| row.get(0),
+        )
+        .context("read PCP assessment target metadata")?;
+    if current.is_none() {
+        transaction
+            .execute(
+                "INSERT INTO pcp_pages (
+                    page_id, current_revision_id, created_at, namespace,
+                    kind, mutability, lifecycle_status, updated_at
+                 ) VALUES (?1, NULL, ?2, ?3, 'validity_assessment',
+                           'revisioned', 'active', ?2)",
+                params![physical_page_id, assessed_at, namespace],
+            )
+            .context("create PCP validity Page")?;
+    }
+    let mut input_page_ids = request.basis_revision_ids.clone();
+    input_page_ids.push(request.target_revision_id.clone());
+    input_page_ids.sort();
+    input_page_ids.dedup();
+    let provenance = vec![ProvenanceEvent {
+        operation: "assess".to_owned(),
+        actor: request.created_by.clone(),
+        timestamp: assessed_at.clone(),
+        input_revision_ids: input_page_ids,
+        tool_or_model: request.tool_or_model.clone(),
+        reason: None,
+    }];
+    let payload = PagePayload {
+        media_type: "text/markdown".to_owned(),
+        content: request.rationale.trim().to_owned(),
+    };
+    let facets = json!({
+        "standing": request.standing.as_str(),
+        "scope": request.scope.clone(),
+    });
+    insert_revision(
+        transaction,
+        &physical_page_id,
+        &assessment_id,
+        &namespace,
+        "active",
+        &assessed_at,
+        Some(&assessed_at),
+        None,
+        None,
+        None,
+        &request.created_by,
+        Some(&payload),
+        &[],
+        Some(&facets),
+        &provenance,
+    )?;
+    if current.is_none() {
+        insert_relation(
+            transaction,
+            &assessment_id,
+            "assesses",
+            &request.target_revision_id,
+            &request.created_by,
+            &assessed_at,
+        )?;
+    }
+    let published = transaction
+        .execute(
+            "UPDATE pcp_pages
+             SET current_revision_id = ?2, updated_at = ?3
+             WHERE page_id = ?1
+               AND (current_revision_id = ?4 OR (current_revision_id IS NULL AND ?4 IS NULL))",
+            params![
+                physical_page_id,
+                assessment_id,
+                assessed_at,
+                current_revision_id
+            ],
+        )
+        .context("publish PCP validity Revision")?;
+    anyhow::ensure!(published == 1, "validity Page changed during publication");
+    transaction
+        .execute(
+            "INSERT INTO pcp_validity_assessments (
+                assessment_revision_id, target_revision_id
+             ) VALUES (?1, ?2)",
+            params![assessment_id, request.target_revision_id],
+        )
+        .context("insert PCP validity assessment")?;
+    transaction
+        .execute(
+            "INSERT INTO pcp_validity_heads (target_page_id, assessment_page_id)
+             VALUES (?1, ?2)
+             ON CONFLICT(target_page_id) DO UPDATE SET
+                 assessment_page_id = excluded.assessment_page_id",
+            params![request.target_page_id, physical_page_id],
+        )
+        .context("publish PCP validity assessment")?;
+    if let Some(key) = request.idempotency_key.as_deref() {
+        transaction
+            .execute(
+                "INSERT INTO pcp_validity_idempotency (
+                    actor_id, idempotency_key, target_revision_id,
+                    result_assessment_id, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    request.created_by.actor_id,
+                    key,
+                    request.target_revision_id,
+                    assessment_id,
+                    assessed_at
+                ],
+            )
+            .context("record PCP validity idempotency")?;
+    }
+    Ok(WriteValidityResult {
+        target_page_id: request.target_page_id.clone(),
+        target_revision_id: request.target_revision_id.clone(),
+        assessment_page_id: physical_page_id,
+        assessment_revision_id: assessment_id,
+        created: true,
+    })
 }
 
 pub(crate) fn current_validity(
@@ -242,6 +251,7 @@ pub(crate) fn current_validity(
             WHERE head.target_page_id = (
                 SELECT page_id FROM pcp_revisions WHERE revision_id = ?1
             )
+              AND assessment.target_revision_id = ?1
             ",
             [target_revision_id],
             validity_from_row,

@@ -14,14 +14,15 @@ use pcp_client::{
     TombstoneCascadeResult, UnpackPageResult,
 };
 use pcp_core::{
-    AccessAuditEvent, AccessSession, AssessPageValidityRequest, Capabilities,
-    CollectRevisionRetentionRequest, CreateScopeRequest, ExpandGraphRequest, ExtractTopicRequest,
-    GraphSliceResponse, IngestPageRequest, IntentEffort, LinkPagesRequest, PackPagesRequest,
-    PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, QueryContextRequest,
-    QueryContextResponse, ReadPage, ReadPagesRequest, Relation, RepairPageRequest,
-    RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan,
-    Scope, SearchPagesRequest, SearchResult, UnpackPageRequest, WritePageRequest, WriteResult,
-    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    AccessAuditEvent, AccessSession, ApplyReconciliationRequest, AssessPageValidityRequest,
+    Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest, ExpandGraphRequest,
+    ExtractTopicRequest, FeedbackSignal, FeedbackSubmission, GraphSliceResponse, IngestPageRequest,
+    IntentEffort, LinkPagesRequest, PackPagesRequest, PlanRevisionRetentionRequest,
+    PutRevisionRetentionLeaseRequest, QueryContextRequest, QueryContextResponse, ReadPage,
+    ReadPagesRequest, ReconciliationResult, Relation, RepairPageRequest, RevisePageRequest,
+    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope,
+    SearchPagesRequest, SearchResult, SubmitFeedbackRequest, UnpackPageRequest, WritePageRequest,
+    WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use tokio::net::UnixStream;
 
@@ -330,6 +331,13 @@ impl PcpTenantApi for RemotePcpClient {
         }
     }
 
+    async fn submit_feedback(&self, request: SubmitFeedbackRequest) -> Result<FeedbackSubmission> {
+        match self.request(RpcOperation::SubmitFeedback(request)).await? {
+            RpcValue::FeedbackSubmission(value) => Ok(value),
+            _ => Err(unexpected("submit_feedback")),
+        }
+    }
+
     async fn semantic_search(&self, request: QueryContextRequest) -> Result<QueryContextResponse> {
         self.semantic_search_rpc(request).await
     }
@@ -572,6 +580,36 @@ impl PcpApi for RemotePcpClient {
         {
             RpcValue::ValidityResult(value) => Ok(value),
             _ => Err(unexpected("assess_page_validity")),
+        }
+    }
+
+    async fn pending_feedback(
+        &self,
+        requested_scopes: Vec<String>,
+        limit: u32,
+    ) -> Result<Vec<FeedbackSignal>> {
+        match self
+            .request(RpcOperation::PendingFeedback {
+                requested_scopes,
+                limit,
+            })
+            .await?
+        {
+            RpcValue::FeedbackSignals(value) => Ok(value),
+            _ => Err(unexpected("pending_feedback")),
+        }
+    }
+
+    async fn apply_reconciliation(
+        &self,
+        request: ApplyReconciliationRequest,
+    ) -> Result<ReconciliationResult> {
+        match self
+            .request(RpcOperation::ApplyReconciliation(request))
+            .await?
+        {
+            RpcValue::ReconciliationResult(value) => Ok(value),
+            _ => Err(unexpected("apply_reconciliation")),
         }
     }
 

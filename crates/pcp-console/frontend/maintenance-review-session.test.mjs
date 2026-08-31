@@ -56,6 +56,20 @@ test("permanent suppression is available only for relation reviews", () => {
   );
 });
 
+test("feedback reconciliation uses the shared reversible review session", () => {
+  const reconciliation = review("reconcile:feedback:target", "reconciliation");
+  const decisions = new Map();
+
+  stageReviewDecision(decisions, reconciliation, REVIEW_DECISION.ACCEPT);
+  assert.equal(partitionReviewSession([reconciliation], decisions).staged.length, 1);
+  assert.equal(undoReviewDecision(decisions, reconciliation.candidateId), true);
+  assert.deepEqual(partitionReviewSession([reconciliation], decisions).pending, [reconciliation]);
+  assert.throws(
+    () => stageReviewDecision(decisions, reconciliation, REVIEW_DECISION.SUPPRESS),
+    /unsupported reconciliation review decision/,
+  );
+});
+
 test("malformed persisted review sessions fail closed", () => {
   assert.deepEqual([...restoreReviewDecisions("not-json")], []);
   assert.deepEqual([...restoreReviewDecisions(JSON.stringify([{ candidateId: "x", kind: "summary", decision: "erase" }]))], []);

@@ -3,15 +3,16 @@ mod health;
 use anyhow::Result;
 use async_trait::async_trait;
 use pcp_core::{
-    AccessAuditEvent, AccessSession, ArchivePageRequest, AssessPageValidityRequest,
-    BrowseIndexOrder, Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest,
-    ExtractTopicRequest, IngestPageRequest, LinkPagesRequest, PackPagesRequest,
-    PageLifecycleTransitionResult, PageMutability, PlanRevisionRetentionRequest,
-    PutRevisionRetentionLeaseRequest, QueryAuditEvent, ReadPage, ReadPagesRequest, Relation,
-    RepairPageRequest, RestoreArchivedPageRequest, RevisePageRequest, RevisionCollectionResult,
+    AccessAuditEvent, AccessSession, ApplyReconciliationRequest, ArchivePageRequest,
+    AssessPageValidityRequest, BrowseIndexOrder, Capabilities, CollectRevisionRetentionRequest,
+    CreateScopeRequest, ExtractTopicRequest, FeedbackSignal, FeedbackSubmission, IngestPageRequest,
+    LinkPagesRequest, PackPagesRequest, PageLifecycleTransitionResult, PageMutability,
+    PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, QueryAuditEvent, ReadPage,
+    ReadPagesRequest, ReconciliationResult, Relation, RepairPageRequest,
+    RestoreArchivedPageRequest, RevisePageRequest, RevisionCollectionResult,
     RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchHit, SearchPagesRequest,
-    SearchResult, SourceSpan, UnpackPageRequest, WritePageRequest, WriteResult,
-    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    SearchResult, SourceSpan, SubmitFeedbackRequest, UnpackPageRequest, WritePageRequest,
+    WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -46,6 +47,14 @@ pub struct DurablePageInventoryItem {
     /// Maintenance may prioritize these pairs, but they are not Relations.
     #[serde(default)]
     pub provenance_input_revision_ids: Vec<String>,
+    /// Stable source Page identities for a current extracted Topic head.
+    /// Empty for ordinary Pages and legacy Topic heads without extraction
+    /// metadata.
+    #[serde(default)]
+    pub topic_source_page_ids: Vec<String>,
+    /// Whether another active Page explicitly supersedes this Page.
+    #[serde(default)]
+    pub superseded: bool,
     #[serde(default)]
     pub packing_protected: bool,
 }
@@ -198,6 +207,11 @@ pub trait PcpStore: Send + Sync {
         access: &AccessSession,
         request: IngestPageRequest,
     ) -> Result<WriteResult>;
+    async fn submit_feedback(
+        &self,
+        access: &AccessSession,
+        request: SubmitFeedbackRequest,
+    ) -> Result<FeedbackSubmission>;
     async fn write_page(
         &self,
         access: &AccessSession,
@@ -268,6 +282,17 @@ pub trait PcpStore: Send + Sync {
         access: &AccessSession,
         request: AssessPageValidityRequest,
     ) -> Result<WriteValidityResult>;
+    async fn pending_feedback(
+        &self,
+        access: &AccessSession,
+        requested_scopes: Vec<String>,
+        limit: u32,
+    ) -> Result<Vec<FeedbackSignal>>;
+    async fn apply_reconciliation(
+        &self,
+        access: &AccessSession,
+        request: ApplyReconciliationRequest,
+    ) -> Result<ReconciliationResult>;
     async fn tombstone_derivation_cascade(
         &self,
         access: &AccessSession,

@@ -68,6 +68,26 @@ impl SqlitePcpStore {
                                ORDER BY provenance.input_revision_id
                            )
                        ), '[]'),
+                       COALESCE((
+                           SELECT json_group_array(source_page_id)
+                           FROM (
+                               SELECT member.source_page_id
+                               FROM pcp_topic_extraction_members member
+                               WHERE member.topic_revision_id = r.revision_id
+                               ORDER BY member.position
+                           )
+                       ), '[]'),
+                       EXISTS (
+                           SELECT 1
+                           FROM pcp_relations superseding
+                           WHERE superseding.relation_type = 'supersedes'
+                             AND superseding.to_page_id = page.page_id
+                             AND NOT EXISTS (
+                                 SELECT 1
+                                 FROM pcp_relation_retractions retraction
+                                 WHERE retraction.relation_id = superseding.relation_id
+                             )
+                       ),
                        EXISTS (
                            SELECT 1 FROM pcp_summaries summary_reference
                            WHERE summary_reference.target_revision_id = r.revision_id
@@ -154,7 +174,10 @@ impl SqlitePcpStore {
                             &provenance_inputs_json,
                         )
                         .unwrap_or_default(),
-                        packing_protected: row.get(17)?,
+                        topic_source_page_ids: serde_json::from_str(&row.get::<_, String>(17)?)
+                            .unwrap_or_default(),
+                        superseded: row.get(18)?,
+                        packing_protected: row.get(19)?,
                     })
                 })
                 .context("query durable PCP inventory")?

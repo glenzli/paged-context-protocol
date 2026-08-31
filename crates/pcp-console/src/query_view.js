@@ -9,6 +9,15 @@ export function querySubmitLabel(method, busy) {
   return method === "match_intent" ? "Matching intent…" : "Searching context…";
 }
 
+export function contextValidityLabel(standing) {
+  return {
+    qualified: "Qualified",
+    disputed: "Disputed",
+    superseded: "Superseded",
+    retracted: "Retracted",
+  }[standing] || standing;
+}
+
 export function createQueryView({ request, byId, element, showError, t, formatNumber, openPage, openPageIcon, searchIcon }) {
   let method = "semantic_search";
   let busy = false;
@@ -199,6 +208,16 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
       actions.append(open);
       header.append(identity, actions);
       article.append(header);
+      if (entry.validity) {
+        const standing = contextValidityLabel(entry.validity.standing);
+        const validity = element("div", `context-pack-entry-validity standing-${entry.validity.standing || "unknown"}`);
+        validity.append(
+          element("strong", "", `${t("Validity caveat")} · ${t(standing)}`),
+          element("span", "", entry.validity.rationale || ""),
+        );
+        if (entry.validity.scope) validity.append(element("span", "", entry.validity.scope));
+        article.append(validity);
+      }
       if (entry.content) article.append(element("pre", "context-pack-entry-content", entry.content));
       article.append(element("div", "context-pack-entry-reason", `${t("Inclusion reason")}: ${inclusionReason(entry)}`));
       const evidence = element("details", "context-pack-entry-evidence");

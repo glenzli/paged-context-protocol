@@ -8,10 +8,11 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use pcp_client::PcpApi;
 use pcp_core::{
-    AccessSession, ExtractTopicRequest, LinkPagesRequest, PACKED_PAGE_MEDIA_TYPE, PackPagesRequest,
-    PageMutability, PageRevisionRef, PlanRevisionRetentionRequest, Projection,
-    PutRevisionRetentionLeaseRequest, ReadPagesRequest, RetentionPolicy, RuntimeUsageEvent,
-    SourceSpan, WriteResult, WriteSummaryRequest,
+    AccessSession, ApplyReconciliationRequest, ExtractTopicRequest, FeedbackAuthority,
+    LinkPagesRequest, PACKED_PAGE_MEDIA_TYPE, PackPagesRequest, PageMutability, PageRevisionRef,
+    PlanRevisionRetentionRequest, Projection, PutRevisionRetentionLeaseRequest, ReadPagesRequest,
+    ReconciliationDisposition, RetentionPolicy, RuntimeUsageEvent, SourceSpan, WriteResult,
+    WriteSummaryRequest,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -19,9 +20,10 @@ use tokio::{sync::watch, time::Instant};
 use uuid::Uuid;
 
 use super::{
-    MaintenanceConfig, MaintenanceMode, MaintenanceWorkerOutcome, MaintenanceWorkerRequest,
-    MaintenanceWorkerResponse, PackingMaintenanceConfig, RelationMaintenanceConfig,
-    RetentionMilestone, SemanticMaintenanceWorker,
+    MaintenanceConfig, MaintenanceMode, MaintenanceReconciliationCandidate,
+    MaintenanceWorkerOutcome, MaintenanceWorkerRequest, MaintenanceWorkerResponse,
+    PackingMaintenanceConfig, RelationMaintenanceConfig, RetentionMilestone,
+    SemanticMaintenanceWorker,
     ledger::{
         MaintenanceAutomationStatus, MaintenanceLedger, MaintenanceRelationReviewPage,
         MaintenanceRelationReviewProposal, MaintenanceRelationReviewStatus, MaintenanceWakeReason,
@@ -33,8 +35,8 @@ use super::{
         MaintenanceReviewStatus,
     },
     worker::{
-        ArchiveCandidatePage, ArchiveWorkerDecision, MaintenanceDetailPage, MaintenanceRoutingPage,
-        PackingCandidateGroup, PackingCandidatePage, RelationCandidatePage,
+        ArchiveCandidatePage, ArchiveWorkerDecision, ExistingTopicPage, MaintenanceDetailPage,
+        MaintenanceRoutingPage, PackingCandidateGroup, PackingCandidatePage, RelationCandidatePage,
     },
 };
 
@@ -54,6 +56,8 @@ pub struct MaintenanceCycleReport {
     pub retention_leases_proposed: u32,
     pub topics_proposed: u32,
     pub archives_proposed: u32,
+    pub reconciliations_committed: u32,
+    pub reconciliations_proposed: u32,
     pub review_items_proposed: u32,
     pub escalated_decisions: u32,
     pub deferred: u32,
@@ -88,6 +92,12 @@ impl MaintenanceCycleReport {
         self.archives_proposed = self
             .archives_proposed
             .saturating_add(report.archives_proposed);
+        self.reconciliations_committed = self
+            .reconciliations_committed
+            .saturating_add(report.reconciliations_committed);
+        self.reconciliations_proposed = self
+            .reconciliations_proposed
+            .saturating_add(report.reconciliations_proposed);
         self.review_items_proposed = self
             .review_items_proposed
             .saturating_add(report.review_items_proposed);
@@ -471,7 +481,20 @@ pub struct MaintenanceTopicCandidate {
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_target: Option<MaintenanceTopicRefreshTarget>,
     pub pages: Vec<MaintenanceTopicInput>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceTopicRefreshTarget {
+    pub page_id: String,
+    pub revision_id: String,
+    pub title: String,
+    pub preview: String,
+    pub source_page_count: usize,
+    pub shared_source_page_count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -488,6 +511,8 @@ pub struct ApplyMaintenanceTopicRequest {
     pub candidate_id: String,
     pub title: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_target: Option<PageRevisionRef>,
     pub pages: Vec<PageRevisionRef>,
 }
 
@@ -1066,6 +1091,40 @@ impl RuntimeMaintainer {
             .resolve_relation_review(candidate_id, MaintenanceRelationReviewStatus::Accepted)?;
         self.ledger.save(&self.config.state_path).await?;
         Ok(relation)
+    }
+
+    pub async fn approve_reconciliation_review(
+        &mut self,
+        candidate_id: &str,
+    ) -> Result<pcp_core::ReconciliationResult> {
+        anyhow::ensure!(
+            self.config.applies_changes(),
+            "PCP reconciliation approval requires apply mode"
+        );
+        let item = self
+            .ledger
+            .review_item(candidate_id)
+            .context("unknown PCP reconciliation review candidate")?;
+        let MaintenanceReviewPayload::Reconciliation(candidate) = item.payload else {
+            anyhow::bail!("maintenance review candidate is not a reconciliation")
+        };
+        anyhow::ensure!(
+            item.status == MaintenanceReviewStatus::Pending,
+            "PCP reconciliation review candidate is no longer pending"
+        );
+        let result = self
+            .client
+            .apply_reconciliation(reconciliation_request(
+                &candidate,
+                self.config.worker_actor(),
+                Some(format!("maintenance:review:{candidate_id}")),
+                Some(self.config.worker.actor_id().to_owned()),
+            ))
+            .await?;
+        self.ledger
+            .resolve_review(candidate_id, MaintenanceReviewStatus::Accepted)?;
+        self.ledger.save(&self.config.state_path).await?;
+        Ok(result)
     }
 
     pub async fn reject_relation_review(
@@ -1801,6 +1860,7 @@ impl RuntimeMaintainer {
             .iter()
             .map(|page| page.page_id.clone())
             .collect::<BTreeSet<_>>();
+        let existing_topics = existing_topics_for_window(&inventory, &window);
         let response = self
             .evaluate_worker(MaintenanceWorkerRequest::ExtractTopic {
                 pages: window
@@ -1812,6 +1872,7 @@ impl RuntimeMaintainer {
                         )
                     })
                     .collect(),
+                existing_topics: existing_topics.clone(),
                 max_source_pages: 8,
             })
             .await?;
@@ -1821,6 +1882,7 @@ impl RuntimeMaintainer {
             title,
             content,
             reason,
+            refresh_topic_page_id,
         } = response
         else {
             return match response {
@@ -1849,11 +1911,17 @@ impl RuntimeMaintainer {
                     .expect("offered Topic Page exists")
             })
             .collect::<Vec<_>>();
+        let refresh_target = select_topic_refresh_target(
+            &selected,
+            &existing_topics,
+            refresh_topic_page_id.as_deref(),
+        )?;
         Ok(MaintenanceTopicAnalysis::candidate(build_topic_candidate(
             &selected,
             title,
             content,
             Some(reason),
+            refresh_target,
         )?))
     }
 
@@ -1892,6 +1960,11 @@ impl RuntimeMaintainer {
             request.title.clone(),
             request.content.clone(),
             None,
+            topic_refresh_target_from_request(
+                &inventory,
+                &selected,
+                request.refresh_target.as_ref(),
+            )?,
         )?;
         anyhow::ensure!(
             candidate.candidate_id == request.candidate_id,
@@ -1899,6 +1972,13 @@ impl RuntimeMaintainer {
         );
         self.client
             .extract_topic(ExtractTopicRequest {
+                target_topic: candidate
+                    .refresh_target
+                    .as_ref()
+                    .map(|target| PageRevisionRef {
+                        page_id: target.page_id.clone(),
+                        revision_id: target.revision_id.clone(),
+                    }),
                 source_pages: request.pages,
                 title: candidate.title,
                 content: candidate.content,
@@ -1964,6 +2044,19 @@ impl RuntimeMaintainer {
         } else {
             MaintenanceReviewOrigin::Manual
         };
+
+        if self.config.reconciliation.enabled
+            && jobs_remaining > 0
+            && self
+                .run_reconciliation_job(&mut report, review_origin)
+                .await
+                .context("run PCP feedback reconciliation maintenance job")?
+        {
+            report.jobs_advanced += 1;
+            jobs_remaining -= 1;
+            inventory = self.scoped_inventory(regions).await?;
+            report.inspected_pages = report.inspected_pages.max(inventory.len());
+        }
 
         // Pack boundaries change the Page surface. Exhaust the current Pack
         // pass before Summary or Relation sees the inventory. If the cycle
@@ -2041,6 +2134,187 @@ impl RuntimeMaintainer {
             self.ledger.save(&self.config.state_path).await?;
         }
         Ok(report)
+    }
+
+    async fn run_reconciliation_job(
+        &mut self,
+        report: &mut MaintenanceCycleReport,
+        review_origin: MaintenanceReviewOrigin,
+    ) -> Result<bool> {
+        let Some(signal) = self
+            .client
+            .pending_feedback(self.config.allowed_scopes.clone(), 1)
+            .await?
+            .into_iter()
+            .next()
+        else {
+            return Ok(false);
+        };
+        let key = format!(
+            "feedback:{}:{}",
+            signal.feedback_revision_id,
+            signal
+                .challenged_revision_ids
+                .first()
+                .context("pending feedback has no unresolved challenged Revision")?
+        );
+        if !self.ledger.eligible(&key) {
+            return Ok(false);
+        }
+        let mut offered_revision_ids = signal.challenged_revision_ids.clone();
+        offered_revision_ids.extend(signal.used_revision_ids.iter().cloned());
+        offered_revision_ids.sort();
+        offered_revision_ids.dedup();
+        let mut feedback_pages = self
+            .read_detail_pages(
+                vec![signal.feedback_revision_id.clone()],
+                self.config.reconciliation.max_input_chars,
+            )
+            .await?;
+        let feedback = feedback_pages
+            .pop()
+            .context("feedback signal Page disappeared")?;
+        let targets = self
+            .read_detail_pages(
+                offered_revision_ids.clone(),
+                self.config.reconciliation.max_input_chars,
+            )
+            .await?;
+        anyhow::ensure!(
+            targets.len() == offered_revision_ids.len(),
+            "one or more feedback target Revisions are no longer readable"
+        );
+        let outcome = self
+            .evaluate_worker(MaintenanceWorkerRequest::ReconcileFeedback {
+                signal: signal.clone(),
+                feedback: Box::new(feedback.clone()),
+                targets: targets.clone(),
+            })
+            .await?;
+        report.worker_calls = report.worker_calls.saturating_add(outcome.model_attempts);
+        report.escalated_decisions = report
+            .escalated_decisions
+            .saturating_add(u32::from(outcome.escalated));
+        let model_attempts = outcome.model_attempts;
+        let escalated = outcome.escalated;
+        let MaintenanceWorkerResponse::ReconcileFeedback {
+            target_revision_id,
+            disposition,
+            rationale,
+            scope,
+            replacement_revision_id,
+        } = outcome.response
+        else {
+            self.ledger.record(
+                key,
+                "feedback_deferred",
+                self.config.reconciliation.retry_after_seconds,
+            );
+            report.deferred += 1;
+            return Ok(true);
+        };
+        anyhow::ensure!(
+            signal.challenged_revision_ids.contains(&target_revision_id),
+            "semantic worker selected a Revision that was context-only, not challenged"
+        );
+        let target = targets
+            .iter()
+            .find(|page| page.revision_id == target_revision_id)
+            .context("semantic worker feedback target disappeared")?
+            .clone();
+        let replacement = replacement_revision_id
+            .map(|revision_id| {
+                anyhow::ensure!(
+                    disposition == ReconciliationDisposition::Superseded,
+                    "semantic worker supplied a replacement for a non-superseded decision"
+                );
+                anyhow::ensure!(
+                    revision_id != target_revision_id,
+                    "semantic worker selected the target as its own replacement"
+                );
+                let page = targets
+                    .iter()
+                    .find(|page| page.revision_id == revision_id)
+                    .context(
+                        "semantic worker selected a replacement outside the offered Revisions",
+                    )?;
+                Ok(PageRevisionRef {
+                    page_id: page.page_id.clone(),
+                    revision_id,
+                })
+            })
+            .transpose()?;
+        anyhow::ensure!(
+            (disposition == ReconciliationDisposition::Superseded) == replacement.is_some(),
+            "semantic worker returned an invalid superseded replacement"
+        );
+        let rationale = rationale.trim().to_owned();
+        anyhow::ensure!(
+            !rationale.is_empty() && rationale.chars().count() <= 2_000,
+            "semantic worker returned an invalid reconciliation rationale"
+        );
+        let mut basis_revision_ids = vec![
+            signal.feedback_revision_id.clone(),
+            target_revision_id.clone(),
+        ];
+        if let Some(replacement) = replacement.as_ref() {
+            basis_revision_ids.push(replacement.revision_id.clone());
+        }
+        basis_revision_ids.sort();
+        basis_revision_ids.dedup();
+        let candidate = MaintenanceReconciliationCandidate {
+            candidate_id: MaintenanceReconciliationCandidate::candidate_id(
+                &signal.feedback_revision_id,
+                &target_revision_id,
+            ),
+            signal,
+            feedback,
+            target,
+            disposition,
+            rationale,
+            scope,
+            replacement,
+            basis_revision_ids,
+        };
+        let safe_to_auto_apply = self.config.applies_changes()
+            && matches!(
+                candidate.signal.authority,
+                FeedbackAuthority::SubjectOwner | FeedbackAuthority::TenantAssertion
+            )
+            && matches!(
+                candidate.disposition,
+                ReconciliationDisposition::NoSourceChange
+                    | ReconciliationDisposition::Qualified
+                    | ReconciliationDisposition::Disputed
+            );
+        if safe_to_auto_apply {
+            self.client
+                .apply_reconciliation(reconciliation_request(
+                    &candidate,
+                    self.config.worker_actor(),
+                    Some(format!("maintenance:{}", candidate.candidate_id)),
+                    Some(self.config.worker.actor_id().to_owned()),
+                ))
+                .await?;
+            report.reconciliations_committed += 1;
+        } else {
+            self.ledger.enqueue_review(
+                MaintenanceReviewPayload::Reconciliation(candidate),
+                review_origin,
+                "Explicit feedback requires a validity decision before default recall changes."
+                    .to_owned(),
+                model_attempts,
+                escalated,
+            );
+            report.reconciliations_proposed += 1;
+            report.review_items_proposed += 1;
+        }
+        self.ledger.record(
+            key,
+            "feedback_reconciled_or_pending_review",
+            self.config.reconciliation.retry_after_seconds,
+        );
+        Ok(true)
     }
 
     async fn run_summary_job(
@@ -2405,6 +2679,7 @@ impl RuntimeMaintainer {
             .iter()
             .map(|page| page.page_id.clone())
             .collect::<BTreeSet<_>>();
+        let existing_topics = existing_topics_for_window(inventory, &window);
         let outcome = self
             .evaluate_worker(MaintenanceWorkerRequest::ExtractTopic {
                 pages: window
@@ -2416,6 +2691,7 @@ impl RuntimeMaintainer {
                         )
                     })
                     .collect(),
+                existing_topics: existing_topics.clone(),
                 max_source_pages: 8,
             })
             .await?;
@@ -2431,6 +2707,7 @@ impl RuntimeMaintainer {
                 title,
                 content,
                 reason,
+                refresh_topic_page_id,
             } => {
                 anyhow::ensure!(
                     (2..=8).contains(&page_ids.len())
@@ -2447,7 +2724,13 @@ impl RuntimeMaintainer {
                             .expect("validated Topic Page is offered")
                     })
                     .collect::<Vec<_>>();
-                let candidate = build_topic_candidate(&selected, title, content, Some(reason))?;
+                let refresh_target = select_topic_refresh_target(
+                    &selected,
+                    &existing_topics,
+                    refresh_topic_page_id.as_deref(),
+                )?;
+                let candidate =
+                    build_topic_candidate(&selected, title, content, Some(reason), refresh_target)?;
                 self.ledger.enqueue_review(
                     MaintenanceReviewPayload::Topic(candidate),
                     review_origin,
@@ -3629,6 +3912,133 @@ fn topic_candidate_windows(
         .collect()
 }
 
+fn existing_topics_for_window(
+    inventory: &[pcp_store::DurablePageInventoryItem],
+    window: &[pcp_store::DurablePageInventoryItem],
+) -> Vec<ExistingTopicPage> {
+    let selected = window.iter().collect::<Vec<_>>();
+    existing_topics_for_selected(inventory, &selected)
+}
+
+fn existing_topics_for_selected(
+    inventory: &[pcp_store::DurablePageInventoryItem],
+    selected: &[&pcp_store::DurablePageInventoryItem],
+) -> Vec<ExistingTopicPage> {
+    let Some(namespace) = selected.first().map(|page| page.namespace.as_str()) else {
+        return Vec::new();
+    };
+    let selected_page_ids = selected
+        .iter()
+        .map(|page| page.page_id.as_str())
+        .collect::<BTreeSet<_>>();
+
+    inventory
+        .iter()
+        .filter(|page| {
+            page.namespace == namespace
+                && page.kind == "topic_summary"
+                && !page.superseded
+                && page
+                    .topic_source_page_ids
+                    .iter()
+                    .filter(|page_id| selected_page_ids.contains(page_id.as_str()))
+                    .take(2)
+                    .count()
+                    >= 2
+        })
+        .map(|page| ExistingTopicPage {
+            page_id: page.page_id.clone(),
+            revision_id: page.revision_id.clone(),
+            title: page
+                .facets
+                .as_ref()
+                .and_then(|facets| facets.get("topicTitle"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Topic")
+                .to_owned(),
+            routing_text: page
+                .summary
+                .as_deref()
+                .unwrap_or(&page.snippet)
+                .chars()
+                .take(PACKING_PREVIEW_CHARS)
+                .collect(),
+            source_page_ids: page.topic_source_page_ids.clone(),
+        })
+        .collect()
+}
+
+fn select_topic_refresh_target(
+    selected: &[&pcp_store::DurablePageInventoryItem],
+    existing_topics: &[ExistingTopicPage],
+    requested_page_id: Option<&str>,
+) -> Result<Option<MaintenanceTopicRefreshTarget>> {
+    let selected_page_ids = selected
+        .iter()
+        .map(|page| page.page_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let selected_topic = if let Some(requested_page_id) = requested_page_id {
+        Some(
+            existing_topics
+                .iter()
+                .find(|topic| topic.page_id == requested_page_id)
+                .context("semantic worker selected an unavailable Topic refresh target")?,
+        )
+    } else {
+        existing_topics.iter().find(|topic| {
+            topic
+                .source_page_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+                == selected_page_ids
+        })
+    };
+    let Some(topic) = selected_topic else {
+        return Ok(None);
+    };
+    let topic_source_ids = topic
+        .source_page_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let shared_source_page_count = topic_source_ids.intersection(&selected_page_ids).count();
+    let union_source_page_count = topic_source_ids.union(&selected_page_ids).count();
+    anyhow::ensure!(
+        shared_source_page_count >= 2
+            && shared_source_page_count.saturating_mul(2) >= union_source_page_count,
+        "Topic refresh target does not substantially overlap the selected source Pages"
+    );
+    Ok(Some(MaintenanceTopicRefreshTarget {
+        page_id: topic.page_id.clone(),
+        revision_id: topic.revision_id.clone(),
+        title: topic.title.clone(),
+        preview: topic.routing_text.clone(),
+        source_page_count: topic.source_page_ids.len(),
+        shared_source_page_count,
+    }))
+}
+
+fn topic_refresh_target_from_request(
+    inventory: &[pcp_store::DurablePageInventoryItem],
+    selected: &[&pcp_store::DurablePageInventoryItem],
+    requested: Option<&PageRevisionRef>,
+) -> Result<Option<MaintenanceTopicRefreshTarget>> {
+    let existing_topics = existing_topics_for_selected(inventory, selected);
+    let target = select_topic_refresh_target(
+        selected,
+        &existing_topics,
+        requested.map(|target| target.page_id.as_str()),
+    )?;
+    if let (Some(requested), Some(target)) = (requested, target.as_ref()) {
+        anyhow::ensure!(
+            requested.revision_id == target.revision_id,
+            "maintenance Topic refresh target is stale"
+        );
+    }
+    Ok(target)
+}
+
 fn topic_scan_group_id(window: &[pcp_store::DurablePageInventoryItem]) -> String {
     let mut digest = Sha256::new();
     for page in window {
@@ -4375,6 +4785,7 @@ fn build_topic_candidate(
     title: String,
     content: String,
     reason: Option<String>,
+    refresh_target: Option<MaintenanceTopicRefreshTarget>,
 ) -> Result<MaintenanceTopicCandidate> {
     let title = title.trim().to_owned();
     let content = content.trim().to_owned();
@@ -4404,6 +4815,16 @@ fn build_topic_candidate(
     digest.update(title.as_bytes());
     digest.update([0]);
     digest.update(content.as_bytes());
+    digest.update([0]);
+    if let Some(target) = refresh_target.as_ref() {
+        digest.update(b"refresh");
+        digest.update([0]);
+        digest.update(target.page_id.as_bytes());
+        digest.update([0]);
+        digest.update(target.revision_id.as_bytes());
+    } else {
+        digest.update(b"create");
+    }
     let encoded = format!("{:x}", digest.finalize());
     Ok(MaintenanceTopicCandidate {
         candidate_id: format!("mtp_{}", &encoded[..24]),
@@ -4411,6 +4832,7 @@ fn build_topic_candidate(
         title,
         content,
         reason,
+        refresh_target,
         pages: pages
             .iter()
             .map(|page| MaintenanceTopicInput {
@@ -4444,6 +4866,29 @@ fn normalize_worker_summary(content: String, source_text: &str) -> Result<String
         "semantic maintenance worker returned an invalid Summary"
     );
     Ok(normalize_known_source_identifiers(content, source_text))
+}
+
+fn reconciliation_request(
+    candidate: &MaintenanceReconciliationCandidate,
+    created_by: pcp_core::Actor,
+    idempotency_key: Option<String>,
+    tool_or_model: Option<String>,
+) -> ApplyReconciliationRequest {
+    ApplyReconciliationRequest {
+        feedback_revision_id: candidate.signal.feedback_revision_id.clone(),
+        target: PageRevisionRef {
+            page_id: candidate.target.page_id.clone(),
+            revision_id: candidate.target.revision_id.clone(),
+        },
+        disposition: candidate.disposition.clone(),
+        rationale: candidate.rationale.clone(),
+        scope: candidate.scope.clone(),
+        replacement: candidate.replacement.clone(),
+        basis_revision_ids: candidate.basis_revision_ids.clone(),
+        created_by,
+        tool_or_model,
+        idempotency_key,
+    }
 }
 
 fn normalize_known_source_identifiers(summary: &str, source: &str) -> String {
@@ -4567,6 +5012,7 @@ fn worker_operation(request: &MaintenanceWorkerRequest) -> &'static str {
         MaintenanceWorkerRequest::SelectRelation { .. } => "select_relation",
         MaintenanceWorkerRequest::ExtractTopic { .. } => "extract_topic",
         MaintenanceWorkerRequest::AssessArchive { .. } => "assess_archive",
+        MaintenanceWorkerRequest::ReconcileFeedback { .. } => "reconcile_feedback",
         MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => "select_retention_milestones",
     }
 }
@@ -4578,6 +5024,11 @@ fn worker_scopes(request: &MaintenanceWorkerRequest, access: &AccessSession) -> 
             pages.iter().map(|page| page.namespace.clone()).collect()
         }
         MaintenanceWorkerRequest::AssessArchive { page } => vec![page.page.namespace.clone()],
+        MaintenanceWorkerRequest::ReconcileFeedback {
+            feedback, targets, ..
+        } => std::iter::once(feedback.namespace.clone())
+            .chain(targets.iter().map(|page| page.namespace.clone()))
+            .collect(),
         MaintenanceWorkerRequest::SelectRelation { pages, .. }
         | MaintenanceWorkerRequest::ExtractTopic { pages, .. } => {
             pages.iter().map(|page| page.namespace.clone()).collect()
@@ -4609,6 +5060,7 @@ fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
         MaintenanceWorkerResponse::Relate { .. } => "relate",
         MaintenanceWorkerResponse::ExtractTopic { .. } => "extract_topic",
         MaintenanceWorkerResponse::ArchiveReview { .. } => "archive_review",
+        MaintenanceWorkerResponse::ReconcileFeedback { .. } => "reconcile_feedback",
         MaintenanceWorkerResponse::Retain { .. } => "retain",
         MaintenanceWorkerResponse::NoCandidate => "no_candidate",
         MaintenanceWorkerResponse::Defer => "defer",
@@ -4628,8 +5080,9 @@ mod relation_window_tests {
 
     use super::{
         MaintenanceWakeReason, PackingMaintenanceConfig, RelationMaintenanceConfig,
-        archive_scan_from_inventory, packing_candidate_windows, relation_candidate_windows,
-        source_boundary_relation_windows, wait_for_scheduler_wakeup,
+        archive_scan_from_inventory, existing_topics_for_selected, packing_candidate_windows,
+        relation_candidate_windows, select_topic_refresh_target, source_boundary_relation_windows,
+        wait_for_scheduler_wakeup,
     };
 
     #[tokio::test]
@@ -4667,8 +5120,32 @@ mod relation_window_tests {
             summary: None,
             relation_types: Vec::new(),
             provenance_input_revision_ids: Vec::new(),
+            topic_source_page_ids: Vec::new(),
+            superseded: false,
             packing_protected: false,
         }
+    }
+
+    #[test]
+    fn exact_topic_source_set_refreshes_existing_front_door() {
+        let first = page("conversation:alpha", "source-1");
+        let second = page("conversation:alpha", "source-2");
+        let mut topic = page("conversation:alpha", "topic-1");
+        topic.kind = "topic_summary".to_owned();
+        topic.topic_source_page_ids = vec![first.page_id.clone(), second.page_id.clone()];
+        topic.facets = Some(serde_json::json!({"topicTitle": "Existing Topic"}));
+        topic.snippet = "Existing routing front door".to_owned();
+        let inventory = vec![first.clone(), second.clone(), topic];
+        let selected = vec![&inventory[0], &inventory[1]];
+        let existing_topics = existing_topics_for_selected(&inventory, &selected);
+
+        let target = select_topic_refresh_target(&selected, &existing_topics, None)
+            .expect("select exact Topic refresh target")
+            .expect("exact logical source set refreshes instead of creating");
+
+        assert_eq!(target.page_id, "topic-1");
+        assert_eq!(target.source_page_count, 2);
+        assert_eq!(target.shared_source_page_count, 2);
     }
 
     #[test]

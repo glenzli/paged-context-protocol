@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use anyhow::{Context, Result};
 use pcp_core::{ExtractTopicRequest, PagePayload, PageRevisionRef, WriteResult};
@@ -39,8 +39,18 @@ impl SqlitePcpStore {
             }
 
             let namespace = validate_sources(&transaction, &request.source_pages, &allowed_scopes)?;
+            let refresh_target = resolve_refresh_target(
+                &transaction,
+                request.target_topic.as_ref(),
+                &request.source_pages,
+                &namespace,
+                &allowed_scopes,
+            )?;
             let timestamp = now();
-            let page_id = random_id(&transaction, "pg_")?;
+            let page_id = match refresh_target.as_ref() {
+                Some(target) => target.page_id.clone(),
+                None => random_id(&transaction, "pg_")?,
+            };
             let revision_id = random_id(&transaction, "rev_")?;
             let source_revision_ids = request
                 .source_pages
@@ -56,16 +66,18 @@ impl SqlitePcpStore {
             )?;
             ensure_provenance_access(&transaction, &provenance, &allowed_scopes)?;
 
-            transaction
-                .execute(
-                    "INSERT INTO pcp_pages (
-                        page_id, current_revision_id, created_at, namespace,
-                        kind, mutability, lifecycle_status, updated_at
-                    ) VALUES (?1, NULL, ?2, ?3, 'topic_summary',
-                              'revisioned', 'active', ?2)",
-                    params![page_id, timestamp, namespace],
-                )
-                .context("create PCP topic Summary Page")?;
+            if refresh_target.is_none() {
+                transaction
+                    .execute(
+                        "INSERT INTO pcp_pages (
+                            page_id, current_revision_id, created_at, namespace,
+                            kind, mutability, lifecycle_status, updated_at
+                        ) VALUES (?1, NULL, ?2, ?3, 'topic_summary',
+                                  'revisioned', 'active', ?2)",
+                        params![page_id, timestamp, namespace],
+                    )
+                    .context("create PCP topic Summary Page")?;
+            }
             let payload = PagePayload {
                 media_type: "text/markdown".to_owned(),
                 content: request.content.trim().to_owned(),
@@ -92,14 +104,25 @@ impl SqlitePcpStore {
                 Some(&facets),
                 &provenance,
             )?;
-            transaction
-                .execute(
+            let published = match refresh_target.as_ref() {
+                Some(target) => transaction.execute(
+                    "UPDATE pcp_pages
+                     SET current_revision_id = ?2, updated_at = ?4
+                     WHERE page_id = ?1 AND current_revision_id = ?3",
+                    params![page_id, revision_id, target.revision_id, timestamp],
+                ),
+                None => transaction.execute(
                     "UPDATE pcp_pages
                      SET current_revision_id = ?2, updated_at = ?3
-                     WHERE page_id = ?1",
+                     WHERE page_id = ?1 AND current_revision_id IS NULL",
                     params![page_id, revision_id, timestamp],
-                )
-                .context("publish PCP topic Summary Page")?;
+                ),
+            }
+            .context("publish PCP topic Summary Page")?;
+            anyhow::ensure!(
+                published == 1,
+                "Topic Page changed while publishing extraction"
+            );
             transaction
                 .execute(
                     "INSERT INTO pcp_topic_extractions (
@@ -115,6 +138,14 @@ impl SqlitePcpStore {
                 )
                 .context("record PCP topic extraction")?;
 
+            if refresh_target.is_some() {
+                retract_topic_source_relations(
+                    &transaction,
+                    &page_id,
+                    &request.created_by,
+                    &timestamp,
+                )?;
+            }
             for (position, source) in request.source_pages.iter().enumerate() {
                 transaction
                     .execute(
@@ -156,14 +187,180 @@ impl SqlitePcpStore {
             Ok(WriteResult {
                 page_id,
                 revision_id,
-                created: true,
+                created: refresh_target.is_none(),
             })
         })
         .await
     }
 }
 
+#[derive(Clone)]
+struct TopicRefreshTarget {
+    page_id: String,
+    revision_id: String,
+}
+
+fn resolve_refresh_target(
+    transaction: &Transaction<'_>,
+    requested_target: Option<&PageRevisionRef>,
+    sources: &[PageRevisionRef],
+    namespace: &str,
+    allowed_scopes: &HashSet<String>,
+) -> Result<Option<TopicRefreshTarget>> {
+    let requested_source_ids = sources
+        .iter()
+        .map(|source| source.page_id.clone())
+        .collect::<BTreeSet<_>>();
+    let topics = current_topic_source_sets(transaction, namespace)?;
+    if let Some(target) = requested_target {
+        let topic_sources = topics
+            .get(&target.page_id)
+            .context("Topic refresh target is unavailable or superseded")?;
+        anyhow::ensure!(
+            topic_sources.revision_id == target.revision_id,
+            "Topic refresh target is stale"
+        );
+        anyhow::ensure!(
+            allowed_scopes.contains(namespace),
+            "Topic refresh target is outside the authorized PCP scopes"
+        );
+        let shared = topic_sources
+            .source_page_ids
+            .intersection(&requested_source_ids)
+            .count();
+        let union = topic_sources
+            .source_page_ids
+            .union(&requested_source_ids)
+            .count();
+        anyhow::ensure!(
+            shared >= 2 && shared.saturating_mul(2) >= union,
+            "Topic refresh target does not substantially overlap the selected source Pages"
+        );
+        return Ok(Some(TopicRefreshTarget {
+            page_id: target.page_id.clone(),
+            revision_id: target.revision_id.clone(),
+        }));
+    }
+
+    anyhow::ensure!(
+        !topics
+            .values()
+            .any(|topic| topic.source_page_ids == requested_source_ids),
+        "an active Topic already has the same logical source Pages; refresh that Topic instead"
+    );
+    Ok(None)
+}
+
+struct CurrentTopicSources {
+    revision_id: String,
+    source_page_ids: BTreeSet<String>,
+}
+
+fn current_topic_source_sets(
+    transaction: &Transaction<'_>,
+    namespace: &str,
+) -> Result<BTreeMap<String, CurrentTopicSources>> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT page.page_id, page.current_revision_id, member.source_page_id
+             FROM pcp_pages page
+             JOIN pcp_topic_extractions extraction
+               ON extraction.topic_revision_id = page.current_revision_id
+             JOIN pcp_topic_extraction_members member
+               ON member.topic_revision_id = extraction.topic_revision_id
+             WHERE page.namespace = ?1
+               AND page.kind = 'topic_summary'
+               AND page.lifecycle_status = 'active'
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM pcp_relations superseding
+                   WHERE superseding.relation_type = 'supersedes'
+                     AND superseding.to_page_id = page.page_id
+                     AND NOT EXISTS (
+                         SELECT 1 FROM pcp_relation_retractions retraction
+                         WHERE retraction.relation_id = superseding.relation_id
+                     )
+               )
+             ORDER BY page.page_id, member.position",
+        )
+        .context("prepare current Topic source lookup")?;
+    let rows = statement
+        .query_map([namespace], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .context("query current Topic sources")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect current Topic sources")?;
+    drop(statement);
+
+    let mut result = BTreeMap::<String, CurrentTopicSources>::new();
+    for (page_id, revision_id, source_page_id) in rows {
+        let entry = result
+            .entry(page_id)
+            .or_insert_with(|| CurrentTopicSources {
+                revision_id,
+                source_page_ids: BTreeSet::new(),
+            });
+        entry.source_page_ids.insert(source_page_id);
+    }
+    Ok(result)
+}
+
+fn retract_topic_source_relations(
+    transaction: &Transaction<'_>,
+    topic_page_id: &str,
+    actor: &pcp_core::Actor,
+    timestamp: &str,
+) -> Result<()> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT relation.relation_id
+             FROM pcp_relations relation
+             WHERE relation.from_page_id = ?1
+               AND relation.relation_type = 'summarizes'
+               AND NOT EXISTS (
+                   SELECT 1 FROM pcp_relation_retractions retraction
+                   WHERE retraction.relation_id = relation.relation_id
+               )",
+        )
+        .context("prepare Topic source relation refresh")?;
+    let relation_ids = statement
+        .query_map([topic_page_id], |row| row.get::<_, String>(0))
+        .context("query current Topic source relations")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect current Topic source relations")?;
+    drop(statement);
+    for relation_id in relation_ids {
+        transaction
+            .execute(
+                "INSERT INTO pcp_relation_retractions (
+                    relation_id, retracted_actor_type, retracted_actor_id,
+                    retracted_at, reason
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    relation_id,
+                    actor.actor_type.as_str(),
+                    actor.actor_id,
+                    timestamp,
+                    "Topic source membership was refreshed",
+                ],
+            )
+            .context("retract previous Topic source relation")?;
+    }
+    Ok(())
+}
+
 fn validate_request(request: &ExtractTopicRequest) -> Result<()> {
+    if let Some(target) = request.target_topic.as_ref() {
+        anyhow::ensure!(
+            !target.page_id.trim().is_empty() && !target.revision_id.trim().is_empty(),
+            "Topic refresh target requires exact Page and Revision IDs"
+        );
+    }
     anyhow::ensure!(
         (2..=MAX_TOPIC_EXTRACTION_SOURCES).contains(&request.source_pages.len()),
         "PCP topic extraction requires 2-{MAX_TOPIC_EXTRACTION_SOURCES} source Pages"

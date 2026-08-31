@@ -21,10 +21,10 @@ during migration.
 
 | Layer | Owns | Does not own |
 | --- | --- | --- |
-| Tenant | Source events, source-local deterministic structure, Page kind, SourceRefs, and external-source custody, parsing, search, and rendering | Global relation graph, maintenance cadence, cross-tenant policy |
+| Tenant | Source events, source-local deterministic structure, Page kind, SourceRefs, explicit feedback against exact recalled Revisions, and external-source custody, parsing, search, and rendering | Global relation graph, maintenance cadence, cross-tenant policy |
 | PCP protocol and Store | Identity boundary, stable Pages, immutable Revisions, Relations, authorization, exact reads, atomic commits | A fixed inference model or active prompt |
 | Runtime maintainer | Identity-wide candidate discovery, bounded convergence, typed review queue, budgets, timeout, cooldown, worker invocation, validation, commit authority, maintenance ledger | Tenant product behavior or external-source custody, parsing, search, or rendering |
-| Inference worker | Summary, ordered packing-candidate, relation, Topic, archive-review, and milestone judgments requested by Runtime | Direct Store writes, content packing, Page-head advancement, scheduling, lifecycle mutation, or GC policy |
+| Inference worker | Feedback reconciliation, Summary, ordered packing-candidate, relation, Topic, archive-review, and milestone judgments requested by Runtime | Direct Store writes, content packing, Page-head advancement, scheduling, lifecycle mutation, or GC policy |
 
 The maintainer is disabled unless `[maintenance]` is present with
 `enabled = true`. It never falls back to automatic similarity-based merging.
@@ -55,12 +55,19 @@ than treating an existing Store backlog as newly written work.
 [maintenance]
 interval_seconds = 1800
 max_interval_seconds = 86400
+
+[maintenance.reconciliation]
+enabled = true
+# Maximum combined detail made available to one bounded feedback decision.
+max_input_chars = 32000
+# A deferred or rejected proposal is not immediately re-run.
+retry_after_seconds = 3600
 ```
 
 Scheduled packing and Summary work may apply in `mode = "apply"`. A relation is
 applied automatically only for the narrow structural case of two continuous
 Pack Pages in one source stream with a shared protected identifier. General
-relations, Topic Pages, and archive recommendations enter one persistent typed
+relations, Topic Pages, archive recommendations, and high-impact feedback reconciliation enter one persistent typed
 review queue even in apply mode. Background maintenance and Console `Run now`
 use this same controller and queue; queued items affect neither retrieval nor
 lifecycle state before acceptance.
@@ -79,15 +86,16 @@ max_wait_seconds = 3600
 
 One cycle is bounded by `max_jobs_per_cycle`:
 
-1. Runtime reads the complete authorized current-Page inventory with a bounded routing excerpt per Page.
-2. Runtime deterministically forms a bounded analysis window of sealed leaves and packed anchors that share Scope, kind, and a contiguous SourceSpan, then sends compact head-and-tail routing text as `select_packing`. `analysis_window_pages` controls what the worker can compare; it is independent of the smaller `max_pages` commit limit.
-3. The worker may select one ordered coherent episode from that exact window. Lossless packing does not require every Page to state the same fact: questions, answers, corrections, qualifications, and short reasoning transitions may stay together. It does not generate packed content.
-4. Runtime validates the selected IDs, aggregate input size, and at most one packed anchor and, in apply mode, calls `pack_pages`; Store rechecks exact heads, source continuity, identity pins, anchor count, retention, and transaction invariants. It then reloads the current-Page inventory before the next phase.
-5. A long unsummarized Page may be sent to the worker as `summarize_page`. Runtime reloads the inventory after a Summary write before relation work.
-6. Runtime may send overlapping bounded current-Page routing windows as `select_relation`. Exact current Page pairs connected by provenance inputs are offered before broad recency windows, but provenance never asserts a Relation. The request lists already related or previously reviewed pairs; the worker can return only two other offered Page IDs. Runtime fixes the relation to symmetric `related_to`, binds the exact current Revisions as basis, rejects stale or excluded pairs, and sends general semantic relations to review.
-7. After relation work quiesces, Runtime may ask for a source-grounded Topic front door. Valid Topic proposals and conservative archive recommendations are persisted as typed review items; archive is never applied automatically.
-8. Runtime obtains a bounded dry-run retention plan and may ask the worker whether any actual old candidate Revision is a semantic milestone.
-9. In apply mode only, validated low-risk Summary writes, packing, structurally low-risk Relations, or finite retention leases cross into the PCP commit API. Leases additionally require `maintenance.retention.write_leases = true`. Lease selection and physical collection remain separate operations; the current maintainer does not collect Revision payloads automatically.
+1. Runtime reads one pending explicit-feedback signal and only its exact feedback, challenged, and used Revisions. The worker must choose a challenged Revision; used-only Revisions remain context. Low-impact `qualified` or `disputed` decisions from a subject-owner or tenant assertion may apply under policy. `superseded`, `retracted`, external claims, and uncertain outcomes go to review. Each challenged target resolves independently.
+2. Runtime reads the complete authorized current-Page inventory with a bounded routing excerpt per Page.
+3. Runtime deterministically forms a bounded analysis window of sealed leaves and packed anchors that share Scope, kind, and a contiguous SourceSpan, then sends compact head-and-tail routing text as `select_packing`. `analysis_window_pages` controls what the worker can compare; it is independent of the smaller `max_pages` commit limit.
+4. The worker may select one ordered coherent episode from that exact window. Lossless packing does not require every Page to state the same fact: questions, answers, corrections, qualifications, and short reasoning transitions may stay together. It does not generate packed content.
+5. Runtime validates the selected IDs, aggregate input size, and at most one packed anchor and, in apply mode, calls `pack_pages`; Store rechecks exact heads, source continuity, identity pins, anchor count, retention, and transaction invariants. It then reloads the current-Page inventory before the next phase.
+6. A long unsummarized Page may be sent to the worker as `summarize_page`. Runtime reloads the inventory after a Summary write before relation work.
+7. Runtime may send overlapping bounded current-Page routing windows as `select_relation`. Exact current Page pairs connected by provenance inputs are offered before broad recency windows, but provenance never asserts a Relation. The request lists already related or previously reviewed pairs; the worker can return only two other offered Page IDs. Runtime fixes the relation to symmetric `related_to`, binds the exact current Revisions as basis, rejects stale or excluded pairs, and sends general semantic relations to review.
+8. After relation work quiesces, Runtime may ask for a source-grounded Topic front door. Valid Topic proposals and conservative archive recommendations are persisted as typed review items; archive is never applied automatically.
+9. Runtime obtains a bounded dry-run retention plan and may ask the worker whether any actual old candidate Revision is a semantic milestone.
+10. In apply mode only, validated low-risk reconciliation, Summary writes, packing, structurally low-risk Relations, or finite retention leases cross into the PCP commit API. Leases additionally require `maintenance.retention.write_leases = true`. Lease selection and physical collection remain separate operations; the current maintainer does not collect Revision payloads automatically.
 
 Runtime keeps cooldown decisions in `state_path`. This operational state is not
 written as user memory. Successful Summary writes remain traceable through normal
@@ -127,7 +135,7 @@ baseline deployment, but it is not the uncertainty escalation path.
 uses it only after the baseline returns the explicit `defer` contract for an
 operation listed in `escalation_operations`; missing evidence, stale candidates,
 invalid output, transport failures, and schema failures do not escalate. The
-default eligible set is packing selection/analysis, Relation, Topic, and archive
+default eligible set is feedback reconciliation, packing selection/analysis, Relation, Topic, and archive
 review. Summary and retention remain Luna-only. A typical policy is:
 
 ```toml
