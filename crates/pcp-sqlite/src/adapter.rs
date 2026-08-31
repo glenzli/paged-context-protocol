@@ -9,10 +9,10 @@ use pcp_core::{
     LifecycleStatus, LinkPagesRequest, OperationTelemetry, PackPagesRequest,
     PageLifecycleTransitionResult, PageMutability, PlanRevisionRetentionRequest, Projection,
     ProvenanceEvent, PutRevisionRetentionLeaseRequest, QueryAuditEvent, ReadPage, ReadPagesRequest,
-    Relation, RestoreArchivedPageRequest, RevisePageRequest, RevisionCollectionResult,
-    RevisionRetentionLease, RevisionRetentionPlan, RuntimeUsageEvent, Scope, SearchPagesRequest,
-    SearchResult, UnpackPageRequest, WritePageRequest, WriteResult, WriteSummaryRequest,
-    WriteSummaryResult, WriteValidityResult,
+    Relation, RepairPageRequest, RestoreArchivedPageRequest, RevisePageRequest,
+    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, RuntimeUsageEvent,
+    Scope, SearchPagesRequest, SearchResult, UnpackPageRequest, WritePageRequest, WriteResult,
+    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::{
     ContentLibraryResult, ContentLibrarySummary, DurablePageInventoryItem, HealthSnapshot,
@@ -974,6 +974,75 @@ impl PcpStore for SqlitePcpStore {
             self,
             access,
             "revise_page",
+            audit_scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
+    }
+
+    async fn repair_page(
+        &self,
+        access: &AccessSession,
+        request: RepairPageRequest,
+    ) -> Result<WriteResult> {
+        let observation =
+            OperationObservation::start().with_input_count(1 + request.based_on_revision_ids.len());
+        let target_scope = match self.page_namespace(request.page_id.clone()).await {
+            Ok(scope) => scope,
+            Err(error) => {
+                return complete(
+                    self,
+                    access,
+                    "repair_page",
+                    Vec::new(),
+                    Err(error),
+                    false,
+                    observation,
+                )
+                .await;
+            }
+        };
+        let mut audit_scopes = vec![target_scope.clone()];
+        let authorization = async {
+            authorize_exact(access, &target_scope, AccessPermission::Repair)?;
+            anyhow::ensure!(
+                access.principal.principal_type != AccessPrincipalType::ModelClient,
+                "model clients cannot use the PCP Page repair surface"
+            );
+            let provenance_scopes = authorize_revision_inputs(
+                self,
+                access,
+                &target_scope,
+                request.based_on_revision_ids.clone(),
+            )
+            .await?;
+            extend_unique(&mut audit_scopes, provenance_scopes);
+            Ok(())
+        }
+        .await;
+        if let Err(error) = authorization {
+            return complete(
+                self,
+                access,
+                "repair_page",
+                audit_scopes,
+                Err(error),
+                true,
+                observation,
+            )
+            .await;
+        }
+        let actor = Actor {
+            actor_type: ActorType::Tool,
+            actor_id: access.principal.principal_id.clone(),
+        };
+        let result = SqlitePcpStore::repair_page(self, request, actor, audit_scopes.clone()).await;
+        complete(
+            self,
+            access,
+            "repair_page",
             audit_scopes,
             result,
             false,

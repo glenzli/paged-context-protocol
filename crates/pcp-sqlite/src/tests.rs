@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::Context;
 use chrono::{Duration, SecondsFormat, Utc};
-use pcp_client::{EmbeddedPcpClient, PcpApi};
+use pcp_client::{AccessMode, EmbeddedPcpClient, PcpApi};
 use pcp_core::{
     AccessDecision, AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor,
     ActorType, ArchivePageRequest, AssessPageValidityRequest, BrowseIndexOrder,
@@ -13,16 +13,211 @@ use pcp_core::{
     GraphEdgeKind, IngestPageRequest, LifecycleStatus, LinkPagesRequest, ModelTokenUsage,
     PackPagesRequest, PageMutability, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest,
     Projection, ProvenanceEvent, PutRevisionRetentionLeaseRequest, QueryAuditEvent,
-    QueryAuditMethod, ReadPagesRequest, RestoreArchivedPageRequest, RetentionPolicy,
-    RetentionProtectionReason, RevisePageRequest, RouterTokenUsage, RuntimeUsageEvent, ScopeGrant,
-    SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch, SourceRef, SourceSpan,
-    UnpackPageRequest, ValidityStanding, WritePageRequest, WriteSummaryRequest,
+    QueryAuditMethod, ReadPagesRequest, RepairPageRequest, RestoreArchivedPageRequest,
+    RetentionPolicy, RetentionProtectionReason, RevisePageRequest, RouterTokenUsage,
+    RuntimeUsageEvent, ScopeGrant, SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch,
+    SourceRef, SourceSpan, UnpackPageRequest, ValidityStanding, WritePageRequest,
+    WriteSummaryRequest,
 };
 use pcp_store::PcpStore;
 use rusqlite::{Connection, params};
 use serde_json::json;
 
 use super::SqlitePcpStore;
+
+#[tokio::test]
+async fn page_repair_retains_history_and_is_restricted_to_the_management_surface() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-sqlite-page-repair-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("pcp.sqlite3"))
+            .await
+            .expect("open Page repair Store"),
+    );
+    let identity_id = store.identity_id().to_owned();
+    let namespace = "project:page-repair".to_owned();
+    let repair_principal = principal("service:page-repair", AccessPrincipalType::Service);
+    let repair_client = pcp_client(
+        Arc::clone(&store),
+        AccessMode::Repair.session(
+            repair_principal.clone(),
+            "session:page-repair",
+            vec![namespace.clone()],
+            false,
+        ),
+    );
+    let admin_client = pcp_client(
+        Arc::clone(&store),
+        AccessSession::full_control(
+            principal("service:page-repair-admin", AccessPrincipalType::Service),
+            "session:page-repair-admin",
+            vec![namespace.clone()],
+        ),
+    );
+    admin_client
+        .create_scope(CreateScopeRequest {
+            namespace: namespace.clone(),
+            display_name: "Page repair".to_owned(),
+            description: None,
+            parent_namespace: None,
+        })
+        .await
+        .expect("create Page repair Scope");
+
+    let mut original = write_request(
+        &identity_id,
+        &namespace,
+        Actor {
+            actor_type: ActorType::Tool,
+            actor_id: "host:source-ingest".to_owned(),
+        },
+        "An over-compressed durable statement.",
+        "page-repair:original",
+    );
+    original.mutability = PageMutability::Sealed;
+    original.source_refs = vec![SourceRef {
+        provider_id: "symbiont:transcript".to_owned(),
+        locator: "message/41".to_owned(),
+        media_type: Some("text/markdown".to_owned()),
+        content_digest: None,
+    }];
+    let written = admin_client
+        .write_page(original)
+        .await
+        .expect("write sealed Page to repair");
+
+    let repair = RepairPageRequest {
+        page_id: written.page_id.clone(),
+        expected_revision_id: written.revision_id.clone(),
+        reason: "Restore source context lost during the transcript migration.".to_owned(),
+        payload: Some(PagePayload {
+            media_type: "text/markdown".to_owned(),
+            content: "The durable statement with the source context and uncertainty restored."
+                .to_owned(),
+        }),
+        source_refs: vec![
+            SourceRef {
+                provider_id: "symbiont:transcript".to_owned(),
+                locator: "message/41".to_owned(),
+                media_type: Some("text/markdown".to_owned()),
+                content_digest: Some("sha256:source-41".to_owned()),
+            },
+            SourceRef {
+                provider_id: "symbiont:transcript".to_owned(),
+                locator: "message/42".to_owned(),
+                media_type: Some("text/markdown".to_owned()),
+                content_digest: Some("sha256:source-42".to_owned()),
+            },
+        ],
+        facets: Some(json!({"confidence": "qualified"})),
+        based_on_revision_ids: Vec::new(),
+        tool_or_model: Some("symbiont-pcp-repair".to_owned()),
+        idempotency_key: Some("page-repair:41-42".to_owned()),
+    };
+
+    let write_only_client = pcp_client(
+        Arc::clone(&store),
+        AccessMode::Write.session(
+            principal("host:ordinary-writer", AccessPrincipalType::Host),
+            "session:ordinary-writer",
+            vec![namespace.clone()],
+            false,
+        ),
+    );
+    assert!(write_only_client.repair_page(repair.clone()).await.is_err());
+    let model_admin = pcp_client(
+        Arc::clone(&store),
+        AccessSession::full_control(
+            principal("model:repair-denied", AccessPrincipalType::ModelClient),
+            "session:model-repair-denied",
+            vec![namespace.clone()],
+        ),
+    );
+    assert!(model_admin.repair_page(repair.clone()).await.is_err());
+
+    let repaired = repair_client
+        .repair_page(repair.clone())
+        .await
+        .expect("repair sealed Page through management surface");
+    assert_eq!(repaired.page_id, written.page_id);
+    assert_ne!(repaired.revision_id, written.revision_id);
+    let retried = repair_client
+        .repair_page(repair.clone())
+        .await
+        .expect("retry idempotent Page repair");
+    assert!(!retried.created);
+    assert_eq!(retried.revision_id, repaired.revision_id);
+
+    let current = repair_client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![written.page_id.clone()],
+            revision_ids: Vec::new(),
+            projections: vec![
+                Projection::Manifest,
+                Projection::Payload,
+                Projection::Sources,
+                Projection::Provenance,
+                Projection::Facets,
+                Projection::History,
+            ],
+            max_chars: 10_000,
+        })
+        .await
+        .expect("read repaired Page")
+        .pop()
+        .expect("repaired Page exists");
+    assert_eq!(current.page.page_id, written.page_id);
+    assert_eq!(current.page.head_revision_id, repaired.revision_id);
+    assert_eq!(current.history.len(), 2);
+    assert_eq!(current.revision.source_refs.len(), 2);
+    assert_eq!(
+        current.revision.created_by.actor_id,
+        repair_principal.principal_id
+    );
+    let repair_provenance = current
+        .revision
+        .provenance
+        .first()
+        .expect("repair provenance");
+    assert_eq!(repair_provenance.operation, "repair");
+    assert_eq!(repair_provenance.actor.actor_id, "service:page-repair");
+    assert_eq!(
+        repair_provenance.reason.as_deref(),
+        Some("Restore source context lost during the transcript migration.")
+    );
+    assert_eq!(
+        repair_provenance.input_revision_ids,
+        vec![written.revision_id.clone()]
+    );
+
+    let original = repair_client
+        .read_pages(ReadPagesRequest {
+            page_ids: Vec::new(),
+            revision_ids: vec![written.revision_id.clone()],
+            projections: vec![Projection::Payload, Projection::Sources],
+            max_chars: 10_000,
+        })
+        .await
+        .expect("read retained original Revision")
+        .pop()
+        .expect("original Revision remains addressable");
+    assert_eq!(
+        original.revision.payload.expect("original payload").content,
+        "An over-compressed durable statement."
+    );
+    assert_eq!(original.revision.source_refs.len(), 1);
+
+    let mut stale = repair;
+    stale.idempotency_key = Some("page-repair:stale".to_owned());
+    assert!(repair_client.repair_page(stale).await.is_err());
+
+    let _ = std::fs::remove_dir_all(root);
+}
 
 #[tokio::test]
 async fn stores_minimal_external_source_references() {
@@ -757,6 +952,7 @@ async fn migrates_clean_store_associations_without_erasing_exact_inputs() {
         timestamp: "2026-08-15T00:00:00Z".to_owned(),
         input_revision_ids: vec![source.revision_id.clone()],
         tool_or_model: Some("gpt-5.6-terra".to_owned()),
+        reason: None,
     }];
     let autonomous = store
         .write_page(autonomous, vec![namespace.clone()])
@@ -776,6 +972,7 @@ async fn migrates_clean_store_associations_without_erasing_exact_inputs() {
         timestamp: "2026-08-15T00:00:01Z".to_owned(),
         input_revision_ids: vec![source.revision_id.clone()],
         tool_or_model: Some("gpt-5.6-luna".to_owned()),
+        reason: None,
     }];
     let exact = store
         .write_page(exact, vec![namespace.clone()])
@@ -1169,6 +1366,7 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
         timestamp: "2026-08-03T00:00:00Z".to_owned(),
         input_revision_ids: vec![page_a.revision_id.clone()],
         tool_or_model: Some("access-test".to_owned()),
+        reason: None,
     }];
     assert!(restricted_writer.write_page(derived).await.is_err());
 
@@ -1205,6 +1403,7 @@ async fn isolates_clients_and_requires_explicit_cross_scope_derivation() {
         timestamp: "2026-08-03T00:00:00Z".to_owned(),
         input_revision_ids: vec![page_a.revision_id.clone()],
         tool_or_model: Some("access-test".to_owned()),
+        reason: None,
     }];
     let derived = cross_scope_writer
         .write_page(derived)
@@ -1824,6 +2023,7 @@ async fn stores_searches_revises_and_links_pages() {
                     timestamp: "2026-07-29T00:00:00Z".to_owned(),
                     input_revision_ids: vec![first.revision_id.clone(), first.revision_id.clone()],
                     tool_or_model: Some("test".to_owned()),
+                    reason: None,
                 }],
                 initial_relations: Vec::new(),
                 idempotency_key: Some("revision:first".to_owned()),
@@ -1940,6 +2140,7 @@ async fn stores_searches_revises_and_links_pages() {
                     timestamp: "2026-07-29T00:05:00Z".to_owned(),
                     input_revision_ids: vec![second.revision_id.clone()],
                     tool_or_model: Some("test".to_owned()),
+                    reason: None,
                 }],
                 initial_relations: Vec::new(),
                 idempotency_key: Some("revision:second".to_owned()),
@@ -2083,6 +2284,7 @@ async fn stores_searches_revises_and_links_pages() {
         timestamp: "2026-07-29T00:00:00Z".to_owned(),
         input_revision_ids: vec!["rev_missing".to_owned()],
         tool_or_model: Some("test".to_owned()),
+        reason: None,
     }];
     let error = store
         .write_page(invalid, vec![namespace])
@@ -2552,6 +2754,7 @@ async fn retracts_derived_pages_and_restores_preexisting_pages() {
                     timestamp: "2026-07-30T00:00:00Z".to_owned(),
                     input_revision_ids: vec![source.revision_id.clone()],
                     tool_or_model: None,
+                    reason: None,
                 }],
                 initial_relations: Vec::new(),
                 idempotency_key: Some("retract:durable-revision".to_owned()),
@@ -2573,6 +2776,7 @@ async fn retracts_derived_pages_and_restores_preexisting_pages() {
         timestamp: "2026-07-30T00:00:00Z".to_owned(),
         input_revision_ids: vec![source.revision_id.clone()],
         tool_or_model: None,
+        reason: None,
     }];
     let derived = store
         .write_page(derived_request, vec![namespace.clone()])
@@ -4620,6 +4824,7 @@ async fn packing_rejects_source_gaps_and_folds_internal_relations() {
         timestamp: "2026-08-16T00:00:00Z".to_owned(),
         input_revision_ids: vec![pages[2].revision_id.clone()],
         tool_or_model: Some("test-model".to_owned()),
+        reason: None,
     }];
     let derived = store
         .write_page(derived_request, vec![namespace.clone()])
@@ -4910,6 +5115,7 @@ async fn durable_inventory_exposes_exact_provenance_inputs_for_maintenance() {
         timestamp: "2026-08-25T00:00:00Z".to_owned(),
         input_revision_ids: vec![source.revision_id.clone()],
         tool_or_model: None,
+        reason: None,
     }];
     let derived = store
         .write_page(derived_request, vec![namespace.clone()])

@@ -9,7 +9,7 @@ use crate::{EnrollmentConfig, ObserverConfig, ObserverService};
 use pcp_client::{PcpApi, PcpTenantApi};
 use pcp_core::{
     AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    CreateScopeRequest, IngestPageRequest, PagePayload, WriteSummaryRequest,
+    CreateScopeRequest, IngestPageRequest, PagePayload, RepairPageRequest, WriteSummaryRequest,
 };
 use pcp_rpc::{
     BeginEnrollmentParams, EnrollmentAdminClient, EnrollmentAdminResult, EnrollmentClient,
@@ -149,7 +149,7 @@ async fn enrollment_approves_identity_bound_session_and_survives_generation_chan
     assert_eq!(remote.access(), &first_session.access);
     let ingested = remote
         .ingest_page(IngestPageRequest {
-            namespace: identity_scope,
+            namespace: identity_scope.clone(),
             kind: "conversation_event".to_owned(),
             observed_at: None,
             source_span: None,
@@ -167,8 +167,8 @@ async fn enrollment_approves_identity_bound_session_and_survives_generation_chan
     assert!(
         remote
             .write_summary(WriteSummaryRequest {
-                target_page_id: ingested.page_id,
-                target_revision_id: ingested.revision_id,
+                target_page_id: ingested.page_id.clone(),
+                target_revision_id: ingested.revision_id.clone(),
                 expected_summary_revision_id: None,
                 content: "A tenant must not publish maintained interpretation.".to_owned(),
                 created_by: Actor {
@@ -181,6 +181,84 @@ async fn enrollment_approves_identity_bound_session_and_survives_generation_chan
             })
             .await
             .is_err()
+    );
+
+    let repair_credential = "bc".repeat(32);
+    let mut repair_params = begin_params(&repair_credential);
+    repair_params.client.principal.principal_id = "service:symbiont-pcp-repair".to_owned();
+    repair_params.client.principal.principal_type = AccessPrincipalType::Service;
+    repair_params.client.principal.display_name = Some("Symbiont PCP repair".to_owned());
+    repair_params.requested_access.mode = RequestedAccessMode::Repair;
+    repair_params.requested_access.scopes = vec!["user:self".to_owned()];
+    let repair_request_id = match public
+        .begin(repair_params)
+        .await
+        .expect("begin narrow repair enrollment")
+        .result
+    {
+        EnrollmentResult::Pending { request_id, .. } => request_id,
+        other => panic!("expected pending repair enrollment, got {other:?}"),
+    };
+    admin
+        .approve(repair_request_id.clone())
+        .await
+        .expect("approve narrow repair enrollment");
+    let repair_session = match public
+        .status(EnrollmentStatusParams {
+            request_id: repair_request_id,
+            credential: repair_credential,
+        })
+        .await
+        .expect("open approved repair enrollment")
+        .result
+    {
+        EnrollmentResult::Active { session } => session,
+        other => panic!("expected active repair enrollment, got {other:?}"),
+    };
+    assert!(
+        repair_session
+            .access
+            .allows(&identity_scope, AccessPermission::Repair)
+    );
+    for denied in [
+        AccessPermission::Ingest,
+        AccessPermission::Write,
+        AccessPermission::Revise,
+        AccessPermission::ManageLifecycle,
+        AccessPermission::ManageScope,
+    ] {
+        assert!(!repair_session.access.allows(&identity_scope, denied));
+    }
+    let repair_remote = RemotePcpClient::connect_expected(
+        root.join(&repair_session.endpoint),
+        "service:symbiont-pcp-repair",
+    )
+    .await
+    .expect("connect narrow identity-bound repair session");
+    let repaired = repair_remote
+        .repair_page(RepairPageRequest {
+            page_id: ingested.page_id,
+            expected_revision_id: ingested.revision_id,
+            reason: "Restore the transcript context during a reviewed development migration."
+                .to_owned(),
+            payload: Some(PagePayload {
+                media_type: "text/plain".to_owned(),
+                content: "A repaired sealed source event with restored context.".to_owned(),
+            }),
+            source_refs: Vec::new(),
+            facets: None,
+            based_on_revision_ids: Vec::new(),
+            tool_or_model: Some("symbiont-pcp-repair".to_owned()),
+            idempotency_key: Some("enrollment:repair:test".to_owned()),
+        })
+        .await
+        .expect("repair through narrow enrolled session");
+    assert_eq!(
+        repair_remote
+            .current_revision_id(repaired.page_id)
+            .await
+            .expect("read repaired current Revision"),
+        repaired.revision_id
     );
     let idempotent = public
         .begin(begin_params(&credential))
@@ -285,6 +363,10 @@ async fn enrollment_requires_the_client_credential_for_status() {
     let mut duplicate_scope = begin_params(&"12".repeat(32));
     duplicate_scope.requested_access.scopes = vec!["user:self".to_owned(); 2];
     assert!(public.begin(duplicate_scope).await.is_err());
+    let mut model_repair = begin_params(&"34".repeat(32));
+    model_repair.client.principal.principal_type = AccessPrincipalType::ModelClient;
+    model_repair.requested_access.mode = RequestedAccessMode::Repair;
+    assert!(public.begin(model_repair).await.is_err());
     observer.shutdown().await.expect("stop provider");
     let _ = tokio::fs::remove_dir_all(root).await;
 }

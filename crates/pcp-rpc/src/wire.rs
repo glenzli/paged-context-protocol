@@ -9,10 +9,10 @@ use pcp_core::{
     ExpandGraphRequest, ExtractTopicRequest, GraphSliceResponse, IngestPageRequest,
     LinkPagesRequest, PackPagesRequest, PageLifecycleTransitionResult,
     PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest,
-    Relation, RestoreArchivedPageRequest, RevisePageRequest, RevisionCollectionResult,
-    RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult,
-    UnpackPageRequest, WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult,
-    WriteValidityResult,
+    Relation, RepairPageRequest, RestoreArchivedPageRequest, RevisePageRequest,
+    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope,
+    SearchPagesRequest, SearchResult, UnpackPageRequest, WritePageRequest, WriteResult,
+    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -106,6 +106,7 @@ pub(crate) enum RpcOperation {
     IngestPage(IngestPageRequest),
     WritePage(WritePageRequest),
     RevisePage(RevisePageRequest),
+    RepairPage(RepairPageRequest),
     ArchivePage(ArchivePageRequest),
     RestoreArchivedPage(RestoreArchivedPageRequest),
     PackPages(PackPagesRequest),
@@ -247,7 +248,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use pcp_core::PageRevisionRef;
+    use pcp_core::{PagePayload, PageRevisionRef, RepairPageRequest};
 
     use super::*;
 
@@ -274,5 +275,31 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn repair_page_has_a_stable_operation_name_without_a_caller_supplied_actor() {
+        let value = serde_json::to_value(RpcOperation::RepairPage(RepairPageRequest {
+            page_id: "pg_durable".to_owned(),
+            expected_revision_id: "rev_old".to_owned(),
+            reason: "Restore source context".to_owned(),
+            payload: Some(PagePayload {
+                media_type: "text/markdown".to_owned(),
+                content: "Restored context".to_owned(),
+            }),
+            source_refs: Vec::new(),
+            facets: None,
+            based_on_revision_ids: vec!["rev_evidence".to_owned()],
+            tool_or_model: Some("symbiont-pcp-repair".to_owned()),
+            idempotency_key: None,
+        }))
+        .expect("serialize repair_page RPC operation");
+
+        assert_eq!(value["type"], "repair_page");
+        assert_eq!(value["params"]["pageId"], "pg_durable");
+        assert_eq!(value["params"]["expectedRevisionId"], "rev_old");
+        assert_eq!(value["params"]["reason"], "Restore source context");
+        assert!(value["params"].get("createdBy").is_none());
+        assert!(value["params"].get("actor").is_none());
     }
 }

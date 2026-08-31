@@ -8,7 +8,7 @@ use pcp_core::{
     ExtractTopicRequest, IngestPageRequest, LinkPagesRequest, PackPagesRequest,
     PageLifecycleTransitionResult, PageMutability, PlanRevisionRetentionRequest,
     PutRevisionRetentionLeaseRequest, QueryAuditEvent, ReadPage, ReadPagesRequest, Relation,
-    RestoreArchivedPageRequest, RevisePageRequest, RevisionCollectionResult,
+    RepairPageRequest, RestoreArchivedPageRequest, RevisePageRequest, RevisionCollectionResult,
     RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchHit, SearchPagesRequest,
     SearchResult, SourceSpan, UnpackPageRequest, WritePageRequest, WriteResult,
     WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
@@ -207,6 +207,13 @@ pub trait PcpStore: Send + Sync {
         &self,
         access: &AccessSession,
         request: RevisePageRequest,
+    ) -> Result<WriteResult>;
+    /// Runtime/admin repair for a current Page head. Implementations must
+    /// retain the replaced Revision and enforce optimistic concurrency.
+    async fn repair_page(
+        &self,
+        access: &AccessSession,
+        request: RepairPageRequest,
     ) -> Result<WriteResult>;
     async fn archive_page(
         &self,

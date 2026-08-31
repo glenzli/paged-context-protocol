@@ -1164,6 +1164,7 @@ fn provenance(operation: &str, actor: &Actor, input_revision_ids: Vec<String>) -
         timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         input_revision_ids,
         tool_or_model: Some(actor.actor_id.clone()),
+        reason: None,
     }
 }
 

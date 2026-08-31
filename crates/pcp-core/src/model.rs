@@ -257,6 +257,13 @@ pub struct ProvenanceEvent {
     pub input_revision_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_or_model: Option<String>,
+    /// Human-readable governance reason for an exceptional mutation.
+    ///
+    /// Ordinary producer writes omit this. Runtime repair and other
+    /// administrative operations may record it without changing the Page
+    /// payload or inventing a tenant-owned facet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Independently recallable semantic identity.

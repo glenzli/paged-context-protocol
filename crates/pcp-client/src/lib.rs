@@ -13,10 +13,10 @@ use pcp_core::{
     GraphSliceResponse, IngestPageRequest, IntentEffort, LinkPagesRequest, PackPagesRequest,
     PlanRevisionRetentionRequest, Projection, PutRevisionRetentionLeaseRequest,
     QueryContextRequest, QueryContextResponse, ReadPage, ReadPagesRequest, Relation,
-    RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan,
-    Scope, ScopeGrant, SearchFilters, SearchMode, SearchPagesRequest, SearchResult,
-    SearchTermMatch, UnpackPageRequest, WritePageRequest, WriteResult, WriteSummaryRequest,
-    WriteSummaryResult, WriteValidityResult,
+    RepairPageRequest, RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease,
+    RevisionRetentionPlan, Scope, ScopeGrant, SearchFilters, SearchMode, SearchPagesRequest,
+    SearchResult, SearchTermMatch, UnpackPageRequest, WritePageRequest, WriteResult,
+    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::PcpStore;
 pub use pcp_store::{
@@ -31,6 +31,7 @@ pub enum AccessMode {
     Audit,
     Contribute,
     Write,
+    Repair,
     Admin,
 }
 
@@ -74,6 +75,9 @@ impl AccessMode {
                 AccessPermission::Assess,
             ]);
         }
+        if matches!(self, Self::Repair | Self::Admin) {
+            permissions.push(AccessPermission::Repair);
+        }
         if matches!(self, Self::Audit | Self::Admin) {
             permissions.push(AccessPermission::Audit);
         }
@@ -102,6 +106,7 @@ impl FromStr for AccessMode {
             "audit" => Ok(Self::Audit),
             "contribute" => Ok(Self::Contribute),
             "write" => Ok(Self::Write),
+            "repair" => Ok(Self::Repair),
             "admin" => Ok(Self::Admin),
             other => anyhow::bail!("unsupported PCP access mode: {other}"),
         }
@@ -326,6 +331,9 @@ pub trait PcpApi: PcpTenantApi {
     ) -> Result<Vec<RevisionRetentionLease>>;
     async fn write_page(&self, request: WritePageRequest) -> Result<WriteResult>;
     async fn revise_page(&self, request: RevisePageRequest) -> Result<WriteResult>;
+    /// Development/admin repair of the current Page head. This is not part of
+    /// [`PcpTenantApi`] and requires the Runtime-bound repair permission.
+    async fn repair_page(&self, request: RepairPageRequest) -> Result<WriteResult>;
     async fn archive_page(
         &self,
         request: pcp_core::ArchivePageRequest,
@@ -597,6 +605,11 @@ impl PcpApi for EmbeddedPcpClient {
         self.observe_successful_write(result)
     }
 
+    async fn repair_page(&self, request: RepairPageRequest) -> Result<WriteResult> {
+        let result = self.store.repair_page(&self.access, request).await;
+        self.observe_successful_write(result)
+    }
+
     async fn archive_page(
         &self,
         request: pcp_core::ArchivePageRequest,
@@ -766,6 +779,28 @@ mod tests {
         assert!(!session.allows("project:test", AccessPermission::Link));
         assert!(!session.allows("project:test", AccessPermission::Assess));
         assert!(!session.allows("project:test", AccessPermission::Audit));
+    }
+
+    #[test]
+    fn repair_mode_can_replace_a_head_without_general_mutation_authority() {
+        let session = AccessMode::Repair.session(
+            AccessPrincipal {
+                principal_id: "service:repair-test".to_owned(),
+                principal_type: AccessPrincipalType::Service,
+                display_name: None,
+            },
+            "session:repair-test",
+            vec!["project:test".to_owned()],
+            false,
+        );
+
+        assert!(session.allows("project:test", AccessPermission::ReadDetail));
+        assert!(session.allows("project:test", AccessPermission::Repair));
+        assert!(!session.allows("project:test", AccessPermission::Ingest));
+        assert!(!session.allows("project:test", AccessPermission::Write));
+        assert!(!session.allows("project:test", AccessPermission::Revise));
+        assert!(!session.allows("project:test", AccessPermission::ManageLifecycle));
+        assert!(!session.allows("project:test", AccessPermission::ManageScope));
     }
 
     #[test]

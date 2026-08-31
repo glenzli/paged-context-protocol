@@ -928,6 +928,7 @@ pub(crate) fn complete_provenance(
             timestamp: timestamp.to_owned(),
             input_revision_ids,
             tool_or_model: None,
+            reason: None,
         });
     }
     for event in &mut provenance {

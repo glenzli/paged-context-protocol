@@ -6,13 +6,13 @@ use std::{
     time::SystemTime,
 };
 
-use pcp_client::{EmbeddedPcpClient, PcpApi, PcpTenantApi};
+use pcp_client::{AccessMode, EmbeddedPcpClient, PcpApi, PcpTenantApi};
 use pcp_core::{
     AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
     CreateScopeRequest, IngestPageRequest, LifecycleStatus, PackPagesRequest, PageMutability,
     PagePayload, PageRevisionRef, PlanRevisionRetentionRequest, Projection, ReadPagesRequest,
-    RetentionPolicy, SearchFilters, SearchMode, SearchPagesRequest, SearchTermMatch, SourceSpan,
-    WritePageRequest,
+    RepairPageRequest, RetentionPolicy, SearchFilters, SearchMode, SearchPagesRequest,
+    SearchTermMatch, SourceRef, SourceSpan, WritePageRequest,
 };
 use pcp_rpc::{RemotePcpClient, RuntimeEndpoint, serve_unix, serve_unix_endpoints};
 use pcp_sqlite::SqlitePcpStore;
@@ -320,6 +320,138 @@ async fn broker_isolates_multiple_principals_on_one_store() {
     let _ = server.await;
     let _ = tokio::fs::remove_file(socket_a).await;
     let _ = tokio::fs::remove_file(socket_b).await;
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn runtime_repair_endpoint_repairs_sealed_pages_without_granting_tenant_writes() {
+    let nonce = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("pcp-runtime-repair-{nonce}"));
+    std::fs::create_dir_all(&root).expect("create Runtime repair test directory");
+    let socket_path =
+        std::path::PathBuf::from("/tmp").join(format!("pcp-runtime-repair-{nonce}.sock"));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("context.sqlite3"))
+            .await
+            .expect("open Runtime repair Store"),
+    );
+    let identity_id = store.identity_id().to_owned();
+    let namespace = "project:runtime-repair".to_owned();
+    let store_api: Arc<dyn PcpStore> = store.clone();
+    let admin = EmbeddedPcpClient::shared(
+        Arc::clone(&store_api),
+        AccessSession::full_control(
+            AccessPrincipal {
+                principal_id: "service:runtime-repair-seed".to_owned(),
+                principal_type: AccessPrincipalType::Service,
+                display_name: None,
+            },
+            "session:runtime-repair-seed",
+            vec![namespace.clone()],
+        ),
+    );
+    admin
+        .create_scope(CreateScopeRequest {
+            namespace: namespace.clone(),
+            display_name: "Runtime repair".to_owned(),
+            description: None,
+            parent_namespace: None,
+        })
+        .await
+        .expect("create Runtime repair Scope");
+    let mut source = test_page(
+        &identity_id,
+        &namespace,
+        "Compressed content that needs its source context restored.",
+        "runtime:repair:source",
+    );
+    source.mutability = PageMutability::Sealed;
+    let written = admin.write_page(source).await.expect("seed sealed Page");
+
+    let repair_access = AccessMode::Repair.session(
+        AccessPrincipal {
+            principal_id: "service:symbiont-repair".to_owned(),
+            principal_type: AccessPrincipalType::Service,
+            display_name: Some("Symbiont repair".to_owned()),
+        },
+        "session:symbiont-repair",
+        vec![namespace.clone()],
+        false,
+    );
+    let repair_endpoint = EmbeddedPcpClient::shared(store_api, repair_access);
+    let server_path = socket_path.clone();
+    let mut server = tokio::spawn(async move { serve_unix(server_path, repair_endpoint).await });
+    let remote = tokio::select! {
+        result = &mut server => panic!("PCP repair endpoint stopped before connect: {result:?}"),
+        remote = connect_when_ready(&socket_path) => remote,
+    };
+    assert!(remote.access().allows(&namespace, AccessPermission::Repair));
+    assert!(!remote.access().allows(&namespace, AccessPermission::Write));
+    assert!(
+        remote
+            .write_page(test_page(
+                &identity_id,
+                &namespace,
+                "The repair endpoint must not create ordinary Pages.",
+                "runtime:repair:denied-write",
+            ))
+            .await
+            .is_err()
+    );
+
+    let repaired = remote
+        .repair_page(RepairPageRequest {
+            page_id: written.page_id.clone(),
+            expected_revision_id: written.revision_id.clone(),
+            reason: "Restore the source-grounded context during development migration.".to_owned(),
+            payload: Some(PagePayload {
+                media_type: "text/markdown".to_owned(),
+                content: "Source-grounded content with its uncertainty restored.".to_owned(),
+            }),
+            source_refs: vec![SourceRef {
+                provider_id: "symbiont:transcript".to_owned(),
+                locator: "message/88".to_owned(),
+                media_type: Some("text/markdown".to_owned()),
+                content_digest: Some("sha256:message-88".to_owned()),
+            }],
+            facets: None,
+            based_on_revision_ids: Vec::new(),
+            tool_or_model: Some("symbiont-pcp-repair".to_owned()),
+            idempotency_key: Some("runtime:repair:88".to_owned()),
+        })
+        .await
+        .expect("repair Page through dedicated Runtime endpoint");
+    assert_eq!(repaired.page_id, written.page_id);
+    assert_ne!(repaired.revision_id, written.revision_id);
+    let read = remote
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![written.page_id],
+            revision_ids: Vec::new(),
+            projections: vec![
+                Projection::Payload,
+                Projection::Provenance,
+                Projection::History,
+            ],
+            max_chars: 10_000,
+        })
+        .await
+        .expect("read repaired Page through Runtime");
+    assert_eq!(read[0].history.len(), 2);
+    assert_eq!(
+        read[0].revision.created_by.actor_id,
+        "service:symbiont-repair"
+    );
+    assert_eq!(
+        read[0].revision.provenance[0].reason.as_deref(),
+        Some("Restore the source-grounded context during development migration.")
+    );
+
+    server.abort();
+    let _ = server.await;
+    let _ = tokio::fs::remove_file(socket_path).await;
     let _ = tokio::fs::remove_dir_all(root).await;
 }
 

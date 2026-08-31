@@ -246,6 +246,7 @@ impl SqlitePcpStore {
                     timestamp: timestamp.clone(),
                     input_revision_ids: vec![request.expected_revision_id.clone()],
                     tool_or_model: Some(actor.actor_id.clone()),
+                    reason: None,
                 }],
             )?;
             let published = transaction

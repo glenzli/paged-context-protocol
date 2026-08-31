@@ -121,6 +121,7 @@ impl SqlitePcpStore {
                                 timestamp: timestamp.clone(),
                                 input_revision_ids: vec![fallback.revision_id],
                                 tool_or_model: Some(actor.actor_id.clone()),
+                                reason: None,
                             }],
                         )?;
                         restored_page_ids.push(page_id.clone());
@@ -152,6 +153,7 @@ impl SqlitePcpStore {
                                 timestamp: timestamp.clone(),
                                 input_revision_ids: vec![current_revision_id.clone()],
                                 tool_or_model: Some(actor.actor_id.clone()),
+                                reason: None,
                             }],
                         )?;
                         tombstone_revision_ids.push(next_revision_id.clone());

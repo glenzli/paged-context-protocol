@@ -9,6 +9,7 @@ mod migration;
 mod pack;
 mod query_audit;
 mod read;
+mod repair;
 mod retention;
 mod retention_collection;
 mod retention_lease;

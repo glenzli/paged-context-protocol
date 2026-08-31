@@ -442,6 +442,7 @@ fn complete_provenance(
             timestamp: timestamp.to_owned(),
             input_revision_ids: vec![target_revision_id.to_owned()],
             tool_or_model: tool_or_model.map(str::to_owned),
+            reason: None,
         });
     }
     provenance

@@ -1847,6 +1847,7 @@ async fn packing_scan_keeps_pages_connected_by_provenance_eligible() {
         timestamp: "2026-08-16T00:00:00Z".to_owned(),
         input_revision_ids: vec![first.revision_id],
         tool_or_model: Some("test-model".to_owned()),
+        reason: None,
     }];
     fixture
         .client

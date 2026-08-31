@@ -18,9 +18,9 @@ use pcp_core::{
     CollectRevisionRetentionRequest, CreateScopeRequest, ExpandGraphRequest, ExtractTopicRequest,
     GraphSliceResponse, IngestPageRequest, IntentEffort, LinkPagesRequest, PackPagesRequest,
     PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, QueryContextRequest,
-    QueryContextResponse, ReadPage, ReadPagesRequest, Relation, RevisePageRequest,
-    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope,
-    SearchPagesRequest, SearchResult, UnpackPageRequest, WritePageRequest, WriteResult,
+    QueryContextResponse, ReadPage, ReadPagesRequest, Relation, RepairPageRequest,
+    RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan,
+    Scope, SearchPagesRequest, SearchResult, UnpackPageRequest, WritePageRequest, WriteResult,
     WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use tokio::net::UnixStream;
@@ -458,6 +458,13 @@ impl PcpApi for RemotePcpClient {
         match self.request(RpcOperation::RevisePage(request)).await? {
             RpcValue::WriteResult(value) => Ok(value),
             _ => Err(unexpected("revise_page")),
+        }
+    }
+
+    async fn repair_page(&self, request: RepairPageRequest) -> Result<WriteResult> {
+        match self.request(RpcOperation::RepairPage(request)).await? {
+            RpcValue::WriteResult(value) => Ok(value),
+            _ => Err(unexpected("repair_page")),
         }
     }
 

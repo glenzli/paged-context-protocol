@@ -112,6 +112,33 @@ pub struct RevisePageRequest {
     pub idempotency_key: Option<String>,
 }
 
+/// Development/admin repair of one current Page head.
+///
+/// Unlike ordinary revision, repair may replace a sealed Page's current
+/// content while retaining the old immutable Revision. Runtime injects the
+/// authenticated actor and records `reason` on the repair provenance event.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairPageRequest {
+    pub page_id: String,
+    pub expected_revision_id: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<PagePayload>,
+    #[serde(default)]
+    pub source_refs: Vec<SourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facets: Option<Value>,
+    /// Additional exact Revisions consulted while reconstructing this Page.
+    /// The replaced head is always included automatically.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub based_on_revision_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_or_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
 /// Reversibly remove a Page from the default retrieval and graph surface.
 ///
 /// Archival is content governance rather than a content revision: the current

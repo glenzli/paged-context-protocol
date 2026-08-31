@@ -132,10 +132,15 @@ Every public request has schema `pcp.runtime.enrollment.request` and version
 ```
 
 `principalType` is `host`, `model_client`, `cli`, or `service`. `mode` is
-`observe`, `read`, `contribute`, `audit`, `write`, or `admin`. Ordinary tenants
+`observe`, `read`, `contribute`, `audit`, `write`, `repair`, or `admin`. Ordinary tenants
 use `read` or `contribute`; `contribute` adds only authenticated `ingest_page`
 and does not grant advanced Page or maintenance writes. `write` and `admin` are
-privileged maintainer and local-operator modes. The special Scope `user:self` is
+privileged maintainer and local-operator modes. `repair` is a narrow,
+approval-gated development migration mode: it adds `repair_page` to normal
+read/search access but grants neither `ingest_page`, ordinary `write_page` /
+`revise_page`, nor lifecycle or Scope management. Use a separate Principal and
+credential, and open that registration only while applying an explicit repair
+migration. The special Scope `user:self` is
 resolved by Runtime to the selected Store's `user:<identity_id>` Scope. Other
 Scope names are literal. A request contains 1-16 unique Scopes, each at most 128
 UTF-8 bytes. Runtime retains at most 16 simultaneous pending requests and 32

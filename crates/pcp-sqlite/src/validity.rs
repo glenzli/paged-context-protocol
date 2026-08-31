@@ -109,6 +109,7 @@ impl SqlitePcpStore {
                 timestamp: assessed_at.clone(),
                 input_revision_ids: input_page_ids,
                 tool_or_model: request.tool_or_model.clone(),
+                reason: None,
             }];
             let payload = PagePayload {
                 media_type: "text/markdown".to_owned(),

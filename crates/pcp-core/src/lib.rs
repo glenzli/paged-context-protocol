@@ -25,8 +25,8 @@ pub use query::{
 pub use request::{
     ArchivePageRequest, AssessPageValidityRequest, CreateScopeRequest, ExtractTopicRequest,
     IngestPageRequest, InitialRelation, LinkPagesRequest, PackPagesRequest, PageRevisionRef,
-    ReadPagesRequest, RestoreArchivedPageRequest, RevisePageRequest, SearchFilters,
-    SearchPagesRequest, UnpackPageRequest, WritePageRequest, WriteSummaryRequest,
+    ReadPagesRequest, RepairPageRequest, RestoreArchivedPageRequest, RevisePageRequest,
+    SearchFilters, SearchPagesRequest, UnpackPageRequest, WritePageRequest, WriteSummaryRequest,
     default_search_projections,
 };
 pub use retention::{

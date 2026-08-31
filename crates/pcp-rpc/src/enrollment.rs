@@ -33,6 +33,7 @@ pub enum RequestedAccessMode {
     Audit,
     Contribute,
     Write,
+    Repair,
     Admin,
 }
 

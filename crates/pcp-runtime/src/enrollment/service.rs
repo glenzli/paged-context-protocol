@@ -606,6 +606,7 @@ fn access_session(
         RequestedAccessMode::Audit => AccessMode::Audit,
         RequestedAccessMode::Contribute => AccessMode::Contribute,
         RequestedAccessMode::Write => AccessMode::Write,
+        RequestedAccessMode::Repair => AccessMode::Repair,
         RequestedAccessMode::Admin => AccessMode::Admin,
     };
     let scopes = registration
@@ -644,6 +645,11 @@ fn validate_client_access(
     access: &pcp_rpc::RequestedAccess,
 ) -> Result<()> {
     let principal = &client.principal;
+    anyhow::ensure!(
+        !matches!(access.mode, RequestedAccessMode::Repair)
+            || principal.principal_type != pcp_core::AccessPrincipalType::ModelClient,
+        "model clients cannot request PCP repair access"
+    );
     if principal.principal_id.trim().is_empty() || principal.principal_id.len() > 128 {
         anyhow::bail!("principal_id has invalid length");
     }

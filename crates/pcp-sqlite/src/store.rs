@@ -89,6 +89,7 @@ impl SqlitePcpStore {
             features: [
                 "access_audit",
                 "lossless_page_packing",
+                "page_repair",
                 "topic_extraction",
                 "revision_retention",
                 "revision_retention_leases",
