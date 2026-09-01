@@ -1,4 +1,5 @@
 import { createPageInspector } from "/page-inspector.js?v=20260823.1";
+import { pageListPreview, pageCount, pageJump, PAGE_ROLE_LABELS, pageRoleBadge, appendPageFilters } from "/page-list.js";
 import { describePagePayload, pagePayloadPreviewText } from "/page-content.js?v=20260822.1";
 import { createHealthView } from "/health-view.js?v=20260816.3";
 import { createRetentionView } from "/retention-view.js?v=20260818.1";
@@ -65,6 +66,36 @@ const ZH_MESSAGES = {
   "A read-only dry run over historical Revisions. Current Page heads and sealed evidence cannot become candidates.": "对历史修订进行只读试算。当前页面头版本和已封存证据不会成为候选项。",
   "Structural signals are descriptive only. Scan evaluates the full eligible inventory before each maintenance phase.": "结构信号只用于描述。每个维护阶段开始前，扫描会检查全部符合条件的页面库存。",
   "All scopes": "所有范围",
+  "Content role": "内容角色",
+  "All content": "全部内容",
+  "Condensed summary": "凝练摘要",
+  "Summarized source": "已被摘要覆盖的原文",
+  "Other pages": "其他页面",
+  "With attached summary": "含页面摘要",
+  "Attached summary": "附属摘要",
+  "Remove filter": "移除筛选",
+  "Active page filters": "当前页面筛选",
+  "A condensed Page used as the retrieval entry for its source Pages. Originals are retained.": "凝练出的独立页面，作为原文的检索入口；原文仍然保留。",
+  "This current Revision is covered by a condensed summary. Original content is retained here.": "当前修订已被凝练摘要覆盖，这里保留原始内容。",
+  "Attached summaries belong to a Page; they are not separate condensed Pages.": "附属摘要属于原页面，不是另一个凝练页面。",
+  "Other pages have neither a current extraction record nor current summary coverage.": "其他页面既非当前凝练页，也未被当前凝练摘要覆盖。",
+  "Jump to page": "跳转到指定页",
+  "Edit content": "编辑正文",
+  "Edit summary": "编辑摘要",
+  "Delete Page": "删除页面",
+  "Save changes": "保存修改",
+  "Cancel editing": "取消编辑",
+  "Loading content": "正在加载正文",
+  "Saving changes…": "正在保存修改…",
+  "Saved": "已保存",
+  "Deleting Page…": "正在删除页面…",
+  "Delete this Page?": "删除这个页面？",
+  "This Page will leave retrieval immediately. Other Pages are not deleted; history is retained.": "此页面会立即退出检索。不会连带删除其他页面，历史记录保留。",
+  "Save to update this Page immediately. Sources stay unchanged.": "保存后立即更新此页面，来源信息保持不变。",
+  "This Page changed. Your draft is kept; copy it before reopening the editor.": "页面已被更新，未保存你的修改。草稿已保留，请复制后重新打开编辑器。",
+  "Discard unsaved changes?": "放弃未保存的修改？",
+  "Your saved Page will not change.": "已保存的页面不会改变。",
+  "Discard changes": "放弃修改",
   "All scopes (store-wide operator)": "所有范围（Store 级操作员）",
   "Analyze": "分析",
   "Analyze suggestions": "分析建议",
@@ -595,7 +626,7 @@ const ZH_MESSAGES = {
   "Descending": "逆序",
   "Filter Pages": "筛选页面",
   "Next page": "下一页",
-  "Page number": "第",
+  "Page number": "页码",
   "Page results": "页面结果",
   "Pages pagination": "页面分页",
   "Previous page": "上一页",
@@ -829,6 +860,7 @@ function pageOrderValue() {
 function pageMenuChoice(label, selected, dataset = {}) {
   const choice = element("button", `page-menu-choice${selected ? " selected" : ""}`);
   choice.type = "button";
+  choice.setAttribute("aria-pressed", String(selected));
   Object.entries(dataset).forEach(([key, value]) => { choice.dataset[key] = value; });
   choice.append(element("span", "page-menu-check", selected ? "✓" : ""), element("span", "", label));
   return choice;
@@ -841,6 +873,29 @@ function renderPageScopeOptions(scopes = state.overview?.scopes || []) {
     scope.namespace === state.pages.scope,
     { pageScope: scope.namespace },
   )));
+  byId("page-role-options").replaceChildren(...[["", "All content"], ...Object.entries(PAGE_ROLE_LABELS)].map(([role,label]) =>
+    pageMenuChoice(t(label), role === state.pages.role, {pageRole:role}),
+  ));
+  byId("page-with-summary").checked = state.pages.withSummary;
+  renderActivePageFilters();
+}
+
+function renderActivePageFilters() {
+  const filters = [
+    state.pages.scope && ["scope", scopeName(state.pages.scope)],
+    state.pages.role && ["role", t(PAGE_ROLE_LABELS[state.pages.role])],
+    state.pages.withSummary && ["withSummary", t("With attached summary")],
+  ].filter(Boolean);
+  byId("page-active-filters").hidden = filters.length === 0;
+  byId("page-filter-toggle").classList.toggle("is-filtered", filters.length > 0);
+  byId("page-active-filters").replaceChildren(...filters.map(([key,label]) => {
+    const button = element("button", "page-filter-chip");
+    button.type = "button";
+    button.dataset.removeFilter = key;
+    button.setAttribute("aria-label", `${t("Remove filter")}: ${label}`);
+    button.append(element("span", "", label), icon("end"));
+    return button;
+  }));
 }
 
 function renderPageSortOptions() {
@@ -951,12 +1006,14 @@ const state = {
     loaded: false,
     busy: false,
     scope: "",
+    role: "",
+    withSummary: false,
     sortKey: "activity",
     count: 0,
     total: 0,
     page: 1,
     pageCache: new Map(),
-    cursors: new Map([[1, null]]),
+    pendingPage: null,
     previewFallbacks: new Map(),
     previewGeneration: 0,
   },
@@ -1348,7 +1405,16 @@ function showError(error) {
   window.setTimeout(() => { box.hidden = true; }, 7000);
 }
 
-const pageInspector = createPageInspector({ request: api, showError, formatTime, t });
+const pageInspector = createPageInspector({
+  request: api, mutate: governanceMutation, confirmAction, showError, formatTime, t,
+  onMutation: async () => {
+    resetPages();
+    state.pages.previewFallbacks.clear();
+    state.governance.loaded = false;
+    if (state.pages.busy) state.pages.reloadAfterBusy = true;
+    await Promise.all([loadOverview(), loadPages({page:1})]);
+  },
+});
 const queryView = createQueryView({
   request: api,
   byId,
@@ -1555,13 +1621,20 @@ function renderAccessSummary() {
 function pageResult(hit) {
   const result = element("article", "page-result");
   result.dataset.pageId = hit.pageId;
+  const role = pageRoleBadge(hit);
+  if (role) {
+    const badge = element("span", `page-role-badge page-role-${role.role}`, t(role.label));
+    badge.title = t(role.description);
+    result.append(badge);
+  }
   const open = element("button", "page-link");
   open.type = "button";
   const indicator = element("span", "page-open-indicator");
   indicator.append(icon("open"));
-  open.append(element("span", "page-title", pageSnippet(hit)), indicator);
+  open.append(element("span", "page-copy"), indicator);
   open.addEventListener("click", () => pageInspector.open(hit.pageId));
   result.append(open, pageResultMeta(hit));
+  renderPageRowPreview(result, hit);
   return result;
 }
 
@@ -1598,8 +1671,12 @@ function hasBudgetTruncatedProjection(payload) {
 }
 
 function renderPageRowPreview(row, hit) {
-  const title = row.querySelector(".page-title");
-  if (title) title.textContent = pageSnippet(hit);
+  const copy = row.querySelector(".page-copy");
+  const { title, excerpt } = pageListPreview(hit, pageSnippet(hit));
+  copy.classList.toggle("has-title", Boolean(title));
+  copy.replaceChildren();
+  if (title) copy.append(element("span", "page-title", title));
+  if (excerpt) copy.append(element("span", "page-excerpt", excerpt));
 }
 
 async function refreshTruncatedPagePreviews(entries, generation) {
@@ -1640,7 +1717,7 @@ function pageSourceLabel(hit) {
 function pageStructureTags(hit) {
   const tags = [];
   if (hit.sourceSpan) tags.push([["M5 7h11", "m-3-3 3 3-3 3", "M19 17H8", "m3 3-3-3 3-3"], t("Source stream")]);
-  if (hit.summaryRevisionId) tags.push([["M5 7h14", "M5 12h10", "M5 17h7"], t("Summary route")]);
+  if (hit.summaryRevisionId) tags.push([["M5 7h14", "M5 12h10", "M5 17h7"], t("Attached summary")]);
   if (hit.previewPayload?.mediaType === "application/vnd.pcp.packed-page+json") tags.push([["M4 5h16v14H4z", "M8 9h8", "M8 13h8", "M8 17h5"], t("Packed")]);
   return tags;
 }
@@ -1698,15 +1775,10 @@ function renderPages(data, page) {
   state.pages.count = data.hits.length;
   state.pages.total = Number.isFinite(data.totalPages) ? data.totalPages : state.pages.count;
   state.pages.pageCache.set(page, data);
-  state.pages.cursors.set(page + 1, data.nextCursor || null);
   state.pages.loaded = true;
   byId("pages-status").textContent = `${scopeName(state.pages.scope)} · ${pageOrderLabel(pageOrderValue())}`;
-  const pageCount = Math.max(1, Math.ceil(state.pages.total / pageLimit));
   byId("pages-loaded").textContent = `${formatNumber(state.pages.total)} ${t("Pages")}`;
-  byId("pages-current").textContent = `${t("Page number")} ${formatNumber(page)} / ${formatNumber(pageCount)} ${t("Pages")}`;
-  byId("pages-pager").hidden = pageCount <= 1;
-  byId("pages-previous").disabled = page <= 1;
-  byId("pages-next").disabled = !data.nextCursor;
+  renderPagePager();
 
   if (state.pages.count === 0) {
     results.replaceChildren(element("div", "empty", t("No pages")));
@@ -1715,6 +1787,18 @@ function renderPages(data, page) {
   }
 
   void refreshTruncatedPagePreviews(rendered, state.pages.previewGeneration);
+}
+
+function renderPagePager() {
+  const count = pageCount(state.pages.total, pageLimit);
+  byId("pages-pager").hidden = count <= 1;
+  byId("pages-current").value = String(state.pages.page);
+  byId("pages-current").max = String(count);
+  byId("pages-total").textContent = formatNumber(count);
+  byId("pages-current").disabled = byId("pages-jump-submit").disabled = state.pages.busy;
+  byId("pages-previous").disabled = state.pages.busy || state.pages.page <= 1;
+  byId("pages-next").disabled = state.pages.busy || state.pages.page >= count;
+  byId("page-results").setAttribute("aria-busy", String(state.pages.busy));
 }
 
 function renderAccess(data, append) {
@@ -1751,25 +1835,25 @@ function resetPages() {
   state.pages.count = 0;
   state.pages.total = 0;
   state.pages.pageCache.clear();
-  state.pages.cursors = new Map([[1, null]]);
+  state.pages.pendingPage = null;
   state.pages.previewGeneration += 1;
 }
 
 async function loadPages({ page = state.pages.page } = {}) {
-  if (state.pages.busy) return;
+  if (!Number.isSafeInteger(page) || page < 1) return;
+  if (state.pages.busy) { state.pages.pendingPage = page; return; }
   const cached = state.pages.pageCache.get(page);
   if (cached) {
     renderPages(cached, page);
     return;
   }
-  const cursor = state.pages.cursors.get(page);
-  if (page > 1 && !cursor) return;
   state.pages.busy = true;
+  const generation = state.pages.previewGeneration;
   byId("pages-status").textContent = t("Loading");
-  byId("pages-previous").disabled = true;
-  byId("pages-next").disabled = true;
+  renderPagePager();
   try {
-    const params = new URLSearchParams({ limit: String(pageLimit) });
+    const params = new URLSearchParams({ limit: String(pageLimit), page: String(page) });
+    appendPageFilters(params, state.pages);
     const query = byId("query").value.trim();
     const scope = state.pages.scope;
     if (query) {
@@ -1777,16 +1861,20 @@ async function loadPages({ page = state.pages.page } = {}) {
     }
     params.set("order", pageOrderValue());
     if (scope) params.set("scope", scope);
-    if (cursor) params.set("cursor", cursor);
-    renderPages(await api(`/api/pages?${params}`), page);
+    const result = await api(`/api/pages?${params}`);
+    if (generation === state.pages.previewGeneration) renderPages(result, result.pageNumber ?? page);
   } catch (error) {
-    showError(error);
-    byId("pages-status").textContent = t("Load failed");
+    if (generation === state.pages.previewGeneration) {
+      showError(error);
+      byId("pages-status").textContent = t("Load failed");
+    }
   } finally {
     state.pages.busy = false;
-    const current = state.pages.pageCache.get(state.pages.page);
-    byId("pages-previous").disabled = state.pages.page <= 1;
-    byId("pages-next").disabled = !current?.nextCursor;
+    const pending = state.pages.reloadAfterBusy ? 1 : state.pages.pendingPage;
+    state.pages.reloadAfterBusy = false;
+    state.pages.pendingPage = null;
+    renderPagePager();
+    if (pending !== null) void loadPages({page:pending});
   }
 }
 
@@ -5084,6 +5172,29 @@ byId("page-filter-options").addEventListener("click", (event) => {
   resetPages();
   loadPages().catch(showError);
 });
+byId("page-role-options").addEventListener("click", (event) => {
+  const choice = event.target.closest("button[data-page-role]");
+  if (!choice) return;
+  state.pages.role = choice.dataset.pageRole;
+  renderPageScopeOptions();
+  closePageMenus();
+  resetPages();
+  loadPages().catch(showError);
+});
+byId("page-with-summary").addEventListener("change", (event) => {
+  state.pages.withSummary = event.target.checked;
+  renderPageScopeOptions();
+  resetPages();
+  loadPages().catch(showError);
+});
+byId("page-active-filters").addEventListener("click", (event) => {
+  const key = event.target.closest("button[data-remove-filter]")?.dataset.removeFilter;
+  if (!["scope", "role", "withSummary"].includes(key)) return;
+  state.pages[key] = key === "withSummary" ? false : "";
+  renderPageScopeOptions();
+  resetPages();
+  loadPages().catch(showError);
+});
 byId("page-sort-options-list").addEventListener("click", (event) => {
   const choice = event.target.closest("button[data-page-sort-key]");
   if (!choice) return;
@@ -5107,6 +5218,11 @@ document.addEventListener("click", (event) => {
 });
 byId("pages-previous").addEventListener("click", () => loadPages({ page: state.pages.page - 1 }).catch(showError));
 byId("pages-next").addEventListener("click", () => loadPages({ page: state.pages.page + 1 }).catch(showError));
+byId("pages-jump").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const page = pageJump(byId("pages-current").value, state.pages.total, pageLimit);
+  if (page !== null) loadPages({page}).catch(showError);
+});
 byId("maintenance-start").addEventListener("click", () => runMaintenanceConvergence().catch(showError));
 byId("maintenance-scene-alert-retry").addEventListener("click", () => runMaintenanceConvergence().catch(showError));
 byId("maintenance-review-undo-all").addEventListener("click", undoAllMaintenanceReviews);

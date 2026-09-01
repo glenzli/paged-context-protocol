@@ -1,11 +1,14 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{Context, Result};
 use pcp_core::{
     BrowseIndexOrder, GraphSearchEdge, LifecycleStatus, PageValidity, PageValidityHint, Projection,
     SearchHit, SearchMode, SearchPagesRequest, SearchResult, SearchTermMatch,
 };
-use pcp_store::{ContentLibraryResult, ContentLibraryScope, ContentLibrarySummary};
+use pcp_store::{
+    ContentLibraryFilter, ContentLibraryResult, ContentLibraryScope, ContentLibrarySummary,
+    ContentPageRole,
+};
 use rusqlite::{Connection, params_from_iter, types::Value as SqlValue};
 use serde_json::{Map, Value};
 
@@ -15,6 +18,8 @@ use crate::{
     text_ranking::{RelationPair, rank_text_hits},
     validity::current_validity,
 };
+
+mod content_roles;
 
 impl SqlitePcpStore {
     pub async fn search_pages(&self, mut request: SearchPagesRequest) -> Result<SearchResult> {
@@ -104,6 +109,7 @@ impl SqlitePcpStore {
         limit: u32,
         cursor: Option<String>,
         max_chars: u32,
+        filter: ContentLibraryFilter,
     ) -> Result<ContentLibraryResult> {
         if scopes.is_empty() {
             anyhow::bail!("PCP content library browse requires at least one authorized scope");
@@ -122,6 +128,7 @@ impl SqlitePcpStore {
                 limit,
                 max_chars,
                 false,
+                &filter,
             )
         })
         .await
@@ -153,6 +160,7 @@ impl SqlitePcpStore {
                 limit,
                 max_chars,
                 true,
+                &ContentLibraryFilter::default(),
             )
         })
         .await
@@ -325,9 +333,10 @@ fn browse_content_pages_once(
     limit: usize,
     max_chars: usize,
     retrieval_only: bool,
+    filter: &ContentLibraryFilter,
 ) -> Result<ContentLibraryResult> {
     let (total_pages, total_content_chars) =
-        content_library_totals_once(connection, scopes, query, retrieval_only)?;
+        content_library_totals_once(connection, scopes, query, retrieval_only, filter)?;
     let mut values = scopes
         .iter()
         .cloned()
@@ -337,7 +346,8 @@ fn browse_content_pages_once(
         "SELECT {REVISION_COLUMNS},
                 substr(COALESCE(r.payload_content, ''), 1, 700),
                 'content',
-                summary_page.current_revision_id
+                {summary_revision},
+                {content_role}
          FROM pcp_pages p
          JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
          LEFT JOIN pcp_page_summary_heads summary_head
@@ -365,7 +375,9 @@ fn browse_content_pages_once(
            ) endpoint
            GROUP BY endpoint.page_id
          ) relation_counts ON relation_counts.page_id = p.page_id
-         WHERE r.namespace IN ("
+         WHERE r.namespace IN (",
+        summary_revision = content_roles::CURRENT_SUMMARY,
+        content_role = content_roles::role_sql(),
     );
     push_placeholders(&mut sql, scopes.len());
     sql.push(')');
@@ -374,6 +386,7 @@ fn browse_content_pages_once(
         append_topic_front_door_filter(&mut sql);
     }
     append_content_library_query_filter(&mut sql, &mut values, query);
+    content_roles::append_filter(&mut sql, &mut values, filter);
     sql.push_str(" ORDER BY ");
     sql.push_str(browse_index_order_by(order));
     sql.push_str(" LIMIT ? OFFSET ?");
@@ -389,6 +402,7 @@ fn browse_content_pages_once(
     let mut hits = Vec::new();
     let mut used_chars = 0_usize;
     let mut has_more = false;
+    let mut page_roles = BTreeMap::new();
     while let Some(row) = rows.next().context("read PCP content library row")? {
         if hits.len() >= limit {
             has_more = true;
@@ -398,6 +412,12 @@ fn browse_content_pages_once(
         let snippet: String = row.get(17)?;
         let matched_projection: String = row.get(18)?;
         let summary_revision_id: Option<String> = row.get(19)?;
+        let role: String = row.get(20)?;
+        let role = match role.as_str() {
+            "condensed" => ContentPageRole::Condensed,
+            "covered_source" => ContentPageRole::CoveredSource,
+            _ => ContentPageRole::Other,
+        };
         let entry_chars = snippet.chars().count().saturating_add(240);
         if !hits.is_empty() && used_chars.saturating_add(entry_chars) > max_chars {
             has_more = true;
@@ -407,6 +427,7 @@ fn browse_content_pages_once(
         let validity =
             current_validity(connection, &revision.revision_id)?.map(compact_validity_hint);
         let page = page_manifest(connection, &revision.page_id)?;
+        page_roles.insert(revision.page_id.clone(), role);
         hits.push(SearchHit {
             page_id: revision.page_id,
             revision_id: revision.revision_id,
@@ -430,6 +451,7 @@ fn browse_content_pages_once(
         });
     }
     Ok(ContentLibraryResult {
+        page_roles,
         next_cursor: has_more.then(|| (offset + hits.len()).to_string()),
         hits,
         total_pages,
@@ -494,6 +516,7 @@ fn content_library_totals_once(
     scopes: &[String],
     query: Option<&str>,
     retrieval_only: bool,
+    filter: &ContentLibraryFilter,
 ) -> Result<(u64, u64)> {
     let mut values = scopes
         .iter()
@@ -520,6 +543,7 @@ fn content_library_totals_once(
         append_topic_front_door_filter(&mut sql);
     }
     append_content_library_query_filter(&mut sql, &mut values, query);
+    content_roles::append_filter(&mut sql, &mut values, filter);
     let (page_count, content_chars) = connection
         .query_row(&sql, params_from_iter(values.iter()), |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
@@ -547,21 +571,8 @@ fn append_current_content_page_filter(sql: &mut String) {
 /// its active current topic Page is the front door while the exact member
 /// revisions remain readable by ID and traversable through `summarizes`.
 fn append_topic_front_door_filter(sql: &mut String) {
-    sql.push_str(
-        " AND NOT EXISTS (
-            SELECT 1
-            FROM pcp_topic_extraction_members extraction_member
-            JOIN pcp_pages topic_page
-              ON topic_page.page_id = extraction_member.topic_page_id
-            JOIN pcp_revisions topic_revision
-              ON topic_revision.revision_id = topic_page.current_revision_id
-            WHERE extraction_member.source_page_id = p.page_id
-              AND extraction_member.source_revision_id = r.revision_id
-              AND extraction_member.topic_revision_id = topic_page.current_revision_id
-              AND topic_page.lifecycle_status = 'active'
-              AND topic_revision.lifecycle_status = 'active'
-        )",
-    );
+    sql.push_str(" AND NOT ");
+    sql.push_str(content_roles::CURRENT_TOPIC_COVERAGE);
 }
 
 fn append_content_library_query_filter(

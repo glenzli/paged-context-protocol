@@ -1,7 +1,9 @@
 use std::collections::{BTreeSet, HashSet};
 
 use anyhow::{Context, Result};
-use pcp_core::{Actor, LifecycleStatus, PageRevision, ProvenanceEvent};
+use pcp_core::{
+    Actor, DeletePageRequest, LifecycleStatus, PageRevision, ProvenanceEvent, WriteResult,
+};
 use pcp_store::TombstoneCascadeResult;
 use rusqlite::{OptionalExtension, params};
 use serde_json::json;
@@ -9,12 +11,62 @@ use serde_json::json;
 use crate::{
     row::{REVISION_COLUMNS, revision_from_row},
     store::SqlitePcpStore,
-    write::{insert_revision, now, random_id},
+    write::{insert_revision, lookup_write_idempotency, now, random_id, record_idempotency},
 };
 
 const MAX_CASCADE_REVISIONS: usize = 1_000;
 
 impl SqlitePcpStore {
+    pub(crate) async fn delete_page(
+        &self,
+        request: DeletePageRequest,
+        actor: Actor,
+        allowed_scopes: Vec<String>,
+    ) -> Result<WriteResult> {
+        anyhow::ensure!(
+            request
+                .reason
+                .as_ref()
+                .is_none_or(|r| r.chars().count() <= 2_000),
+            "deletion reason is too long"
+        );
+        self.run("single Page deletion", move |mut connection| {
+            let transaction = connection.transaction().context("start PCP Page deletion")?;
+            let (current, _) = current_revision(&transaction, &request.page_id)?;
+            anyhow::ensure!(allowed_scopes.contains(&current.namespace), "Page is outside the authorized PCP scopes");
+            if let Some(existing) = lookup_write_idempotency(&transaction, &actor.actor_id, "delete_page", request.idempotency_key.as_deref())? {
+                anyhow::ensure!(existing.page_id == request.page_id, "deletion idempotency key belongs to another Page");
+                return Ok(existing);
+            }
+            anyhow::ensure!(current.revision_id == request.expected_revision_id, "revision conflict: Page changed before deletion");
+            anyhow::ensure!(current.lifecycle_status != LifecycleStatus::Tombstoned, "Page is already deleted");
+            let timestamp = now();
+            let revision_id = random_id(&transaction, "rev_")?;
+            insert_revision(
+                &transaction, &request.page_id, &revision_id, &current.namespace,
+                LifecycleStatus::Tombstoned.as_str(), &timestamp, current.observed_at.as_deref(),
+                None, None, None, &actor, None, &[],
+                Some(&json!({"kind": "tombstone", "deletedRevisionId": current.revision_id})),
+                &[ProvenanceEvent {
+                    operation: "delete".to_owned(), actor: actor.clone(), timestamp: timestamp.clone(),
+                    input_revision_ids: vec![current.revision_id.clone()], tool_or_model: None,
+                    reason: request.reason.clone(),
+                }],
+            )?;
+            retract_incident_relations(&transaction, std::slice::from_ref(&request.page_id), &actor, &timestamp, "Page deleted by operator")?;
+            transaction.execute("DELETE FROM pcp_page_summary_heads WHERE summary_page_id = ?1", [&request.page_id])?;
+            transaction.execute("DELETE FROM pcp_summary_fts WHERE summary_revision_id IN (SELECT revision_id FROM pcp_revisions WHERE page_id = ?1)", [&request.page_id])?;
+            let changed = transaction.execute(
+                "UPDATE pcp_pages SET current_revision_id = ?2, kind = 'tombstone', lifecycle_status = 'tombstoned', updated_at = ?4 WHERE page_id = ?1 AND current_revision_id = ?3",
+                params![request.page_id, revision_id, request.expected_revision_id, timestamp],
+            )?;
+            anyhow::ensure!(changed == 1, "revision conflict while deleting Page");
+            record_idempotency(&transaction, &actor.actor_id, "delete_page", request.idempotency_key.as_deref(), Some(&request.page_id), Some(&revision_id), None, &timestamp)?;
+            transaction.commit().context("commit PCP Page deletion")?;
+            Ok(WriteResult { page_id: request.page_id, revision_id, created: true })
+        }).await
+    }
+
     pub async fn tombstone_derivation_cascade(
         &self,
         root_revision_id: String,

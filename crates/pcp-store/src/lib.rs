@@ -17,6 +17,24 @@ use pcp_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Structural role of a current library Page, independent of tenant-defined kind.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentPageRole {
+    Condensed,
+    CoveredSource,
+    Other,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentLibraryFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<ContentPageRole>,
+    #[serde(default)]
+    pub with_summary: bool,
+}
+
 pub use health::{
     ActivityHealth, GraphHealth, HealthSnapshot, HealthTimelineBucket, NamedCount, OperationHealth,
     PackingHealth, QueryAuditMethodHealth, QueryAuditSummary, RecallHealth,
@@ -68,6 +86,9 @@ pub struct DurablePageInventoryItem {
 #[serde(rename_all = "camelCase")]
 pub struct ContentLibraryResult {
     pub hits: Vec<SearchHit>,
+    /// Library-only metadata; absent in older Runtime responses.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub page_roles: std::collections::BTreeMap<String, ContentPageRole>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     pub total_pages: u64,
@@ -147,6 +168,7 @@ pub trait PcpStore: Send + Sync {
         limit: u32,
         cursor: Option<String>,
         max_chars: u32,
+        filter: ContentLibraryFilter,
     ) -> Result<ContentLibraryResult>;
     /// Browse the default retrieval surface. A current extracted topic Page
     /// stands in front of its retained source Pages here.
@@ -228,6 +250,12 @@ pub trait PcpStore: Send + Sync {
         &self,
         access: &AccessSession,
         request: RepairPageRequest,
+    ) -> Result<WriteResult>;
+    /// Delete only the expected current Page; never cascade to its dependents.
+    async fn delete_page(
+        &self,
+        access: &AccessSession,
+        request: pcp_core::DeletePageRequest,
     ) -> Result<WriteResult>;
     async fn archive_page(
         &self,

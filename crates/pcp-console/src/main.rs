@@ -10,7 +10,9 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
-use pcp_client::{ContentLibraryResult, PcpApi, PcpTenantApi};
+use pcp_client::{
+    ContentLibraryFilter, ContentLibraryResult, ContentPageRole, PcpApi, PcpTenantApi,
+};
 use pcp_core::{
     AccessPermission, Actor, ActorType, ArchivePageRequest, BrowseIndexOrder, IntentEffort,
     LifecycleStatus, PackPagesRequest, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest,
@@ -46,6 +48,7 @@ const CONSOLE_STATIC_CACHE_CONTROL: &str = "no-store";
 
 mod graph_view;
 mod managed;
+mod page_actions;
 
 #[derive(Clone)]
 struct AppState {
@@ -86,6 +89,27 @@ struct PageQuery {
     order: Option<String>,
     cursor: Option<String>,
     limit: Option<u32>,
+    page: Option<u32>,
+    role: Option<ContentPageRole>,
+    #[serde(default, rename = "withSummary")]
+    with_summary: bool,
+}
+
+fn page_query_cursor(query: &PageQuery, limit: u32) -> anyhow::Result<Option<String>> {
+    match query.page {
+        Some(page) => {
+            anyhow::ensure!(page > 0, "page must be at least 1");
+            anyhow::ensure!(query.cursor.is_none(), "use page or cursor, not both");
+            // The local content-library cursor is a decimal row offset.
+            // Keep this storage detail out of the browser's pagination state.
+            Ok(Some(((u64::from(page) - 1) * u64::from(limit)).to_string()))
+        }
+        None => Ok(query.cursor.clone()),
+    }
+}
+
+fn bounded_page_number(requested: u32, total: u64, limit: u32) -> u32 {
+    u64::from(requested).min(total.div_ceil(u64::from(limit)).max(1)) as u32
 }
 
 #[derive(Default, Deserialize)]
@@ -119,6 +143,8 @@ struct ConsolePageResult {
 struct ConsolePageHit {
     #[serde(flatten)]
     hit: SearchHit,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_role: Option<ContentPageRole>,
     #[serde(skip_serializing_if = "Option::is_none")]
     preview_payload: Option<PagePayload>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -315,6 +341,8 @@ fn router(state: AppState) -> Router {
         .route("/app.js", get(app_js))
         .route("/ui-icons.js", get(ui_icons_js))
         .route("/page-inspector.js", get(page_inspector_js))
+        .route("/page-editor.js", get(page_editor_js))
+        .route("/page-list.js", get(page_list_js))
         .route("/page-content.js", get(page_content_js))
         .route("/page-content.css", get(page_content_css))
         .route("/page-graph.js", get(page_graph_js))
@@ -353,6 +381,14 @@ fn router(state: AppState) -> Router {
         .route("/api/query/match-intent", post(run_match_intent))
         .route("/api/pages/{page_id}/preview", get(page_preview))
         .route("/api/pages/{page_id}", get(page_detail))
+        .route(
+            "/api/pages/{page_id}/edit",
+            get(page_actions::edit_content).post(page_actions::save_content),
+        )
+        .route(
+            "/api/pages/{page_id}/delete",
+            post(page_actions::delete_page),
+        )
         .route("/api/pages/{page_id}/raw", get(page_raw))
         .route("/api/pages/{page_id}/graph", get(page_graph))
         .route("/api/pages/{page_id}/lineage", get(page_lineage))
@@ -564,6 +600,20 @@ async fn maintenance_operation_state_js() -> Response {
     )
 }
 
+async fn page_editor_js() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("page-editor.js"),
+    )
+}
+
+async fn page_list_js() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("page-list.js"),
+    )
+}
+
 async fn page_inspector_js() -> Response {
     static_asset(
         "text/javascript; charset=utf-8",
@@ -725,20 +775,90 @@ async fn pages(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
-    let result = state
-        .client
-        .browse_content_pages(
+    let cursor = page_query_cursor(&query, limit)?;
+    let order = parse_browse_index_order(query.order.as_deref())?;
+    let filter = ContentLibraryFilter {
+        role: query.role,
+        with_summary: query.with_summary,
+    };
+    let mut result = browse_console_page(
+        &state.client,
+        scopes.clone(),
+        search_query.clone(),
+        order.clone(),
+        limit,
+        cursor,
+        filter.clone(),
+    )
+    .await?;
+    let page_number = query
+        .page
+        .map(|page| bounded_page_number(page, result.total_pages, limit));
+    // Writes/deletions may have shortened the list since the user saw its count.
+    if page_number != query.page && result.total_pages > 0 {
+        result = browse_console_page(
+            &state.client,
             scopes,
             search_query,
-            parse_browse_index_order(query.order.as_deref())?,
+            order,
             limit,
-            query.cursor,
-            PAGE_LIST_PREVIEW_CHARS,
+            Some(((u64::from(page_number.unwrap()) - 1) * u64::from(limit)).to_string()),
+            filter,
         )
         .await?;
-    Ok(Json(json!(
-        console_page_result(state.client.as_ref(), result).await?
-    )))
+    }
+    let mut response = json!(console_page_result(state.client.as_ref(), result).await?);
+    if let Some(page) = page_number {
+        response["pageNumber"] = json!(page);
+    }
+    Ok(Json(response))
+}
+
+// A Runtime response may stop at its character budget before reaching `limit`.
+// Fill the UI page using its returned cursor so numbered navigation skips no rows.
+async fn browse_console_page(
+    client: &RemotePcpClient,
+    scopes: Vec<String>,
+    query: Option<String>,
+    order: BrowseIndexOrder,
+    limit: u32,
+    cursor: Option<String>,
+    filter: ContentLibraryFilter,
+) -> Result<ContentLibraryResult> {
+    let mut result = client
+        .browse_content_pages(
+            scopes.clone(),
+            query.clone(),
+            order.clone(),
+            limit,
+            cursor,
+            PAGE_LIST_PREVIEW_CHARS,
+            filter.clone(),
+        )
+        .await?;
+    while result.hits.len() < limit as usize {
+        let Some(cursor) = result.next_cursor.clone() else {
+            break;
+        };
+        let more = client
+            .browse_content_pages(
+                scopes.clone(),
+                query.clone(),
+                order.clone(),
+                limit - result.hits.len() as u32,
+                Some(cursor.clone()),
+                PAGE_LIST_PREVIEW_CHARS,
+                filter.clone(),
+            )
+            .await?;
+        if more.hits.is_empty() || more.next_cursor.as_ref() == Some(&cursor) {
+            break;
+        }
+        result.hits.extend(more.hits);
+        result.page_roles.extend(more.page_roles);
+        result.next_cursor = more.next_cursor;
+    }
+    Ok(result)
 }
 
 async fn governance_pages(
@@ -869,6 +989,7 @@ async fn console_page_result(
 ) -> Result<ConsolePageResult> {
     let ContentLibraryResult {
         hits,
+        mut page_roles,
         next_cursor,
         total_pages,
         total_content_chars,
@@ -915,6 +1036,7 @@ async fn console_page_result(
                     .as_ref()
                     .and_then(|metadata| metadata.source_span.clone());
                 ConsolePageHit {
+                    content_role: page_roles.remove(&hit.page_id),
                     preview_payload: page_metadata
                         .as_ref()
                         .and_then(|metadata| metadata.preview_payload.clone()),
@@ -951,7 +1073,21 @@ async fn page_detail(
         max_chars,
     )
     .await?;
-    Ok(Json(json!(page)))
+    let mut value = json!(page);
+    let live = page.page.lifecycle_status != LifecycleStatus::Tombstoned
+        && page.page.head_revision_id == page.revision.revision_id;
+    let text = page.revision.payload.as_ref().is_some_and(|payload| {
+        matches!(
+            payload.media_type.split(';').next().unwrap_or("").trim(),
+            "text/plain" | "text/markdown"
+        )
+    });
+    value["actions"] = json!({
+        "canEdit": live && text && state.client.access().allows(&page.page.namespace, AccessPermission::Repair),
+        "canEditSummary": live && page.summary.is_some() && state.client.access().allows(&page.page.namespace, AccessPermission::Repair),
+        "canDelete": live && state.client.access().allows(&page.page.namespace, AccessPermission::Retract),
+    });
+    Ok(Json(value))
 }
 
 async fn page_preview(
@@ -1952,6 +2088,81 @@ fn retention_policy(query: &RetentionQuery) -> RetentionPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_query_accepts_only_known_structural_roles() {
+        let query: PageQuery =
+            serde_json::from_value(json!({"role":"condensed","withSummary":true,"page":2}))
+                .unwrap();
+        assert_eq!(query.role, Some(ContentPageRole::Condensed));
+        assert!(query.with_summary);
+        assert_eq!(query.page, Some(2));
+        assert!(serde_json::from_value::<PageQuery>(json!({"role":"topic_summary"})).is_err());
+        let query: PageQuery = serde_json::from_value(json!({})).unwrap();
+        assert!(query.role.is_none());
+        assert!(!query.with_summary);
+    }
+
+    #[test]
+    fn numbered_pages_jump_directly_and_keep_cursor_compatibility() {
+        assert_eq!(
+            page_query_cursor(
+                &PageQuery {
+                    page: Some(9),
+                    ..Default::default()
+                },
+                20
+            )
+            .unwrap(),
+            Some("160".into())
+        );
+        assert_eq!(
+            page_query_cursor(
+                &PageQuery {
+                    cursor: Some("40".into()),
+                    ..Default::default()
+                },
+                20
+            )
+            .unwrap(),
+            Some("40".into())
+        );
+        assert!(
+            page_query_cursor(
+                &PageQuery {
+                    page: Some(0),
+                    ..Default::default()
+                },
+                20
+            )
+            .is_err()
+        );
+        assert!(
+            page_query_cursor(
+                &PageQuery {
+                    page: Some(2),
+                    cursor: Some("20".into()),
+                    ..Default::default()
+                },
+                20
+            )
+            .is_err()
+        );
+        assert_eq!(
+            page_query_cursor(
+                &PageQuery {
+                    page: Some(u32::MAX),
+                    ..Default::default()
+                },
+                100
+            )
+            .unwrap(),
+            Some("429496729400".into())
+        );
+        assert_eq!(bounded_page_number(9, 83, 20), 5);
+        assert_eq!(bounded_page_number(9, 80, 20), 4);
+        assert_eq!(bounded_page_number(9, 0, 20), 1);
+    }
 
     #[test]
     fn console_static_assets_disable_browser_caching() {

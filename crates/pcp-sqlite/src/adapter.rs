@@ -330,6 +330,7 @@ impl PcpStore for SqlitePcpStore {
         limit: u32,
         cursor: Option<String>,
         max_chars: u32,
+        filter: pcp_store::ContentLibraryFilter,
     ) -> Result<ContentLibraryResult> {
         let observation = OperationObservation::start();
         let scopes = match authorize_scopes(
@@ -366,6 +367,7 @@ impl PcpStore for SqlitePcpStore {
             limit,
             cursor,
             max_chars,
+            filter,
         )
         .await;
         complete(
@@ -1781,6 +1783,51 @@ impl PcpStore for SqlitePcpStore {
             self,
             access,
             "apply_reconciliation",
+            scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
+    }
+
+    async fn delete_page(
+        &self,
+        access: &AccessSession,
+        request: pcp_core::DeletePageRequest,
+    ) -> Result<WriteResult> {
+        let observation = OperationObservation::start().with_input_count(1);
+        let namespace = self.page_namespace(request.page_id.clone()).await?;
+        let scopes = vec![namespace.clone()];
+        let authorization = authorize_exact(access, &namespace, AccessPermission::Retract)
+            .and_then(|()| {
+                anyhow::ensure!(
+                    access.principal.principal_type != AccessPrincipalType::ModelClient,
+                    "model clients cannot use the PCP Page deletion surface"
+                );
+                Ok(())
+            });
+        if let Err(error) = authorization {
+            return complete(
+                self,
+                access,
+                "delete_page",
+                scopes,
+                Err(error),
+                true,
+                observation,
+            )
+            .await;
+        }
+        let actor = Actor {
+            actor_type: ActorType::Tool,
+            actor_id: access.principal.principal_id.clone(),
+        };
+        let result = SqlitePcpStore::delete_page(self, request, actor, scopes.clone()).await;
+        complete(
+            self,
+            access,
+            "delete_page",
             scopes,
             result,
             false,

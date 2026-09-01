@@ -262,6 +262,7 @@ impl PcpTenantApi for RemotePcpClient {
         limit: u32,
         cursor: Option<String>,
         max_chars: u32,
+        filter: pcp_client::ContentLibraryFilter,
     ) -> Result<pcp_client::ContentLibraryResult> {
         match self
             .request(RpcOperation::BrowseContentPages {
@@ -271,6 +272,7 @@ impl PcpTenantApi for RemotePcpClient {
                 limit,
                 cursor,
                 max_chars,
+                filter,
             })
             .await?
         {
@@ -473,6 +475,13 @@ impl PcpApi for RemotePcpClient {
         match self.request(RpcOperation::RepairPage(request)).await? {
             RpcValue::WriteResult(value) => Ok(value),
             _ => Err(unexpected("repair_page")),
+        }
+    }
+
+    async fn delete_page(&self, request: pcp_core::DeletePageRequest) -> Result<WriteResult> {
+        match self.request(RpcOperation::DeletePage(request)).await? {
+            RpcValue::WriteResult(result) => Ok(result),
+            _ => Err(unexpected("delete_page")),
         }
     }
 

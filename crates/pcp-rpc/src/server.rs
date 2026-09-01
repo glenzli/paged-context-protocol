@@ -338,9 +338,10 @@ async fn dispatch(
             limit,
             cursor,
             max_chars,
+            filter,
         } => RpcValue::ContentLibraryResult(
             client
-                .browse_content_pages(scopes, query, order, limit, cursor, max_chars)
+                .browse_content_pages(scopes, query, order, limit, cursor, max_chars, filter)
                 .await?,
         ),
         RpcOperation::BrowseRetrievalPages {
@@ -397,6 +398,9 @@ async fn dispatch(
         }
         RpcOperation::RepairPage(request) => {
             RpcValue::WriteResult(client.repair_page(request).await?)
+        }
+        RpcOperation::DeletePage(request) => {
+            RpcValue::WriteResult(client.delete_page(request).await?)
         }
         RpcOperation::ArchivePage(request) => {
             RpcValue::LifecycleTransition(client.archive_page(request).await?)

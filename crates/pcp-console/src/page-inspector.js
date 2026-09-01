@@ -1,7 +1,9 @@
 import { createTopologyMap, relationFamily } from "./page-graph.js";
+import { createPageEditor } from "./page-editor.js";
+import { icon } from "./ui-icons.js";
 import { pagePayloadPreviewText, renderPageContent, renderPagePreview } from "./page-content.js?v=20260822.1";
 
-export function createPageInspector({ request, showError, formatTime, t = (value) => value }) {
+export function createPageInspector({ request, mutate, confirmAction, onMutation = async () => {}, showError, formatTime, t = (value) => value }) {
   const dialog = document.getElementById("page-dialog");
   const backButton = document.getElementById("dialog-back");
   const title = document.getElementById("dialog-title");
@@ -33,6 +35,7 @@ export function createPageInspector({ request, showError, formatTime, t = (value
   const reviewedRevisionCache = new Map();
   const navigationHistory = [];
   let currentPageId = null;
+  let inspectGeneration = 0;
   let currentView = "summary";
   let currentGraphFilter = "all";
   let currentGraphDepth = 2;
@@ -41,6 +44,15 @@ export function createPageInspector({ request, showError, formatTime, t = (value
   let comparisonRejectAction = null;
   let comparisonSkipAction = null;
   let comparisonScrollTop = 0;
+  const editor = createPageEditor({
+    request, mutate, confirmAction, t,
+    onSaved: async (pageId) => { invalidate(); await inspect(pageId); await onMutation(); },
+    onDeleted: async () => { invalidate(); currentPageId = null; navigationHistory.length = 0; await onMutation(); },
+  });
+
+  function invalidate() {
+    detailCache.clear(); graphCache.clear(); historyCache.clear(); rawCache.clear(); reviewedRevisionCache.clear();
+  }
 
   const relationFamilies = [
     ["all", "All connections"],
@@ -155,10 +167,22 @@ export function createPageInspector({ request, showError, formatTime, t = (value
 
     const sections = [];
     if (page.summary) {
-      sections.push(detailSection(
+      const summarySection = detailSection(
         t("Summary"),
         contentBlock(page.summary.content, "text/markdown"),
-      ));
+      );
+      if (page.actions?.canEditSummary) {
+        const editSummary = element("button", "icon-button");
+        editSummary.type = "button";
+        editSummary.setAttribute("aria-label", t("Edit summary"));
+        editSummary.append(icon("edit"));
+        editSummary.addEventListener("click", async () => {
+          await navigate(page.summary.summaryPageId);
+          if (currentPageId === page.summary.summaryPageId) await editor.begin();
+        });
+        summarySection.querySelector("h3").append(editSummary);
+      }
+      sections.push(summarySection);
     }
     sections.push(detailSection(
       t(page.page.kind === "summary_projection" ? "Summary content" : "Content"),
@@ -434,6 +458,9 @@ export function createPageInspector({ request, showError, formatTime, t = (value
   }
 
   async function inspect(pageId, restoredView = "summary") {
+    if (!await editor.leave()) return;
+    const generation = ++inspectGeneration;
+    editor.attach(null);
     currentPageId = pageId;
     backButton.hidden = navigationHistory.length === 0;
     activate("summary");
@@ -449,27 +476,32 @@ export function createPageInspector({ request, showError, formatTime, t = (value
         page = await request(`/api/pages/${encodeURIComponent(pageId)}`);
         detailCache.set(pageId, page);
       }
-      if (currentPageId !== pageId) return;
+      if (currentPageId !== pageId || generation !== inspectGeneration) return;
       title.textContent = page.page.pageId;
       subtitle.textContent = `${page.page.namespace} · ${page.page.kind} · ${page.page.mutability} · ${page.revision.revisionId}`;
       renderSummary(page);
+      editor.attach(page);
       if (!dialog.open) dialog.showModal();
       dialog.scrollTop = 0;
       if (restoredView !== "summary") activate(restoredView);
     } catch (error) { showError(error); }
   }
 
-  function open(pageId) {
+  async function open(pageId) {
+    if (!await editor.leave()) return;
     navigationHistory.length = 0;
+    invalidate();
     return inspect(pageId);
   }
 
-  function navigate(pageId) {
+  async function navigate(pageId) {
+    if (!await editor.leave()) return;
     if (currentPageId) navigationHistory.push({ pageId: currentPageId, view: currentView });
     return inspect(pageId);
   }
 
-  function back() {
+  async function back() {
+    if (!await editor.leave()) return;
     const entry = navigationHistory.pop();
     if (entry) return inspect(entry.pageId, entry.view);
     return Promise.resolve();
@@ -634,9 +666,14 @@ export function createPageInspector({ request, showError, formatTime, t = (value
     tab.addEventListener("click", () => activate(tab.dataset.detailView));
   });
   backButton.addEventListener("click", () => back());
-  document.getElementById("dialog-close").addEventListener("click", () => {
+  document.getElementById("dialog-close").addEventListener("click", async () => {
+    if (!await editor.leave()) return;
     navigationHistory.length = 0;
     dialog.close();
+  });
+  dialog.addEventListener("cancel", async (event) => {
+    event.preventDefault();
+    if (await editor.leave()) dialog.close();
   });
   document.getElementById("relation-comparison-close").addEventListener("click", () => {
     relationComparisonDialog.close();

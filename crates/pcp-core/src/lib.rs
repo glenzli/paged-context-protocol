@@ -28,11 +28,11 @@ pub use reconciliation::{
     FeedbackSubmission, ReconciliationDisposition, ReconciliationResult, SubmitFeedbackRequest,
 };
 pub use request::{
-    ArchivePageRequest, AssessPageValidityRequest, CreateScopeRequest, ExtractTopicRequest,
-    IngestPageRequest, InitialRelation, LinkPagesRequest, PackPagesRequest, PageRevisionRef,
-    ReadPagesRequest, RepairPageRequest, RestoreArchivedPageRequest, RevisePageRequest,
-    SearchFilters, SearchPagesRequest, UnpackPageRequest, WritePageRequest, WriteSummaryRequest,
-    default_search_projections,
+    ArchivePageRequest, AssessPageValidityRequest, CreateScopeRequest, DeletePageRequest,
+    ExtractTopicRequest, IngestPageRequest, InitialRelation, LinkPagesRequest, PackPagesRequest,
+    PageRevisionRef, ReadPagesRequest, RepairPageRequest, RestoreArchivedPageRequest,
+    RevisePageRequest, SearchFilters, SearchPagesRequest, UnpackPageRequest, WritePageRequest,
+    WriteSummaryRequest, default_search_projections,
 };
 pub use retention::{
     CollectRevisionRetentionRequest, PlanRevisionRetentionRequest, ProtectedRevisionSample,

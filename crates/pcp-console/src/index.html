@@ -88,6 +88,11 @@
           <div id="page-filter-menu" class="page-menu-panel" role="menu" aria-label="Filter Pages" data-i18n-aria-label="Filter Pages" hidden>
             <div class="page-menu-heading" data-i18n="Scope">Scope</div>
             <div id="page-filter-options" class="page-menu-options"></div>
+            <div class="page-menu-heading page-filter-divider" data-i18n="Content role">Content role</div>
+            <div id="page-role-options" class="page-menu-options"></div>
+            <p class="page-filter-help" data-i18n="Other pages have neither a current extraction record nor current summary coverage.">Other pages have neither a current extraction record nor current summary coverage.</p>
+            <label class="page-summary-filter page-filter-divider"><input id="page-with-summary" type="checkbox"><span data-i18n="With attached summary">With attached summary</span></label>
+            <p class="page-filter-help" data-i18n="Attached summaries belong to a Page; they are not separate condensed Pages.">Attached summaries belong to a Page; they are not separate condensed Pages.</p>
           </div>
         </div>
         <div class="page-sort-controls">
@@ -105,12 +110,17 @@
           </div>
         </div>
       </form>
+      <div id="page-active-filters" class="page-active-filters" role="group" aria-label="Active page filters" data-i18n-aria-label="Active page filters" hidden></div>
       <div id="page-results" class="page-results" aria-live="polite"></div>
       <div class="list-footer page-results-footer">
         <span id="pages-loaded" class="muted"></span>
         <nav id="pages-pager" class="page-pager" aria-label="Pages pagination" data-i18n-aria-label="Pages pagination" hidden>
           <button id="pages-previous" class="icon-button" type="button" aria-label="Previous page" title="Previous page" data-i18n-aria-label="Previous page" data-i18n-title="Previous page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
-          <span id="pages-current" class="muted"></span>
+          <form id="pages-jump" class="page-jump">
+            <input id="pages-current" type="number" min="1" step="1" required inputmode="numeric" aria-label="Page number" data-i18n-aria-label="Page number">
+            <span class="page-total muted">/ <span id="pages-total"></span></span>
+            <button id="pages-jump-submit" class="icon-button" type="submit" aria-label="Jump to page" data-i18n-aria-label="Jump to page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6"/></svg></button>
+          </form>
           <button id="pages-next" class="icon-button" type="button" aria-label="Next page" title="Next page" data-i18n-aria-label="Next page" data-i18n-title="Next page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>
         </nav>
       </div>
@@ -495,8 +505,20 @@
         <button id="dialog-back" class="icon-button" type="button" aria-label="Back" title="Back" data-i18n-aria-label="Back" data-i18n-title="Back" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
         <div><strong id="dialog-title" data-i18n="Page">Page</strong><div id="dialog-subtitle" class="muted"></div></div>
       </div>
-      <button id="dialog-close" class="icon-button dialog-close-button" type="button" aria-label="Close" title="Close" data-i18n-aria-label="Close" data-i18n-title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+      <div class="dialog-header-actions">
+        <button id="page-edit" class="icon-button" type="button" aria-label="Edit content" data-i18n-aria-label="Edit content" hidden></button>
+        <button id="page-delete" class="icon-button page-delete-button" type="button" aria-label="Delete Page" data-i18n-aria-label="Delete Page" hidden></button>
+        <button id="page-save" class="icon-button primary-button" type="button" aria-label="Save changes" data-i18n-aria-label="Save changes" hidden></button>
+        <button id="page-edit-cancel" class="icon-button" type="button" aria-label="Cancel editing" data-i18n-aria-label="Cancel editing" hidden></button>
+        <button id="dialog-close" class="icon-button dialog-close-button" type="button" aria-label="Close" title="Close" data-i18n-aria-label="Close" data-i18n-title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+      </div>
     </header>
+    <div id="page-action-notice" class="page-action-notice" role="status" hidden></div>
+    <section id="page-editor" class="page-editor" hidden>
+      <label for="page-editor-content" data-i18n="Edit content">Edit content</label>
+      <textarea id="page-editor-content" spellcheck="false"></textarea>
+      <p class="muted" data-i18n="Save to update this Page immediately. Sources stay unchanged.">Save to update this Page immediately. Sources stay unchanged.</p>
+    </section>
     <nav class="detail-tabs" aria-label="Page views" data-i18n-aria-label="Page views">
       <button class="detail-tab active" type="button" data-detail-view="summary" data-i18n="Overview">Overview</button>
       <button class="detail-tab" type="button" data-detail-view="graph" data-i18n="Connections">Connections</button>

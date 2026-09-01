@@ -139,6 +139,19 @@ pub struct RepairPageRequest {
     pub idempotency_key: Option<String>,
 }
 
+/// Delete one current Page from retrieval without cascading into other Pages.
+/// Historical Revisions remain addressable. Runtime supplies the actor.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeletePageRequest {
+    pub page_id: String,
+    pub expected_revision_id: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
 /// Reversibly remove a Page from the default retrieval and graph surface.
 ///
 /// Archival is content governance rather than a content revision: the current

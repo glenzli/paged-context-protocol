@@ -75,6 +75,8 @@ pub(crate) enum RpcOperation {
         limit: u32,
         cursor: Option<String>,
         max_chars: u32,
+        #[serde(default)]
+        filter: pcp_client::ContentLibraryFilter,
     },
     BrowseRetrievalPages {
         scopes: Vec<String>,
@@ -109,6 +111,7 @@ pub(crate) enum RpcOperation {
     WritePage(WritePageRequest),
     RevisePage(RevisePageRequest),
     RepairPage(RepairPageRequest),
+    DeletePage(pcp_core::DeletePageRequest),
     ArchivePage(ArchivePageRequest),
     RestoreArchivedPage(RestoreArchivedPageRequest),
     PackPages(PackPagesRequest),
@@ -314,6 +317,60 @@ mod tests {
         assert_eq!(value["params"]["reason"], "Restore source context");
         assert!(value["params"].get("createdBy").is_none());
         assert!(value["params"].get("actor").is_none());
+    }
+
+    #[test]
+    fn content_library_filters_keep_legacy_requests_and_roundtrip_roles() {
+        let legacy = serde_json::json!({"type":"browse_content_pages","params":{
+            "scopes":["user:self"],"query":null,"order":"recent","limit":20,
+            "cursor":null,"max_chars":32000
+        }});
+        let decoded: RpcOperation = serde_json::from_value(legacy.clone()).unwrap();
+        let RpcOperation::BrowseContentPages { filter, .. } = decoded else {
+            panic!("wrong operation")
+        };
+        assert!(filter.role.is_none());
+        assert!(!filter.with_summary);
+        let mut filtered = legacy;
+        filtered["params"]["filter"] = serde_json::json!({"role":"condensed","withSummary":true});
+        let decoded: RpcOperation = serde_json::from_value(filtered).unwrap();
+        let encoded = serde_json::to_value(decoded).unwrap();
+        assert_eq!(encoded["params"]["filter"]["role"], "condensed");
+        assert_eq!(encoded["params"]["filter"]["withSummary"], true);
+        let roles = pcp_client::ContentLibraryResult {
+            hits: Vec::new(),
+            next_cursor: None,
+            total_pages: 0,
+            total_content_chars: 0,
+            page_roles: std::collections::BTreeMap::from([(
+                "pg_one".into(),
+                pcp_client::ContentPageRole::CoveredSource,
+            )]),
+        };
+        let encoded = serde_json::to_value(&roles).unwrap();
+        assert_eq!(encoded["pageRoles"]["pg_one"], "covered_source");
+        let decoded: pcp_client::ContentLibraryResult = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.page_roles, roles.page_roles);
+    }
+
+    #[test]
+    fn single_page_delete_is_revision_bound_and_has_no_caller_actor() {
+        let value = serde_json::to_value(RpcOperation::DeletePage(pcp_core::DeletePageRequest {
+            page_id: "pg_one".into(),
+            expected_revision_id: "rev_current".into(),
+            reason: None,
+            idempotency_key: None,
+        }))
+        .unwrap();
+        assert_eq!(value["type"], "delete_page");
+        assert_eq!(value["params"]["expectedRevisionId"], "rev_current");
+        assert!(value["params"].get("actor").is_none());
+        assert!(
+            serde_json::from_value::<RpcOperation>(serde_json::json!({
+                "type":"delete_page", "params":{"pageId":"pg_one"}
+            }))
+            .is_err()
+        );
     }
 
     #[test]

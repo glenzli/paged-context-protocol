@@ -21,8 +21,9 @@ use pcp_core::{
 };
 use pcp_store::PcpStore;
 pub use pcp_store::{
-    ContentLibraryResult, ContentLibraryScope, ContentLibrarySummary, DurablePageInventoryItem,
-    HealthSnapshot, QueryAuditSummary, TombstoneCascadeResult, UnpackPageResult,
+    ContentLibraryFilter, ContentLibraryResult, ContentLibraryScope, ContentLibrarySummary,
+    ContentPageRole, DurablePageInventoryItem, HealthSnapshot, QueryAuditSummary,
+    TombstoneCascadeResult, UnpackPageResult,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,6 +167,7 @@ pub trait PcpTenantApi: Send + Sync {
         limit: u32,
         cursor: Option<String>,
         max_chars: u32,
+        filter: ContentLibraryFilter,
     ) -> Result<ContentLibraryResult>;
     /// Browse the default retrieval surface, where topic extractions stand in
     /// front of their retained source Pages.
@@ -355,6 +357,8 @@ pub trait PcpApi: PcpTenantApi {
     /// Development/admin repair of the current Page head. This is not part of
     /// [`PcpTenantApi`] and requires the Runtime-bound repair permission.
     async fn repair_page(&self, request: RepairPageRequest) -> Result<WriteResult>;
+    /// Administrative single-Page deletion, separate from derivation retraction.
+    async fn delete_page(&self, request: pcp_core::DeletePageRequest) -> Result<WriteResult>;
     async fn archive_page(
         &self,
         request: pcp_core::ArchivePageRequest,
@@ -521,9 +525,19 @@ impl PcpTenantApi for EmbeddedPcpClient {
         limit: u32,
         cursor: Option<String>,
         max_chars: u32,
+        filter: ContentLibraryFilter,
     ) -> Result<ContentLibraryResult> {
         self.store
-            .browse_content_pages(&self.access, scopes, query, order, limit, cursor, max_chars)
+            .browse_content_pages(
+                &self.access,
+                scopes,
+                query,
+                order,
+                limit,
+                cursor,
+                max_chars,
+                filter,
+            )
             .await
     }
 
@@ -642,6 +656,11 @@ impl PcpApi for EmbeddedPcpClient {
 
     async fn repair_page(&self, request: RepairPageRequest) -> Result<WriteResult> {
         let result = self.store.repair_page(&self.access, request).await;
+        self.observe_successful_write(result)
+    }
+
+    async fn delete_page(&self, request: pcp_core::DeletePageRequest) -> Result<WriteResult> {
+        let result = self.store.delete_page(&self.access, request).await;
         self.observe_successful_write(result)
     }
 

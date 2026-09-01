@@ -26,6 +26,11 @@ use serde_json::json;
 
 use super::SqlitePcpStore;
 
+#[path = "tests/content_filters.rs"]
+mod content_filters;
+#[path = "tests/page_actions.rs"]
+mod page_actions;
+
 #[tokio::test]
 async fn store_wide_operator_dynamically_resolves_current_and_future_scopes() {
     let root = std::env::temp_dir().join(format!(
@@ -741,6 +746,7 @@ async fn topic_extraction_preserves_sources_but_routes_retrieval_through_topic_p
             10,
             None,
             10_000,
+            Default::default(),
         )
         .await
         .expect("browse complete content library");
@@ -3702,6 +3708,7 @@ async fn content_library_excludes_attached_summaries_without_restricting_page_ki
             10,
             None,
             8_000,
+            Default::default(),
         )
         .await
         .expect("browse content library");

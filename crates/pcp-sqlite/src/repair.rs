@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use pcp_core::{Actor, PACKED_PAGE_MEDIA_TYPE, RepairPageRequest, SourceSpan, WriteResult};
-use rusqlite::{Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::{
     SqlitePcpStore,
@@ -60,6 +60,14 @@ impl SqlitePcpStore {
                 current.lifecycle_status != "tombstoned",
                 "tombstoned PCP Pages cannot be repaired"
             );
+            let summary_target: Option<String> = transaction.query_row(
+                "SELECT target_revision_id FROM pcp_summaries WHERE summary_revision_id = ?1",
+                [&current.revision_id], |row| row.get(0),
+            ).optional()?;
+            if summary_target.is_some() {
+                let content = request.payload.as_ref().context("Summary repair requires text")?;
+                anyhow::ensure!(content.media_type == "text/markdown" && (1..=crate::summary::MAX_SUMMARY_CHARS).contains(&content.content.trim().chars().count()), "Summary repair requires 1-1200 Markdown characters");
+            }
 
             let timestamp = now();
             let revision_id = random_id(&transaction, "rev_")?;
@@ -112,6 +120,13 @@ impl SqlitePcpStore {
                 published == 1,
                 "revision conflict while publishing Page repair"
             );
+            // A Summary is a Page as well as a routing projection. Keep its
+            // target binding and search projection in the same transaction.
+            if let Some(target) = summary_target {
+                transaction.execute("INSERT INTO pcp_summaries (summary_revision_id, target_revision_id) VALUES (?1, ?2)", params![revision_id, target])?;
+                transaction.execute("DELETE FROM pcp_summary_fts WHERE summary_revision_id IN (SELECT revision_id FROM pcp_revisions WHERE page_id = ?1)", [&request.page_id])?;
+                transaction.execute("INSERT INTO pcp_summary_fts (summary_revision_id, target_revision_id, content) VALUES (?1, ?2, ?3)", params![revision_id, target, request.payload.as_ref().unwrap().content])?;
+            }
             record_idempotency(
                 &transaction,
                 &actor.actor_id,
