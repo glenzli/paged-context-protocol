@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 
 use chrono::{SecondsFormat, Utc};
 use pcp_client::PcpApi;
@@ -21,11 +21,76 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::json;
 
-const SERVER_INSTRUCTIONS: &str = "PCP writes from Codex are exceptional. Call pcp_capture only when the user explicitly asks to retain something, or for a confirmed decision, explicit preference, stable cross-task constraint, verified reusable finding, or completed reusable outcome that is likely to matter in a later task. If uncertain, do not write. Never capture routine progress, raw transcripts or logs, facts cheaply recovered from the repository, speculation, secrets, or duplicates. Preserve the user's language and keep one self-contained subject per Page. PCP is an identity-scoped durable graph of stable Pages with immutable Revisions. Call pcp_whoami before cross-Scope work. Prefer pcp_semantic_search for conservative semantic retrieval; use pcp_match_intent only when a Router review is justified, and pcp_search_pages only for deterministic inspection. Use pageId for stable identity and Relations; use revisionId for exact evidence and provenance. pcp_expand_graph returns only a bounded, anchored ACL-filtered slice, never the entire graph. Non-Codex producers may use pcp_ingest_page for ordinary source events. When a user explicitly challenges recalled evidence, call pcp_submit_feedback with exact challenged and actually-used revision IDs; do not silently rewrite or delete the recalled Page. Maintained interpretations use the advanced write and revise tools.";
+const SHARED_SERVER_INSTRUCTIONS: &str = "Call pcp_capture only when the user explicitly asks to retain something, or for a confirmed decision, explicit preference, stable cross-task constraint, verified reusable finding, or completed reusable outcome that is likely to matter in a later task. If uncertain, do not write. Never capture routine progress, raw transcripts or logs, facts cheaply recovered from the repository, speculation, secrets, or duplicates. Preserve the user's language and keep one self-contained subject per Page. PCP is an identity-scoped durable graph of stable Pages with immutable Revisions. Call pcp_whoami before cross-Scope work. Prefer pcp_semantic_search for conservative semantic retrieval; use pcp_match_intent only when a Router review is justified, and pcp_search_pages only for deterministic inspection. Use pageId for stable identity and Relations; use revisionId for exact evidence and provenance. pcp_expand_graph returns only a bounded, anchored ACL-filtered slice, never the entire graph. Source applications may use pcp_ingest_page for ordinary source events. When a user explicitly challenges recalled evidence, call pcp_submit_feedback with exact challenged and actually-used revision IDs; do not silently rewrite or delete the recalled Page. Maintained interpretations use the advanced write and revise tools.";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PcpMcpSurface {
+    #[default]
+    Codex,
+    ChatGpt,
+    Generic,
+}
+
+impl PcpMcpSurface {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::ChatGpt => "ChatGPT",
+            Self::Generic => "MCP client",
+        }
+    }
+
+    fn facet_value(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::ChatGpt => "chatgpt",
+            Self::Generic => "generic",
+        }
+    }
+
+    fn capture_kind(self) -> &'static str {
+        match self {
+            Self::Codex => "codex_capture",
+            Self::ChatGpt => "chatgpt_capture",
+            Self::Generic => "agent_capture",
+        }
+    }
+
+    fn capture_policy(self) -> &'static str {
+        match self {
+            Self::Codex => "codex_high_threshold",
+            Self::ChatGpt => "chatgpt_high_threshold",
+            Self::Generic => "agent_high_threshold",
+        }
+    }
+
+    fn instructions(self) -> String {
+        format!(
+            "PCP writes from {} are exceptional. {SHARED_SERVER_INSTRUCTIONS}",
+            self.label()
+        )
+    }
+}
+
+impl FromStr for PcpMcpSurface {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "codex" => Ok(Self::Codex),
+            "chatgpt" | "chat-gpt" => Ok(Self::ChatGpt),
+            "generic" | "mcp" => Ok(Self::Generic),
+            other => Err(format!(
+                "unsupported PCP_MCP_SURFACE `{other}`; use codex, chatgpt, or generic"
+            )),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct PcpMcpServer {
     client: Arc<dyn PcpApi>,
+    surface: PcpMcpSurface,
 }
 
 #[derive(Debug, JsonSchema, Serialize)]
@@ -392,7 +457,11 @@ pub struct AccessLogResult {
 
 impl PcpMcpServer {
     pub fn new(client: Arc<dyn PcpApi>) -> Self {
-        Self { client }
+        Self::with_surface(client, PcpMcpSurface::Codex)
+    }
+
+    pub fn with_surface(client: Arc<dyn PcpApi>, surface: PcpMcpSurface) -> Self {
+        Self { client, surface }
     }
 
     async fn read_exact_revisions(
@@ -491,7 +560,7 @@ impl PcpMcpServer {
 
     #[tool(
         name = "pcp_capture",
-        description = "Exceptionally retain one confirmed, self-contained Codex item for later tasks. Use only for an explicit retention request, explicit preference, durable decision, stable cross-task constraint, verified reusable finding, or completed reusable outcome. Explain why it remains useful; when uncertain, do not call this tool. Never store routine progress, raw transcripts or logs, cheaply recoverable repository facts, speculation, secrets, or duplicates.",
+        description = "Exceptionally retain one confirmed, self-contained item for later tasks or conversations. Use only for an explicit retention request, explicit preference, durable decision, stable cross-task constraint, verified reusable finding, or completed reusable outcome. Explain why it remains useful; when uncertain, do not call this tool. Never store routine progress, raw transcripts or logs, cheaply recoverable repository facts, speculation, secrets, or duplicates.",
         annotations(
             title = "Capture Durable PCP Context",
             read_only_hint = false,
@@ -507,7 +576,7 @@ impl PcpMcpServer {
             self.client.as_ref(),
             params.scope.as_deref(),
             AccessPermission::Ingest,
-            "Codex capture",
+            "durable capture",
         )?;
         let title = bounded_capture_text("title", params.title, 160)?;
         let content = bounded_capture_text("content", params.content, 16_000)?;
@@ -518,7 +587,7 @@ impl PcpMcpServer {
             .client
             .ingest_page(IngestPageRequest {
                 namespace,
-                kind: "codex_capture".to_owned(),
+                kind: self.surface.capture_kind().to_owned(),
                 observed_at: params.observed_at,
                 source_span: None,
                 payload: Some(PagePayload {
@@ -530,7 +599,8 @@ impl PcpMcpServer {
                 facets: Some(json!({
                     "title": title,
                     "captureCategory": category,
-                    "capturePolicy": "codex_high_threshold",
+                    "capturePolicy": self.surface.capture_policy(),
+                    "captureSurface": self.surface.facet_value(),
                     "retentionRationale": retention_rationale,
                 })),
                 external_event_id: params.external_event_id,
@@ -1231,7 +1301,7 @@ impl ServerHandler for PcpMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("paged-context-protocol", "0.1.0"))
-            .with_instructions(SERVER_INSTRUCTIONS)
+            .with_instructions(self.surface.instructions())
     }
 }
 
@@ -1393,8 +1463,16 @@ mod tests {
 
     use super::{
         AccessLogParams, CaptureCategory, CapturePageParams, IngestPageParams, PcpMcpServer,
-        SearchPagesParams, SubmitFeedbackParams, WritePageParams,
+        PcpMcpSurface, SearchPagesParams, SubmitFeedbackParams, WritePageParams,
     };
+
+    #[test]
+    fn mcp_surface_names_are_explicit() {
+        assert_eq!("codex".parse(), Ok(PcpMcpSurface::Codex));
+        assert_eq!("chatgpt".parse(), Ok(PcpMcpSurface::ChatGpt));
+        assert_eq!("mcp".parse(), Ok(PcpMcpSurface::Generic));
+        assert!("browser".parse::<PcpMcpSurface>().is_err());
+    }
 
     #[tokio::test]
     async fn tools_write_search_and_enforce_scope_access() {
@@ -1499,7 +1577,10 @@ mod tests {
             .await
             .expect("create authorized scope");
 
-        let tenant = PcpMcpServer::new(contribute_client(store, vec![namespace.clone()]));
+        let tenant = PcpMcpServer::new(contribute_client(
+            Arc::clone(&store),
+            vec![namespace.clone()],
+        ));
         let ingested = tenant
             .pcp_ingest_page(Parameters(IngestPageParams {
                 scope: Some(namespace.clone()),
@@ -1574,6 +1655,73 @@ mod tests {
                 .and_then(|facets| facets.get("capturePolicy"))
                 .and_then(serde_json::Value::as_str),
             Some("codex_high_threshold")
+        );
+        assert_eq!(
+            captured_page
+                .revision
+                .facets
+                .as_ref()
+                .and_then(|facets| facets.get("captureSurface"))
+                .and_then(serde_json::Value::as_str),
+            Some("codex")
+        );
+
+        let chatgpt = PcpMcpServer::with_surface(
+            contribute_client(store, vec![namespace.clone()]),
+            PcpMcpSurface::ChatGpt,
+        );
+        let chatgpt_capture = chatgpt
+            .pcp_capture(Parameters(CapturePageParams {
+                scope: Some(namespace.clone()),
+                category: CaptureCategory::ExplicitPreference,
+                title: "Keep ChatGPT capture explicit".to_owned(),
+                content: "ChatGPT uses a distinct PCP Principal and capture surface.".to_owned(),
+                retention_rationale: "The source boundary matters across later conversations."
+                    .to_owned(),
+                source_refs: Vec::new(),
+                based_on_revision_ids: Vec::new(),
+                observed_at: None,
+                external_event_id: Some("mcp:chatgpt:capture:test".to_owned()),
+            }))
+            .await
+            .expect("capture durable ChatGPT context")
+            .0;
+        let chatgpt_page = chatgpt
+            .client
+            .read_pages(ReadPagesRequest {
+                page_ids: Vec::new(),
+                revision_ids: vec![chatgpt_capture.revision_id],
+                projections: vec![Projection::Manifest, Projection::Facets],
+                max_chars: 32_000,
+            })
+            .await
+            .expect("read ChatGPT capture")
+            .pop()
+            .expect("ChatGPT capture exists");
+        assert_eq!(chatgpt_page.page.kind, "chatgpt_capture");
+        assert_eq!(
+            chatgpt_page
+                .revision
+                .facets
+                .as_ref()
+                .and_then(|facets| facets.get("capturePolicy"))
+                .and_then(serde_json::Value::as_str),
+            Some("chatgpt_high_threshold")
+        );
+        assert_eq!(
+            chatgpt_page
+                .revision
+                .facets
+                .as_ref()
+                .and_then(|facets| facets.get("captureSurface"))
+                .and_then(serde_json::Value::as_str),
+            Some("chatgpt")
+        );
+        assert!(
+            rmcp::ServerHandler::get_info(&chatgpt)
+                .instructions
+                .expect("ChatGPT instructions")
+                .starts_with("PCP writes from ChatGPT are exceptional")
         );
         assert!(
             tenant

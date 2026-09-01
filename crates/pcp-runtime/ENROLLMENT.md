@@ -150,6 +150,13 @@ Scope names are literal. A request contains 1-16 unique primary Scopes, each at
 most 128 UTF-8 bytes. Runtime retains at most 16 simultaneous pending requests and 32
 active registrations per Store.
 
+Each external agent surface uses its own Principal and credential even when two
+surfaces request the same Scope policy. For example, the Codex plugin uses
+`codex:pcp` while the ChatGPT tunnel integration uses `chatgpt:pcp`. This keeps
+Console approval, revocation, access audit, and captured Page provenance
+independent; a tunnel transports MCP messages but does not inherit another
+client's PCP registration.
+
 `begin` is idempotent for the same credential, client claim, and requested
 access. Before approval it returns `pending`; after approval it may return an
 active session directly.

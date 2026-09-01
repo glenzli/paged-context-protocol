@@ -12,6 +12,8 @@ RUNTIME_BINARY="$BIN_DIR/pcp-runtime"
 MCP_BINARY="$BIN_DIR/pcp-mcp"
 INSTALLED_BIN_DIR="$PCP_HOME/bin"
 INSTALLED_MCP_BINARY="$INSTALLED_BIN_DIR/pcp-mcp"
+CHATGPT_LAUNCHER_SOURCE="$PROJECT_ROOT/integrations/chatgpt/launch-pcp-mcp"
+INSTALLED_CHATGPT_LAUNCHER="$INSTALLED_BIN_DIR/pcp-chatgpt-mcp"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST_PATH="$PLIST_DIR/$LABEL.plist"
 LOG_DIR="$PCP_HOME/logs"
@@ -45,6 +47,13 @@ chmod 700 "$installed_mcp_temporary"
 mv "$installed_mcp_temporary" "$INSTALLED_MCP_BINARY"
 trap - EXIT
 
+installed_chatgpt_temporary="$(mktemp "$INSTALLED_BIN_DIR/.pcp-chatgpt-mcp.XXXXXX")"
+trap 'rm -f "$installed_chatgpt_temporary"' EXIT
+cp "$CHATGPT_LAUNCHER_SOURCE" "$installed_chatgpt_temporary"
+chmod 700 "$installed_chatgpt_temporary"
+mv "$installed_chatgpt_temporary" "$INSTALLED_CHATGPT_LAUNCHER"
+trap - EXIT
+
 temporary="$(mktemp "$PLIST_DIR/$LABEL.XXXXXX")"
 trap 'rm -f "$temporary"' EXIT
 sed \
@@ -67,3 +76,4 @@ launchctl kickstart -k "$DOMAIN/$LABEL"
 
 echo "PCP Console is managed by $LABEL at http://127.0.0.1:4318/"
 echo "PCP home: $PCP_HOME"
+echo "ChatGPT MCP launcher: $INSTALLED_CHATGPT_LAUNCHER"

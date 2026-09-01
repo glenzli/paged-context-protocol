@@ -159,6 +159,12 @@ Long-running MCP clients should use enrollment instead of persisting a generatio
 
 An ordinary writable tenant should use `contribute`, which adds authenticated `ingest_page` and exact-Revision `submit_feedback` to Read. `repair` is a narrow development-migration surface for history-preserving `repair_page`; it does not grant ordinary Page writes, revisions, lifecycle changes, or Scope administration. Use a separate Principal and credential, opened only during an explicit apply migration. `write` and `admin` remain reserved for maintainers and local administration tools. See [`crates/pcp-runtime/ENROLLMENT.md`](crates/pcp-runtime/ENROLLMENT.md) for access modes and the enrollment contract.
 
+### Local ChatGPT Access
+
+ChatGPT Developer Mode can call the local stdio `pcp-mcp` through OpenAI Secure MCP Tunnel. PCP Runtime, its Store, Unix sockets, and enrollment credential remain off the public internet; the local tunnel client creates an outbound HTTPS connection to OpenAI. This surface uses a separate `chatgpt:pcp` Principal, `chatgpt-pcp.json` enrollment state, and `chatgpt_capture` Page kind rather than reusing the Codex grant or source label.
+
+`scripts/install-macos.sh` installs the entry point at `~/Library/Application Support/PCP/bin/pcp-chatgpt-mcp`. See [`integrations/chatgpt`](integrations/chatgpt/README.md) for enrollment, tunnel configuration, and Developer Mode connection steps. This is a private development path, not a replacement for the public HTTPS MCP deployment required by a public ChatGPT app.
+
 ### Maintenance, Console, and Observation
 
 Background maintenance and manual Console runs use the same persistent review queue. A worker produces candidates; Runtime and Store retain control of budgets, authorization, current-Revision checks, and commits. Relation, Topic, and Archive proposals requiring judgment are reviewed before application. Scheduling, model escalation, and failure backoff are documented in [`crates/pcp-runtime/README.md`](crates/pcp-runtime/README.md).

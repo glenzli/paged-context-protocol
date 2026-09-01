@@ -1,0 +1,65 @@
+#!/bin/sh
+set -eu
+
+pcp_home="${PCP_HOME:-$HOME/Library/Application Support/PCP}"
+enrollment_file="${PCP_CHATGPT_ENROLLMENT_FILE:-$pcp_home/clients/chatgpt-pcp.json}"
+pcp_mcp_binary="${PCP_MCP_BINARY:-$pcp_home/bin/pcp-mcp}"
+
+if [ ! -x "$pcp_mcp_binary" ]; then
+  echo "PCP MCP binary is unavailable at $pcp_mcp_binary; install PCP or set PCP_MCP_BINARY." >&2
+  exit 1
+fi
+
+case "${1:-serve}" in
+  enroll)
+    case "${2:-status}" in
+      begin)
+        if [ "$#" -ne 3 ]; then
+          echo "usage: pcp-chatgpt-mcp enroll begin /absolute/path/to/current/pcp--idn_....json" >&2
+          exit 2
+        fi
+        PCP_CLIENT_ID="chatgpt:pcp" \
+        PCP_CLIENT_NAME="ChatGPT" \
+        PCP_ACCESS_MODE="contribute" \
+        PCP_ALLOWED_SCOPES="user:self" \
+        PCP_READ_ALL_SCOPES="true" \
+        PCP_ENROLLMENT_FILE="$enrollment_file" \
+        PCP_DISCOVERY_MANIFEST="$3" \
+        exec "$pcp_mcp_binary" enroll begin
+        ;;
+      status)
+        if [ "$#" -ne 2 ]; then
+          echo "usage: pcp-chatgpt-mcp enroll status" >&2
+          exit 2
+        fi
+        PCP_ENROLLMENT_FILE="$enrollment_file" \
+        exec "$pcp_mcp_binary" enroll status
+        ;;
+      *)
+        echo "usage: pcp-chatgpt-mcp enroll begin MANIFEST | enroll status" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  serve)
+    if [ "$#" -gt 1 ]; then
+      echo "usage: pcp-chatgpt-mcp [serve]" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "usage: pcp-chatgpt-mcp [serve] | enroll begin MANIFEST | enroll status" >&2
+    exit 2
+    ;;
+esac
+
+if [ ! -f "$enrollment_file" ]; then
+  echo "PCP ChatGPT enrollment is missing at $enrollment_file; create and approve the chatgpt:pcp contribute enrollment first." >&2
+  exit 1
+fi
+
+PCP_CLIENT_ID="chatgpt:pcp" \
+PCP_CLIENT_NAME="ChatGPT" \
+PCP_ENROLLMENT_FILE="$enrollment_file" \
+PCP_MCP_SURFACE="chatgpt" \
+exec "$pcp_mcp_binary"

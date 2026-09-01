@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result};
 use pcp_client::{AccessMode, EmbeddedPcpClient, PcpApi};
 use pcp_core::{AccessPrincipal, AccessPrincipalType};
-use pcp_mcp::PcpMcpServer;
+use pcp_mcp::{PcpMcpServer, PcpMcpSurface};
 use pcp_rpc::RemotePcpClient;
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
@@ -38,7 +38,11 @@ async fn main() -> Result<()> {
     } else {
         embedded_client().await?
     };
-    let service = PcpMcpServer::new(client)
+    let surface = env::var("PCP_MCP_SURFACE")
+        .unwrap_or_else(|_| "codex".to_owned())
+        .parse::<PcpMcpSurface>()
+        .map_err(anyhow::Error::msg)?;
+    let service = PcpMcpServer::with_surface(client, surface)
         .serve(stdio())
         .await
         .context("start PCP MCP stdio server")?;

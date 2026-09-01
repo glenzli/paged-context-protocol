@@ -159,6 +159,12 @@ codex mcp add pcp \
 
 普通可写租户应使用 `contribute`；它在 Read 基础上增加 `ingest_page` 和针对精确 Revision 的 `submit_feedback`。`repair` 是开发迁移使用的窄管理面：仅在 Read 基础上增加保留历史的 `repair_page`，不授予普通 Page 写入、修订、生命周期或 Scope 管理。应使用独立 Principal/credential，只在显式 apply 迁移期间打开。`write` 和 `admin` 仍仅用于维护器和本机管理工具。完整访问模式与 enrollment 合同见 [`crates/pcp-runtime/ENROLLMENT.md`](crates/pcp-runtime/ENROLLMENT.md)。
 
+### ChatGPT 本地接入
+
+ChatGPT Developer Mode 可以通过 OpenAI Secure MCP Tunnel 调用本机的 stdio `pcp-mcp`。PCP Runtime、Store、Unix socket 和 enrollment credential 不需要对公网开放；本机 tunnel client 主动建立到 OpenAI 的 HTTPS 连接。该入口使用独立的 `chatgpt:pcp` Principal、`chatgpt-pcp.json` enrollment state 和 `chatgpt_capture` Page kind，不复用 Codex 的授权或来源标记。
+
+`scripts/install-macos.sh` 会把入口安装到 `~/Library/Application Support/PCP/bin/pcp-chatgpt-mcp`。创建并批准 ChatGPT enrollment、配置 tunnel 和连接 Developer Mode 的步骤见 [`integrations/chatgpt`](integrations/chatgpt/README.md)。这是一条私有开发接入路径，不替代公开 ChatGPT app 所需的公网 HTTPS MCP 部署。
+
 ### 维护、Console 与观测
 
 后台维护与 Console 手动运行共用持久审阅队列。Worker 只产生候选，Runtime 和 Store 负责预算、授权、当前 Revision 校验与提交；需要人工判断的 Relation、Topic、Archive 和反馈协调建议在应用前审阅。反馈协调默认由低成本模型判断；只有不确定项才升级一次，更高影响的 `superseded`/`retracted` 仍需人工批准。调度、模型升级和失败退避见 [`crates/pcp-runtime/README.md`](crates/pcp-runtime/README.md)。
