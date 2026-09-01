@@ -1,8 +1,11 @@
 # PCP Runtime
 
 `pcp-runtime` composes one Identity-bound Store, local RPC endpoints,
-user-approved client enrollment, and background maintenance. It is the official
-service implementation; the normative data and behavior contract remains in the
+user-approved client enrollment, and optional background maintenance. It is the
+project-maintained multi-client service implementation and one deployment profile,
+not a prerequisite of the Core protocol. An embedded Host may compose the same
+Store and client contracts in-process without RPC, Discovery, enrollment, Observer,
+or a background scheduler. The normative data and behavior contract remains in the
 top-level protocol specification.
 
 It also advertises the versioned, aggregate-only
@@ -21,10 +24,16 @@ during migration.
 
 | Layer | Owns | Does not own |
 | --- | --- | --- |
-| Tenant | Source events, source-local deterministic structure, Page kind, SourceRefs, explicit feedback against exact recalled Revisions, and external-source custody, parsing, search, and rendering | Global relation graph, maintenance cadence, cross-tenant policy |
-| PCP protocol and Store | Identity boundary, stable Pages, immutable Revisions, Relations, authorization, exact reads, atomic commits | A fixed inference model or active prompt |
-| Runtime maintainer | Identity-wide candidate discovery, bounded convergence, typed review queue, budgets, timeout, cooldown, worker invocation, validation, commit authority, maintenance ledger | Tenant product behavior or external-source custody, parsing, search, or rendering |
+| Tenant / Host | Source events, source-local deterministic structure, Page kind, SourceRefs, explicit feedback against exact recalled Revisions, active-context planning, and external-source custody, parsing, search, and rendering | Data outside its grants, the global relation graph, cross-tenant policy |
+| PCP protocol | Identity, Page, Revision, Relation, authorization, provenance, and operation invariants | A daemon, scheduler, fixed inference model, or active prompt |
+| Store implementation | Transactions, current-head indexes, authorization enforcement, exact reads, retention roots, and advertised atomic operations | Retrieval timing, active-context assembly, or tenant product behavior |
+| Runtime service | Local RPC, injected Principal and AccessSession, enrollment, Discovery, Observer, and optional maintenance coordination | Active-context assembly or external-source parsing and rendering |
+| Optional Runtime maintainer | Identity-wide candidate discovery, bounded convergence, typed review queue, budgets, timeout, cooldown, worker invocation, validation, commit authority, maintenance ledger | Tenant product behavior or external-source custody, parsing, search, or rendering |
 | Inference worker | Feedback reconciliation, Summary, ordered packing-candidate, relation, Topic, archive-review, and milestone judgments requested by Runtime | Direct Store writes, content packing, Page-head advancement, scheduling, lifecycle mutation, or GC policy |
+
+An embedded deployment combines the Tenant / Host and Store roles in one process.
+That composition does not grant access outside the Host's Scopes or make Runtime
+control-plane and maintenance behavior part of protocol conformance.
 
 The maintainer is disabled unless `[maintenance]` is present with
 `enabled = true`. It never falls back to automatic similarity-based merging.

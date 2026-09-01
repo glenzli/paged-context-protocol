@@ -19,8 +19,9 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::Serialize;
+use serde_json::json;
 
-const SERVER_INSTRUCTIONS: &str = "PCP is an identity-scoped durable graph of stable Pages with immutable Revisions. Call pcp_whoami before cross-Scope work. Prefer pcp_semantic_search for conservative semantic retrieval; use pcp_match_intent only when a Router review is justified, and pcp_search_pages only for deterministic inspection. Use pageId for stable identity and Relations; use revisionId for exact evidence and provenance. pcp_expand_graph returns only a bounded, anchored ACL-filtered slice, never the entire graph. Ordinary producers should use pcp_ingest_page. When a user explicitly challenges recalled evidence, call pcp_submit_feedback with exact challenged and actually-used revision IDs; do not silently rewrite or delete the recalled Page. Maintained interpretations use the advanced write and revise tools.";
+const SERVER_INSTRUCTIONS: &str = "PCP writes from Codex are exceptional. Call pcp_capture only when the user explicitly asks to retain something, or for a confirmed decision, explicit preference, stable cross-task constraint, verified reusable finding, or completed reusable outcome that is likely to matter in a later task. If uncertain, do not write. Never capture routine progress, raw transcripts or logs, facts cheaply recovered from the repository, speculation, secrets, or duplicates. Preserve the user's language and keep one self-contained subject per Page. PCP is an identity-scoped durable graph of stable Pages with immutable Revisions. Call pcp_whoami before cross-Scope work. Prefer pcp_semantic_search for conservative semantic retrieval; use pcp_match_intent only when a Router review is justified, and pcp_search_pages only for deterministic inspection. Use pageId for stable identity and Relations; use revisionId for exact evidence and provenance. pcp_expand_graph returns only a bounded, anchored ACL-filtered slice, never the entire graph. Non-Codex producers may use pcp_ingest_page for ordinary source events. When a user explicitly challenges recalled evidence, call pcp_submit_feedback with exact challenged and actually-used revision IDs; do not silently rewrite or delete the recalled Page. Maintained interpretations use the advanced write and revise tools.";
 
 #[derive(Clone)]
 pub struct PcpMcpServer {
@@ -189,6 +190,50 @@ pub struct IngestPageParams {
     observed_at: Option<String>,
     #[serde(default)]
     source_span: Option<SourceSpan>,
+    #[serde(default)]
+    external_event_id: Option<String>,
+}
+
+#[derive(Debug, JsonSchema, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureCategory {
+    ExplicitInstruction,
+    ExplicitPreference,
+    DurableDecision,
+    StableConstraint,
+    VerifiedFinding,
+    ReusableOutcome,
+}
+
+impl CaptureCategory {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::ExplicitInstruction => "explicit_instruction",
+            Self::ExplicitPreference => "explicit_preference",
+            Self::DurableDecision => "durable_decision",
+            Self::StableConstraint => "stable_constraint",
+            Self::VerifiedFinding => "verified_finding",
+            Self::ReusableOutcome => "reusable_outcome",
+        }
+    }
+}
+
+#[derive(Debug, JsonSchema, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapturePageParams {
+    #[serde(default)]
+    scope: Option<String>,
+    category: CaptureCategory,
+    title: String,
+    content: String,
+    /// Why this item is likely to remain useful in a later, separate task.
+    retention_rationale: String,
+    #[serde(default)]
+    source_refs: Vec<SourceRef>,
+    #[serde(default)]
+    based_on_revision_ids: Vec<String>,
+    #[serde(default)]
+    observed_at: Option<String>,
     #[serde(default)]
     external_event_id: Option<String>,
 }
@@ -437,6 +482,61 @@ impl PcpMcpServer {
             })
             .await
             .map_err(|error| operation_error("ingest PCP Page", error))?;
+        Ok(Json(PageWriteResult {
+            page_id: written.page_id,
+            revision_id: written.revision_id,
+            created: written.created,
+        }))
+    }
+
+    #[tool(
+        name = "pcp_capture",
+        description = "Exceptionally retain one confirmed, self-contained Codex item for later tasks. Use only for an explicit retention request, explicit preference, durable decision, stable cross-task constraint, verified reusable finding, or completed reusable outcome. Explain why it remains useful; when uncertain, do not call this tool. Never store routine progress, raw transcripts or logs, cheaply recoverable repository facts, speculation, secrets, or duplicates.",
+        annotations(
+            title = "Capture Durable PCP Context",
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    pub async fn pcp_capture(
+        &self,
+        Parameters(params): Parameters<CapturePageParams>,
+    ) -> Result<Json<PageWriteResult>, McpError> {
+        let namespace = operation_scope(
+            self.client.as_ref(),
+            params.scope.as_deref(),
+            AccessPermission::Ingest,
+            "Codex capture",
+        )?;
+        let title = bounded_capture_text("title", params.title, 160)?;
+        let content = bounded_capture_text("content", params.content, 16_000)?;
+        let retention_rationale =
+            bounded_capture_text("retentionRationale", params.retention_rationale, 500)?;
+        let category = params.category.as_str();
+        let written = self
+            .client
+            .ingest_page(IngestPageRequest {
+                namespace,
+                kind: "codex_capture".to_owned(),
+                observed_at: params.observed_at,
+                source_span: None,
+                payload: Some(PagePayload {
+                    media_type: "text/markdown".to_owned(),
+                    content: format!("# {title}\n\n{content}"),
+                }),
+                source_refs: params.source_refs,
+                based_on_revision_ids: params.based_on_revision_ids,
+                facets: Some(json!({
+                    "title": title,
+                    "captureCategory": category,
+                    "capturePolicy": "codex_high_threshold",
+                    "retentionRationale": retention_rationale,
+                })),
+                external_event_id: params.external_event_id,
+            })
+            .await
+            .map_err(|error| operation_error("capture durable PCP context", error))?;
         Ok(Json(PageWriteResult {
             page_id: written.page_id,
             revision_id: written.revision_id,
@@ -1151,6 +1251,23 @@ fn default_feedback_authority() -> FeedbackAuthority {
     FeedbackAuthority::Unknown
 }
 
+fn bounded_capture_text(field: &str, value: String, max_chars: usize) -> Result<String, McpError> {
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        return Err(McpError::invalid_params(
+            format!("{field} must not be empty"),
+            None,
+        ));
+    }
+    if value.chars().count() > max_chars {
+        return Err(McpError::invalid_params(
+            format!("{field} exceeds {max_chars} characters"),
+            None,
+        ));
+    }
+    Ok(value)
+}
+
 fn parse_search_strategy(value: &str) -> Result<SearchMode, McpError> {
     match value {
         "auto" => Ok(SearchMode::Auto),
@@ -1268,15 +1385,15 @@ mod tests {
     use pcp_client::{AccessMode, EmbeddedPcpClient, PcpApi};
     use pcp_core::{
         AccessPrincipal, AccessPrincipalType, AccessSession, CreateScopeRequest, FeedbackAuthority,
-        FeedbackKind,
+        FeedbackKind, Projection, ReadPagesRequest,
     };
     use pcp_sqlite::SqlitePcpStore;
     use pcp_store::PcpStore;
     use rmcp::{ServiceExt, handler::server::wrapper::Parameters, model::CallToolRequestParams};
 
     use super::{
-        AccessLogParams, IngestPageParams, PcpMcpServer, SearchPagesParams, SubmitFeedbackParams,
-        WritePageParams,
+        AccessLogParams, CaptureCategory, CapturePageParams, IngestPageParams, PcpMcpServer,
+        SearchPagesParams, SubmitFeedbackParams, WritePageParams,
     };
 
     #[tokio::test]
@@ -1414,6 +1531,50 @@ mod tests {
             .expect("submit feedback with contribute permission")
             .0;
         assert!(feedback.created);
+        let captured = tenant
+            .pcp_capture(Parameters(CapturePageParams {
+                scope: Some(namespace.clone()),
+                category: CaptureCategory::DurableDecision,
+                title: "Keep tenant capture narrow".to_owned(),
+                content: "Codex uses a dedicated contribute Principal and cannot publish maintained interpretations."
+                    .to_owned(),
+                retention_rationale:
+                    "This access boundary applies to later Codex tasks across repositories."
+                        .to_owned(),
+                source_refs: Vec::new(),
+                based_on_revision_ids: Vec::new(),
+                observed_at: None,
+                external_event_id: Some("mcp:capture:test".to_owned()),
+            }))
+            .await
+            .expect("capture durable Codex context")
+            .0;
+        let captured_page = tenant
+            .client
+            .read_pages(ReadPagesRequest {
+                page_ids: Vec::new(),
+                revision_ids: vec![captured.revision_id],
+                projections: vec![
+                    Projection::Manifest,
+                    Projection::Payload,
+                    Projection::Facets,
+                ],
+                max_chars: 32_000,
+            })
+            .await
+            .expect("read captured Page")
+            .pop()
+            .expect("captured Page exists");
+        assert_eq!(captured_page.page.kind, "codex_capture");
+        assert_eq!(
+            captured_page
+                .revision
+                .facets
+                .as_ref()
+                .and_then(|facets| facets.get("capturePolicy"))
+                .and_then(serde_json::Value::as_str),
+            Some("codex_high_threshold")
+        );
         assert!(
             tenant
                 .pcp_write_page(Parameters(WritePageParams {
@@ -1445,6 +1606,12 @@ mod tests {
         );
         let server =
             PcpMcpServer::new(full_client(store, vec!["project:protocol-test".to_owned()]));
+        let instructions = rmcp::ServerHandler::get_info(&server)
+            .instructions
+            .expect("server instructions");
+        let instruction_prefix = instructions.chars().take(512).collect::<String>();
+        assert!(instruction_prefix.contains("If uncertain, do not write"));
+        assert!(instruction_prefix.contains("Never capture routine progress"));
         let (server_io, client_io) = tokio::io::duplex(128 * 1024);
         let server_task = tokio::spawn(async move {
             server
@@ -1461,6 +1628,14 @@ mod tests {
         assert!(tools.iter().any(|tool| tool.name == "pcp_whoami"));
         assert!(tools.iter().any(|tool| tool.name == "pcp_access_log"));
         assert!(tools.iter().any(|tool| tool.name == "pcp_submit_feedback"));
+        assert!(tools.iter().any(|tool| {
+            tool.name == "pcp_capture"
+                && tool
+                    .annotations
+                    .as_ref()
+                    .and_then(|annotations| annotations.read_only_hint)
+                    == Some(false)
+        }));
         assert!(tools.iter().any(|tool| {
             tool.name == "pcp_write_page"
                 && tool

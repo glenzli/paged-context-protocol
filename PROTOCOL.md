@@ -1,30 +1,31 @@
 # Paged-Context-Protocol (PCP) - v0.8.0-draft
 
-> 状态：草案。v0.8 在 Page/Revision 模型之上明确 Identity、租户与 Runtime 维护权，并收敛来源与关系语义。
+> 状态：草案。v0.8 在 Page/Revision 模型之上明确 Identity、租户、Store 与可选 Runtime 的边界，并收敛来源与关系语义。
 
-Paged-Context-Protocol（PCP）是一套面向模型、由用户拥有的长期上下文协议。它让不同 Host
-和模型在明确 Scope 与权限下发现、读取、写入并追溯同一组持久信息，但不规定固定的召回、
-总结、压缩或推理流程。
+Paged-Context-Protocol（PCP）是一套面向模型、由用户拥有的持久上下文协议。它既可以由单个 Host
+在进程内用于自己的上下文管理，也可以由独立服务让多个 Host 和模型在明确 Scope 与权限下发现、
+读取、写入并追溯同一组持久信息。协议不要求独立守护进程、多个租户、后台维护器，也不规定固定的
+召回、总结、压缩或推理流程。
 
 PCP 的边界是：
 
-> **在一个用户拥有的 Identity 中接收多租户输入，维护稳定 Page、不可变 Revision、来源与跨 Scope
-> 关系，并向模型提供当前任务最相关、可追溯且经过权限裁剪的有效上下文。**
+> **在一个用户拥有的 Identity 边界内维护稳定 Page、不可变 Revision、授权 Scope、来源与可追溯
+> 关系，并让 Host 按当前任务读取有界、经过权限裁剪的上下文。**
 
 ## 1. Core 对象
 
 ### 1.1 Identity、Principal 与 Scope
 
-Identity 是 PCP 的持久上下文与维护边界。同一 Identity 可以接收任意数量租户的输入；Runtime 可以在
-Identity 内发现跨租户候选并维护关系，但不得跨 Identity 推断、连接或召回内容。官方 Runtime 当前将
-一个 Store 绑定到一个 Identity。
+Identity 是 PCP 的持久上下文、授权与可选维护边界。同一 Identity 可以只服务一个 Host，也可以接收
+多个租户的输入；部署了独立 Runtime 时，Runtime 可以在授权范围内发现跨租户候选并维护关系，但不得跨
+Identity 推断、连接或召回内容。项目维护的 `pcp-runtime` 当前将一个 Store 绑定到一个 Identity。
 
 租户通过服务端注入的 Principal 与 AccessSession 操作 PCP。Principal 表示调用者，不是内容所有者。
 Scope 是 Identity 内的授权切片。任何读取、搜索、图遍历和写入都必须经过 Scope Grant；统一的 Identity
 不表示所有租户自动看到全部内容。若关系任一端不可读，响应不得泄露该关系或隐藏端点的存在。
 
-`identityId` 由 Runtime descriptor 给出，租户不得自行声明内容归属。真正需要隔离维护与关联的内容应进入
-不同 Identity，而不是通过租户名称伪造边界。
+`identityId` 由实现的 descriptor 与 AccessSession 给出；使用独立 Runtime 时由 Runtime 注入。租户不得
+自行声明内容归属。真正需要隔离授权、维护与关联的内容应进入不同 Identity，而不是通过租户名称伪造边界。
 
 ### 1.2 Page
 
@@ -238,10 +239,10 @@ Relation 组织。时间邻近和主题连续性由 Runtime 的语义判断选�
 - `expand_graph(anchor_page_ids, scopes?, max_depth?, max_nodes?, max_edges?, view?, max_chars?)`
 - 可选 `browse_index(scopes?, view?, limit?, cursor?)`
 
-`ingest_page` 是租户写入普通来源 Page 的唯一入口。Identity 由所连接的 Runtime 决定，不在 Page、Revision、Scope 或
-写请求中重复携带。Runtime 从认证会话填充 Actor、active lifecycle 与 sealed mutability，并隔离可选
+`ingest_page` 是租户写入普通来源 Page 的唯一入口。Identity 由实现及认证会话决定，不在 Page、Revision、Scope 或
+写请求中重复携带。实现从认证会话填充 Actor、active lifecycle 与 sealed mutability，并隔离可选
 `sourceSpan.streamId`；调用方只提供来源事件本身。可选 `basedOnRevisionIds` 表示租户确实用来产生新
-Page 的精确 PCP Revision。Runtime 以认证 Principal、Store 提交时间和受信操作名生成 provenance；
+Page 的精确 PCP Revision。实现以认证 Principal、Store 提交时间和受信操作名生成 provenance；
 调用方不能借此伪造 Actor 或完整 provenance。该字段可以提高后续关系候选的审阅优先级，但绝不自动
 建立 Relation；Relation 的 `basisRevisionIds` 仍只表示一条已审阅关系所依据的精确版本。普通 `read` 会话只能检索和读取；`contribute` 会话
 额外获得独立的 `ingest` 权限，但不因此获得高级 Page 写入或维护权限。
@@ -255,7 +256,7 @@ Page 的精确 PCP Revision。Runtime 以认证 Principal、Store 提交时间�
 Search 返回候选而不是真值，并必须有界、可分页、标明命中投影和当前 Revision。Relation、Summary、
 Validity、provenance 与 SourceRef 可以作为被授权的读取投影返回；租户不需要对应的直接写接口。持有精确
 Revision ID 的调用方可以按授权读取历史证据，但历史 Revision 不应重新进入默认搜索结果；原始访问审计与
-历史枚举仍属于 audit/operator 面。模型决定当前任务需要查询和读取什么，并把结果组装进当前工作上下文。
+历史枚举仍属于 audit/operator 面。模型可以提出查询并判断相关性；Host 决定实际读取、预算和当前工作上下文的组装。
 
 `search_pages` 是确定性候选和调试接口，不应被作为模型的默认“智能检索”工具。`semantic_search` 是 Runtime
 拥有 Provider、预算和组装策略的保守语义入口：它只返回独立相关的 Page，并仅以已断言 Relation 做保守的排序加权。
@@ -318,18 +319,22 @@ Runtime Discovery、授权注册、批准与 `open_session` 属于 Runtime 控�
 协议定义：Identity 边界、Page/Revision 身份、sealed/revisioned 不变量、Page Relation、精确
 provenance、SourceRef、Scope 权限、CAS 发布与可追溯回收约束。
 
-Store/Runtime 负责：当前头索引、事务、权限执行、审计、Relation 撤回、历史保留、GC 根、候选发现，
-以及 Identity 范围内 Summary、Validity、无损 pack、语义关系和 retention 的全局维护策略。Runtime
-可以调用独立模型作为推理 Provider，但必须拥有任务生成、预算、验证、提交与维护 ledger；单个租户不应
-成为个人长期上下文的权威维护者。
+Store 实现负责：当前头索引、事务、权限执行、精确读取、Relation 撤回、历史保留、GC 根，以及它所声明
+支持的原子操作。它不因此拥有 Host 当前上下文的规划权。
 
-租户/Host 负责：捕获自己观察到的原始事件、来源内部确定知道的顺序或结构（包括可选 `sourceSpan`）、Page kind、SourceRef，
-以及外部来源的保管、解析、查询和展示；它可以提交真实的生成输入、反馈或候选，但不得假定自己拥有其他租户的数据或全局关系图。
+部署了独立 Runtime 时，Runtime 负责 RPC 与控制面、Principal 和 AccessSession 注入，以及其启用的预算、
+验证、提交权限和维护 ledger。它可以提供 Identity 范围内的候选发现和可选维护策略；嵌入式 Host 也可以
+在进程内组合 Store 与同一套客户端契约，协议不要求存在独立 Runtime 或后台调度器。
 
-消费模型负责：提出查询、读取被授权的精确内容、判断当前任务相关性，并把 PCP 返回的有界结果组装进
-当前工作上下文。语义模型 Provider 只向 Runtime 提供判断能力，不直接拥有 Store 写权限或维护 cadence。
+租户/Host 负责：捕获自己观察到的原始事件、来源内部确定知道的顺序或结构（包括可选 `sourceSpan`）、
+Page kind、SourceRef，以及外部来源的保管、解析、查询和展示。Host 还决定何时检索、使用何种预算与排序、
+如何投影，以及哪些结果进入当前模型上下文；它可以提交真实的生成输入、反馈或候选，但不得假定自己拥有
+其他租户的数据或全局关系图。
 
-PCP 不定义固定 Prompt、向量算法、总结阈值、后台 Agent 拓扑或用户画像格式。
+消费模型可以提出查询并判断当前任务相关性，但由 Host 控制最终上下文组装。语义模型 Provider 只向
+调用它的实现提供判断能力，不直接拥有 Store 写权限、提交权限或维护 cadence。
+
+PCP 不定义固定 Prompt、向量算法、上下文窗口规划、轮次压缩策略、总结阈值、后台 Agent 拓扑或用户画像格式。
 
 ## 5. 保留与回收
 

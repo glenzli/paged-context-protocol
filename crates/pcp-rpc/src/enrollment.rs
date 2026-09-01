@@ -43,6 +43,8 @@ pub struct RequestedAccess {
     pub mode: RequestedAccessMode,
     pub scopes: Vec<String>,
     #[serde(default)]
+    pub read_all_scopes: bool,
+    #[serde(default)]
     pub allow_cross_scope_derivation: bool,
 }
 
@@ -540,6 +542,7 @@ mod tests {
             requested_access: RequestedAccess {
                 mode: RequestedAccessMode::Contribute,
                 scopes: vec!["user:self".to_owned()],
+                read_all_scopes: true,
                 allow_cross_scope_derivation: false,
             },
             credential: "ab".repeat(32),
@@ -557,6 +560,7 @@ mod tests {
             value["params"]["requested_access"]["scopes"][0],
             "user:self"
         );
+        assert_eq!(value["params"]["requested_access"]["read_all_scopes"], true);
     }
 
     #[test]

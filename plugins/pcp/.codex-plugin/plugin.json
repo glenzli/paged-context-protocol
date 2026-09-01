@@ -1,0 +1,39 @@
+{
+  "name": "pcp",
+  "version": "0.1.0",
+  "description": "Read and selectively retain durable context through a local PCP Runtime.",
+  "author": {
+    "name": "Glen Li",
+    "url": "https://github.com/glenzli"
+  },
+  "homepage": "https://github.com/glenzli/paged-context-protocol",
+  "repository": "https://github.com/glenzli/paged-context-protocol",
+  "license": "MIT",
+  "keywords": [
+    "context",
+    "memory",
+    "provenance",
+    "mcp"
+  ],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "PCP",
+    "shortDescription": "Recall and selectively retain durable local context.",
+    "longDescription": "Connect Codex to one approved local PCP client for scoped retrieval, exact evidence reads, explicit feedback, and high-threshold durable capture.",
+    "developerName": "Glen Li",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Search PCP for context relevant to this task.",
+      "Read the exact PCP revisions behind this result.",
+      "Retain this confirmed decision for later tasks."
+    ],
+    "brandColor": "#6F7FF2",
+    "composerIcon": "./assets/pcp.png",
+    "logo": "./assets/pcp.png",
+    "logoDark": "./assets/pcp.png"
+  }
+}

@@ -14,9 +14,20 @@ use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 use rmcp::{ServiceExt, transport::stdio};
 
+mod enrollment;
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let client: Arc<dyn PcpApi> = if let Some(socket_path) = env::var_os("PCP_RUNTIME_SOCKET") {
+    let mut args = env::args().skip(1);
+    if args.next().as_deref() == Some("enroll") {
+        enrollment::run_command(args.next().as_deref()).await?;
+        return Ok(());
+    }
+    let client: Arc<dyn PcpApi> = if let Some(state_path) = env::var_os("PCP_ENROLLMENT_FILE") {
+        let expected_principal = env::var("PCP_CLIENT_ID")
+            .context("PCP_CLIENT_ID must match the enrolled Runtime Principal")?;
+        enrollment::connect(PathBuf::from(state_path), &expected_principal).await?
+    } else if let Some(socket_path) = env::var_os("PCP_RUNTIME_SOCKET") {
         let expected_principal = env::var("PCP_CLIENT_ID")
             .context("PCP_CLIENT_ID must match the configured runtime endpoint")?;
         Arc::new(

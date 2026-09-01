@@ -30,27 +30,39 @@ async fn enrollment_approves_identity_bound_session_and_survives_generation_chan
     );
     let identity_id = store.identity_id().to_owned();
     let identity_scope = format!("user:{identity_id}");
+    let read_only_scopes = vec![
+        "project:symbiont-d".to_owned(),
+        "conversation:symbiont-d".to_owned(),
+    ];
+    let future_scope = "project:created-later".to_owned();
     let store: Arc<dyn PcpStore> = store;
-    store
-        .create_scope(
-            &AccessSession::full_control(
-                AccessPrincipal {
-                    principal_id: "operator:enrollment-test".to_owned(),
-                    principal_type: AccessPrincipalType::Service,
-                    display_name: None,
+    let operator = AccessSession::full_control(
+        AccessPrincipal {
+            principal_id: "operator:enrollment-test".to_owned(),
+            principal_type: AccessPrincipalType::Service,
+            display_name: None,
+        },
+        "session:enrollment-test",
+        std::iter::once(identity_scope.clone())
+            .chain(read_only_scopes.iter().cloned())
+            .chain(std::iter::once(future_scope.clone()))
+            .collect::<Vec<_>>(),
+    );
+    for namespace in std::iter::once(identity_scope.clone()).chain(read_only_scopes.iter().cloned())
+    {
+        store
+            .create_scope(
+                &operator,
+                CreateScopeRequest {
+                    namespace,
+                    display_name: "Enrollment test identity".to_owned(),
+                    description: None,
+                    parent_namespace: None,
                 },
-                "session:enrollment-test",
-                vec![identity_scope.clone()],
-            ),
-            CreateScopeRequest {
-                namespace: identity_scope.clone(),
-                display_name: "Enrollment test identity".to_owned(),
-                description: None,
-                parent_namespace: None,
-            },
-        )
-        .await
-        .expect("create identity scope");
+            )
+            .await
+            .expect("create identity scope");
+    }
     let mut observer_config = ObserverConfig::for_test(root.clone(), identity_id.clone());
     observer_config.enrollment_enabled = true;
     let enrollment_config = EnrollmentConfig::for_test(root.clone());
@@ -142,6 +154,18 @@ async fn enrollment_approves_identity_bound_session_and_survives_generation_chan
             .access
             .allows(&format!("user:{identity_id}"), AccessPermission::Write)
     );
+    for read_only_scope in ["project:symbiont-d", "conversation:symbiont-d"] {
+        assert!(
+            first_session
+                .access
+                .allows(read_only_scope, AccessPermission::ReadDetail)
+        );
+        assert!(
+            !first_session
+                .access
+                .allows(read_only_scope, AccessPermission::Ingest)
+        );
+    }
     let remote =
         RemotePcpClient::connect_expected(root.join(&first_session.endpoint), "host:symbiont-d")
             .await
@@ -181,6 +205,41 @@ async fn enrollment_approves_identity_bound_session_and_survives_generation_chan
             })
             .await
             .is_err()
+    );
+
+    store
+        .create_scope(
+            &operator,
+            CreateScopeRequest {
+                namespace: future_scope.clone(),
+                display_name: "Created after enrollment".to_owned(),
+                description: None,
+                parent_namespace: None,
+            },
+        )
+        .await
+        .expect("create later Scope");
+    let refreshed = match public
+        .open_session(OpenEnrollmentSessionParams {
+            registration_id: first_session.registration_id.clone(),
+            credential: credential.clone(),
+        })
+        .await
+        .expect("refresh read-all enrollment")
+        .result
+    {
+        EnrollmentResult::Active { session } => session,
+        other => panic!("expected refreshed enrollment, got {other:?}"),
+    };
+    assert!(
+        refreshed
+            .access
+            .allows(&future_scope, AccessPermission::ReadDetail)
+    );
+    assert!(
+        !refreshed
+            .access
+            .allows(&future_scope, AccessPermission::Ingest)
     );
 
     let repair_credential = "bc".repeat(32);
@@ -267,7 +326,7 @@ async fn enrollment_approves_identity_bound_session_and_survives_generation_chan
     match idempotent.result {
         EnrollmentResult::Active { session } => {
             assert_eq!(session.registration_id, first_session.registration_id);
-            assert_eq!(session.endpoint, first_session.endpoint);
+            assert_eq!(session.endpoint, refreshed.endpoint);
         }
         other => panic!("expected active idempotent begin, got {other:?}"),
     }
@@ -396,11 +455,8 @@ fn begin_params(credential: &str) -> BeginEnrollmentParams {
         },
         requested_access: RequestedAccess {
             mode: RequestedAccessMode::Contribute,
-            scopes: vec![
-                "user:self".to_owned(),
-                "project:symbiont-d".to_owned(),
-                "conversation:symbiont-d".to_owned(),
-            ],
+            scopes: vec!["user:self".to_owned()],
+            read_all_scopes: true,
             allow_cross_scope_derivation: false,
         },
         credential: credential.to_owned(),

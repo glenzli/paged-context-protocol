@@ -304,19 +304,31 @@ impl EnrollmentHandler {
                 .ok_or_else(ProtocolError::not_found)?
         };
 
+        let read_scopes = if registration.approved_access.read_all_scopes {
+            self.inner
+                .store
+                .local_scope_names()
+                .await
+                .map_err(|_| ProtocolError::unavailable())?
+        } else {
+            Vec::new()
+        };
+        let access = access_session(
+            &registration,
+            &self.inner.identity_id,
+            &self.inner.service.generation,
+            read_scopes,
+        )?;
+
         let mut sessions = self.inner.sessions.lock().await;
         if let Some(session) = sessions.get(registration_id)
             && !session._endpoint.is_finished()
+            && session.wire.access == access
         {
             return Ok(session.wire.clone());
         }
         sessions.remove(registration_id);
 
-        let access = access_session(
-            &registration,
-            &self.inner.identity_id,
-            &self.inner.service.generation,
-        )?;
         let bound = BoundInfraSocket::bind(&self.inner.runtime_root)
             .map_err(|_| ProtocolError::unavailable())?;
         let (endpoint, socket_path, listener) = bound.into_parts();
@@ -599,6 +611,7 @@ fn access_session(
     registration: &StoredRegistration,
     identity_id: &str,
     generation: &str,
+    read_scopes: Vec<String>,
 ) -> std::result::Result<AccessSession, ProtocolError> {
     let mode = match registration.approved_access.mode {
         RequestedAccessMode::Observe => AccessMode::Observe,
@@ -621,16 +634,33 @@ fn access_session(
             }
         })
         .collect();
-    Ok(mode.session(
-        AccessPrincipal {
-            principal_id: registration.client.principal.principal_id.clone(),
-            principal_type: registration.client.principal.principal_type.clone(),
-            display_name: registration.client.principal.display_name.clone(),
-        },
-        format!("enrolled:{}:{generation}", registration.registration_id),
+    let principal = AccessPrincipal {
+        principal_id: registration.client.principal.principal_id.clone(),
+        principal_type: registration.client.principal.principal_type.clone(),
+        display_name: registration.client.principal.display_name.clone(),
+    };
+    let session_id = format!("enrolled:{}:{generation}", registration.registration_id);
+    let mut access = mode.session(
+        principal.clone(),
+        session_id.clone(),
         scopes,
         registration.approved_access.allow_cross_scope_derivation,
-    ))
+    );
+    let primary_scopes = access
+        .grants
+        .iter()
+        .map(|grant| grant.namespace.as_str())
+        .collect::<HashSet<_>>();
+    let read_scopes = read_scopes
+        .into_iter()
+        .filter(|scope| !primary_scopes.contains(scope.as_str()))
+        .collect();
+    access.grants.extend(
+        AccessMode::Read
+            .session(principal, session_id, read_scopes, false)
+            .grants,
+    );
+    Ok(access)
 }
 
 fn validate_begin(params: &BeginEnrollmentParams) -> std::result::Result<(), ProtocolError> {

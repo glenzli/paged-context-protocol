@@ -120,10 +120,9 @@ Every public request has schema `pcp.runtime.enrollment.request` and version
     "requested_access": {
       "mode": "contribute",
       "scopes": [
-        "user:self",
-        "project:symbiont-d",
-        "conversation:symbiont-d"
+        "user:self"
       ],
+      "read_all_scopes": true,
       "allow_cross_scope_derivation": false
     },
     "credential": "<64 lowercase hexadecimal characters>"
@@ -135,15 +134,20 @@ Every public request has schema `pcp.runtime.enrollment.request` and version
 `observe`, `read`, `contribute`, `audit`, `write`, `repair`, or `admin`. Ordinary tenants
 use `read` or `contribute`; `contribute` adds only authenticated `ingest_page`
 and does not grant advanced Page or maintenance writes. `write` and `admin` are
-privileged maintainer and local-operator modes. `repair` is a narrow,
+privileged maintainer and local-operator modes. `read_all_scopes` optionally
+adds read/search grants for every Scope present when the session is opened,
+even when the primary `scopes` use `contribute` or a stronger mode. This allows
+one approved Principal to contribute to its own Scope while retrieving evidence
+from the rest of the Store without gaining write authority there. Reopen the
+session after creating a new Scope so it is included. `repair` is a narrow,
 approval-gated development migration mode: it adds `repair_page` to normal
 read/search access but grants neither `ingest_page`, ordinary `write_page` /
 `revise_page`, nor lifecycle or Scope management. Use a separate Principal and
 credential, and open that registration only while applying an explicit repair
 migration. The special Scope `user:self` is
 resolved by Runtime to the selected Store's `user:<identity_id>` Scope. Other
-Scope names are literal. A request contains 1-16 unique Scopes, each at most 128
-UTF-8 bytes. Runtime retains at most 16 simultaneous pending requests and 32
+Scope names are literal. A request contains 1-16 unique primary Scopes, each at
+most 128 UTF-8 bytes. Runtime retains at most 16 simultaneous pending requests and 32
 active registrations per Store.
 
 `begin` is idempotent for the same credential, client claim, and requested

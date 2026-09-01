@@ -1,0 +1,38 @@
+{
+  "mcpServers": {
+    "pcp": {
+      "command": "./scripts/launch-pcp-mcp",
+      "cwd": ".",
+      "enabled": true,
+      "enabled_tools": [
+        "pcp_describe",
+        "pcp_whoami",
+        "pcp_list_scopes",
+        "pcp_search_pages",
+        "pcp_semantic_search",
+        "pcp_match_intent",
+        "pcp_expand_graph",
+        "pcp_browse_index",
+        "pcp_read_pages",
+        "pcp_capture",
+        "pcp_submit_feedback"
+      ],
+      "default_tools_approval_mode": "auto",
+      "tools": {
+        "pcp_capture": {
+          "approval_mode": "prompt"
+        },
+        "pcp_submit_feedback": {
+          "approval_mode": "prompt"
+        }
+      },
+      "env_vars": [
+        "HOME",
+        "PCP_HOME",
+        "PCP_MCP_BINARY"
+      ],
+      "startup_timeout_sec": 10,
+      "tool_timeout_sec": 180
+    }
+  }
+}

@@ -6,9 +6,9 @@
 
 > **协议草案与开发预览。** v0.8 的协议、接口和 Store 格式仍可能调整。v0.8 不兼容 v0.7 Store；迁移需要新建 Store，并从租户保留的原始内容重新导入。
 
-PCP 是一个开放协议及项目维护的 Rust 实现，用于在应用、会话和模型之间保存、组织和检索长期上下文。它以稳定 Page、不可变 Revision、Scope、Relation 和 Provenance 表达内容，并通过有界查询把需要的部分交给当前任务。
+PCP 是一个开放协议及项目维护的 Rust 实现，用于保存、组织和检索可跨任务延续的上下文。它以稳定 Page、不可变 Revision、Scope、Relation 和 Provenance 表达内容，并通过有界查询把需要的部分交给当前任务。
 
-PCP 可以作为单个应用的上下文层，也可以让多个租户在同一个 Identity 下贡献不同 Scope。具体产品可以把它用于长期记忆、项目知识、会话连续性或这些场景的组合。协议本身不区分“上下文库”和“记忆产品”，也不规定上层如何命名或呈现这些能力。
+PCP 可以由单个应用在进程内作为上下文层使用，也可以由独立 Runtime 让多个客户端在同一个 Identity 下贡献不同 Scope。具体产品可以把它用于当前任务的上下文管理、长期记忆、项目知识、会话连续性或这些场景的组合。协议不要求独立守护进程、多个租户或后台维护器，也不规定上层如何命名或呈现这些能力。
 
 ## 设计范围
 
@@ -22,18 +22,18 @@ PCP 可以作为单个应用的上下文层，也可以让多个租户在同一�
 ```
 
 - **Page 与 Revision**：Page 是可独立检索的记录；Revision 是不可变内容快照。原始记录通常为 `sealed`，维护型记录可以是 `revisioned`。
-- **Identity、Tenant 与 Scope**：一个 Store/Runtime 服务一个持久 Identity。租户只能读写获授权的 Scope，请求身份由服务端注入。
+- **Identity、Tenant 与 Scope**：一个 Store（无论嵌入 Host 还是由 Runtime 托管）服务一个持久 Identity。租户只能读写获授权的 Scope，请求身份由实现注入。
 - **Relation 与 Provenance**：Relation 连接稳定 Page；关系依据和派生来源引用精确 Revision。时间相邻或文本相似不会自动形成领域关系。
 - **Search、Read 与 Projection**：检索先返回候选，再按需读取 Payload、Summary、Sources、Relations 或 History。Host 决定哪些结果进入当前上下文。
-- **维护与治理**：Runtime 可以维护 Summary、Topic、Validity、Relation、无损 packing 和 retention。需要判断的变更进入同一套审阅流程；低风险操作是否自动应用由部署配置决定。
+- **维护与治理**：实现可以提供 Summary、Topic、Validity、Relation、无损 packing 和 retention；项目维护的 Runtime 还提供可选的后台维护与审阅流程。低风险操作是否自动应用由部署配置决定。
 - **显式反馈**：租户可把一次召回中实际使用和被明确质疑的 Revision 分开提交。PCP 保存反馈与精确证据，后续由维护器评估 Validity 或 `supersedes`，不会静默改写原 Page。
 - **外部来源**：租户保管并理解自己的聊天记录、媒体或领域对象。PCP 保存最小 SourceRef 和可选 digest，并按授权返回来源坐标；来源解析、查询和展示仍由租户负责。
 
-PCP 不规定 Router、提示词格式、Chain-of-Thought 或模型状态机。它只定义持久记录、授权、来源、检索和维护边界。SQLite、语义模型、Console 交互和具体 Host 工作流属于实现选择。
+PCP 不规定 Router、提示词格式、Chain-of-Thought、上下文窗口规划或模型状态机。它定义持久记录、授权、来源、检索和可选维护操作的边界。SQLite、独立 Runtime、语义模型、Console 交互和具体 Host 工作流属于实现选择。
 
 ## 当前实现
 
-本仓库包含规范和项目维护的 Rust 实现。当前实现可供本机应用通过 embedded client 或 Runtime RPC 接入，并提供 CLI、MCP 和本地 Console。
+本仓库包含规范和项目维护的 Rust 实现。应用可以通过 embedded client 在进程内组合 Store，也可以通过 `pcp-runtime` 的 RPC 接入同一套对象和租户契约。`pcp-runtime` 是面向本机多客户端部署的参考服务形态，不是协议本身，也不是使用 PCP 的前置条件；Discovery、注册、Observer 和后台调度只属于这种服务形态。仓库另提供 CLI、MCP 和本地 Console。
 
 新客户端可以通过 [Infra Discovery](https://github.com/glenzli/infra-protocol) 发现 Runtime，申请 Principal、访问模式和 Scope，并在用户批准后取得当前 generation 的身份绑定端点。已批准的 registration 可在 Runtime 重启后重新发现并打开新会话。
 
@@ -155,6 +155,8 @@ codex mcp add pcp \
   -- /absolute/path/to/paged-context-protocol/target/release/pcp-mcp
 ```
 
+长期运行的 MCP 客户端应使用 enrollment，而不是持久保存 generation-specific Runtime socket。`pcp-mcp enroll begin` 会创建 mode `0600` 的本机 credential state 并提交访问申请；Console 批准后运行 `pcp-mcp enroll status` 完成注册。随后在 MCP 配置中传入 `PCP_ENROLLMENT_FILE` 和匹配的 `PCP_CLIENT_ID`，每次启动都会通过当前 Infra Discovery registration 重新打开会话。静态 `PCP_RUNTIME_SOCKET` 仅保留给显式配置的兼容端点。
+
 普通可写租户应使用 `contribute`；它在 Read 基础上增加 `ingest_page` 和针对精确 Revision 的 `submit_feedback`。`repair` 是开发迁移使用的窄管理面：仅在 Read 基础上增加保留历史的 `repair_page`，不授予普通 Page 写入、修订、生命周期或 Scope 管理。应使用独立 Principal/credential，只在显式 apply 迁移期间打开。`write` 和 `admin` 仍仅用于维护器和本机管理工具。完整访问模式与 enrollment 合同见 [`crates/pcp-runtime/ENROLLMENT.md`](crates/pcp-runtime/ENROLLMENT.md)。
 
 ### 维护、Console 与观测
@@ -170,6 +172,21 @@ PCP_CLIENT_ID=operator:local \
 PCP_CONSOLE_BIND=127.0.0.1:4318 \
   target/release/pcp-console
 ```
+
+## Codex 插件
+
+[`plugins/pcp`](plugins/pcp) 是 Codex 插件的源码包。它把 `pcp-mcp`、[`use-pcp`](plugins/pcp/skills/use-pcp/SKILL.md) Skill、工具审批策略和图标组合为一个入口；它不捆绑 Runtime 或 Store，也不会替用户创建访问授权。公开 marketplace 快照附带已经编译的 macOS arm64 `pcp-mcp`，其他平台可以通过 `PCP_MCP_BINARY` 指定兼容构建，或使用 PCP 的系统安装版本。`pcp-runtime` 与 `pcp-console` 仍是独立本机服务，需先通过 PCP release 或源码仓库的 `scripts/install-macos.sh` 安装并启动。随后按 [Enrollment 合同](crates/pcp-runtime/ENROLLMENT.md) 为 `codex:pcp` 创建并批准 `contribute` enrollment；插件默认从 `~/Library/Application Support/PCP/clients/codex-pcp.json` 打开该 enrollment。
+
+公开版本从 Glenzli Marketplace 安装：
+
+```bash
+codex plugin marketplace add glenzli/marketplace --ref main
+codex plugin add pcp@glenzli-marketplace
+```
+
+插件只使用一个获批准的 `codex:pcp` Principal：`user:self` 使用 `contribute`，`read_all_scopes` 为当前 Store 的其他 Scope 提供只读访问。它暴露有界检索、精确 Revision 读取、显式反馈和高门槛 capture；`pcp_capture` 与 `pcp_submit_feedback` 每次都需要确认。capture 只适用于用户明确要求保留的内容，或已经确认且可跨任务复用的偏好、约束、决策、发现与结果；不记录常规进度、原始会话、日志、推测、秘密或可从仓库低成本恢复的事实。安装或更新后应新建 Codex 任务，使新的 Skill 和 MCP 工具进入上下文。
+
+发布边界如下：PCP 仓库保存 Rust、插件与 Skill 源码；`cargo build --release -p pcp-runtime -p pcp-console -p pcp-mcp` 生成本机服务和 MCP 产物；系统安装负责 Runtime、Console、Store、LaunchAgent 与 enrollment state；公开 marketplace 只保存经过验证的插件快照、Skill、启动脚本、图标、许可证及其支持平台的 `pcp-mcp` dist。它不会把 Runtime 生命周期隐藏进 Codex 插件进程。
 
 ## 文档
 

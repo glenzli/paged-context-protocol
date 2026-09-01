@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+pcp_home="${PCP_HOME:-$HOME/Library/Application Support/PCP}"
+enrollment_file="$pcp_home/clients/codex-pcp.json"
+plugin_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+if [ -n "${PCP_MCP_BINARY:-}" ]; then
+  pcp_mcp_binary="$PCP_MCP_BINARY"
+elif [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ] &&
+  [ -x "$plugin_root/dist/darwin-arm64/pcp-mcp" ]; then
+  pcp_mcp_binary="$plugin_root/dist/darwin-arm64/pcp-mcp"
+else
+  pcp_mcp_binary="$pcp_home/bin/pcp-mcp"
+fi
+
+if [ ! -x "$pcp_mcp_binary" ]; then
+  echo "PCP MCP binary is unavailable; install PCP or use a plugin release that includes dist for this platform." >&2
+  exit 1
+fi
+
+if [ ! -f "$enrollment_file" ]; then
+  echo "PCP Codex enrollment is missing at $enrollment_file; create and approve the codex:pcp contribute enrollment first." >&2
+  exit 1
+fi
+
+PCP_CLIENT_ID="codex:pcp" \
+PCP_ENROLLMENT_FILE="$enrollment_file" \
+exec "$pcp_mcp_binary"

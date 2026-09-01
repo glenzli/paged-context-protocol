@@ -2141,7 +2141,7 @@ impl RuntimeMaintainer {
         report: &mut MaintenanceCycleReport,
         review_origin: MaintenanceReviewOrigin,
     ) -> Result<bool> {
-        let Some(signal) = self
+        let Some(mut signal) = self
             .client
             .pending_feedback(self.config.allowed_scopes.clone(), 1)
             .await?
@@ -2150,15 +2150,13 @@ impl RuntimeMaintainer {
         else {
             return Ok(false);
         };
-        let key = format!(
-            "feedback:{}:{}",
-            signal.feedback_revision_id,
-            signal
-                .challenged_revision_ids
-                .first()
-                .context("pending feedback has no unresolved challenged Revision")?
-        );
-        if !self.ledger.eligible(&key) {
+        signal.challenged_revision_ids.retain(|revision_id| {
+            self.ledger.eligible(&feedback_reconciliation_key(
+                &signal.feedback_revision_id,
+                revision_id,
+            ))
+        });
+        if signal.challenged_revision_ids.is_empty() {
             return Ok(false);
         }
         let mut offered_revision_ids = signal.challenged_revision_ids.clone();
@@ -2205,11 +2203,13 @@ impl RuntimeMaintainer {
             replacement_revision_id,
         } = outcome.response
         else {
-            self.ledger.record(
-                key,
-                "feedback_deferred",
-                self.config.reconciliation.retry_after_seconds,
-            );
+            for target_revision_id in &signal.challenged_revision_ids {
+                self.ledger.record(
+                    feedback_reconciliation_key(&signal.feedback_revision_id, target_revision_id),
+                    "feedback_deferred",
+                    self.config.reconciliation.retry_after_seconds,
+                );
+            }
             report.deferred += 1;
             return Ok(true);
         };
@@ -2287,6 +2287,10 @@ impl RuntimeMaintainer {
                     | ReconciliationDisposition::Qualified
                     | ReconciliationDisposition::Disputed
             );
+        let key = feedback_reconciliation_key(
+            &candidate.signal.feedback_revision_id,
+            &candidate.target.revision_id,
+        );
         if safe_to_auto_apply {
             self.client
                 .apply_reconciliation(reconciliation_request(
@@ -4866,6 +4870,10 @@ fn normalize_worker_summary(content: String, source_text: &str) -> Result<String
         "semantic maintenance worker returned an invalid Summary"
     );
     Ok(normalize_known_source_identifiers(content, source_text))
+}
+
+fn feedback_reconciliation_key(feedback_revision_id: &str, target_revision_id: &str) -> String {
+    format!("feedback:{feedback_revision_id}:{target_revision_id}")
 }
 
 fn reconciliation_request(

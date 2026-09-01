@@ -6,9 +6,9 @@
 
 > **Protocol draft and development preview.** The v0.8 protocol, APIs, and Store format may still change. v0.8 is not compatible with v0.7 Stores; migration requires a new Store populated from tenant-held source material.
 
-PCP is an open protocol with a project-maintained Rust implementation for storing, organizing, and retrieving long-lived context across applications, sessions, and models. It represents content as stable Pages and immutable Revisions with Scopes, Relations, and Provenance, then returns bounded results for the current task.
+PCP is an open protocol with a project-maintained Rust implementation for storing, organizing, and retrieving context that persists across tasks. It represents content as stable Pages and immutable Revisions with Scopes, Relations, and Provenance, then returns bounded results for the current task.
 
-PCP can serve as the context layer for one application or let several tenants contribute separate Scopes under one Identity. A product may use it for long-term memory, project knowledge, session continuity, or a combination of these. The protocol does not distinguish a “context store” from a “memory product,” nor does it prescribe how those capabilities are named or presented.
+PCP can run in-process as the context layer for one application, or an independent Runtime can let several clients contribute separate Scopes under one Identity. A product may use it for current-task context management, long-term memory, project knowledge, session continuity, or a combination of these. The protocol does not require a standalone daemon, multiple tenants, or a background maintainer, nor does it prescribe how those capabilities are named or presented.
 
 ## Design Scope
 
@@ -22,17 +22,18 @@ Tenant-held sources
 ```
 
 - **Page and Revision**: A Page is an independently retrievable record; a Revision is an immutable content snapshot. Source records are normally `sealed`, while maintained records may be `revisioned`.
-- **Identity, Tenant, and Scope**: One Store/Runtime serves one durable Identity. Tenants can read and write only authorized Scopes, and the server injects request identity.
+- **Identity, Tenant, and Scope**: One Store, whether embedded in a Host or managed by Runtime, serves one durable Identity. Tenants can read and write only authorized Scopes, and the implementation injects request identity.
 - **Relation and Provenance**: Relations connect stable Pages. Relation evidence and derivation refer to exact Revisions. Temporal adjacency or textual similarity does not create a domain relation by itself.
 - **Search, Read, and Projection**: Search returns candidates before a caller reads Payload, Summary, Sources, Relations, or History projections. The Host decides which results enter its current context.
-- **Maintenance and governance**: Runtime may maintain Summaries, Topics, Validity, Relations, lossless packing, and retention. Changes requiring judgment use a shared review path; deployment policy determines whether validated low-risk work applies automatically.
+- **Maintenance and governance**: An implementation may provide Summaries, Topics, Validity, Relations, lossless packing, and retention. The project-maintained Runtime also provides optional background maintenance and review. Deployment policy determines whether validated low-risk work applies automatically.
+- **Explicit feedback**: A tenant may report the exact Revisions used by a recalled response separately from the Revisions it explicitly challenges. PCP stores the signal and exact evidence for later Validity or `supersedes` review without silently rewriting the original Page.
 - **External sources**: Tenants retain and understand their own chat records, media, or domain objects. PCP stores a minimal SourceRef and optional digest, then returns authorized source coordinates. Source parsing, search, and rendering remain tenant responsibilities.
 
-PCP does not prescribe a Router, prompt format, Chain-of-Thought, or model state machine. It defines boundaries for durable records, authorization, sources, retrieval, and maintenance. SQLite, semantic models, Console interactions, and Host workflows are implementation choices.
+PCP does not prescribe a Router, prompt format, Chain-of-Thought, context-window planner, or model state machine. It defines boundaries for durable records, authorization, sources, retrieval, and optional maintenance operations. SQLite, a standalone Runtime, semantic models, Console interactions, and Host workflows are implementation choices.
 
 ## Current Implementation
 
-This repository contains the specification and the project-maintained Rust implementation. Local applications can connect through an embedded client or Runtime RPC. The workspace also provides a CLI, MCP server, and local Console.
+This repository contains the specification and the project-maintained Rust implementation. An application can compose a Store in-process through the embedded client or use the same objects and tenant contract over `pcp-runtime` RPC. `pcp-runtime` is a reference service profile for local multi-client deployment; it is neither the protocol itself nor a prerequisite for using PCP. Discovery, enrollment, Observer, and background scheduling belong only to that service profile. The workspace also provides a CLI, MCP server, and local Console.
 
 New clients can discover Runtime through [Infra Discovery](https://github.com/glenzli/infra-protocol), request a Principal, access mode, and Scopes, then receive an identity-bound endpoint for the current generation after approval. An approved registration can rediscover Runtime and open a new session after a restart.
 
@@ -47,6 +48,7 @@ New clients can discover Runtime through [Infra Discovery](https://github.com/gl
 - Runtime-RPC `semantic_search`, `match_intent`, and explicit-anchor graph expansion.
 - Summary, Topic, Validity, Relation, Provenance, archive/restore, lossless sealed-Page packing, and access audit.
 - Runtime-injected Identity and Actor for `ingest_page`, with optional `sourceSpan`, `basedOnRevisionIds`, and a minimal SourceRef.
+- Tenant `submit_feedback`, per-target reconciliation, atomic Validity/`supersedes` commits, and a bounded Luna-to-Sol-to-human escalation path.
 - Embedded and RPC clients, approved enrollment, CLI, MCP, Console, a maintenance coordinator, and read-only infrastructure observation.
 - Deterministic Revision-retention planning, finite leases, and protected explicit collection.
 
@@ -153,7 +155,9 @@ codex mcp add pcp \
   -- /absolute/path/to/paged-context-protocol/target/release/pcp-mcp
 ```
 
-An ordinary writable tenant should use `contribute`, which adds only `ingest_page` to Read. `write` and `admin` are reserved for maintainers and local administration tools. See [`crates/pcp-runtime/ENROLLMENT.md`](crates/pcp-runtime/ENROLLMENT.md) for access modes and the enrollment contract.
+Long-running MCP clients should use enrollment instead of persisting a generation-specific Runtime socket. `pcp-mcp enroll begin` creates a mode `0600` local credential state and submits an access request; after Console approval, run `pcp-mcp enroll status` to complete registration. Then pass `PCP_ENROLLMENT_FILE` and the matching `PCP_CLIENT_ID` in MCP configuration. Each process start reopens a session through the current Infra Discovery registration. Static `PCP_RUNTIME_SOCKET` remains only for explicitly configured compatibility endpoints.
+
+An ordinary writable tenant should use `contribute`, which adds authenticated `ingest_page` and exact-Revision `submit_feedback` to Read. `repair` is a narrow development-migration surface for history-preserving `repair_page`; it does not grant ordinary Page writes, revisions, lifecycle changes, or Scope administration. Use a separate Principal and credential, opened only during an explicit apply migration. `write` and `admin` remain reserved for maintainers and local administration tools. See [`crates/pcp-runtime/ENROLLMENT.md`](crates/pcp-runtime/ENROLLMENT.md) for access modes and the enrollment contract.
 
 ### Maintenance, Console, and Observation
 
@@ -168,6 +172,21 @@ PCP_CLIENT_ID=operator:local \
 PCP_CONSOLE_BIND=127.0.0.1:4318 \
   target/release/pcp-console
 ```
+
+## Codex Plugin
+
+[`plugins/pcp`](plugins/pcp) is the source bundle for the Codex plugin. It combines `pcp-mcp`, the [`use-pcp`](plugins/pcp/skills/use-pcp/SKILL.md) Skill, tool approval policy, and icon behind one entry point. It does not bundle Runtime or a Store, and it does not create access grants for the user. The public marketplace snapshot includes a compiled macOS arm64 `pcp-mcp`; other platforms may select a compatible build through `PCP_MCP_BINARY` or use the PCP system installation. `pcp-runtime` and `pcp-console` remain independent local services and must first be installed from a PCP release or from the source repository with `scripts/install-macos.sh`. Then create and approve a `contribute` enrollment for `codex:pcp` as documented by the [enrollment contract](crates/pcp-runtime/ENROLLMENT.md). The plugin opens that enrollment from `~/Library/Application Support/PCP/clients/codex-pcp.json` by default.
+
+Install the public release from Glenzli Marketplace:
+
+```bash
+codex plugin marketplace add glenzli/marketplace --ref main
+codex plugin add pcp@glenzli-marketplace
+```
+
+The plugin uses one approved `codex:pcp` Principal. `user:self` has `contribute` access, while `read_all_scopes` provides read-only access to the other Scopes in the current Store. It exposes bounded retrieval, exact-Revision reads, explicit feedback, and high-threshold capture; every `pcp_capture` and `pcp_submit_feedback` call requires confirmation. Capture is limited to explicit retention requests or confirmed preferences, constraints, decisions, findings, and outcomes that are reusable across tasks. It excludes routine progress, raw conversations, logs, speculation, secrets, and facts that are inexpensive to recover from the repository. Start a new Codex task after installation or update so the new Skill and MCP tools enter the task context.
+
+The release boundary is explicit: the PCP repository owns the Rust, plugin, and Skill sources; `cargo build --release -p pcp-runtime -p pcp-console -p pcp-mcp` produces the local services and MCP artifacts; system installation owns Runtime, Console, Store, LaunchAgent, and enrollment state; the public marketplace contains only the validated plugin snapshot, Skill, launcher, icon, license, and `pcp-mcp` dist for supported platforms. It does not hide Runtime lifecycle inside the Codex plugin process.
 
 ## Documentation
 

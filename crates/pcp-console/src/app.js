@@ -1242,7 +1242,8 @@ async function governanceMutation(path, body) {
 
 function enrollmentAccessLabel(access) {
   const scopes = access.scopes.join(", ");
-  return `${access.mode} / ${scopes}${access.allow_cross_scope_derivation ? " / cross-scope derivation" : ""}`;
+  const readAll = access.read_all_scopes ? " · read / all scopes" : "";
+  return `${access.mode} / ${scopes}${readAll}${access.allow_cross_scope_derivation ? " / cross-scope derivation" : ""}`;
 }
 
 function enrollmentIdentity(client) {
