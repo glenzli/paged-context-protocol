@@ -54,6 +54,23 @@ impl AccessMode {
         AccessSession::new(principal, session_id, grants)
     }
 
+    /// Build a Runtime-attested session whose permissions apply to every
+    /// current and future Scope in one Store.
+    ///
+    /// Callers must enforce the deployment boundary before selecting this
+    /// constructor. Runtime configuration restricts it to administrative
+    /// service endpoints; tenant enrollment never uses it.
+    pub fn store_wide_session(
+        self,
+        principal: AccessPrincipal,
+        session_id: impl Into<String>,
+        scopes: Vec<String>,
+        allow_cross_scope_derivation: bool,
+    ) -> AccessSession {
+        self.session(principal, session_id, scopes, allow_cross_scope_derivation)
+            .with_store_permissions(self.permissions(allow_cross_scope_derivation))
+    }
+
     fn permissions(self, allow_cross_scope_derivation: bool) -> Vec<AccessPermission> {
         if self == Self::Observe {
             return vec![AccessPermission::Observe];
@@ -877,5 +894,32 @@ mod tests {
         );
 
         assert!(session.allows("project:test", AccessPermission::ManageLifecycle));
+    }
+
+    #[test]
+    fn store_wide_admin_applies_to_future_scopes_without_literal_grants() {
+        let session = AccessMode::Admin.store_wide_session(
+            AccessPrincipal {
+                principal_id: "operator:local".to_owned(),
+                principal_type: AccessPrincipalType::Service,
+                display_name: Some("PCP Console".to_owned()),
+            },
+            "session:operator",
+            Vec::new(),
+            true,
+        );
+
+        assert!(session.grants.is_empty());
+        assert!(session.allows("user:current", AccessPermission::ReadDetail));
+        assert!(session.allows("project:created-later", AccessPermission::ManageScope));
+        assert!(session.has_store_permissions(&[
+            AccessPermission::Search,
+            AccessPermission::ReadDetail,
+            AccessPermission::ManageLifecycle,
+        ]));
+        assert!(session.allows(
+            "project:created-later",
+            AccessPermission::DeriveAcrossScopes
+        ));
     }
 }

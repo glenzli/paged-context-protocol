@@ -12,11 +12,11 @@ use axum::{
 use chrono::{DateTime, Utc};
 use pcp_client::{ContentLibraryResult, PcpApi, PcpTenantApi};
 use pcp_core::{
-    Actor, ActorType, ArchivePageRequest, BrowseIndexOrder, IntentEffort, LifecycleStatus,
-    PackPagesRequest, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest, Projection,
-    QueryContextRequest, ReadPage, ReadPagesRequest, Relation, RestoreArchivedPageRequest,
-    RetentionPolicy, SearchFilters, SearchHit, SearchMode, SearchPagesRequest, SourceSpan,
-    UnpackPageRequest,
+    AccessPermission, Actor, ActorType, ArchivePageRequest, BrowseIndexOrder, IntentEffort,
+    LifecycleStatus, PackPagesRequest, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest,
+    Projection, QueryContextRequest, ReadPage, ReadPagesRequest, Relation,
+    RestoreArchivedPageRequest, RetentionPolicy, SearchFilters, SearchHit, SearchMode,
+    SearchPagesRequest, SourceSpan, UnpackPageRequest,
 };
 use pcp_rpc::{EnrollmentAdminClient, EnrollmentAdminResponse, RemotePcpClient};
 use pcp_runtime::{
@@ -698,6 +698,7 @@ async fn overview(State(state): State<AppState>) -> Result<Json<Value>, ApiError
         "identityId": state.client.identity_id(),
         "principal": state.client.access().principal,
         "grants": state.client.access().grants,
+        "storePermissions": state.client.access().store_permissions,
         "capabilities": state.client.capabilities(),
         "runtime": {
             "pid": state.client.server_pid(),
@@ -1869,6 +1870,13 @@ async fn shutdown_signal() {
 fn selected_scopes(client: &RemotePcpClient, selected: Option<&str>) -> Vec<String> {
     if let Some(scope) = selected.map(str::trim).filter(|scope| !scope.is_empty()) {
         return vec![scope.to_owned()];
+    }
+    if client.access().has_store_permissions(&[
+        AccessPermission::Search,
+        AccessPermission::ReadSummary,
+        AccessPermission::ReadDetail,
+    ]) {
+        return Vec::new();
     }
     let mut scopes = client
         .access()

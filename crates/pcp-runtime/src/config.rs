@@ -62,6 +62,8 @@ pub struct RuntimeEndpointConfig {
     pub client_name: Option<String>,
     #[serde(default = "default_access_mode")]
     pub access_mode: String,
+    #[serde(default)]
+    pub store_wide: bool,
     pub allowed_scopes: Vec<String>,
     #[serde(default)]
     pub allow_cross_scope_derivation: bool,
@@ -93,11 +95,13 @@ impl RuntimeConfig {
                 !endpoint.client_id.trim().is_empty(),
                 "PCP runtime endpoint client_id must not be empty"
             );
-            anyhow::ensure!(
-                !endpoint.allowed_scopes.is_empty(),
-                "PCP runtime endpoint {} requires at least one allowed Scope",
-                endpoint.client_id
-            );
+            if !endpoint.store_wide {
+                anyhow::ensure!(
+                    !endpoint.allowed_scopes.is_empty(),
+                    "PCP runtime endpoint {} requires at least one allowed Scope",
+                    endpoint.client_id
+                );
+            }
             anyhow::ensure!(
                 endpoint
                     .allowed_scopes
@@ -106,8 +110,20 @@ impl RuntimeConfig {
                 "PCP runtime endpoint {} contains an empty Scope",
                 endpoint.client_id
             );
-            endpoint.access_mode.parse::<AccessMode>()?;
-            parse_principal_type(&endpoint.client_type)?;
+            let access_mode = endpoint.access_mode.parse::<AccessMode>()?;
+            let principal_type = parse_principal_type(&endpoint.client_type)?;
+            if endpoint.store_wide {
+                anyhow::ensure!(
+                    access_mode == AccessMode::Admin,
+                    "PCP store-wide endpoint {} must use admin access",
+                    endpoint.client_id
+                );
+                anyhow::ensure!(
+                    principal_type == AccessPrincipalType::Service,
+                    "PCP store-wide endpoint {} must be a service Principal",
+                    endpoint.client_id
+                );
+            }
             anyhow::ensure!(
                 sockets.insert(endpoint.socket_path.clone()),
                 "duplicate PCP runtime socket: {}",
@@ -221,25 +237,36 @@ impl RuntimeEndpointConfig {
             .iter()
             .map(|scope| scope.replace("{identity_id}", identity_id))
             .collect();
-        Ok(mode.session(
-            AccessPrincipal {
-                principal_id: self.client_id.clone(),
-                principal_type: parse_principal_type(&self.client_type)?,
-                display_name: self.client_name.clone(),
-            },
-            self.session_id.clone().unwrap_or_else(|| {
-                let started = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis();
-                format!(
-                    "pcp-runtime:{}:{endpoint_index}:{started}",
-                    std::process::id(),
-                )
-            }),
-            scopes,
-            self.allow_cross_scope_derivation,
-        ))
+        let principal = AccessPrincipal {
+            principal_id: self.client_id.clone(),
+            principal_type: parse_principal_type(&self.client_type)?,
+            display_name: self.client_name.clone(),
+        };
+        let session_id = self.session_id.clone().unwrap_or_else(|| {
+            let started = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            format!(
+                "pcp-runtime:{}:{endpoint_index}:{started}",
+                std::process::id(),
+            )
+        });
+        Ok(if self.store_wide {
+            mode.store_wide_session(
+                principal,
+                session_id,
+                scopes,
+                self.allow_cross_scope_derivation,
+            )
+        } else {
+            mode.session(
+                principal,
+                session_id,
+                scopes,
+                self.allow_cross_scope_derivation,
+            )
+        })
     }
 }
 

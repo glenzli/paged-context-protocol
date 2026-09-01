@@ -65,6 +65,7 @@ const ZH_MESSAGES = {
   "A read-only dry run over historical Revisions. Current Page heads and sealed evidence cannot become candidates.": "对历史修订进行只读试算。当前页面头版本和已封存证据不会成为候选项。",
   "Structural signals are descriptive only. Scan evaluates the full eligible inventory before each maintenance phase.": "结构信号只用于描述。每个维护阶段开始前，扫描会检查全部符合条件的页面库存。",
   "All scopes": "所有范围",
+  "All scopes (store-wide operator)": "所有范围（Store 级操作员）",
   "Analyze": "分析",
   "Analyze suggestions": "分析建议",
   "Pack maintenance": "打包维护",
@@ -1484,12 +1485,18 @@ function renderOverview(data) {
     return row;
   }));
 
+  const storeWide = (data.storePermissions || []).length > 0;
   const endpointRows = [
     [t("Principal"), data.principal.principalId],
     [t("Principal type"), data.principal.principalType],
     [t("Identity"), data.identityId],
-    [t("Session"), data.grants.length ? t("active") : t("no grants")],
-    [t("Granted scopes"), data.grants.map((grant) => grant.namespace).join(", ")],
+    [t("Session"), (data.grants.length || storeWide) ? t("active") : t("no grants")],
+    [
+      t("Granted scopes"),
+      storeWide
+        ? t("All scopes (store-wide operator)")
+        : data.grants.map((grant) => grant.namespace).join(", "),
+    ],
   ];
   byId("endpoint-details").replaceChildren(...endpointRows.flatMap(([label, value]) => [
     element("dt", "", label),

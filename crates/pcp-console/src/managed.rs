@@ -287,6 +287,120 @@ fn rewrite_maintenance_settings(path: &Path, settings: &MaintenanceSettings) -> 
         .with_context(|| format!("publish managed Runtime configuration {}", path.display()))
 }
 
+fn ensure_store_wide_operator(path: &Path) -> Result<()> {
+    let original = fs::read_to_string(path)
+        .with_context(|| format!("read managed Runtime configuration {}", path.display()))?;
+    let rewritten = rewrite_operator_endpoint(&original)?;
+    if rewritten == original {
+        return Ok(());
+    }
+    let temporary = path.with_extension("toml.operator.tmp");
+    fs::write(&temporary, rewritten).with_context(|| {
+        format!(
+            "write managed Runtime configuration {}",
+            temporary.display()
+        )
+    })?;
+    let config = RuntimeConfig::load(&temporary)?;
+    let operator = config
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.client_id == "operator:local")
+        .context("managed Runtime configuration has no operator:local endpoint")?;
+    anyhow::ensure!(
+        operator.store_wide && operator.access_mode == "admin",
+        "managed PCP Console operator migration did not produce store-wide admin access"
+    );
+    let permissions = fs::metadata(path)
+        .with_context(|| format!("inspect managed Runtime configuration {}", path.display()))?
+        .permissions();
+    fs::set_permissions(&temporary, permissions).with_context(|| {
+        format!(
+            "secure managed Runtime configuration {}",
+            temporary.display()
+        )
+    })?;
+    fs::rename(&temporary, path)
+        .with_context(|| format!("publish managed Runtime configuration {}", path.display()))
+}
+
+fn rewrite_operator_endpoint(source: &str) -> Result<String> {
+    let mut output = String::with_capacity(source.len() + 32);
+    let mut endpoint = String::new();
+    let mut in_endpoint = false;
+    let mut operator_found = false;
+
+    let flush =
+        |output: &mut String, endpoint: &mut String, operator_found: &mut bool| -> Result<()> {
+            if endpoint.is_empty() {
+                return Ok(());
+            }
+            let is_operator = endpoint.lines().any(|line| {
+                line.split_once('=').is_some_and(|(key, value)| {
+                    key.trim() == "client_id" && value.trim() == "\"operator:local\""
+                })
+            });
+            if is_operator {
+                let rewritten = rewrite_flat_toml_key(endpoint, "access_mode", "\"admin\"");
+                let rewritten = rewrite_flat_toml_key(&rewritten, "store_wide", "true");
+                let rewritten =
+                    rewrite_flat_toml_key(&rewritten, "allow_cross_scope_derivation", "true");
+                output.push_str(&rewritten);
+                *operator_found = true;
+            } else {
+                output.push_str(endpoint);
+            }
+            endpoint.clear();
+            Ok(())
+        };
+
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            if in_endpoint {
+                flush(&mut output, &mut endpoint, &mut operator_found)?;
+            }
+            in_endpoint = trimmed == "[[endpoints]]";
+        }
+        if in_endpoint {
+            endpoint.push_str(line);
+        } else {
+            output.push_str(line);
+        }
+    }
+    if in_endpoint {
+        flush(&mut output, &mut endpoint, &mut operator_found)?;
+    }
+    anyhow::ensure!(
+        operator_found,
+        "managed Runtime configuration has no operator:local endpoint"
+    );
+    Ok(output)
+}
+
+fn rewrite_flat_toml_key(source: &str, key: &str, value: &str) -> String {
+    let mut output = String::with_capacity(source.len() + key.len() + value.len() + 4);
+    let mut written = false;
+    for line in source.split_inclusive('\n') {
+        if line
+            .split_once('=')
+            .is_some_and(|(candidate, _)| candidate.trim() == key)
+        {
+            output.push_str(&format!("{key} = {value}\n"));
+            written = true;
+        } else {
+            output.push_str(line);
+        }
+    }
+    if !written {
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str(&format!("{key} = {value}\n"));
+    }
+    output
+}
+
 fn rewrite_toml_key(source: &str, section: &str, key: &str, value: &str) -> Result<String> {
     let header = format!("[{section}]");
     let mut output = String::with_capacity(source.len() + key.len() + value.len() + 8);
@@ -366,6 +480,7 @@ impl ManagedPaths {
                 || format!("secure PCP runtime config {}", runtime_config.display()),
             )?;
         }
+        ensure_store_wide_operator(&runtime_config)?;
         Ok(Self {
             home,
             runtime_config,
@@ -376,7 +491,7 @@ impl ManagedPaths {
 
 fn default_runtime_config(data: &Path, run: &Path) -> String {
     format!(
-        "# PCP owns this local Runtime configuration.\n# Add tenant-specific static endpoints only when a client cannot use enrollment.\n\nstore_path = \"{}\"\n\n[[endpoints]]\nsocket_path = \"{}\"\nclient_id = \"operator:local\"\nclient_type = \"service\"\nclient_name = \"PCP Console\"\naccess_mode = \"admin\"\nallowed_scopes = [\"user:{{identity_id}}\"]\nallow_cross_scope_derivation = true\n\n# Runtime owns maintenance cadence and state. Maintenance remains disabled until\n# PCP has an independently authorized semantic provider.\n#\n# [maintenance]\n# enabled = true\n# mode = \"observe\"\n# state_path = \"{}\"\n# allowed_scopes = [\"user:{{identity_id}}\"]\n# interval_seconds = 21600\n# max_interval_seconds = 86400\n# initial_delay_seconds = 300\n# max_jobs_per_cycle = 3\n# principal_id = \"service:pcp-maintainer\"\n# principal_name = \"PCP runtime maintainer\"\n#\n# [maintenance.worker]\n# provider = \"infer_runtime\"\n# credential_file = \"/absolute/path/to/pcp-runtime.token\"\n# timeout_seconds = 120\n# summary_deployment_id = \"codex_gpt_5_6_luna\"\n# reasoning_deployment_id = \"codex_gpt_5_6_luna\"\n# escalation_deployment_id = \"codex_gpt_5_6_sol\"\n# actor_id = \"model:infer-runtime-maintenance\"\n# actor_type = \"model\"\n#\n# [maintenance.relation]\n# enabled = true\n# candidate_window = 24\n# routing_chars_per_page = 800\n# retry_after_seconds = 86400\n#\n# Intent matching performs a bounded Router review over semantic candidates.\n# It is separate from Runtime maintenance and remains unavailable until an\n# Infer Runtime credential is configured.\n#\n# [intent_match]\n# credential_file = \"/absolute/path/to/pcp-runtime.token\"\n# timeout_seconds = 180\n# max_catalog_pages = 250\n",
+        "# PCP owns this local Runtime configuration.\n# Add tenant-specific static endpoints only when a client cannot use enrollment.\n\nstore_path = \"{}\"\n\n[[endpoints]]\nsocket_path = \"{}\"\nclient_id = \"operator:local\"\nclient_type = \"service\"\nclient_name = \"PCP Console\"\naccess_mode = \"admin\"\nstore_wide = true\nallowed_scopes = []\nallow_cross_scope_derivation = true\n\n# Runtime owns maintenance cadence and state. Maintenance remains disabled until\n# PCP has an independently authorized semantic provider.\n#\n# [maintenance]\n# enabled = true\n# mode = \"observe\"\n# state_path = \"{}\"\n# allowed_scopes = [\"user:{{identity_id}}\"]\n# interval_seconds = 21600\n# max_interval_seconds = 86400\n# initial_delay_seconds = 300\n# max_jobs_per_cycle = 3\n# principal_id = \"service:pcp-maintainer\"\n# principal_name = \"PCP runtime maintainer\"\n#\n# [maintenance.worker]\n# provider = \"infer_runtime\"\n# credential_file = \"/absolute/path/to/pcp-runtime.token\"\n# timeout_seconds = 120\n# summary_deployment_id = \"codex_gpt_5_6_luna\"\n# reasoning_deployment_id = \"codex_gpt_5_6_luna\"\n# escalation_deployment_id = \"codex_gpt_5_6_sol\"\n# actor_id = \"model:infer-runtime-maintenance\"\n# actor_type = \"model\"\n#\n# [maintenance.relation]\n# enabled = true\n# candidate_window = 24\n# routing_chars_per_page = 800\n# retry_after_seconds = 86400\n#\n# Intent matching performs a bounded Router review over semantic candidates.\n# It is separate from the local semantic index because it carries a different\n# execution policy and may use a reasoning-capable provider.\n#\n# [intent_match]\n# credential_file = \"/absolute/path/to/pcp-runtime.token\"\n# timeout_seconds = 180\n# max_catalog_pages = 250\n",
         data.join("context.sqlite3").display(),
         run.join("pcp-console.sock").display(),
         data.join("maintenance-state.json").display(),
@@ -464,6 +579,8 @@ mod tests {
         let config = fs::read_to_string(&paths.runtime_config).expect("read runtime config");
         assert!(config.contains(&paths.operator_socket.display().to_string()));
         assert!(config.contains("PCP owns this local Runtime configuration"));
+        assert!(config.contains("access_mode = \"admin\""));
+        assert!(config.contains("store_wide = true"));
         assert_eq!(
             fs::metadata(&root).unwrap().permissions().mode() & 0o777,
             0o700
@@ -477,6 +594,51 @@ mod tests {
             0o600
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn managed_operator_migration_preserves_tenant_and_maintenance_configuration() {
+        let source = r#"store_path = "/tmp/context.sqlite3"
+
+[[endpoints]]
+socket_path = "/tmp/operator.sock"
+client_id = "operator:local"
+client_type = "service"
+access_mode = "audit"
+allowed_scopes = ["symbiont-d"]
+allow_cross_scope_derivation = false
+
+[[endpoints]]
+socket_path = "/tmp/tenant.sock"
+client_id = "host:tenant"
+client_type = "host"
+access_mode = "read"
+allowed_scopes = ["tenant"]
+
+[maintenance]
+enabled = true
+mode = "apply"
+state_path = "/tmp/maintenance.json"
+allowed_scopes = ["symbiont-d"]
+"#;
+        let rewritten = rewrite_operator_endpoint(source).expect("rewrite operator endpoint");
+        let operator = rewritten
+            .split("[[endpoints]]")
+            .nth(1)
+            .expect("operator endpoint");
+        assert!(operator.contains("client_id = \"operator:local\""));
+        assert!(operator.contains("access_mode = \"admin\""));
+        assert!(operator.contains("store_wide = true"));
+        assert!(operator.contains("allow_cross_scope_derivation = true"));
+        assert!(operator.contains("allowed_scopes = [\"symbiont-d\"]"));
+        let tenant = rewritten
+            .split("[[endpoints]]")
+            .nth(2)
+            .expect("tenant endpoint");
+        assert!(tenant.contains("client_id = \"host:tenant\""));
+        assert!(tenant.contains("access_mode = \"read\""));
+        assert!(!tenant.contains("store_wide"));
+        assert!(rewritten.contains("[maintenance]\nenabled = true\nmode = \"apply\""));
     }
 
     #[test]

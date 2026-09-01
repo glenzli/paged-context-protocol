@@ -103,6 +103,52 @@ max_pages = 6
 }
 
 #[test]
+fn runtime_config_restricts_store_wide_access_to_admin_services() {
+    let nonce = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("pcp-runtime-store-wide-{nonce}"));
+    std::fs::create_dir_all(&root).expect("create store-wide config directory");
+    let path = root.join("runtime.toml");
+    let write_config = |client_type: &str, access_mode: &str| {
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+store_path = "data/context.sqlite3"
+
+[[endpoints]]
+socket_path = "run/operator.sock"
+client_id = "operator:local"
+client_type = "{client_type}"
+access_mode = "{access_mode}"
+store_wide = true
+allowed_scopes = []
+allow_cross_scope_derivation = true
+"#,
+            ),
+        )
+        .expect("write store-wide config");
+    };
+
+    write_config("service", "admin");
+    let config = RuntimeConfig::load(&path).expect("load store-wide operator config");
+    let access = config.endpoints[0]
+        .access_session("owner-test", 0)
+        .expect("build store-wide operator session");
+    assert!(access.grants.is_empty());
+    assert!(access.allows("project:future", AccessPermission::ManageScope));
+    assert!(access.allows("project:future", AccessPermission::DeriveAcrossScopes));
+
+    write_config("service", "audit");
+    assert!(RuntimeConfig::load(&path).is_err());
+    write_config("host", "admin");
+    assert!(RuntimeConfig::load(&path).is_err());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn maintenance_defaults_to_read_only_observation() {
     let nonce = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)

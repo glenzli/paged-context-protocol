@@ -27,6 +27,98 @@ use serde_json::json;
 use super::SqlitePcpStore;
 
 #[tokio::test]
+async fn store_wide_operator_dynamically_resolves_current_and_future_scopes() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-sqlite-store-wide-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("pcp.sqlite3"))
+            .await
+            .expect("open store-wide test Store"),
+    );
+    let operator = pcp_client(
+        Arc::clone(&store),
+        AccessMode::Admin.store_wide_session(
+            principal("operator:local", AccessPrincipalType::Service),
+            "session:store-wide",
+            Vec::new(),
+            true,
+        ),
+    );
+    let (scopes, _) = operator
+        .list_scopes(Vec::new(), None, 100, None)
+        .await
+        .expect("list an empty Store through store-wide access");
+    assert!(scopes.is_empty());
+    let first = "project:existing".to_owned();
+    operator
+        .create_scope(CreateScopeRequest {
+            namespace: first.clone(),
+            display_name: "Existing".to_owned(),
+            description: None,
+            parent_namespace: None,
+        })
+        .await
+        .expect("create first Scope through store-wide access");
+    let (scopes, _) = operator
+        .list_scopes(Vec::new(), None, 100, None)
+        .await
+        .expect("list first dynamic Scope");
+    assert_eq!(
+        scopes
+            .iter()
+            .map(|scope| scope.namespace.as_str())
+            .collect::<Vec<_>>(),
+        vec![first.as_str()]
+    );
+
+    let future = "user:created-later".to_owned();
+    operator
+        .create_scope(CreateScopeRequest {
+            namespace: future.clone(),
+            display_name: "Created later".to_owned(),
+            description: None,
+            parent_namespace: None,
+        })
+        .await
+        .expect("create future Scope through same session");
+    let (scopes, _) = operator
+        .list_scopes(Vec::new(), None, 100, None)
+        .await
+        .expect("list future dynamic Scope");
+    let namespaces = scopes
+        .iter()
+        .map(|scope| scope.namespace.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        namespaces,
+        std::collections::BTreeSet::from([first.as_str(), future.as_str()])
+    );
+
+    let tenant = pcp_client(
+        Arc::clone(&store),
+        AccessMode::Read.session(
+            principal("host:tenant", AccessPrincipalType::Host),
+            "session:tenant",
+            vec![first.clone()],
+            false,
+        ),
+    );
+    let (tenant_scopes, _) = tenant
+        .list_scopes(Vec::new(), None, 100, None)
+        .await
+        .expect("list tenant Scope");
+    assert_eq!(tenant_scopes.len(), 1);
+    assert_eq!(tenant_scopes[0].namespace, first);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn page_repair_retains_history_and_is_restricted_to_the_management_surface() {
     let root = std::env::temp_dir().join(format!(
         "pcp-sqlite-page-repair-{}",

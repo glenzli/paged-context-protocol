@@ -35,6 +35,30 @@ An embedded deployment combines the Tenant / Host and Store roles in one process
 That composition does not grant access outside the Host's Scopes or make Runtime
 control-plane and maintenance behavior part of protocol conformance.
 
+## Local operator access
+
+A same-user local administration surface such as managed PCP Console may use a
+Store-wide static endpoint:
+
+```toml
+[[endpoints]]
+socket_path = "run/pcp-console.sock"
+client_id = "operator:local"
+client_type = "service"
+client_name = "PCP Console"
+access_mode = "admin"
+store_wide = true
+allowed_scopes = []
+allow_cross_scope_derivation = true
+```
+
+`store_wide = true` is accepted only for an `admin` service Principal. Runtime
+records its permissions separately from ordinary Scope grants, and Store
+authorization resolves an unscoped request against the current local Scope
+inventory. New Scopes therefore become visible without regenerating the
+session. Enrollment never issues Store-wide access, and the optional maintainer
+continues to use its independently configured `allowed_scopes`.
+
 The maintainer is disabled unless `[maintenance]` is present with
 `enabled = true`. It never falls back to automatic similarity-based merging.
 Destructive sealed-Page packing has a second opt-in and remains disabled unless

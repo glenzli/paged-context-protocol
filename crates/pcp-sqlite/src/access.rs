@@ -9,22 +9,31 @@ use pcp_core::{
 
 const MAX_AUDIT_DETAIL_CHARS: usize = 320;
 
-pub(crate) fn authorize_scopes(
+pub(crate) async fn authorize_scopes(
+    store: &SqlitePcpStore,
     access: &AccessSession,
     permissions: &[AccessPermission],
     requested_scopes: &[String],
 ) -> Result<Vec<String>> {
-    let available = access.scopes_with_permissions(permissions);
     if requested_scopes.is_empty() {
-        if available.is_empty() {
+        let mut available = access.scopes_with_permissions(permissions);
+        let store_wide = access.has_store_permissions(permissions);
+        if store_wide {
+            available.extend(store.local_scope_names().await?);
+        }
+        available.sort();
+        available.dedup();
+        if available.is_empty() && !store_wide {
             anyhow::bail!("PCP access session has no authorized Scope for this operation");
         }
         return Ok(available);
     }
-    let available = available.into_iter().collect::<HashSet<_>>();
     let mut resolved = Vec::with_capacity(requested_scopes.len());
     for scope in requested_scopes {
-        if !available.contains(scope) {
+        if !permissions
+            .iter()
+            .all(|permission| access.allows(scope, *permission))
+        {
             anyhow::bail!("PCP Scope is not authorized for this operation: {scope}");
         }
         if !resolved.contains(scope) {
@@ -34,33 +43,42 @@ pub(crate) fn authorize_scopes(
     Ok(resolved)
 }
 
-pub(crate) fn authorize_scopes_any(
+pub(crate) async fn authorize_scopes_any(
+    store: &SqlitePcpStore,
     access: &AccessSession,
     permissions: &[AccessPermission],
     requested_scopes: &[String],
 ) -> Result<Vec<String>> {
-    let mut available = access
-        .grants
-        .iter()
-        .filter(|grant| {
-            permissions
-                .iter()
-                .any(|permission| grant.allows(*permission))
-        })
-        .map(|grant| grant.namespace.clone())
-        .collect::<Vec<_>>();
-    available.sort();
-    available.dedup();
     if requested_scopes.is_empty() {
-        if available.is_empty() {
+        let mut available = access
+            .grants
+            .iter()
+            .filter(|grant| {
+                permissions
+                    .iter()
+                    .any(|permission| grant.allows(*permission))
+            })
+            .map(|grant| grant.namespace.clone())
+            .collect::<Vec<_>>();
+        let store_wide = permissions
+            .iter()
+            .any(|permission| access.store_permissions.contains(permission));
+        if store_wide {
+            available.extend(store.local_scope_names().await?);
+        }
+        available.sort();
+        available.dedup();
+        if available.is_empty() && !store_wide {
             anyhow::bail!("PCP access session has no authorized Scope for this operation");
         }
         return Ok(available);
     }
-    let available = available.into_iter().collect::<HashSet<_>>();
     let mut resolved = Vec::with_capacity(requested_scopes.len());
     for scope in requested_scopes {
-        if !available.contains(scope) {
+        if !permissions
+            .iter()
+            .any(|permission| access.allows(scope, *permission))
+        {
             anyhow::bail!("PCP Scope is not authorized for this operation: {scope}");
         }
         if !resolved.contains(scope) {

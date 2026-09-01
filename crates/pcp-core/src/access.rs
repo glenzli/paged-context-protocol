@@ -130,6 +130,13 @@ pub struct AccessSession {
     pub principal: AccessPrincipal,
     pub session_id: String,
     pub grants: Vec<ScopeGrant>,
+    /// Permissions that apply to every current and future Scope in this Store.
+    ///
+    /// Ordinary tenant sessions leave this empty. Runtime may inject it for a
+    /// same-user local operator endpoint after validating that endpoint as an
+    /// administrative service.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub store_permissions: Vec<AccessPermission>,
 }
 
 impl AccessSession {
@@ -142,13 +149,32 @@ impl AccessSession {
             principal,
             session_id: session_id.into(),
             grants,
+            store_permissions: Vec::new(),
         }
     }
 
     pub fn allows(&self, namespace: &str, permission: AccessPermission) -> bool {
-        self.grants
+        self.store_permissions.contains(&permission)
+            || self
+                .grants
+                .iter()
+                .any(|grant| grant.namespace == namespace && grant.allows(permission))
+    }
+
+    pub fn has_store_permissions(&self, permissions: &[AccessPermission]) -> bool {
+        permissions
             .iter()
-            .any(|grant| grant.namespace == namespace && grant.allows(permission))
+            .all(|permission| self.store_permissions.contains(permission))
+    }
+
+    pub fn with_store_permissions(
+        mut self,
+        permissions: impl IntoIterator<Item = AccessPermission>,
+    ) -> Self {
+        self.store_permissions = permissions.into_iter().collect();
+        self.store_permissions.sort();
+        self.store_permissions.dedup();
+        self
     }
 
     pub fn scopes_with_permissions(&self, permissions: &[AccessPermission]) -> Vec<String> {
@@ -183,6 +209,13 @@ impl AccessSession {
                 })
                 .collect(),
         )
+    }
+
+    pub fn store_wide_full_control(
+        principal: AccessPrincipal,
+        session_id: impl Into<String>,
+    ) -> Self {
+        Self::new(principal, session_id, Vec::new()).with_store_permissions(AccessPermission::ALL)
     }
 
     pub fn read_only(
