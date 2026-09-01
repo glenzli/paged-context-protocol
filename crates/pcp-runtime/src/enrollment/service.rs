@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
 use pcp_client::{AccessMode, EmbeddedPcpClient};
-use pcp_core::{AccessPrincipal, AccessSession};
+use pcp_core::{AccessPrincipal, AccessPrincipalType, AccessSession, CreateScopeRequest};
 use pcp_rpc::{
     BeginEnrollmentParams, ENROLLMENT_ADMIN_REQUEST_SCHEMA, ENROLLMENT_MAX_RESPONSE_FRAME_BYTES,
     ENROLLMENT_REQUEST_SCHEMA, EmptyParams, EnrollmentAdminRequest, EnrollmentAdminResponse,
@@ -303,6 +303,8 @@ impl EnrollmentHandler {
                 .cloned()
                 .ok_or_else(ProtocolError::not_found)?
         };
+        self.ensure_identity_scope(&registration.approved_access)
+            .await?;
 
         let read_scopes = if registration.approved_access.read_all_scopes {
             self.inner
@@ -529,6 +531,55 @@ impl EnrollmentHandler {
         Ok(())
     }
 
+    async fn ensure_identity_scope(
+        &self,
+        approved_access: &pcp_rpc::RequestedAccess,
+    ) -> std::result::Result<(), ProtocolError> {
+        if !approved_access
+            .scopes
+            .iter()
+            .any(|scope| scope == "user:self")
+        {
+            return Ok(());
+        }
+        let namespace = identity_scope_namespace(&self.inner.identity_id);
+        let existing = self
+            .inner
+            .store
+            .local_scope_names()
+            .await
+            .map_err(|_| ProtocolError::unavailable())?;
+        if existing.iter().any(|scope| scope == &namespace) {
+            return Ok(());
+        }
+        let principal = AccessPrincipal {
+            principal_id: "service:pcp-enrollment".to_owned(),
+            principal_type: AccessPrincipalType::Service,
+            display_name: Some("PCP enrollment".to_owned()),
+        };
+        let operator = AccessSession::full_control(
+            principal,
+            format!("session:pcp-enrollment:{}", self.inner.service.generation),
+            vec![namespace.clone()],
+        );
+        self.inner
+            .store
+            .create_scope(
+                &operator,
+                CreateScopeRequest {
+                    namespace,
+                    display_name: "User context".to_owned(),
+                    description: Some(
+                        "Identity-scoped durable context created for approved enrollment clients."
+                            .to_owned(),
+                    ),
+                    parent_namespace: None,
+                },
+            )
+            .await
+            .map_err(|_| ProtocolError::unavailable())
+    }
+
     async fn reject(&self, request_id: &str) -> std::result::Result<(), ProtocolError> {
         let mut state = self.inner.state.lock().await;
         let mut next = state.clone();
@@ -628,7 +679,7 @@ fn access_session(
         .iter()
         .map(|scope| {
             if scope == "user:self" {
-                format!("user:{identity_id}")
+                identity_scope_namespace(identity_id)
             } else {
                 scope.clone()
             }
@@ -661,6 +712,10 @@ fn access_session(
             .grants,
     );
     Ok(access)
+}
+
+fn identity_scope_namespace(identity_id: &str) -> String {
+    format!("user:{identity_id}")
 }
 
 fn validate_begin(params: &BeginEnrollmentParams) -> std::result::Result<(), ProtocolError> {

@@ -146,7 +146,11 @@ read/search access but grants neither `ingest_page`, ordinary `write_page` /
 credential, and open that registration only while applying an explicit repair
 migration. The special Scope `user:self` is
 resolved by Runtime to the selected Store's `user:<identity_id>` Scope. Other
-Scope names are literal. A request contains 1-16 unique primary Scopes, each at
+Scope names are literal. Opening an approved enrollment that requests
+`user:self` materializes that identity Scope when it does not yet exist; a
+pending, rejected, or approved-but-unopened request does not change the Store.
+Runtime does not create arbitrary literal Scopes from an enrollment request. A
+request contains 1-16 unique primary Scopes, each at
 most 128 UTF-8 bytes. Runtime retains at most 16 simultaneous pending requests and 32
 active registrations per Store.
 

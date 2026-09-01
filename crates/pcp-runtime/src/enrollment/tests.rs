@@ -30,7 +30,7 @@ async fn enrollment_approves_identity_bound_session_and_survives_generation_chan
     );
     let identity_id = store.identity_id().to_owned();
     let identity_scope = format!("user:{identity_id}");
-    let read_only_scopes = vec![
+    let read_only_scopes = [
         "project:symbiont-d".to_owned(),
         "conversation:symbiont-d".to_owned(),
     ];
@@ -43,13 +43,13 @@ async fn enrollment_approves_identity_bound_session_and_survives_generation_chan
             display_name: None,
         },
         "session:enrollment-test",
-        std::iter::once(identity_scope.clone())
-            .chain(read_only_scopes.iter().cloned())
+        read_only_scopes
+            .iter()
+            .cloned()
             .chain(std::iter::once(future_scope.clone()))
             .collect::<Vec<_>>(),
     );
-    for namespace in std::iter::once(identity_scope.clone()).chain(read_only_scopes.iter().cloned())
-    {
+    for namespace in read_only_scopes.iter().cloned() {
         store
             .create_scope(
                 &operator,
@@ -61,8 +61,15 @@ async fn enrollment_approves_identity_bound_session_and_survives_generation_chan
                 },
             )
             .await
-            .expect("create identity scope");
+            .expect("create read-only Scope");
     }
+    assert!(
+        !store
+            .local_scope_names()
+            .await
+            .expect("list initial Scopes")
+            .contains(&identity_scope)
+    );
     let mut observer_config = ObserverConfig::for_test(root.clone(), identity_id.clone());
     observer_config.enrollment_enabled = true;
     let enrollment_config = EnrollmentConfig::for_test(root.clone());
@@ -125,6 +132,13 @@ async fn enrollment_approves_identity_bound_session_and_survives_generation_chan
         .approve(request_id.clone())
         .await
         .expect("approve enrollment");
+    assert!(
+        !store
+            .local_scope_names()
+            .await
+            .expect("list approved unopened Scopes")
+            .contains(&identity_scope)
+    );
     let active = public
         .status(EnrollmentStatusParams {
             request_id: request_id.clone(),
@@ -136,6 +150,13 @@ async fn enrollment_approves_identity_bound_session_and_survives_generation_chan
         EnrollmentResult::Active { session } => session,
         other => panic!("expected active enrollment, got {other:?}"),
     };
+    assert!(
+        store
+            .local_scope_names()
+            .await
+            .expect("list opened Scopes")
+            .contains(&identity_scope)
+    );
     assert_eq!(first_session.service.generation, first_generation);
     assert!(std::path::Path::new(&first_session.endpoint).is_relative());
     assert_canonical_infra_socket_endpoint(&first_session.endpoint);
@@ -388,13 +409,14 @@ async fn enrollment_requires_the_client_credential_for_status() {
             .expect("open credential test store"),
     );
     let identity_id = store.identity_id().to_owned();
+    let identity_scope = format!("user:{identity_id}");
     let store: Arc<dyn PcpStore> = store;
     let mut observer_config = ObserverConfig::for_test(root.clone(), identity_id);
     observer_config.enrollment_enabled = true;
     let mut observer = ObserverService::start(
         observer_config,
         EnrollmentConfig::for_test(root.clone()),
-        store,
+        Arc::clone(&store),
     )
     .await
     .expect("start enrollment provider")
@@ -410,6 +432,13 @@ async fn enrollment_requires_the_client_credential_for_status() {
         EnrollmentResult::Pending { request_id, .. } => request_id,
         other => panic!("expected pending enrollment, got {other:?}"),
     };
+    assert!(
+        !store
+            .local_scope_names()
+            .await
+            .expect("list pending Scopes")
+            .contains(&identity_scope)
+    );
     assert!(
         public
             .status(EnrollmentStatusParams {
