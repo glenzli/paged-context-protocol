@@ -6,6 +6,7 @@ mod ledger;
 mod operator;
 mod reconciliation;
 mod review;
+mod update_discovery;
 mod worker;
 
 use std::{sync::Arc, time::Duration};

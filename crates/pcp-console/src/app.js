@@ -1,5 +1,6 @@
 import { createPageInspector } from "/page-inspector.js?v=20260823.1";
 import { pageListPreview, pageCount, pageJump, PAGE_ROLE_LABELS, pageRoleBadge, appendPageFilters } from "/page-list.js";
+import { reconciliationView } from "/maintenance-reconciliation.js";
 import { describePagePayload, pagePayloadPreviewText } from "/page-content.js?v=20260822.1";
 import { createHealthView } from "/health-view.js?v=20260816.3";
 import { createRetentionView } from "/retention-view.js?v=20260818.1";
@@ -153,6 +154,18 @@ const ZH_MESSAGES = {
   "Deferred for now": "暂时延后",
   "Will be suppressed": "将不再建议",
   "Feedback reconciliation": "反馈协调",
+  "Content update review": "内容更新审阅",
+  "Current evidence": "原内容",
+  "Proposed replacement": "建议替代内容",
+  "Correction evidence": "纠正证据",
+  "Pending approval; original content is unchanged": "待批准；原内容尚未改变",
+  "Keep original content": "保留原内容",
+  "Qualify the claim": "限定适用范围",
+  "Mark as disputed": "标记争议",
+  "Replace with new content": "以新内容替代",
+  "Retract the old claim": "撤回旧结论",
+  "Cross-scope decision: approval changes the target's validity but does not grant access to the replacement. The decision rationale is stored in the target Scope.": "跨范围决定：批准会改变原内容的有效性，但不会授予新内容的读取权限。判定理由会存入原内容所在范围。",
+  "Replacement preview unavailable; re-analyze before applying": "缺少替代内容预览，请重新分析后再应用",
   "Explicit feedback": "显式反馈",
   "Challenged Page": "被质疑页面",
   "Proposed disposition": "建议处置",
@@ -2954,36 +2967,37 @@ function maintenanceReviewContent(review) {
     (candidate.candidateSignals || []).forEach((signal) => signals.append(element("span", "status-pill", signal)));
     body.append(signals);
   } else if (payload.kind === "reconciliation") {
+    const view = reconciliationView(candidate);
     const disposition = {
-      no_source_change: "No source change",
-      qualified: "Qualified",
-      disputed: "Disputed",
-      superseded: "Superseded",
-      retracted: "Retracted",
+      no_source_change: "Keep original content",
+      qualified: "Qualify the claim",
+      disputed: "Mark as disputed",
+      superseded: "Replace with new content",
+      retracted: "Retract the old claim",
     }[candidate.disposition] || candidate.disposition;
     const decision = element("div", `maintenance-reconciliation-decision disposition-${candidate.disposition || "unknown"}`);
     decision.append(
       element("span", "muted", t("Proposed disposition")),
       element("strong", "", t(disposition)),
     );
-    const feedback = element("section", "maintenance-reconciliation-panel");
-    feedback.append(
-      element("span", "maintenance-reconciliation-label", t("Explicit feedback")),
-      element("p", "maintenance-review-preview", candidate.feedback?.content || candidate.feedback?.summary || "—"),
-    );
-    const target = element("button", "maintenance-reconciliation-panel maintenance-reconciliation-target");
-    target.type = "button";
-    target.append(
-      element("span", "maintenance-reconciliation-label", t("Challenged Page")),
-      element("p", "maintenance-review-preview", candidate.target?.content || candidate.target?.summary || "—"),
-      element("span", "mono muted", candidate.target?.revisionId || ""),
-    );
-    if (candidate.target?.pageId) {
-      target.addEventListener("click", () => pageInspector.open(candidate.target.pageId));
-    } else {
-      target.disabled = true;
+    body.append(decision, element("p", "muted", t("Pending approval; original content is unchanged")));
+    if (candidate.feedback) {
+      const feedback = element("section", "maintenance-reconciliation-panel");
+      feedback.append(element("span", "maintenance-reconciliation-label", t("Explicit feedback")),
+        element("p", "maintenance-review-preview", candidate.feedback.content || candidate.feedback.summary || "—"));
+      body.append(feedback);
     }
-    body.append(decision, feedback, target, element("p", "maintenance-review-evidence", candidate.rationale));
+    const comparison = element("div", "maintenance-reconciliation-comparison");
+    for (const {label, page} of view.panels) {
+      const panel = element("section", "maintenance-reconciliation-panel");
+      panel.append(element("span", "maintenance-reconciliation-label", t(label)),
+        element("p", "maintenance-review-preview", page.content || page.summary || "—"),
+        element("span", "mono muted", `${page.namespace || ""} · ${page.revisionId || ""}`));
+      comparison.append(panel);
+    }
+    body.append(comparison, element("p", "maintenance-review-evidence", candidate.rationale));
+    if (view.crossScope) body.append(element("p", "notice warning", t("Cross-scope decision: approval changes the target's validity but does not grant access to the replacement. The decision rationale is stored in the target Scope.")));
+    if (view.replacementUnavailable) body.append(element("p", "notice warning", t("Replacement preview unavailable; re-analyze before applying")));
     if (candidate.scope) body.append(element("span", "status-pill", candidate.scope));
     if (candidate.replacement?.revisionId) {
       body.append(element("p", "maintenance-review-evidence", `${t("Replacement Revision")} · ${candidate.replacement.revisionId}`));
@@ -3034,7 +3048,9 @@ function maintenanceReviewSettledRow(review, staged) {
   undo.disabled = state.maintenance.reviewCommitBusy;
   undo.addEventListener("click", () => undoMaintenanceReview(review.candidateId));
   row.append(
-    maintenanceKindBadge(review.payload?.kind),
+    maintenanceKindBadge(review.payload?.kind, review.payload?.kind === "reconciliation"
+      ? t(reconciliationView(review.payload.candidate).title)
+      : t(maintenanceReviewKindLabel(review.payload?.kind))),
     stateNode,
     summary,
     pending,
@@ -3065,7 +3081,7 @@ function maintenanceReviewCard(review) {
   const heading = element("div", "maintenance-relation-review-card-heading");
   const metadata = element("div", "maintenance-review-metadata");
   metadata.append(
-    maintenanceKindBadge(payload.kind),
+    payload.kind === "reconciliation" ? element("span", "status-pill", t(reconciliationView(candidate).title)) : maintenanceKindBadge(payload.kind),
     element("span", "muted", review.origin === "automatic" ? t("Automatic maintenance") : t("Manual maintenance")),
     element("span", "muted", formatTime(review.proposedAt)),
   );
@@ -3097,6 +3113,7 @@ function maintenanceReviewCard(review) {
     payload.kind === "archive" ? "archive" : "accept",
   );
   const reject = reviewDecisionButton(review, REVIEW_DECISION.REJECT, t(payload.kind === "reconciliation" ? "Reject this proposal" : "Reject"), icon("reject"), "reject");
+  if (payload.kind === "reconciliation" && reconciliationView(candidate).replacementUnavailable) accept.disabled = true;
   const defer = reviewDecisionButton(review, REVIEW_DECISION.DEFER, t("Skip for now"), icon("defer"), "defer");
   actions.append(accept, reject, defer);
   if (payload.kind === "relation") {

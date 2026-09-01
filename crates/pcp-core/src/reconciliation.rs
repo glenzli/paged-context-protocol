@@ -88,6 +88,10 @@ pub struct SubmitFeedbackRequest {
     /// This may be a superset of `challengedRevisionIds`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub used_revision_ids: Vec<String>,
+    /// Additional correction evidence, including content written after the
+    /// challenged response. This is not evidence that the old response used.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_revision_ids: Vec<String>,
     /// Opaque tenant-owned locator for the response or interaction. PCP does
     /// not dereference or render this value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -104,6 +108,8 @@ pub struct FeedbackSubmission {
     pub created: bool,
     pub challenged_revision_ids: Vec<String>,
     pub used_revision_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_revision_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -147,6 +153,8 @@ pub struct FeedbackSignal {
     pub response_ref: Option<String>,
     pub challenged_revision_ids: Vec<String>,
     pub used_revision_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_revision_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -175,8 +183,14 @@ impl ReconciliationDisposition {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyReconciliationRequest {
-    pub feedback_revision_id: String,
+    /// Absent for a Runtime-discovered update reviewed by the operator. Such
+    /// proposals live only in the maintenance ledger until approved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_revision_id: Option<String>,
     pub target: PageRevisionRef,
+    /// Exact validity head displayed at review time; None means no assessment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_assessment_revision_id: Option<String>,
     pub disposition: ReconciliationDisposition,
     pub rationale: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -196,7 +210,8 @@ pub struct ApplyReconciliationRequest {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReconciliationResult {
-    pub feedback_revision_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_revision_id: Option<String>,
     pub target: PageRevisionRef,
     pub disposition: ReconciliationDisposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]

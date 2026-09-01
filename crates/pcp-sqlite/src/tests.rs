@@ -30,6 +30,8 @@ use super::SqlitePcpStore;
 mod content_filters;
 #[path = "tests/page_actions.rs"]
 mod page_actions;
+#[path = "tests/reconciliation.rs"]
+mod reconciliation;
 
 #[tokio::test]
 async fn store_wide_operator_dynamically_resolves_current_and_future_scopes() {
@@ -3347,6 +3349,7 @@ async fn explicit_feedback_reconciliation_is_atomic_and_changes_default_recall()
                 source_refs: Vec::new(),
                 challenged_revision_ids: vec![old.revision_id.clone()],
                 used_revision_ids: vec![old.revision_id.clone(), replacement.revision_id.clone()],
+                evidence_revision_ids: Vec::new(),
                 response_ref: Some("tenant://conversation/42/response/7".to_owned()),
                 external_event_id: Some("feedback:event:7".to_owned()),
             },
@@ -3370,6 +3373,7 @@ async fn explicit_feedback_reconciliation_is_atomic_and_changes_default_recall()
                 source_refs: Vec::new(),
                 challenged_revision_ids: vec![old.revision_id.clone()],
                 used_revision_ids: vec![old.revision_id.clone()],
+                evidence_revision_ids: Vec::new(),
                 response_ref: None,
                 external_event_id: Some("feedback:event:7".to_owned()),
             },
@@ -3394,7 +3398,8 @@ async fn explicit_feedback_reconciliation_is_atomic_and_changes_default_recall()
     let result = store
         .apply_reconciliation(
             ApplyReconciliationRequest {
-                feedback_revision_id: feedback.feedback_revision_id.clone(),
+                feedback_revision_id: Some(feedback.feedback_revision_id.clone()),
+                expected_assessment_revision_id: None,
                 target: PageRevisionRef {
                     page_id: old.page_id.clone(),
                     revision_id: old.revision_id.clone(),

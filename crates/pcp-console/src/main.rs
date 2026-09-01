@@ -343,6 +343,10 @@ fn router(state: AppState) -> Router {
         .route("/page-inspector.js", get(page_inspector_js))
         .route("/page-editor.js", get(page_editor_js))
         .route("/page-list.js", get(page_list_js))
+        .route(
+            "/maintenance-reconciliation.js",
+            get(maintenance_reconciliation_js),
+        )
         .route("/page-content.js", get(page_content_js))
         .route("/page-content.css", get(page_content_css))
         .route("/page-graph.js", get(page_graph_js))
@@ -611,6 +615,13 @@ async fn page_list_js() -> Response {
     static_asset(
         "text/javascript; charset=utf-8",
         include_str!("page-list.js"),
+    )
+}
+
+async fn maintenance_reconciliation_js() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("maintenance-reconciliation.js"),
     )
 }
 

@@ -34,10 +34,26 @@ When the user rejects, corrects, or materially narrows recalled context, do not 
 
 - the exact Revision IDs whose content was challenged;
 - the exact Revision IDs actually used in the response, when different;
+- any additional corrective evidence in `evidenceRevisionIds`, especially a new Page written after the challenged response; never mislabel it as `usedRevisionIds`;
 - the correction or disagreement in the user's own terms;
 - enough context to distinguish a factual correction from a preference change or a one-off exception.
 
 The MCP server still prompts for approval before feedback is written. This Skill does not grant write authority.
+
+### New information and replacement
+
+Write independent new information normally, in your own writable Scope. It does not need to claim that an older Page is wrong. Runtime can propose a content update after comparing related evidence, but a newer timestamp, shared subject, or provenance link is not proof of replacement.
+
+When the user explicitly requests a correction:
+
+1. Read the exact old Revision and confirm the correction's meaning, subject, and scope.
+2. If the correction deserves its own durable Page, capture that new information with the normal approval. Otherwise put the correction directly in feedback; creating a second Page is optional.
+3. Submit feedback in your writable `scope`, referencing the old Revision in `challengedRevisionIds` and any new Page's returned Revision in `evidenceRevisionIds`. `usedRevisionIds` contains only evidence actually used in the challenged response; omit it when no such response is identified.
+4. Report that the feedback was recorded and that any replacement/retraction awaits Console approval. Do not say the old Page was revised, replaced, or deleted.
+
+Reading another Scope is enough to challenge its evidence; writing or assessing that Scope is not required. It does not grant permission to publish a derived copy across Scopes. If a new Page genuinely derives from PCP evidence, keep truthful `basedOnRevisionIds` and obtain the required derivation authorization rather than dropping provenance to bypass a denial. A feedback reference is not a provenance-free route for copying private content.
+
+The ordinary plugin does not use `pcp_assess_validity`, privileged Page revision, or direct Relation writes to force a replacement. Console shows the exact old content, new evidence, and Scopes for review. Partial corrections should qualify a claim or record a dispute, not discard unrelated useful content. Approval does not enlarge any client's read permissions or rewrite all downstream summaries.
 
 ## Capture sparingly
 

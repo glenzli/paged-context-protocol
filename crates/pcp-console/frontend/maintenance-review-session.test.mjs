@@ -74,3 +74,19 @@ test("malformed persisted review sessions fail closed", () => {
   assert.deepEqual([...restoreReviewDecisions("not-json")], []);
   assert.deepEqual([...restoreReviewDecisions(JSON.stringify([{ candidateId: "x", kind: "summary", decision: "erase" }]))], []);
 });
+
+test("re-analysis never inherits an approval staged against a different validity head", () => {
+  const item = review("same-pair", "reconciliation");
+  const decisions = new Map();
+  stageReviewDecision(decisions, item, REVIEW_DECISION.ACCEPT);
+  const newer = {...item, payload:{...item.payload, candidate:{expectedAssessmentRevisionId:"new-head"}}};
+  const restored = restoreReviewDecisions(serializeReviewDecisions(decisions));
+  assert.equal(partitionReviewSession([newer], restored).staged.length, 0);
+  assert.equal(restored.size, 0);
+});
+
+test("legacy staged decisions require a fresh review instead of unbound approval", () => {
+  const restored = restoreReviewDecisions(JSON.stringify([{candidateId:"old",kind:"reconciliation",decision:"accept"}]));
+  reconcileReviewDecisions([review("old", "reconciliation")], restored);
+  assert.equal(restored.size, 0);
+});

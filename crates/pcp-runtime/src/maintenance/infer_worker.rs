@@ -265,6 +265,7 @@ fn operation_name(request: &MaintenanceWorkerRequest) -> &'static str {
         MaintenanceWorkerRequest::ExtractTopic { .. } => "extract_topic",
         MaintenanceWorkerRequest::AssessArchive { .. } => "assess_archive",
         MaintenanceWorkerRequest::ReconcileFeedback { .. } => "reconcile_feedback",
+        MaintenanceWorkerRequest::ReviewUpdate { .. } => "review_update",
         MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => "select_retention_milestones",
     }
 }
@@ -346,6 +347,7 @@ fn infer_request(
         | MaintenanceWorkerRequest::ExtractTopic { .. }
         | MaintenanceWorkerRequest::AssessArchive { .. }
         | MaintenanceWorkerRequest::ReconcileFeedback { .. }
+        | MaintenanceWorkerRequest::ReviewUpdate { .. }
         | MaintenanceWorkerRequest::SelectRelation { .. }
         | MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => {
             let deployment_id = deployment_override.unwrap_or_else(|| match request {
@@ -366,6 +368,7 @@ fn infer_request(
                 request,
                 MaintenanceWorkerRequest::SelectRelation { .. }
                     | MaintenanceWorkerRequest::ReconcileFeedback { .. }
+                    | MaintenanceWorkerRequest::ReviewUpdate { .. }
             ) {
                 "high"
             } else {
@@ -410,6 +413,7 @@ fn intent_for(request: &MaintenanceWorkerRequest) -> &'static str {
         | MaintenanceWorkerRequest::ExtractTopic { .. }
         | MaintenanceWorkerRequest::AssessArchive { .. }
         | MaintenanceWorkerRequest::ReconcileFeedback { .. }
+        | MaintenanceWorkerRequest::ReviewUpdate { .. }
         | MaintenanceWorkerRequest::SelectRelation { .. }
         | MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => "reasoning.solve",
     }
@@ -417,6 +421,13 @@ fn intent_for(request: &MaintenanceWorkerRequest) -> &'static str {
 
 fn instructions_for(request: &MaintenanceWorkerRequest) -> String {
     match request {
+        MaintenanceWorkerRequest::ReviewUpdate { target, evidence } => {
+            let source = format!("{}\n{}", target.content.as_deref().unwrap_or_default(), evidence.content.as_deref().unwrap_or_default());
+            let language = if matches!(summary_language_for_text(&source), SummaryLanguage::Chinese) {
+                "Write rationale and scope in Chinese."
+            } else { "Use the dominant language of the supplied content." };
+            format!("Compare the exact target and evidence Pages. Neither timestamps, similarity, provenance nor a different client establishes correctness. Distinguish historical events, different subjects, time-bounded preferences, complementary details and partial corrections. Never replace an entire Page for a partial correction that loses independently useful claims. Return only {{\"decision\":\"no_candidate\"}} for merely related/complementary content; {{\"decision\":\"defer\"}} if uncertain; otherwise {{\"decision\":\"reconcile_feedback\",\"target_revision_id\":\"the supplied target Revision\",\"disposition\":\"qualified|disputed|superseded\",\"rationale\":\"specific evidence grounded explanation\",\"scope\":null,\"replacement_revision_id\":null}}. superseded is only for direct, complete replacement of the target claim by the supplied evidence Revision, and must name that exact evidence Revision as replacement_revision_id. qualified and disputed must not name a replacement. Do not invent facts, authority, consent or source material. This is a proposal requiring human Console approval, never an applied update. {language}")
+        }
         MaintenanceWorkerRequest::SummarizePage { page } => summary_instructions(page),
         MaintenanceWorkerRequest::SummarizePages { .. } => {
             "Return exactly one JSON object and no markdown. Use either {\"decision\":\"summaries\",\"summaries\":[{\"pageId\":\"pg_...\",\"content\":\"...\"}]}, {\"decision\":\"no_candidate\"}, or {\"decision\":\"defer\"}. Every supplied Page is an eligible missing-summary Page: return exactly one entry for every supplied pageId, do not omit or merge Pages, and use each exact pageId once. Each routing summary must be 60-180 Unicode characters, name the concrete subject and the key assertion, decision, observation, or unresolved question, preserve qualifications, distinguish evidence from inference, and never invent facts. Return no_candidate only when none of the supplied Pages has usable content; otherwise return defer rather than a partial list."
@@ -451,7 +462,7 @@ fn instructions_for(request: &MaintenanceWorkerRequest) -> String {
                 SummaryLanguage::Unspecified => "Write rationale and scope in the dominant natural language of the supplied feedback and target Pages.",
             };
             format!(
-                "Return exactly one JSON object and no markdown. Use either {{\"decision\":\"reconcile_feedback\",\"target_revision_id\":\"rev_...\",\"disposition\":\"no_source_change|qualified|disputed|superseded|retracted\",\"rationale\":\"...\",\"scope\":null,\"replacement_revision_id\":null}}, or {{\"decision\":\"defer\"}}. Select exactly one target_revision_id from signal.challengedRevisionIds. signal.usedRevisionIds is context-only evidence and must never be selected as the target. This is a validity decision about the exact target Revision, not a judgment of the tenant's opaque source. no_source_change means the feedback does not change stored source validity; qualified means the claim remains useful only within a stated scope; disputed means credible conflict exists without a settled replacement; superseded requires replacement_revision_id naming another supplied Revision that directly replaces it; retracted means the target claim should leave default recall without a replacement. Never invent a Revision or infer source contents that PCP did not receive. Preserve uncertainty and prefer defer when evidence is insufficient. rationale must be concise and grounded. {language}"
+                "Return exactly one JSON object and no markdown. Use either {{\"decision\":\"reconcile_feedback\",\"target_revision_id\":\"rev_...\",\"disposition\":\"no_source_change|qualified|disputed|superseded|retracted\",\"rationale\":\"...\",\"scope\":null,\"replacement_revision_id\":null}}, or {{\"decision\":\"defer\"}}. Select exactly one target_revision_id from signal.challengedRevisionIds. signal.usedRevisionIds records context actually used by the old response. signal.evidenceRevisionIds contains additional corrective evidence, possibly written later. Neither used-only nor evidence-only Revisions may be selected as the target. This is a validity decision about the exact target Revision, not a judgment of the tenant's opaque source. no_source_change means the feedback does not change stored source validity; qualified means the claim remains useful only within a stated scope; disputed means credible conflict exists without a settled replacement; superseded requires replacement_revision_id naming another supplied Revision that completely replaces it; retracted means the target claim should leave default recall without a replacement. Do not replace an entire Page for a partial correction that would lose unrelated useful claims. A later timestamp, provenance or a client's claimed authority is not proof. Never invent a Revision or infer source contents that PCP did not receive. Preserve uncertainty and prefer defer when evidence is insufficient. rationale must be concise and grounded. {language}"
             )
         }
         MaintenanceWorkerRequest::SelectRelation { pages, .. } => {

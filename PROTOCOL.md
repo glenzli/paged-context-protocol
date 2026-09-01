@@ -231,7 +231,7 @@ Relation 组织。时间邻近和主题连续性由 Runtime 的语义判断选�
 - `describe() -> identity_id, access, capabilities`
 - `list_scopes(query?, limit?, cursor?)`
 - `ingest_page(namespace, kind, payload?, source_refs?, based_on_revision_ids?, observed_at?, source_span?, facets?, external_event_id?)`
-- `submit_feedback(namespace, kind, authority, payload, challenged_revision_ids, used_revision_ids?, response_ref?, source_refs?, observed_at?, external_event_id?)`
+- `submit_feedback(namespace, kind, authority, payload, challenged_revision_ids, used_revision_ids?, evidence_revision_ids?, response_ref?, source_refs?, observed_at?, external_event_id?)`
 - `search_pages(query, scopes, strategy?, limit?, cursor?)`
 - `read_pages(page_ids, revision_ids?, view?, max_chars?)`
 - `semantic_search(query, scopes?, result_limit?, context_budget_chars?)`
@@ -249,6 +249,9 @@ Page 的精确 PCP Revision。实现以认证 Principal、Store 提交时间和�
 
 `submit_feedback` 只记录一次明确的用户或租户反馈，不直接修改被召回 Page。`challengedRevisionIds` 必须列出
 被质疑的精确 Revision；`usedRevisionIds` 记录产生被质疑响应时实际使用的完整 PCP 证据，可以是前者的超集。
+`evidenceRevisionIds` 记录额外纠正证据，例如响应之后写入的新 Page；不得为了提交新证据而把它伪装成当时使用的上下文。
+反馈写入调用方拥有 `ingest` 的 Scope，所有引用必须拥有 `read_detail`。跨 Scope 引用本身不要求对目标 Scope
+拥有写入、`assess` 或 `derive_across_scopes` 权限，也不授予这些权限。复制、生成跨 Scope 派生内容仍遵守原有授权。
 `responseRef` 和 SourceRef 是租户拥有的不透明坐标，PCP 不负责反查、解析或渲染外部原始材料。一个反馈可以
 挑战多个 Revision，但每个目标必须独立得到协调结果；仅作为使用上下文的 Revision 不得被维护模型提升为处置
 目标。租户声明的 `authority` 是审阅上下文，不是 PCP 自行验证的事实。
@@ -282,7 +285,7 @@ Runtime maintainer 与本机管理工具可以使用完整 Core 接口：
 - `write_summary(target_page_id, target_revision_id, content)`
 - `assess_validity(target_page_id, target_revision_id, standing, evidence_revision_ids)`
 - `pending_feedback(scopes, limit)`
-- `apply_reconciliation(feedback_revision_id, target, disposition, rationale, scope?, replacement?, basis_revision_ids)`
+- `apply_reconciliation(target, disposition, rationale, basis_revision_ids, feedback_revision_id?, expected_assessment_revision_id?, scope?, replacement?, idempotency_key?)`
 - `relate_pages(from_page_id, relation_type, to_page_id, basis_revision_ids?)`
 - `plan_revision_retention(scopes, policy)`
 - `collect_revision_retention(scopes, policy, confirmed_revision_ids)`
@@ -298,10 +301,16 @@ Summary、Pack、Relation、Topic、Archive、反馈协调或 retention 候选�
 生命周期或保留状态的协议事实。实现可以在预先授权的维护策略内自动提交确定性、可验证的低风险操作，但仍须
 由 Store 重验精确当前 Revision、权限和事务不变量。
 
-反馈协调必须以精确 feedback Revision 和被挑战 Revision 为原子边界。结果可以是 `no_source_change`、
-`qualified`、`disputed`、`superseded` 或 `retracted`；只有 `superseded` 可以同时给出一个已在反馈证据集合中的
-replacement Revision，并在同一事务中写入 Validity 与 `supersedes` Relation。低影响决定可以按部署策略自动
-应用；`superseded`、`retracted`、外部声明或仍不确定的判断应进入与其他维护任务共用的持久审阅队列。
+协调以精确目标 Revision 和有界证据为原子边界。有反馈时还必须绑定 feedback Revision，且只能处置其被挑战目标。
+无反馈时，维护器可以从普通新写入中发现内容更新候选，不得为此伪造用户反馈。结果可以是 `no_source_change`、
+`qualified`、`disputed`、`superseded` 或 `retracted`；只有 `superseded` 可以指定证据集合中的 replacement Revision，
+并在同一事务中写入 Validity 与跨 Page `supersedes` Relation。目标、替代内容和审阅时的 Validity head 必须重验；
+`expectedAssessmentRevisionId` 为空表示审阅时尚无评估，不表示允许覆盖任意新评估。过期候选不得应用。
+
+普通写入不自动断言替代。相似度、来源重合或时间先后只能用于找候选，不足以决定哪个内容正确；局部修正也不应
+抹去旧 Page 中仍有效的其他内容。低影响、同 Scope 的反馈决定可以按部署策略自动应用；跨 Scope 的协调、普通
+写入发现的更新、`superseded` 和 `retracted` 必须经有权限的操作员批准。未批准的候选不改变默认召回或原内容。
+批准不会扩大客户端的读取授权，也不等于所有依赖摘要已被重写；受影响的派生 Revision 应作为后续维护的输入。
 
 `archive_page` 与 `restore_archived_page` 是显式生命周期治理动作。Archive 建议无论来自后台扫描、模型还是
 本机工具，都不得被视为批准；归档必须由具有 `manage_lifecycle` 权限的主体针对精确当前 Revision 明确接受，

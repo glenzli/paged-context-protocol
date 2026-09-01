@@ -1212,3 +1212,12 @@ pre { margin: 0; max-height: 420px; overflow: auto; padding: 11px; border: 1px s
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }
+.maintenance-reconciliation-comparison {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  gap: 12px;
+}
+.maintenance-reconciliation-comparison .maintenance-reconciliation-panel {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

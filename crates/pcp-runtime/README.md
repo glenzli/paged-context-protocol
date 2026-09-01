@@ -91,6 +91,7 @@ max_interval_seconds = 86400
 
 [maintenance.reconciliation]
 enabled = true
+discover_updates = true
 # Maximum combined detail made available to one bounded feedback decision.
 max_input_chars = 32000
 # A deferred or rejected proposal is not immediately re-run.
@@ -119,12 +120,13 @@ max_wait_seconds = 3600
 
 One cycle is bounded by `max_jobs_per_cycle`:
 
-1. Runtime reads one pending explicit-feedback signal and only its exact feedback, challenged, and used Revisions. The worker must choose a challenged Revision; used-only Revisions remain context. Low-impact `qualified` or `disputed` decisions from a subject-owner or tenant assertion may apply under policy. `superseded`, `retracted`, external claims, and uncertain outcomes go to review. Each challenged target resolves independently.
+1. Runtime selects eligible explicit feedback from a bounded pending window and reads its exact feedback, challenged, used, and additional evidence Revisions. Only a challenged Revision may be the target; `evidenceRevisionIds` can include newer corrective content without claiming the old response used it. Low-impact `qualified` or `disputed` decisions may apply under policy only within one Scope. Cross-Scope decisions, `superseded`, `retracted`, external claims, and uncertain outcomes go to review. Each challenged target resolves independently; pending reviews are not repeatedly analyzed. Rejected feedback proposals may be reconsidered after the configured cooldown; a rejected ordinary-content pair is not re-proposed unchanged.
 2. Runtime reads the complete authorized current-Page inventory with a bounded routing excerpt per Page.
 3. Runtime deterministically forms a bounded analysis window of sealed leaves and packed anchors that share Scope, kind, and a contiguous SourceSpan, then sends compact head-and-tail routing text as `select_packing`. `analysis_window_pages` controls what the worker can compare; it is independent of the smaller `max_pages` commit limit.
 4. The worker may select one ordered coherent episode from that exact window. Lossless packing does not require every Page to state the same fact: questions, answers, corrections, qualifications, and short reasoning transitions may stay together. It does not generate packed content.
 5. Runtime validates the selected IDs, aggregate input size, and at most one packed anchor and, in apply mode, calls `pack_pages`; Store rechecks exact heads, source continuity, identity pins, anchor count, retention, and transaction invariants. It then reloads the current-Page inventory before the next phase.
-6. A long unsummarized Page may be sent to the worker as `summarize_page`. Runtime reloads the inventory after a Summary write before relation work.
+6. With `reconciliation.discover_updates`, ordinary writes may trigger a bounded `review_update` comparison before Summary work. At most 48 recent anchors contribute up to eight exact provenance inputs and two subject-overlap matches each. Older candidates can come from other authorized Scopes. One eligible pair is analyzed per job, using complete bounded content; oversized or incomplete evidence is deferred. This is not an exhaustive semantic duplicate search. A later timestamp, similarity, or provenance never authorizes replacement. All discovered decisions require Console review, including in apply mode; there is no fabricated feedback Page. The operation uses the baseline reasoning route at high effort and is not in the default Sol escalation set.
+   A long unsummarized Page may then be sent to the worker as `summarize_page`. Runtime reloads the inventory after a Summary write before relation work.
 7. Runtime may send overlapping bounded current-Page routing windows as `select_relation`. Exact current Page pairs connected by provenance inputs are offered before broad recency windows, but provenance never asserts a Relation. The request lists already related or previously reviewed pairs; the worker can return only two other offered Page IDs. Runtime fixes the relation to symmetric `related_to`, binds the exact current Revisions as basis, rejects stale or excluded pairs, and sends general semantic relations to review.
 8. After relation work quiesces, Runtime may ask for a source-grounded Topic front door. Valid Topic proposals and conservative archive recommendations are persisted as typed review items; archive is never applied automatically.
 9. Runtime obtains a bounded dry-run retention plan and may ask the worker whether any actual old candidate Revision is a semantic milestone.
@@ -138,6 +140,29 @@ may later absorb adjacent leaves through a new Revision without changing its Pag
 A `no_candidate` response also cools down
 the exact routing-window Page ID set, so an unchanged Store does not repeatedly
 consume semantic-worker tokens.
+
+### Correcting content across clients
+
+A contributor can write independent new information in its own Scope, then optionally submit explicit feedback against readable old Revisions. Cross-Scope feedback does not require target-write or derivation permission. Actual cross-Scope derived captures still require derivation permission; feedback is not a way to copy content without it.
+
+Console review presents the exact old content, new evidence, proposed disposition, and involved Scopes. Approval rechecks current Page heads and the Validity head observed during review. A changed target, replacement, or assessment makes the proposal stale rather than overwriting newer work. Replacements and retractions never auto-apply. Cross-Scope approval can record a rationale in the target's Scope but does not grant its readers access to the replacement's Scope.
+
+`apply_reconciliation` remains a privileged API. It accepts an optional `feedbackRevisionId` for explicit feedback, or none for a discovered update, plus `expectedAssessmentRevisionId` and exact `basisRevisionIds`. The result includes `affectedRevisionIds` for dependent material. This transaction does not rewrite every downstream Summary or Topic; those remain separate maintenance decisions.
+
+For the Codex plugin, capture new durable evidence first when it deserves a separate Page, then submit (using real IDs returned by reads and writes):
+
+```json
+{
+  "scope": "user:your-identity",
+  "kind": "correction",
+  "content": "The user confirmed the new evidence corrects the earlier claim.",
+  "challengedRevisionIds": ["rev_old"],
+  "evidenceRevisionIds": ["rev_new"],
+  "usedRevisionIds": []
+}
+```
+
+This is an example of `pcp_submit_feedback`, not an approval or direct revision. Capture is optional if the feedback text itself is sufficient. Use only actually-used context in `usedRevisionIds` and a writable destination `scope`, not necessarily the challenged Page's Scope.
 
 For a bounded migration or operator-reviewed rebuild, use `maintenance run-batch`.
 It persists the normal cooldown ledger, stops when its worker-call budget is

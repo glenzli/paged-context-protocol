@@ -387,6 +387,7 @@ mod tests {
             source_refs: Vec::new(),
             challenged_revision_ids: vec!["rev_challenged".to_owned()],
             used_revision_ids: vec!["rev_challenged".to_owned(), "rev_context".to_owned()],
+            evidence_revision_ids: vec!["rev_correction".to_owned()],
             response_ref: Some("tenant:response:7".to_owned()),
             external_event_id: Some("feedback:7".to_owned()),
         }))
@@ -401,10 +402,26 @@ mod tests {
             serde_json::json!(["rev_challenged", "rev_context"])
         );
         assert_eq!(feedback["params"]["authority"], "tenant_assertion");
+        assert_eq!(
+            feedback["params"]["evidenceRevisionIds"],
+            serde_json::json!(["rev_correction"])
+        );
+        let mut legacy = feedback.clone();
+        legacy["params"]
+            .as_object_mut()
+            .unwrap()
+            .remove("evidenceRevisionIds");
+        let RpcOperation::SubmitFeedback(decoded) =
+            serde_json::from_value::<RpcOperation>(legacy).unwrap()
+        else {
+            panic!("wrong feedback operation")
+        };
+        assert!(decoded.evidence_revision_ids.is_empty());
 
         let reconciliation = serde_json::to_value(RpcOperation::ApplyReconciliation(
             ApplyReconciliationRequest {
-                feedback_revision_id: "rev_feedback".to_owned(),
+                feedback_revision_id: Some("rev_feedback".to_owned()),
+                expected_assessment_revision_id: None,
                 target: PageRevisionRef {
                     page_id: "pg_target".to_owned(),
                     revision_id: "rev_challenged".to_owned(),
@@ -426,5 +443,16 @@ mod tests {
         assert_eq!(reconciliation["type"], "apply_reconciliation");
         assert_eq!(reconciliation["params"]["target"]["pageId"], "pg_target");
         assert_eq!(reconciliation["params"]["disposition"], "disputed");
+        let mut discovered = reconciliation;
+        discovered["params"]
+            .as_object_mut()
+            .unwrap()
+            .remove("feedbackRevisionId");
+        let RpcOperation::ApplyReconciliation(decoded) =
+            serde_json::from_value::<RpcOperation>(discovered).unwrap()
+        else {
+            panic!("wrong reconciliation operation")
+        };
+        assert!(decoded.feedback_revision_id.is_none());
     }
 }

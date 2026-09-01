@@ -52,6 +52,12 @@ pub enum MaintenanceWorkerRequest {
         feedback: Box<MaintenanceDetailPage>,
         targets: Vec<MaintenanceDetailPage>,
     },
+    /// Ordinary content may suggest an update without an explicit feedback
+    /// signal. Similarity/provenance only selected the pair, not its meaning.
+    ReviewUpdate {
+        target: Box<MaintenanceDetailPage>,
+        evidence: Box<MaintenanceDetailPage>,
+    },
     SelectRetentionMilestones {
         pages: Vec<MaintenanceRoutingPage>,
         max_revisions: usize,

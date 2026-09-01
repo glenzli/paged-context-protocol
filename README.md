@@ -26,7 +26,7 @@ PCP 可以由单个应用在进程内作为上下文层使用，也可以由独�
 - **Relation 与 Provenance**：Relation 连接稳定 Page；关系依据和派生来源引用精确 Revision。时间相邻或文本相似不会自动形成领域关系。
 - **Search、Read 与 Projection**：检索先返回候选，再按需读取 Payload、Summary、Sources、Relations 或 History。Host 决定哪些结果进入当前上下文。
 - **维护与治理**：实现可以提供 Summary、Topic、Validity、Relation、无损 packing 和 retention；项目维护的 Runtime 还提供可选的后台维护与审阅流程。低风险操作是否自动应用由部署配置决定。
-- **显式反馈**：租户可把一次召回中实际使用和被明确质疑的 Revision 分开提交。PCP 保存反馈与精确证据，后续由维护器评估 Validity 或 `supersedes`，不会静默改写原 Page。
+- **内容更新与反馈**：租户可以正常写入新信息，也可以针对可读的旧 Revision 提交反馈，分开记录实际使用的上下文和新增纠正证据。维护器提出有效性或替代建议；跨 Scope 的决定和替代、撤回都需在 Console 批准，不会静默改写原 Page。
 - **外部来源**：租户保管并理解自己的聊天记录、媒体或领域对象。PCP 保存最小 SourceRef 和可选 digest，并按授权返回来源坐标；来源解析、查询和展示仍由租户负责。
 
 PCP 不规定 Router、提示词格式、Chain-of-Thought、上下文窗口规划或模型状态机。它定义持久记录、授权、来源、检索和可选维护操作的边界。SQLite、独立 Runtime、语义模型、Console 交互和具体 Host 工作流属于实现选择。

@@ -21,7 +21,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::json;
 
-const SHARED_SERVER_INSTRUCTIONS: &str = "Call pcp_capture only when the user explicitly asks to retain something, or for a confirmed decision, explicit preference, stable cross-task constraint, verified reusable finding, or completed reusable outcome that is likely to matter in a later task. If uncertain, do not write. Never capture routine progress, raw transcripts or logs, facts cheaply recovered from the repository, speculation, secrets, or duplicates. Preserve the user's language and keep one self-contained subject per Page. PCP is an identity-scoped durable graph of stable Pages with immutable Revisions. Call pcp_whoami before cross-Scope work. Prefer pcp_semantic_search for conservative semantic retrieval; use pcp_match_intent only when a Router review is justified, and pcp_search_pages only for deterministic inspection. Use pageId for stable identity and Relations; use revisionId for exact evidence and provenance. pcp_expand_graph returns only a bounded, anchored ACL-filtered slice, never the entire graph. Source applications may use pcp_ingest_page for ordinary source events. When a user explicitly challenges recalled evidence, call pcp_submit_feedback with exact challenged and actually-used revision IDs; do not silently rewrite or delete the recalled Page. Maintained interpretations use the advanced write and revise tools.";
+const SHARED_SERVER_INSTRUCTIONS: &str = "Call pcp_capture only when the user explicitly asks to retain something, or for a confirmed decision, explicit preference, stable cross-task constraint, verified reusable finding, or completed reusable outcome that is likely to matter in a later task. If uncertain, do not write. Never capture routine progress, raw transcripts or logs, facts cheaply recovered from the repository, speculation, secrets, or duplicates. Preserve the user's language and keep one self-contained subject per Page. PCP is an identity-scoped durable graph of stable Pages with immutable Revisions. Call pcp_whoami before cross-Scope work. Prefer pcp_semantic_search for conservative semantic retrieval; use pcp_match_intent only when a Router review is justified, and pcp_search_pages only for deterministic inspection. Use pageId for stable identity and Relations; use revisionId for exact evidence and provenance. pcp_expand_graph returns only a bounded, anchored ACL-filtered slice, never the entire graph. Source applications may use pcp_ingest_page for ordinary source events. Write independent new information normally; a later timestamp does not prove it replaces an older claim. When a user explicitly challenges recalled evidence, call pcp_submit_feedback with challengedRevisionIds, the actually-used usedRevisionIds, and any new corrective evidence in evidenceRevisionIds. Feedback is stored in your writable Scope and may reference other readable Scopes without changing them. Replacements and retractions await Console approval. Do not report pending feedback as an applied correction. Advanced validity, write and revise tools require separate maintainer permissions; never use them to bypass review.";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PcpMcpSurface {
@@ -315,6 +315,9 @@ pub struct SubmitFeedbackParams {
     challenged_revision_ids: Vec<String>,
     #[serde(default)]
     used_revision_ids: Vec<String>,
+    /// New correction/replacement evidence, not context used by the old response.
+    #[serde(default)]
+    evidence_revision_ids: Vec<String>,
     #[serde(default)]
     response_ref: Option<String>,
     #[serde(default)]
@@ -409,6 +412,7 @@ pub struct FeedbackWriteResult {
     created: bool,
     challenged_revision_ids: Vec<String>,
     used_revision_ids: Vec<String>,
+    evidence_revision_ids: Vec<String>,
 }
 
 #[derive(Debug, JsonSchema, Serialize)]
@@ -616,7 +620,7 @@ impl PcpMcpServer {
 
     #[tool(
         name = "pcp_submit_feedback",
-        description = "Record an explicit user or tenant challenge against exact recalled Revisions. challengedRevisionIds names the disputed evidence; usedRevisionIds records the full exact context actually used by the tenant response. PCP stores the feedback for reconciliation but does not dereference responseRef or tenant-owned sources.",
+        description = "Submit an explicit correction or challenge for Console review, including across readable Scopes. Write new information with pcp_capture first when needed; reference its exact Revision in evidenceRevisionIds. challengedRevisionIds identifies old disputed Revisions; usedRevisionIds is only context actually used in the old response. scope is where feedback is stored, not the challenged Page's Scope. This does not edit, invalidate or replace the original Page. Runtime proposes a decision; replacements and retractions require Console approval. PCP does not dereference responseRef or tenant sources.",
         annotations(
             title = "Submit PCP Feedback",
             read_only_hint = false,
@@ -648,6 +652,7 @@ impl PcpMcpServer {
                 source_refs: params.source_refs,
                 challenged_revision_ids: params.challenged_revision_ids,
                 used_revision_ids: params.used_revision_ids,
+                evidence_revision_ids: params.evidence_revision_ids,
                 response_ref: params.response_ref,
                 external_event_id: params.external_event_id,
             })
@@ -659,6 +664,7 @@ impl PcpMcpServer {
             created: written.created,
             challenged_revision_ids: written.challenged_revision_ids,
             used_revision_ids: written.used_revision_ids,
+            evidence_revision_ids: written.evidence_revision_ids,
         }))
     }
 
@@ -1217,7 +1223,7 @@ impl PcpMcpServer {
 
     #[tool(
         name = "pcp_assess_validity",
-        description = "Create or revise the validity assessment for one exact target Revision using exact evidence Revisions.",
+        description = "Privileged maintainer operation: create or revise validity for an exact target Revision. Ordinary contributors must use pcp_submit_feedback, including for corrections across readable Scopes; this tool is not a way to bypass Console replacement review.",
         annotations(
             title = "Assess PCP Validity",
             read_only_hint = false,
@@ -1603,6 +1609,7 @@ mod tests {
                 content: "The user explicitly challenged the recalled event.".to_owned(),
                 challenged_revision_ids: vec![ingested.revision_id.clone()],
                 used_revision_ids: vec![ingested.revision_id],
+                evidence_revision_ids: Vec::new(),
                 response_ref: Some("tenant:response:mcp-test".to_owned()),
                 observed_at: None,
                 source_refs: Vec::new(),
@@ -1630,6 +1637,28 @@ mod tests {
             .await
             .expect("capture durable Codex context")
             .0;
+        let correction = tenant
+            .pcp_submit_feedback(Parameters(SubmitFeedbackParams {
+                scope: Some(namespace.clone()),
+                kind: FeedbackKind::Correction,
+                authority: FeedbackAuthority::SubjectOwner,
+                content: "New evidence corrects the earlier event.".into(),
+                challenged_revision_ids: feedback.challenged_revision_ids.clone(),
+                used_revision_ids: Vec::new(),
+                evidence_revision_ids: vec![captured.revision_id.clone()],
+                response_ref: None,
+                observed_at: None,
+                source_refs: Vec::new(),
+                external_event_id: Some("mcp:new-evidence".into()),
+            }))
+            .await
+            .expect("record additional evidence without direct assessment")
+            .0;
+        assert_eq!(
+            correction.evidence_revision_ids,
+            vec![captured.revision_id.clone()]
+        );
+        assert!(correction.used_revision_ids.is_empty());
         let captured_page = tenant
             .client
             .read_pages(ReadPagesRequest {

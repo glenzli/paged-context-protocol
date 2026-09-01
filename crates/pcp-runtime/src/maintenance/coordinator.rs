@@ -535,10 +535,10 @@ const MAX_ARCHIVE_REVIEW_INPUT_CHARS: u32 = 24_000;
 const REVIEW_SNOOZE_SECONDS: u64 = 24 * 60 * 60;
 
 pub struct RuntimeMaintainer {
-    client: Arc<dyn PcpApi>,
+    pub(super) client: Arc<dyn PcpApi>,
     worker: Arc<dyn SemanticMaintenanceWorker>,
-    config: MaintenanceConfig,
-    ledger: MaintenanceLedger,
+    pub(super) config: MaintenanceConfig,
+    pub(super) ledger: MaintenanceLedger,
     usage_source: &'static str,
     write_wakeup: Option<watch::Receiver<u64>>,
 }
@@ -635,7 +635,7 @@ impl RuntimeMaintainer {
         self
     }
 
-    async fn evaluate_worker(
+    pub(super) async fn evaluate_worker(
         &self,
         request: MaintenanceWorkerRequest,
     ) -> Result<MaintenanceWorkerOutcome> {
@@ -1112,6 +1112,16 @@ impl RuntimeMaintainer {
             item.status == MaintenanceReviewStatus::Pending,
             "PCP reconciliation review candidate is no longer pending"
         );
+        anyhow::ensure!(
+            candidate.replacement.as_ref().is_none_or(|replacement| {
+                candidate.evidence.iter().any(|page| {
+                    page.page_id == replacement.page_id
+                        && page.revision_id == replacement.revision_id
+                        && page.content.is_some()
+                })
+            }),
+            "replacement evidence preview is unavailable; analyze again before approval"
+        );
         let result = self
             .client
             .apply_reconciliation(reconciliation_request(
@@ -1120,7 +1130,18 @@ impl RuntimeMaintainer {
                 Some(format!("maintenance:review:{candidate_id}")),
                 Some(self.config.worker.actor_id().to_owned()),
             ))
-            .await?;
+            .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                if error.to_string().contains("stale") {
+                    self.ledger
+                        .resolve_review(candidate_id, MaintenanceReviewStatus::Stale)?;
+                    self.ledger.save(&self.config.state_path).await?;
+                }
+                return Err(error);
+            }
+        };
         self.ledger
             .resolve_review(candidate_id, MaintenanceReviewStatus::Accepted)?;
         self.ledger.save(&self.config.state_path).await?;
@@ -2077,6 +2098,18 @@ impl RuntimeMaintainer {
             report.inspected_pages = report.inspected_pages.max(inventory.len());
         }
 
+        if self.config.reconciliation.enabled
+            && self.config.reconciliation.discover_updates
+            && jobs_remaining > 0
+            && self
+                .run_update_discovery(&inventory, &mut report, review_origin)
+                .await
+                .context("review PCP content updates")?
+        {
+            report.jobs_advanced += 1;
+            jobs_remaining -= 1;
+        }
+
         let summary_ran = self.config.summary.enabled
             && jobs_remaining > 0
             && self
@@ -2141,26 +2174,35 @@ impl RuntimeMaintainer {
         report: &mut MaintenanceCycleReport,
         review_origin: MaintenanceReviewOrigin,
     ) -> Result<bool> {
-        let Some(mut signal) = self
+        let signals = self
             .client
-            .pending_feedback(self.config.allowed_scopes.clone(), 1)
-            .await?
-            .into_iter()
-            .next()
-        else {
+            .pending_feedback(self.config.allowed_scopes.clone(), 32)
+            .await?;
+        let Some(signal) = signals.into_iter().find_map(|mut signal| {
+            signal.challenged_revision_ids.retain(|revision_id| {
+                let candidate_id = MaintenanceReconciliationCandidate::candidate_id(
+                    &signal.feedback_revision_id,
+                    revision_id,
+                );
+                self.ledger.eligible(&feedback_reconciliation_key(
+                    &signal.feedback_revision_id,
+                    revision_id,
+                )) && self.ledger.review_item(&candidate_id).is_none_or(|item| {
+                    matches!(
+                        item.status,
+                        MaintenanceReviewStatus::Deferred
+                            | MaintenanceReviewStatus::Rejected
+                            | MaintenanceReviewStatus::Stale
+                    )
+                })
+            });
+            (!signal.challenged_revision_ids.is_empty()).then_some(signal)
+        }) else {
             return Ok(false);
         };
-        signal.challenged_revision_ids.retain(|revision_id| {
-            self.ledger.eligible(&feedback_reconciliation_key(
-                &signal.feedback_revision_id,
-                revision_id,
-            ))
-        });
-        if signal.challenged_revision_ids.is_empty() {
-            return Ok(false);
-        }
         let mut offered_revision_ids = signal.challenged_revision_ids.clone();
         offered_revision_ids.extend(signal.used_revision_ids.iter().cloned());
+        offered_revision_ids.extend(signal.evidence_revision_ids.iter().cloned());
         offered_revision_ids.sort();
         offered_revision_ids.dedup();
         let mut feedback_pages = self
@@ -2182,6 +2224,9 @@ impl RuntimeMaintainer {
             targets.len() == offered_revision_ids.len(),
             "one or more feedback target Revisions are no longer readable"
         );
+        let assessment_heads = self
+            .reconciliation_assessment_heads(signal.challenged_revision_ids.clone())
+            .await?;
         let outcome = self
             .evaluate_worker(MaintenanceWorkerRequest::ReconcileFeedback {
                 signal: signal.clone(),
@@ -2257,18 +2302,35 @@ impl RuntimeMaintainer {
             signal.feedback_revision_id.clone(),
             target_revision_id.clone(),
         ];
+        basis_revision_ids.extend(signal.evidence_revision_ids.iter().cloned());
+        basis_revision_ids.extend(signal.used_revision_ids.iter().cloned());
         if let Some(replacement) = replacement.as_ref() {
             basis_revision_ids.push(replacement.revision_id.clone());
         }
         basis_revision_ids.sort();
         basis_revision_ids.dedup();
+        let expected_assessment_revision_id = assessment_heads
+            .get(&target.revision_id)
+            .context("feedback target assessment snapshot is missing")?
+            .clone();
+        let cross_scope = targets
+            .iter()
+            .any(|page| page.namespace != target.namespace)
+            || signal.namespace != target.namespace;
+        let key = feedback_reconciliation_key(&signal.feedback_revision_id, &target.revision_id);
+        let authority = signal.authority.clone();
         let candidate = MaintenanceReconciliationCandidate {
             candidate_id: MaintenanceReconciliationCandidate::candidate_id(
                 &signal.feedback_revision_id,
                 &target_revision_id,
             ),
-            signal,
-            feedback,
+            signal: Some(signal),
+            feedback: Some(feedback),
+            evidence: targets
+                .into_iter()
+                .filter(|page| page.revision_id != target.revision_id)
+                .collect(),
+            expected_assessment_revision_id,
             target,
             disposition,
             rationale,
@@ -2277,8 +2339,9 @@ impl RuntimeMaintainer {
             basis_revision_ids,
         };
         let safe_to_auto_apply = self.config.applies_changes()
+            && !cross_scope
             && matches!(
-                candidate.signal.authority,
+                authority,
                 FeedbackAuthority::SubjectOwner | FeedbackAuthority::TenantAssertion
             )
             && matches!(
@@ -2287,10 +2350,6 @@ impl RuntimeMaintainer {
                     | ReconciliationDisposition::Qualified
                     | ReconciliationDisposition::Disputed
             );
-        let key = feedback_reconciliation_key(
-            &candidate.signal.feedback_revision_id,
-            &candidate.target.revision_id,
-        );
         if safe_to_auto_apply {
             self.client
                 .apply_reconciliation(reconciliation_request(
@@ -2319,6 +2378,41 @@ impl RuntimeMaintainer {
             self.config.reconciliation.retry_after_seconds,
         );
         Ok(true)
+    }
+
+    pub(super) async fn reconciliation_assessment_head(
+        &self,
+        revision_id: &str,
+    ) -> Result<Option<String>> {
+        self.reconciliation_assessment_heads(vec![revision_id.to_owned()])
+            .await?
+            .remove(revision_id)
+            .context("reconciliation target is not readable")
+    }
+
+    async fn reconciliation_assessment_heads(
+        &self,
+        revision_ids: Vec<String>,
+    ) -> Result<BTreeMap<String, Option<String>>> {
+        let pages = self
+            .client
+            .read_pages(ReadPagesRequest {
+                page_ids: Vec::new(),
+                revision_ids,
+                projections: vec![Projection::Manifest, Projection::Validity],
+                max_chars: 4_000,
+            })
+            .await?;
+        Ok(pages
+            .into_iter()
+            .map(|page| {
+                (
+                    page.revision.revision_id,
+                    page.validity
+                        .map(|validity| validity.assessment_revision_id),
+                )
+            })
+            .collect())
     }
 
     async fn run_summary_job(
@@ -3183,7 +3277,7 @@ impl RuntimeMaintainer {
         Ok(true)
     }
 
-    async fn read_detail_pages(
+    pub(super) async fn read_detail_pages(
         &self,
         page_ids: Vec<String>,
         max_chars: u32,
@@ -4883,7 +4977,11 @@ fn reconciliation_request(
     tool_or_model: Option<String>,
 ) -> ApplyReconciliationRequest {
     ApplyReconciliationRequest {
-        feedback_revision_id: candidate.signal.feedback_revision_id.clone(),
+        feedback_revision_id: candidate
+            .signal
+            .as_ref()
+            .map(|signal| signal.feedback_revision_id.clone()),
+        expected_assessment_revision_id: candidate.expected_assessment_revision_id.clone(),
         target: PageRevisionRef {
             page_id: candidate.target.page_id.clone(),
             revision_id: candidate.target.revision_id.clone(),
@@ -5021,12 +5119,16 @@ fn worker_operation(request: &MaintenanceWorkerRequest) -> &'static str {
         MaintenanceWorkerRequest::ExtractTopic { .. } => "extract_topic",
         MaintenanceWorkerRequest::AssessArchive { .. } => "assess_archive",
         MaintenanceWorkerRequest::ReconcileFeedback { .. } => "reconcile_feedback",
+        MaintenanceWorkerRequest::ReviewUpdate { .. } => "review_update",
         MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => "select_retention_milestones",
     }
 }
 
 fn worker_scopes(request: &MaintenanceWorkerRequest, access: &AccessSession) -> Vec<String> {
     let mut scopes = match request {
+        MaintenanceWorkerRequest::ReviewUpdate { target, evidence } => {
+            vec![target.namespace.clone(), evidence.namespace.clone()]
+        }
         MaintenanceWorkerRequest::SummarizePage { page } => vec![page.namespace.clone()],
         MaintenanceWorkerRequest::SummarizePages { pages } => {
             pages.iter().map(|page| page.namespace.clone()).collect()

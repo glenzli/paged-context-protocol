@@ -888,18 +888,26 @@ impl PcpStore for SqlitePcpStore {
         request: SubmitFeedbackRequest,
     ) -> Result<FeedbackSubmission> {
         let observation = OperationObservation::start().with_input_count(
-            request.challenged_revision_ids.len() + request.used_revision_ids.len(),
+            request.challenged_revision_ids.len()
+                + request.used_revision_ids.len()
+                + request.evidence_revision_ids.len(),
         );
         let target_scope = request.namespace.clone();
         let mut revision_ids = request.challenged_revision_ids.clone();
         revision_ids.extend(request.used_revision_ids.iter().cloned());
+        revision_ids.extend(request.evidence_revision_ids.iter().cloned());
         revision_ids.sort();
         revision_ids.dedup();
         let mut scopes = vec![target_scope.clone()];
         let authorization = async {
             authorize_exact(access, &target_scope, AccessPermission::Ingest)?;
-            let revision_scopes =
-                authorize_revision_inputs(self, access, &target_scope, revision_ids).await?;
+            // Feedback writes the caller's observation, not a derived Page or
+            // an assessment in the challenged Scope. Reading each exact input
+            // is necessary; writing/deriving in that Scope is not.
+            let revision_scopes = self.revision_namespaces(revision_ids).await?;
+            for scope in &revision_scopes {
+                authorize_exact(access, scope, AccessPermission::ReadDetail)?;
+            }
             extend_unique(&mut scopes, revision_scopes);
             Ok(())
         }
@@ -1733,10 +1741,8 @@ impl PcpStore for SqlitePcpStore {
         let observation = OperationObservation::start().with_input_count(
             2 + request.basis_revision_ids.len() + usize::from(request.replacement.is_some()),
         );
-        let mut revision_ids = vec![
-            request.feedback_revision_id.clone(),
-            request.target.revision_id.clone(),
-        ];
+        let mut revision_ids = vec![request.target.revision_id.clone()];
+        revision_ids.extend(request.feedback_revision_id.iter().cloned());
         revision_ids.extend(request.basis_revision_ids.iter().cloned());
         if let Some(replacement) = request.replacement.as_ref() {
             revision_ids.push(replacement.revision_id.clone());

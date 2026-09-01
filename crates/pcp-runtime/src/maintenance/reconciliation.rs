@@ -3,16 +3,23 @@ use serde::{Deserialize, Serialize};
 
 use super::MaintenanceDetailPage;
 
-/// Human-review view for one model-proposed response to explicit tenant
-/// feedback. It preserves the exact offered Revisions and never contains a
+/// Human-review view for explicit feedback or a discovered content update.
+/// It preserves the exact offered Revisions and never contains a
 /// tenant source-provider expansion.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaintenanceReconciliationCandidate {
     pub candidate_id: String,
-    pub signal: FeedbackSignal,
-    pub feedback: MaintenanceDetailPage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<FeedbackSignal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<MaintenanceDetailPage>,
     pub target: MaintenanceDetailPage,
+    /// Exact evidence shown alongside the old content, including replacements.
+    #[serde(default)]
+    pub evidence: Vec<MaintenanceDetailPage>,
+    #[serde(default)]
+    pub expected_assessment_revision_id: Option<String>,
     pub disposition: ReconciliationDisposition,
     pub rationale: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

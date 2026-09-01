@@ -39,6 +39,9 @@ struct FakeWorker {
     requests: Mutex<Vec<MaintenanceWorkerRequest>>,
 }
 
+#[path = "tests/update_discovery.rs"]
+mod update_discovery;
+
 #[test]
 fn packing_is_opt_in_and_selection_wire_contains_only_semantic_inputs() {
     let config = PackingMaintenanceConfig::default();
@@ -259,6 +262,7 @@ async fn reconciliation_resolves_each_challenged_revision_without_promoting_cont
             source_refs: Vec::new(),
             challenged_revision_ids: vec![first.revision_id.clone(), second.revision_id.clone()],
             used_revision_ids: vec![context.revision_id.clone()],
+            evidence_revision_ids: Vec::new(),
             response_ref: Some("tenant:response:1".to_owned()),
             external_event_id: Some("feedback:multi-target:1".to_owned()),
         })
@@ -357,6 +361,7 @@ async fn reconciliation_rejects_a_context_only_revision_selected_by_the_worker()
             source_refs: Vec::new(),
             challenged_revision_ids: vec![challenged.revision_id],
             used_revision_ids: vec![context.revision_id.clone()],
+            evidence_revision_ids: Vec::new(),
             response_ref: None,
             external_event_id: Some("feedback:invalid-target:1".to_owned()),
         })
@@ -421,6 +426,7 @@ async fn high_impact_reconciliation_waits_for_review_and_applies_atomically_on_a
             source_refs: Vec::new(),
             challenged_revision_ids: vec![challenged.revision_id.clone()],
             used_revision_ids: Vec::new(),
+            evidence_revision_ids: Vec::new(),
             response_ref: Some("tenant:response:withdrawal".to_owned()),
             external_event_id: Some("feedback:reviewed-retraction:1".to_owned()),
         })
@@ -3899,7 +3905,10 @@ impl Fixture {
             summary: SummaryMaintenanceConfig::default(),
             packing: PackingMaintenanceConfig::default(),
             relation: RelationMaintenanceConfig::default(),
-            reconciliation: ReconciliationMaintenanceConfig::default(),
+            reconciliation: ReconciliationMaintenanceConfig {
+                discover_updates: false,
+                ..ReconciliationMaintenanceConfig::default()
+            },
             retention: RetentionMaintenanceConfig::default(),
         }
     }

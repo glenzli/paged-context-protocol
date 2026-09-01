@@ -264,6 +264,7 @@ fn operation_name(request: &MaintenanceWorkerRequest) -> &'static str {
         MaintenanceWorkerRequest::SelectRelation { .. } => "select_relation",
         MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => "select_retention_milestones",
         MaintenanceWorkerRequest::ReconcileFeedback { .. } => "reconcile_feedback",
+        MaintenanceWorkerRequest::ReviewUpdate { .. } => "review_update",
     }
 }
 

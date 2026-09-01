@@ -223,6 +223,9 @@ pub struct SummaryMaintenanceConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ReconciliationMaintenanceConfig {
     pub enabled: bool,
+    /// Compare new ordinary content with bounded same-subject or provenance
+    /// candidates; never apply the resulting validity decision automatically.
+    pub discover_updates: bool,
     pub max_input_chars: u32,
     pub retry_after_seconds: u64,
 }
@@ -231,6 +234,7 @@ impl Default for ReconciliationMaintenanceConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            discover_updates: true,
             max_input_chars: 32_000,
             retry_after_seconds: 3_600,
         }

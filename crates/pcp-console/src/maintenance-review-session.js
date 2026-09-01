@@ -11,6 +11,18 @@ export function reviewKind(review) {
   return review?.payload?.kind || "unknown";
 }
 
+function reviewSnapshot(review) {
+  const candidate = review?.payload?.candidate || {};
+  // Persist identity only, not source content. A re-analyzed candidate must
+  // not inherit a previous staged approval merely because its ID is stable.
+  return JSON.stringify([
+    review?.proposedAt ?? null, review?.updatedAt ?? null,
+    candidate.expectedAssessmentRevisionId ?? null,
+    candidate.target?.revisionId ?? null, candidate.replacement?.revisionId ?? null,
+    candidate.disposition ?? null, candidate.basisRevisionIds ?? [],
+  ]);
+}
+
 export function canStageReviewDecision(review, decision) {
   return REVIEW_DECISIONS.has(decision)
     && (decision !== REVIEW_DECISION.SUPPRESS || reviewKind(review) === "relation");
@@ -23,6 +35,7 @@ export function stageReviewDecision(decisions, review, decision, stagedAt = new 
   decisions.set(review.candidateId, {
     candidateId: review.candidateId,
     kind: reviewKind(review),
+    snapshot: reviewSnapshot(review),
     decision,
     stagedAt,
     error: null,
@@ -38,7 +51,7 @@ export function reconcileReviewDecisions(reviews, decisions) {
   const reviewsById = new Map(reviews.map((review) => [review.candidateId, review]));
   for (const [candidateId, staged] of decisions) {
     const review = reviewsById.get(candidateId);
-    if (!review || staged.kind !== reviewKind(review) || !canStageReviewDecision(review, staged.decision)) {
+    if (!review || staged.kind !== reviewKind(review) || staged.snapshot !== reviewSnapshot(review) || !canStageReviewDecision(review, staged.decision)) {
       decisions.delete(candidateId);
     }
   }
@@ -67,11 +80,12 @@ export function reviewDecisionCounts(decisions) {
 }
 
 export function serializeReviewDecisions(decisions) {
-  return JSON.stringify([...decisions.values()].map(({ candidateId, kind, decision, stagedAt }) => ({
+  return JSON.stringify([...decisions.values()].map(({ candidateId, kind, decision, stagedAt, snapshot }) => ({
     candidateId,
     kind,
     decision,
     stagedAt,
+    snapshot,
   })));
 }
 

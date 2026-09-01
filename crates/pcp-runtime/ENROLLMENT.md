@@ -132,8 +132,15 @@ Every public request has schema `pcp.runtime.enrollment.request` and version
 
 `principalType` is `host`, `model_client`, `cli`, or `service`. `mode` is
 `observe`, `read`, `contribute`, `audit`, `write`, `repair`, or `admin`. Ordinary tenants
-use `read` or `contribute`; `contribute` adds only authenticated `ingest_page`
-and does not grant advanced Page or maintenance writes. `write` and `admin` are
+use `read` or `contribute`; `contribute` adds authenticated `ingest_page` and
+`submit_feedback` in its own Scopes, without advanced Page or maintenance writes.
+Feedback may reference any Revision the session can read, including through
+`read_all_scopes`; it does not require target-write or cross-Scope derivation
+permission. New corrective evidence belongs in `evidenceRevisionIds`, distinct
+from context actually used by the old response. Cross-Scope reconciliation and
+replacement/retraction decisions require Console approval. Publishing a derived
+Page across Scopes still requires `allow_cross_scope_derivation`.
+`write` and `admin` are
 privileged maintainer and local-operator modes. `read_all_scopes` optionally
 adds read/search grants for every Scope present when the session is opened,
 even when the primary `scopes` use `contribute` or a stronger mode. This allows

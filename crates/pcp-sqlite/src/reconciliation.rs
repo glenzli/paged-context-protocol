@@ -31,12 +31,13 @@ impl SqlitePcpStore {
         let allowed_scopes = allowed_scopes.into_iter().collect::<HashSet<_>>();
         self.run("feedback submission", move |mut connection| {
             let transaction = connection
-                .transaction()
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .context("start PCP feedback submission")?;
             ensure_scope_access(&transaction, &request.namespace, &allowed_scopes)?;
             let challenged = normalized_revision_ids(request.challenged_revision_ids.clone());
             let used = normalized_revision_ids(request.used_revision_ids.clone());
-            for revision_id in challenged.iter().chain(&used) {
+            let evidence = normalized_revision_ids(request.evidence_revision_ids.clone());
+            for revision_id in challenged.iter().chain(&used).chain(&evidence) {
                 ensure_revision_access(&transaction, revision_id, &allowed_scopes)?;
             }
             if let Some(existing) = lookup_feedback_idempotency(
@@ -52,6 +53,7 @@ impl SqlitePcpStore {
             let revision_id = random_id(&transaction, "rev_")?;
             let mut provenance_inputs = challenged.clone();
             provenance_inputs.extend(used.iter().cloned());
+            provenance_inputs.extend(evidence.iter().cloned());
             provenance_inputs.sort();
             provenance_inputs.dedup();
             let provenance = vec![ProvenanceEvent {
@@ -124,6 +126,7 @@ impl SqlitePcpStore {
                 .context("index PCP feedback signal")?;
             insert_targets(&transaction, &revision_id, "challenged", &challenged)?;
             insert_targets(&transaction, &revision_id, "used", &used)?;
+            insert_targets(&transaction, &revision_id, "evidence", &evidence)?;
             if let Some(key) = request.external_event_id.as_deref() {
                 transaction
                     .execute(
@@ -144,6 +147,7 @@ impl SqlitePcpStore {
                 created: true,
                 challenged_revision_ids: challenged,
                 used_revision_ids: used,
+                evidence_revision_ids: evidence,
             })
         })
         .await
@@ -223,6 +227,7 @@ impl SqlitePcpStore {
                         &revision_id,
                     )?,
                     used_revision_ids: load_targets(&connection, &revision_id, "used")?,
+                    evidence_revision_ids: load_targets(&connection, &revision_id, "evidence")?,
                 });
             }
             Ok(signals)
@@ -239,16 +244,17 @@ impl SqlitePcpStore {
         let allowed_scopes = allowed_scopes.into_iter().collect::<HashSet<_>>();
         self.run("feedback reconciliation", move |mut connection| {
             let transaction = connection
-                .transaction()
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .context("start PCP feedback reconciliation")?;
+            if let Some(feedback_revision_id) = request.feedback_revision_id.as_deref() {
             transaction
                 .query_row(
                     "SELECT 1 FROM pcp_feedback_signals WHERE feedback_revision_id = ?1",
-                    [&request.feedback_revision_id],
+                    [feedback_revision_id],
                     |_| Ok(()),
                 )
                 .context("find PCP feedback signal")?;
-            ensure_revision_access(&transaction, &request.feedback_revision_id, &allowed_scopes)?;
+            ensure_revision_access(&transaction, feedback_revision_id, &allowed_scopes)?;
             ensure_revision_access(&transaction, &request.target.revision_id, &allowed_scopes)?;
             ensure_page_revision_pair(
                 &transaction,
@@ -275,10 +281,10 @@ impl SqlitePcpStore {
             }
             for revision_id in &request.basis_revision_ids {
                 ensure_revision_access(&transaction, revision_id, &allowed_scopes)?;
-                if revision_id != &request.feedback_revision_id {
+                if revision_id != feedback_revision_id {
                     ensure_feedback_evidence(
                         &transaction,
-                        &request.feedback_revision_id,
+                        feedback_revision_id,
                         revision_id,
                     )?;
                 }
@@ -287,9 +293,25 @@ impl SqlitePcpStore {
                 request
                     .basis_revision_ids
                     .iter()
-                    .any(|revision_id| revision_id == &request.feedback_revision_id),
+                    .any(|revision_id| revision_id == feedback_revision_id),
                 "reconciliation basis must include the feedback Revision"
             );
+            }
+            ensure_revision_access(&transaction, &request.target.revision_id, &allowed_scopes)?;
+            ensure_current_page_revision(&transaction, &request.target)?;
+            for revision_id in &request.basis_revision_ids {
+                ensure_revision_access(&transaction, revision_id, &allowed_scopes)?;
+            }
+            // Review is bound to the validity head as well as Page contents.
+            let current_assessment: Option<String> = transaction.query_row(
+                "SELECT p.current_revision_id FROM pcp_validity_heads h JOIN pcp_pages p
+                 ON p.page_id = h.assessment_page_id JOIN pcp_validity_assessments a
+                 ON a.assessment_revision_id = p.current_revision_id WHERE a.target_revision_id = ?1",
+                [&request.target.revision_id], |row| row.get(0),
+            ).optional()?.flatten();
+            let replay = is_identical_reconciliation_replay(&transaction, &request)?;
+            anyhow::ensure!(replay || current_assessment == request.expected_assessment_revision_id,
+                "reconciliation review is stale: validity assessment changed; review again");
 
             let standing = match request.disposition {
                 ReconciliationDisposition::NoSourceChange => None,
@@ -305,7 +327,7 @@ impl SqlitePcpStore {
                         &AssessPageValidityRequest {
                             target_page_id: request.target.page_id.clone(),
                             target_revision_id: request.target.revision_id.clone(),
-                            expected_assessment_revision_id: None,
+                            expected_assessment_revision_id: request.expected_assessment_revision_id.clone(),
                             standing,
                             rationale: request.rationale.clone(),
                             scope: request.scope.clone(),
@@ -323,20 +345,24 @@ impl SqlitePcpStore {
                 .transpose()?;
             let supersedes_relation = if let Some(replacement) = request.replacement.as_ref() {
                 ensure_revision_access(&transaction, &replacement.revision_id, &allowed_scopes)?;
-                ensure_feedback_evidence(
-                    &transaction,
-                    &request.feedback_revision_id,
-                    &replacement.revision_id,
-                )?;
-                ensure_page_revision_pair(
-                    &transaction,
-                    &replacement.page_id,
-                    &replacement.revision_id,
-                )?;
+                if let Some(feedback_revision_id) = request.feedback_revision_id.as_deref() {
+                    ensure_feedback_evidence(&transaction, feedback_revision_id, &replacement.revision_id)?;
+                }
+                ensure_current_page_revision(&transaction, replacement)?;
                 anyhow::ensure!(
                     replacement.page_id != request.target.page_id,
                     "superseded reconciliation requires a different replacement Page"
                 );
+                let replaced: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pcp_relations r
+                     WHERE r.relation_type = 'supersedes' AND r.to_page_id = ?1
+                     AND NOT EXISTS(SELECT 1 FROM pcp_relation_retractions x WHERE x.relation_id = r.relation_id))",
+                    [&replacement.page_id], |row| row.get(0),
+                )?;
+                anyhow::ensure!(!replaced, "reconciliation review is stale: replacement Page is itself superseded");
+                let validity = crate::validity::current_validity(&transaction, &replacement.revision_id)?;
+                anyhow::ensure!(validity.is_none_or(|validity| !matches!(validity.standing, ValidityStanding::Retracted | ValidityStanding::Superseded)),
+                    "reconciliation review is stale: replacement evidence is no longer valid");
                 let mut relation_basis = request.basis_revision_ids.clone();
                 relation_basis.extend([
                     request.target.revision_id.clone(),
@@ -365,8 +391,9 @@ impl SqlitePcpStore {
                 validity,
                 supersedes_relation,
                 affected_revision_ids,
-                created: true,
+                created: !replay,
             };
+            if request.feedback_revision_id.is_some() {
             let resolved_at = now();
             let resolution_json = serde_json::to_string(&result)?;
             let updated = transaction
@@ -406,6 +433,7 @@ impl SqlitePcpStore {
                     params![request.feedback_revision_id, resolved_at],
                 )
                 .context("complete reconciled PCP feedback signal")?;
+            }
             transaction
                 .commit()
                 .context("commit PCP feedback reconciliation")?;
@@ -413,6 +441,59 @@ impl SqlitePcpStore {
         })
         .await
     }
+}
+
+// A retry may replay the same decision, never turn one approval into another
+// replacement by reusing its idempotency key.
+fn is_identical_reconciliation_replay(
+    transaction: &Transaction<'_>,
+    request: &ApplyReconciliationRequest,
+) -> Result<bool> {
+    let Some(key) = request.idempotency_key.as_ref() else {
+        return Ok(false);
+    };
+    let existing = transaction.query_row(
+        "SELECT i.target_revision_id, r.payload_content, r.facets_json, r.provenance_json
+         FROM pcp_validity_idempotency i JOIN pcp_revisions r ON r.revision_id = i.result_assessment_id
+         WHERE i.actor_id = ?1 AND i.idempotency_key = ?2",
+        params![request.created_by.actor_id, format!("reconciliation:{key}")],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)),
+    ).optional()?;
+    let Some((target, rationale, facets, provenance)) = existing else {
+        return Ok(false);
+    };
+    let facets: serde_json::Value = serde_json::from_str(&facets)?;
+    let provenance: Vec<ProvenanceEvent> = serde_json::from_str(&provenance)?;
+    let mut basis = request.basis_revision_ids.clone();
+    basis.push(request.target.revision_id.clone());
+    let basis = normalized_revision_ids(basis);
+    let old_basis = normalized_revision_ids(
+        provenance
+            .iter()
+            .flat_map(|event| event.input_revision_ids.iter().cloned())
+            .collect(),
+    );
+    anyhow::ensure!(
+        target == request.target.revision_id
+            && rationale == request.rationale.trim()
+            && facets["standing"] == request.disposition.as_str()
+            && facets["scope"] == json!(request.scope)
+            && old_basis == basis,
+        "reconciliation idempotency key was already used for a different decision"
+    );
+    if let Some(replacement) = &request.replacement {
+        let relation_exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pcp_relations r WHERE r.relation_type = 'supersedes'
+             AND r.from_page_id = ?1 AND r.to_page_id = ?2
+             AND NOT EXISTS(SELECT 1 FROM pcp_relation_retractions x WHERE x.relation_id = r.relation_id))",
+            params![replacement.page_id, request.target.page_id], |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            relation_exists,
+            "reconciliation idempotency key has no matching replacement relation"
+        );
+    }
+    Ok(true)
 }
 
 fn validate_feedback(request: &SubmitFeedbackRequest) -> Result<()> {
@@ -430,7 +511,9 @@ fn validate_feedback(request: &SubmitFeedbackRequest) -> Result<()> {
         "feedback requires at least one challenged Revision"
     );
     anyhow::ensure!(
-        request.challenged_revision_ids.len() + request.used_revision_ids.len()
+        request.challenged_revision_ids.len()
+            + request.used_revision_ids.len()
+            + request.evidence_revision_ids.len()
             <= MAX_FEEDBACK_TARGETS,
         "feedback exceeds {MAX_FEEDBACK_TARGETS} Revision references"
     );
@@ -449,6 +532,19 @@ fn validate_reconciliation(request: &ApplyReconciliationRequest) -> Result<()> {
         !request.rationale.trim().is_empty(),
         "reconciliation rationale is required"
     );
+    anyhow::ensure!(
+        !request.basis_revision_ids.is_empty()
+            && request.basis_revision_ids.len() <= MAX_FEEDBACK_TARGETS + 1,
+        "reconciliation requires bounded evidence"
+    );
+    if let Some(replacement) = &request.replacement {
+        anyhow::ensure!(
+            request
+                .basis_revision_ids
+                .contains(&replacement.revision_id),
+            "reconciliation basis must include the replacement Revision"
+        );
+    }
     match request.disposition {
         ReconciliationDisposition::Superseded => anyhow::ensure!(
             request.replacement.is_some(),
@@ -519,6 +615,24 @@ fn ensure_page_revision_pair(
     anyhow::ensure!(
         resolved == page_id,
         "Revision does not belong to the declared Page"
+    );
+    Ok(())
+}
+
+fn ensure_current_page_revision(
+    transaction: &Transaction<'_>,
+    page: &pcp_core::PageRevisionRef,
+) -> Result<()> {
+    let current: Option<(String, String)> = transaction
+        .query_row(
+            "SELECT current_revision_id, lifecycle_status FROM pcp_pages WHERE page_id = ?1",
+            [&page.page_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    anyhow::ensure!(
+        current == Some((page.revision_id.clone(), "active".to_owned())),
+        "reconciliation review is stale: Page changed; review again"
     );
     Ok(())
 }
@@ -610,6 +724,7 @@ fn lookup_feedback_idempotency(
                 created: false,
                 challenged_revision_ids: load_targets(transaction, &revision_id, "challenged")?,
                 used_revision_ids: load_targets(transaction, &revision_id, "used")?,
+                evidence_revision_ids: load_targets(transaction, &revision_id, "evidence")?,
             })
         })
         .transpose()
