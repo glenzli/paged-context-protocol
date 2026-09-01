@@ -582,14 +582,16 @@ impl RuntimeMaintainer {
     ) -> Result<Self> {
         config.validate()?;
         let ledger = MaintenanceLedger::load(&config.state_path).await?;
-        Ok(Self {
+        let mut maintainer = Self {
             client,
             worker,
             config,
             ledger,
             usage_source,
             write_wakeup: None,
-        })
+        };
+        maintainer.refresh_feedback_reviews().await?;
+        Ok(maintainer)
     }
 
     pub async fn load_operator_observe_once(
@@ -838,6 +840,7 @@ impl RuntimeMaintainer {
     }
 
     async fn run_scheduled_cycle_inner(&mut self) -> Result<MaintenanceCycleReport> {
+        self.refresh_feedback_reviews().await?;
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
         self.ledger
             .observe_writes(&inventory, &self.config.write_trigger);
@@ -1137,7 +1140,9 @@ impl RuntimeMaintainer {
                 if error.to_string().contains("stale") {
                     self.ledger
                         .resolve_review(candidate_id, MaintenanceReviewStatus::Stale)?;
-                    self.ledger.save(&self.config.state_path).await?;
+                    self.ledger
+                        .persist_stale_reviews(&self.config.state_path, &[candidate_id.to_owned()])
+                        .await?;
                 }
                 return Err(error);
             }
@@ -2174,6 +2179,7 @@ impl RuntimeMaintainer {
         report: &mut MaintenanceCycleReport,
         review_origin: MaintenanceReviewOrigin,
     ) -> Result<bool> {
+        self.refresh_feedback_reviews().await?;
         let signals = self
             .client
             .pending_feedback(self.config.allowed_scopes.clone(), 32)
@@ -2240,6 +2246,11 @@ impl RuntimeMaintainer {
             .saturating_add(u32::from(outcome.escalated));
         let model_attempts = outcome.model_attempts;
         let escalated = outcome.escalated;
+        // A repair may have completed while inference was running. Discard its
+        // obsolete answer; the newly indexed feedback is eligible next cycle.
+        if !self.feedback_is_current(&signal).await? {
+            return Ok(true);
+        }
         let MaintenanceWorkerResponse::ReconcileFeedback {
             target_revision_id,
             disposition,
@@ -4987,7 +4998,10 @@ fn reconciliation_request(
             revision_id: candidate.target.revision_id.clone(),
         },
         disposition: candidate.disposition.clone(),
-        rationale: candidate.rationale.clone(),
+        rationale: super::reconciliation::assessment_rationale(
+            &candidate.disposition,
+            &candidate.rationale,
+        ),
         scope: candidate.scope.clone(),
         replacement: candidate.replacement.clone(),
         basis_revision_ids: candidate.basis_revision_ids.clone(),

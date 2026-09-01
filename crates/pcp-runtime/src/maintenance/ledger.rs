@@ -217,6 +217,43 @@ impl MaintenanceLedger {
         {
             self.merge_persisted_reviews(persisted);
         }
+        self.write_locked(path).await
+    }
+
+    /// Inbox refresh is not a scheduling run. Publish only its stale review
+    /// transitions under the same lock, retaining concurrent cadence/work state.
+    pub(crate) async fn persist_stale_reviews(
+        &mut self,
+        path: &Path,
+        ids: &[String],
+    ) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let _lock = MaintenanceLedgerLock::acquire(path)?;
+        let mut persisted = Self::load(path).await?;
+        for id in ids {
+            let Some(local) = self.review_items.get(id) else {
+                continue;
+            };
+            anyhow::ensure!(
+                local.status == MaintenanceReviewStatus::Stale,
+                "inbox refresh can only persist stale reviews"
+            );
+            if let Some(current) = persisted.review_items.get(id)
+                && current.status != MaintenanceReviewStatus::Pending
+            {
+                // Do not rewrite a completed decision from another operator.
+                self.review_items.insert(id.clone(), current.clone());
+                continue;
+            }
+            persisted.review_items.insert(id.clone(), local.clone());
+        }
+        persisted.write_locked(path).await
+    }
+
+    // Caller owns MaintenanceLedgerLock for this path.
+    async fn write_locked(&self, path: &Path) -> Result<()> {
         let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
         let bytes = serde_json::to_vec_pretty(self).context("encode PCP maintenance state")?;
         tokio::fs::write(&temporary, bytes)
@@ -538,6 +575,27 @@ impl MaintenanceLedger {
 
     pub(crate) fn review_item(&self, candidate_id: &str) -> Option<MaintenanceReviewItem> {
         self.review_items.get(candidate_id).cloned()
+    }
+
+    pub(crate) fn pending_feedback_reviews(&self) -> Vec<(String, String, String)> {
+        self.review_items
+            .values()
+            .filter_map(|item| {
+                // Include snoozed reviews: they must not become actionable later.
+                if item.status != MaintenanceReviewStatus::Pending {
+                    return None;
+                }
+                let MaintenanceReviewPayload::Reconciliation(candidate) = &item.payload else {
+                    return None;
+                };
+                let signal = candidate.signal.as_ref()?;
+                Some((
+                    item.candidate_id.clone(),
+                    signal.feedback_page_id.clone(),
+                    signal.feedback_revision_id.clone(),
+                ))
+            })
+            .collect()
     }
 
     pub(crate) fn resolve_review(

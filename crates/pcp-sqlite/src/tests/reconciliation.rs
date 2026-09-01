@@ -1,9 +1,11 @@
 use super::{SqlitePcpStore, pcp_client, principal, write_request};
 use pcp_client::{AccessMode, PcpApi};
 use pcp_core::{
-    AccessPrincipalType, Actor, ActorType, ApplyReconciliationRequest, CreateScopeRequest,
-    FeedbackAuthority, FeedbackKind, PagePayload, PageRevisionRef, Projection, ReadPagesRequest,
-    ReconciliationDisposition, RevisePageRequest, SubmitFeedbackRequest, ValidityStanding,
+    AccessPrincipalType, Actor, ActorType, ApplyReconciliationRequest, AssessPageValidityRequest,
+    BrowseIndexOrder, CreateScopeRequest, FeedbackAuthority, FeedbackKind, PagePayload,
+    PageRevisionRef, Projection, ReadPagesRequest, ReconciliationDisposition, RepairPageRequest,
+    RevisePageRequest, SearchFilters, SearchMode, SearchPagesRequest, SubmitFeedbackRequest,
+    ValidityStanding,
 };
 use std::{
     sync::Arc,
@@ -15,6 +17,236 @@ struct Fixture {
     admin: Arc<dyn PcpApi>,
     tenant: Arc<dyn PcpApi>,
     actor: Actor,
+}
+
+#[tokio::test]
+async fn assessment_rationale_is_optional_and_audit_pages_are_not_knowledge() {
+    let f = Fixture::open().await;
+    let old = f.page("symbiont", "Old icon knowledge").await;
+    let new = f.page("codex", "Current icon knowledge").await;
+    let mut approval = serde_json::to_value(f.update(&old, &new, None)).unwrap();
+    approval.as_object_mut().unwrap().remove("rationale");
+    let result = f
+        .admin
+        .apply_reconciliation(serde_json::from_value(approval).unwrap())
+        .await
+        .unwrap();
+    assert!(result.supersedes_relation.is_some());
+    let validity = f.read(&old).await.validity.unwrap();
+    assert_eq!(validity.standing, ValidityStanding::Superseded);
+    assert!(validity.rationale.is_empty());
+    assert!(validity.basis_revision_ids.contains(&new.revision_id));
+
+    // The audit Page has no invented placeholder text, but remains readable by ID.
+    let audit = f
+        .admin
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![validity.assessment_page_id.clone()],
+            revision_ids: vec![],
+            projections: vec![Projection::Payload, Projection::Provenance],
+            max_chars: 8000,
+        })
+        .await
+        .unwrap();
+    assert!(audit[0].revision.payload.is_none());
+    assert_eq!(audit[0].revision.provenance[0].actor.actor_id, "operator");
+
+    // Existing verbose assessments must also be filtered, not just empty ones.
+    let mut request = serde_json::to_value(AssessPageValidityRequest {
+        target_page_id: old.page_id.clone(),
+        target_revision_id: old.revision_id.clone(),
+        expected_assessment_revision_id: Some(validity.assessment_revision_id.clone()),
+        standing: ValidityStanding::Superseded,
+        rationale: "knowledge auditneedle".into(),
+        scope: None,
+        basis_revision_ids: vec![new.revision_id.clone()],
+        created_by: Actor {
+            actor_type: ActorType::Model,
+            actor_id: "model:audit".into(),
+        },
+        tool_or_model: None,
+        idempotency_key: None,
+    })
+    .unwrap();
+    let verbose = f
+        .admin
+        .assess_page_validity(serde_json::from_value(request.clone()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(verbose.assessment_page_id, validity.assessment_page_id);
+
+    // A tenant-chosen kind alone must never hide ordinary knowledge.
+    let mut ordinary = write_request(
+        f.store.identity_id(),
+        "symbiont",
+        f.actor.clone(),
+        "knowledge named by tenant",
+        "tenant-kind",
+    );
+    ordinary.kind = "validity_assessment".into();
+    let ordinary = f
+        .store
+        .write_page(ordinary, vec!["symbiont".into()])
+        .await
+        .unwrap();
+    let scopes = vec!["symbiont".into(), "codex".into()];
+    let library = f
+        .store
+        .browse_content_pages(
+            scopes.clone(),
+            None,
+            BrowseIndexOrder::Recent,
+            1,
+            None,
+            32000,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(library.total_pages, 2);
+    assert_eq!(library.hits.len(), 1);
+    let next = f
+        .store
+        .browse_content_pages(
+            scopes.clone(),
+            None,
+            BrowseIndexOrder::Recent,
+            1,
+            library.next_cursor,
+            32000,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(next.hits.len(), 1);
+    assert!(next.next_cursor.is_none());
+    assert!(
+        library
+            .hits
+            .iter()
+            .chain(&next.hits)
+            .any(|p| p.page_id == ordinary.page_id)
+    );
+    assert_eq!(
+        f.store
+            .content_library_summary(scopes.clone())
+            .await
+            .unwrap()
+            .page_count,
+        2
+    );
+    let retrieval = f
+        .store
+        .browse_retrieval_pages(
+            scopes.clone(),
+            None,
+            BrowseIndexOrder::Recent,
+            10,
+            None,
+            32000,
+        )
+        .await
+        .unwrap();
+    assert_eq!(retrieval.total_pages, 2);
+    assert!(
+        retrieval
+            .hits
+            .iter()
+            .all(|p| p.page_id != validity.assessment_page_id)
+    );
+    let index = f
+        .store
+        .browse_index(
+            scopes.clone(),
+            vec![],
+            BrowseIndexOrder::Recent,
+            10,
+            None,
+            32000,
+        )
+        .await
+        .unwrap();
+    assert!(
+        index
+            .hits
+            .iter()
+            .all(|p| p.page_id != validity.assessment_page_id)
+    );
+    for mode in [
+        SearchMode::Text,
+        SearchMode::Exact,
+        SearchMode::Auto,
+        SearchMode::Temporal,
+    ] {
+        let found = f
+            .store
+            .search_pages(SearchPagesRequest {
+                query: if mode == SearchMode::Temporal {
+                    ""
+                } else {
+                    "knowledge"
+                }
+                .into(),
+                scopes: scopes.clone(),
+                mode,
+                term_match: Default::default(),
+                projections: vec![Projection::Payload],
+                filters: SearchFilters::default(),
+                limit: 10,
+                cursor: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(found.hits.len(), 2);
+        assert!(
+            found
+                .hits
+                .iter()
+                .all(|p| p.page_id != validity.assessment_page_id)
+        );
+    }
+    // Repair the current explanation through the assessment owner. Old audit
+    // text stays in history, and the replacement Relation is not duplicated.
+    request.as_object_mut().unwrap().remove("rationale");
+    request["expectedAssessmentRevisionId"] = verbose.assessment_revision_id.clone().into();
+    let clean = f
+        .admin
+        .assess_page_validity(serde_json::from_value(request).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(clean.assessment_page_id, validity.assessment_page_id);
+    let target = f
+        .admin
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![old.page_id],
+            revision_ids: vec![],
+            projections: vec![
+                Projection::Validity,
+                Projection::History,
+                Projection::Payload,
+            ],
+            max_chars: 16000,
+        })
+        .await
+        .unwrap();
+    assert!(target[0].validity.as_ref().unwrap().rationale.is_empty());
+    assert_eq!(target[0].validity_history.len(), 2);
+    assert!(
+        target[0]
+            .validity_history
+            .iter()
+            .any(|v| v.rationale == "knowledge auditneedle")
+    );
+    assert!(
+        target[0]
+            .validity_history
+            .iter()
+            .any(|v| v.rationale.is_empty())
+    );
+    assert_eq!(
+        target[0].revision.payload.as_ref().unwrap().content,
+        "Old icon knowledge"
+    );
 }
 impl Fixture {
     async fn open() -> Self {
@@ -156,6 +388,240 @@ impl Fixture {
             .unwrap()
             .remove(0)
     }
+
+    fn repair(&self, page: &str, revision: &str, content: &str) -> RepairPageRequest {
+        RepairPageRequest {
+            page_id: page.into(),
+            expected_revision_id: revision.into(),
+            payload: Some(PagePayload {
+                media_type: "text/plain".into(),
+                content: content.into(),
+            }),
+            source_refs: Vec::new(),
+            facets: None,
+            based_on_revision_ids: Vec::new(),
+            reason: "Remove unrelated instructions from feedback".into(),
+            tool_or_model: Some("pcp-console".into()),
+            idempotency_key: None,
+        }
+    }
+}
+
+#[tokio::test]
+async fn feedback_repair_moves_pending_work_and_rejects_old_approvals() {
+    let f = Fixture::open().await;
+    let old = f.page("symbiont", "Old icon description").await;
+    let new = f.page("codex", "Correct icon description").await;
+    let mut request = f.feedback(&old.revision_id, &new.revision_id);
+    request.used_revision_ids = vec![old.revision_id.clone()];
+    let signal = f.tenant.submit_feedback(request.clone()).await.unwrap();
+    let stale_approval = f.update(&old, &new, Some(signal.feedback_revision_id.clone()));
+    let repair = f.repair(
+        &signal.feedback_page_id,
+        &signal.feedback_revision_id,
+        "Only the factual correction.",
+    );
+    assert!(f.tenant.repair_page(repair.clone()).await.is_err());
+    // Failed content validation must roll back the new head and work index.
+    for invalid in [String::new(), "x".repeat(32_001)] {
+        let failed = f.repair(
+            &signal.feedback_page_id,
+            &signal.feedback_revision_id,
+            &invalid,
+        );
+        assert!(f.admin.repair_page(failed).await.is_err());
+        assert_eq!(
+            f.admin
+                .current_revision_id(signal.feedback_page_id.clone())
+                .await
+                .unwrap(),
+            signal.feedback_revision_id
+        );
+    }
+    let edited = f.admin.repair_page(repair.clone()).await.unwrap();
+    assert!(f.admin.repair_page(repair).await.is_err());
+    let pending = f.admin.pending_feedback(Vec::new(), 1).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].feedback_revision_id, edited.revision_id);
+    assert_eq!(pending[0].feedback_page_id, signal.feedback_page_id);
+    assert_eq!(
+        pending[0].challenged_revision_ids,
+        signal.challenged_revision_ids
+    );
+    assert_eq!(pending[0].used_revision_ids, signal.used_revision_ids);
+    assert_eq!(
+        pending[0].evidence_revision_ids,
+        signal.evidence_revision_ids
+    );
+    assert_eq!(pending[0].authority, request.authority);
+    assert_eq!(pending[0].kind, request.kind);
+    assert!(
+        f.admin
+            .apply_reconciliation(stale_approval)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("stale")
+    );
+    assert!(f.read(&old).await.validity.is_none());
+    assert_eq!(
+        f.read(&edited).await.revision.payload.unwrap().content,
+        "Only the factual correction."
+    );
+    let original = pcp_core::WriteResult {
+        page_id: signal.feedback_page_id.clone(),
+        revision_id: signal.feedback_revision_id.clone(),
+        created: true,
+    };
+    assert_eq!(
+        f.read(&original).await.revision.payload.unwrap().content,
+        request.payload.content
+    );
+    // A retry of the originating MCP request is not a new feedback signal.
+    assert!(!f.tenant.submit_feedback(request).await.unwrap().created);
+    let edited_again = f
+        .admin
+        .repair_page(f.repair(&edited.page_id, &edited.revision_id, "Final wording."))
+        .await
+        .unwrap();
+    assert_eq!(
+        f.admin.pending_feedback(Vec::new(), 10).await.unwrap()[0].feedback_revision_id,
+        edited_again.revision_id
+    );
+    assert!(
+        f.admin
+            .apply_reconciliation(f.update(&old, &new, Some(edited.revision_id)))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("stale")
+    );
+    let result = f
+        .admin
+        .apply_reconciliation(f.update(&old, &new, Some(edited_again.revision_id.clone())))
+        .await
+        .unwrap();
+    assert!(result.created);
+    assert_eq!(result.feedback_revision_id, Some(edited_again.revision_id));
+    assert!(
+        f.admin
+            .pending_feedback(Vec::new(), 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn feedback_repair_preserves_already_applied_targets() {
+    let f = Fixture::open().await;
+    let first = f.page("symbiont", "First older claim").await;
+    let second = f.page("symbiont", "Second older claim").await;
+    let new = f.page("codex", "Current evidence").await;
+    let mut request = f.feedback(&first.revision_id, &new.revision_id);
+    request
+        .challenged_revision_ids
+        .push(second.revision_id.clone());
+    let signal = f.tenant.submit_feedback(request).await.unwrap();
+    let first_result = f
+        .admin
+        .apply_reconciliation(f.update(&first, &new, Some(signal.feedback_revision_id.clone())))
+        .await
+        .unwrap();
+    let edited = f
+        .admin
+        .repair_page(f.repair(
+            &signal.feedback_page_id,
+            &signal.feedback_revision_id,
+            "Edited second claim correction",
+        ))
+        .await
+        .unwrap();
+    let pending = f.admin.pending_feedback(Vec::new(), 10).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].challenged_revision_ids,
+        vec![second.revision_id.clone()]
+    );
+    let replay = f
+        .admin
+        .apply_reconciliation(f.update(&first, &new, Some(edited.revision_id.clone())))
+        .await
+        .unwrap();
+    assert!(!replay.created);
+    assert_eq!(
+        serde_json::to_value(replay.validity).unwrap(),
+        serde_json::to_value(first_result.validity).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(replay.supersedes_relation).unwrap(),
+        serde_json::to_value(first_result.supersedes_relation).unwrap()
+    );
+    let mut approval = f.update(&second, &new, Some(edited.revision_id.clone()));
+    approval.idempotency_key = Some("approved:second".into());
+    f.admin.apply_reconciliation(approval).await.unwrap();
+    let final_edit = f
+        .admin
+        .repair_page(f.repair(
+            &edited.page_id,
+            &edited.revision_id,
+            "Copy edit after completion",
+        ))
+        .await
+        .unwrap();
+    assert_ne!(final_edit.revision_id, edited.revision_id);
+    assert!(
+        f.admin
+            .pending_feedback(Vec::new(), 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        f.read(&first).await.validity.unwrap().standing,
+        ValidityStanding::Superseded
+    );
+    assert_eq!(
+        f.read(&second).await.validity.unwrap().standing,
+        ValidityStanding::Superseded
+    );
+}
+
+#[tokio::test]
+async fn deleted_feedback_is_not_actionable() {
+    let f = Fixture::open().await;
+    let old = f.page("symbiont", "Old claim").await;
+    let new = f.page("codex", "New claim").await;
+    let signal = f
+        .tenant
+        .submit_feedback(f.feedback(&old.revision_id, &new.revision_id))
+        .await
+        .unwrap();
+    f.admin
+        .delete_page(pcp_core::DeletePageRequest {
+            page_id: signal.feedback_page_id,
+            expected_revision_id: signal.feedback_revision_id.clone(),
+            reason: Some("Feedback withdrawn".into()),
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        f.admin
+            .pending_feedback(Vec::new(), 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        f.admin
+            .apply_reconciliation(f.update(&old, &new, Some(signal.feedback_revision_id)))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("stale")
+    );
+    assert!(f.read(&old).await.validity.is_none());
 }
 
 #[tokio::test]

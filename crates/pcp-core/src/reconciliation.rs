@@ -192,6 +192,8 @@ pub struct ApplyReconciliationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_assessment_revision_id: Option<String>,
     pub disposition: ReconciliationDisposition,
+    /// Optional explanation, not a new knowledge assertion.
+    #[serde(default)]
     pub rationale: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,

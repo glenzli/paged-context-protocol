@@ -21,7 +21,11 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::json;
 
-const SHARED_SERVER_INSTRUCTIONS: &str = "Call pcp_capture only when the user explicitly asks to retain something, or for a confirmed decision, explicit preference, stable cross-task constraint, verified reusable finding, or completed reusable outcome that is likely to matter in a later task. If uncertain, do not write. Never capture routine progress, raw transcripts or logs, facts cheaply recovered from the repository, speculation, secrets, or duplicates. Preserve the user's language and keep one self-contained subject per Page. PCP is an identity-scoped durable graph of stable Pages with immutable Revisions. Call pcp_whoami before cross-Scope work. Prefer pcp_semantic_search for conservative semantic retrieval; use pcp_match_intent only when a Router review is justified, and pcp_search_pages only for deterministic inspection. Use pageId for stable identity and Relations; use revisionId for exact evidence and provenance. pcp_expand_graph returns only a bounded, anchored ACL-filtered slice, never the entire graph. Source applications may use pcp_ingest_page for ordinary source events. Write independent new information normally; a later timestamp does not prove it replaces an older claim. When a user explicitly challenges recalled evidence, call pcp_submit_feedback with challengedRevisionIds, the actually-used usedRevisionIds, and any new corrective evidence in evidenceRevisionIds. Feedback is stored in your writable Scope and may reference other readable Scopes without changing them. Replacements and retractions await Console approval. Do not report pending feedback as an applied correction. Advanced validity, write and revise tools require separate maintainer permissions; never use them to bypass review.";
+const SHARED_SERVER_INSTRUCTIONS: &str = concat!(
+    "Call pcp_capture only when the user explicitly asks to retain something, or for a confirmed decision, explicit preference, stable cross-task constraint, verified reusable finding, or completed reusable outcome that is likely to matter in a later task. If uncertain, do not write. Never capture routine progress, raw transcripts or logs, facts cheaply recovered from the repository, speculation, secrets, or duplicates. Preserve the user's language and keep one self-contained subject per Page.\n\n",
+    "Compose content as the durable subject itself, not a report about saving it. Omit retention requests, save/approval acknowledgements and dates, tool calls, and assistant-authored next steps or Console handling instructions from title and content. Put retention reasons in retentionRationale, source pointers in sourceRefs, and exact PCP evidence in the appropriate Revision ID fields. Do not invent sources or dates. Preserve meaningful attribution, uncertainty, scope, and fact-effective dates; a save date is not a fact-effective date. A genuine ongoing preference such as 'reply in Chinese' is durable content, unlike 'call MCP to save this'. Feedback content states the disputed claim, correction or disagreement, grounds and affected scope, including an explicit user withdrawal intent when present; it is not an agent execution plan. Before writing, check that the body stands alone without this conversation and does not present a requested or pending action as completed.\n\n",
+    "PCP is an identity-scoped durable graph of stable Pages with immutable Revisions. Call pcp_whoami before cross-Scope work. Prefer pcp_semantic_search for conservative semantic retrieval; use pcp_match_intent only when a Router review is justified, and pcp_search_pages only for deterministic inspection. Use pageId for stable identity and Relations; use revisionId for exact evidence and provenance. pcp_expand_graph returns only a bounded, anchored ACL-filtered slice, never the entire graph. Source applications may use pcp_ingest_page for ordinary source events. Write independent new information normally; a later timestamp does not prove it replaces an older claim. When a user explicitly challenges recalled evidence, call pcp_submit_feedback with challengedRevisionIds, the actually-used usedRevisionIds, and any new corrective evidence in evidenceRevisionIds. Feedback is stored in your writable Scope and may reference other readable Scopes without changing them. Replacements and retractions await Console approval. Do not report pending feedback as an applied correction. Advanced validity, write and revise tools require separate maintainer permissions; never use them to bypass review."
+);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PcpMcpSurface {
@@ -262,6 +266,8 @@ pub struct IngestPageParams {
 #[derive(Debug, JsonSchema, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureCategory {
+    /// The user explicitly asked to retain the subject. Store that subject,
+    /// not the instruction to save it or an acknowledgement of permission.
     ExplicitInstruction,
     ExplicitPreference,
     DurableDecision,
@@ -288,15 +294,28 @@ impl CaptureCategory {
 pub struct CapturePageParams {
     #[serde(default)]
     scope: Option<String>,
+    /// Why capture is justified; explicit_instruction means an explicit retention
+    /// request, not that the request itself belongs in content.
     category: CaptureCategory,
+    /// Short subject title, without a Markdown heading prefix or save/approval wording.
     title: String,
+    /// One self-contained durable fact, preference, decision, constraint or finding,
+    /// in the user's language. Preserve attribution, qualifications, scope and relevant
+    /// fact-effective dates. Exclude requests to save, save/approval acknowledgements
+    /// or dates, tool instructions, retention rationale and assistant next steps.
+    /// Genuine ongoing preferences are content, even when phrased as instructions.
     content: String,
-    /// Why this item is likely to remain useful in a later, separate task.
+    /// Why this subject will be useful in a later task; metadata, not part of content.
+    /// Explain future utility rather than repeating that the user authorized saving.
     retention_rationale: String,
+    /// Known source pointers, not invented provenance or save-confirmation prose.
     #[serde(default)]
     source_refs: Vec<SourceRef>,
+    /// Exact PCP Revisions actually used to derive this content, not merely related Pages.
     #[serde(default)]
     based_on_revision_ids: Vec<String>,
+    /// When the source information was observed, if known. Not a save/approval timestamp;
+    /// retain any distinct fact-effective date in content when it affects meaning.
     #[serde(default)]
     observed_at: Option<String>,
     #[serde(default)]
@@ -306,22 +325,33 @@ pub struct CapturePageParams {
 #[derive(Debug, JsonSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitFeedbackParams {
+    /// Writable Scope for the feedback, not necessarily the challenged Page's Scope.
     #[serde(default)]
     scope: Option<String>,
     kind: FeedbackKind,
     #[serde(default = "default_feedback_authority")]
     authority: FeedbackAuthority,
+    /// The disputed claim, correction or disagreement, grounds and affected scope,
+    /// in the user's language. Preserve explicit user withdrawal intent when present.
+    /// Exclude save requests/acknowledgements, tool or Console handling instructions,
+    /// assistant execution plans and claims that pending changes are already applied.
+    /// Put source pointers and exact Revision IDs in their dedicated fields.
     content: String,
+    /// Exact old Revisions being challenged; do not substitute current Page heads.
     challenged_revision_ids: Vec<String>,
+    /// Only Revisions actually used in the challenged response; omit when none is identified.
     #[serde(default)]
     used_revision_ids: Vec<String>,
     /// New correction/replacement evidence, not context used by the old response.
     #[serde(default)]
     evidence_revision_ids: Vec<String>,
+    /// Known reference to the challenged response, not an instruction for the next agent.
     #[serde(default)]
     response_ref: Option<String>,
+    /// When the correction or disagreement was observed, if known, not when it was saved.
     #[serde(default)]
     observed_at: Option<String>,
+    /// Known sources of the correction; do not invent attribution or save confirmations.
     #[serde(default)]
     source_refs: Vec<SourceRef>,
     #[serde(default)]
@@ -359,6 +389,9 @@ pub struct AssessPageParams {
     target_page_id: String,
     target_revision_id: String,
     standing: ValidityStanding,
+    /// Optional concise qualification or explanation. Omit for a clear decision
+    /// already expressed by standing and exact evidence; not a knowledge Page.
+    #[serde(default)]
     rationale: String,
     evidence_revision_ids: Vec<String>,
 }
@@ -564,7 +597,7 @@ impl PcpMcpServer {
 
     #[tool(
         name = "pcp_capture",
-        description = "Exceptionally retain one confirmed, self-contained item for later tasks or conversations. Use only for an explicit retention request, explicit preference, durable decision, stable cross-task constraint, verified reusable finding, or completed reusable outcome. Explain why it remains useful; when uncertain, do not call this tool. Never store routine progress, raw transcripts or logs, cheaply recoverable repository facts, speculation, secrets, or duplicates.",
+        description = "Exceptionally retain one confirmed, self-contained item for later tasks or conversations. Use only for an explicit retention request, explicit preference, durable decision, stable cross-task constraint, verified reusable finding, or completed reusable outcome. Write the subject itself in content, not the request to remember it, save/approval acknowledgements, or tool/handling instructions. Explain future utility in retentionRationale and put provenance in dedicated fields. Preserve real preferences, qualifications and fact-effective dates. When uncertain, do not call this tool. Never store routine progress, raw transcripts or logs, cheaply recoverable repository facts, speculation, secrets, or duplicates.",
         annotations(
             title = "Capture Durable PCP Context",
             read_only_hint = false,
@@ -620,7 +653,7 @@ impl PcpMcpServer {
 
     #[tool(
         name = "pcp_submit_feedback",
-        description = "Submit an explicit correction or challenge for Console review, including across readable Scopes. Write new information with pcp_capture first when needed; reference its exact Revision in evidenceRevisionIds. challengedRevisionIds identifies old disputed Revisions; usedRevisionIds is only context actually used in the old response. scope is where feedback is stored, not the challenged Page's Scope. This does not edit, invalidate or replace the original Page. Runtime proposes a decision; replacements and retractions require Console approval. PCP does not dereference responseRef or tenant sources.",
+        description = "Submit an explicit correction or challenge for Console review, including across readable Scopes. Content states the disagreement/correction, grounds and affected scope, including explicit user withdrawal intent, without save acknowledgements, assistant execution plans or tool/Console handling instructions. Write new information with pcp_capture first when needed; reference its exact Revision in evidenceRevisionIds. challengedRevisionIds identifies old disputed Revisions; usedRevisionIds is only context actually used in the old response. scope is where feedback is stored, not the challenged Page's Scope. This does not edit, invalidate or replace the original Page. Runtime proposes a decision; replacements and retractions require Console approval. PCP does not dereference responseRef or tenant sources.",
         annotations(
             title = "Submit PCP Feedback",
             read_only_hint = false,
@@ -1473,6 +1506,20 @@ mod tests {
     };
 
     #[test]
+    fn validity_wire_schema_does_not_require_explanatory_text() {
+        let params: super::AssessPageParams = serde_json::from_value(serde_json::json!({
+            "targetPageId": "page", "targetRevisionId": "revision",
+            "standing": "superseded", "evidenceRevisionIds": ["replacement"]
+        }))
+        .unwrap();
+        assert!(params.rationale.is_empty());
+        let schema = serde_json::to_value(schemars::schema_for!(super::AssessPageParams)).unwrap();
+        let required = schema["required"].as_array().unwrap();
+        assert!(!required.contains(&serde_json::json!("rationale")));
+        assert!(required.contains(&serde_json::json!("evidenceRevisionIds")));
+    }
+
+    #[test]
     fn mcp_surface_names_are_explicit() {
         assert_eq!("codex".parse(), Ok(PcpMcpSurface::Codex));
         assert_eq!("chatgpt".parse(), Ok(PcpMcpSurface::ChatGpt));
@@ -1789,6 +1836,16 @@ mod tests {
         let instruction_prefix = instructions.chars().take(512).collect::<String>();
         assert!(instruction_prefix.contains("If uncertain, do not write"));
         assert!(instruction_prefix.contains("Never capture routine progress"));
+        server
+            .pcp_create_scope(Parameters(CreateScopeRequest {
+                namespace: "project:protocol-test".into(),
+                display_name: "Protocol test".into(),
+                description: None,
+                parent_namespace: None,
+            }))
+            .await
+            .expect("create isolated wire-test Scope");
+        let store_client = Arc::clone(&server.client);
         let (server_io, client_io) = tokio::io::duplex(128 * 1024);
         let server_task = tokio::spawn(async move {
             server
@@ -1821,6 +1878,142 @@ mod tests {
                     .and_then(|annotations| annotations.read_only_hint)
                     == Some(false)
         }));
+        // Verify guidance reaches the actual wire schema, without freezing its wording.
+        for (name, fields) in [
+            (
+                "pcp_capture",
+                vec![
+                    "category",
+                    "title",
+                    "content",
+                    "retentionRationale",
+                    "sourceRefs",
+                    "basedOnRevisionIds",
+                    "observedAt",
+                ],
+            ),
+            (
+                "pcp_submit_feedback",
+                vec![
+                    "content",
+                    "challengedRevisionIds",
+                    "usedRevisionIds",
+                    "evidenceRevisionIds",
+                    "responseRef",
+                    "sourceRefs",
+                    "observedAt",
+                ],
+            ),
+        ] {
+            let tool = tools.iter().find(|tool| tool.name == name).expect("tool");
+            let properties = tool.input_schema.get("properties").expect("properties");
+            for field in fields {
+                let description = properties[field]["description"]
+                    .as_str()
+                    .unwrap_or_default();
+                assert!(
+                    !description.trim().is_empty(),
+                    "{name}.{field} has no guidance"
+                );
+            }
+        }
+
+        // Durable instructions and effective dates remain content, while capture
+        // rationale, observation time and source references remain metadata.
+        let title = "技术解释语言";
+        let content = "自 2026-09-01 起，用户偏好技术解释使用中文；代码标识符保留英文。";
+        let rationale = "该语言偏好适用于以后的技术讨论。";
+        let observed_at = "2026-09-02T00:00:00.000Z";
+        let captured = client
+            .call_tool(
+                CallToolRequestParams::new("pcp_capture").with_arguments(
+                    serde_json::json!({
+                        "category": "explicit_instruction",
+                        "title": title,
+                        "content": content,
+                        "retentionRationale": rationale,
+                        "observedAt": observed_at,
+                        "sourceRefs": [{"providerId": "test", "locator": "conversation:preference"}]
+                    })
+                    .as_object()
+                    .expect("arguments")
+                    .clone(),
+                ),
+            )
+            .await
+            .expect("capture through MCP");
+        assert_ne!(captured.is_error, Some(true));
+        let captured_revision = captured.structured_content.expect("capture result")["revisionId"]
+            .as_str()
+            .expect("capture Revision")
+            .to_owned();
+        let feedback_content =
+            "用户撤回技术解释一律使用中文的要求；英文技术讨论也可接受，代码标识符仍保留英文。";
+        let feedback = client
+            .call_tool(
+                CallToolRequestParams::new("pcp_submit_feedback").with_arguments(
+                    serde_json::json!({
+                        "kind": "preference_change",
+                        "authority": "subject_owner",
+                        "content": feedback_content,
+                        "challengedRevisionIds": [captured_revision],
+                        "responseRef": "conversation:correction",
+                        "observedAt": observed_at
+                    })
+                    .as_object()
+                    .expect("arguments")
+                    .clone(),
+                ),
+            )
+            .await
+            .expect("feedback through MCP");
+        assert_ne!(feedback.is_error, Some(true));
+        let feedback_revision =
+            feedback.structured_content.expect("feedback result")["feedbackRevisionId"]
+                .as_str()
+                .expect("feedback Revision")
+                .to_owned();
+        let pages = store_client
+            .read_pages(ReadPagesRequest {
+                page_ids: Vec::new(),
+                revision_ids: vec![captured_revision.clone(), feedback_revision.clone()],
+                projections: vec![
+                    Projection::Manifest,
+                    Projection::Payload,
+                    Projection::Facets,
+                    Projection::Sources,
+                    Projection::Provenance,
+                ],
+                max_chars: 32_000,
+            })
+            .await
+            .expect("read actual persisted wire writes");
+        let capture = pages
+            .iter()
+            .find(|page| page.revision.revision_id == captured_revision)
+            .expect("capture");
+        assert_eq!(
+            capture.revision.payload.as_ref().expect("payload").content,
+            format!("# {title}\n\n{content}")
+        );
+        assert_eq!(
+            capture.revision.facets.as_ref().expect("facets")["retentionRationale"],
+            rationale
+        );
+        assert_eq!(capture.revision.observed_at.as_deref(), Some(observed_at));
+        assert_eq!(
+            capture.revision.source_refs[0].locator,
+            "conversation:preference"
+        );
+        let feedback = pages
+            .iter()
+            .find(|page| page.revision.revision_id == feedback_revision)
+            .expect("feedback");
+        assert_eq!(
+            feedback.revision.payload.as_ref().expect("payload").content,
+            feedback_content
+        );
+
         let described = client
             .call_tool(CallToolRequestParams::new("pcp_describe"))
             .await

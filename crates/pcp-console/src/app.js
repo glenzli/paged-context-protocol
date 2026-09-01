@@ -1425,7 +1425,7 @@ const pageInspector = createPageInspector({
     state.pages.previewFallbacks.clear();
     state.governance.loaded = false;
     if (state.pages.busy) state.pages.reloadAfterBusy = true;
-    await Promise.all([loadOverview(), loadPages({page:1})]);
+    await Promise.all([loadOverview(), loadPages({page:1}), loadRelationReviews()]);
   },
 });
 const queryView = createQueryView({

@@ -190,8 +190,8 @@ Search/Browse current Summary and Page heads
 ```
 
 Validity assessment 同样是稳定的 `revisioned` Page；新的判断更新同一 Page，而不是累积新的
-assessment Page。Page 的 `lifecycleStatus` 只控制默认可见性；`live`、
-`qualified`、`disputed`、`retracted` 等认识必须由 assessment 内容、证据 Revision 与当前投影
+assessment Page。这些 Page 属于审计记录，不是独立的知识候选。Page 的 `lifecycleStatus` 只控制默认可见性；`live`、
+`qualified`、`disputed`、`retracted` 等认识必须由结构化 standing、证据 Revision 与当前投影
 表达，不能混入版本链。
 
 无损 pack 用于降低大量细粒度 sealed Page 的对象数量，而不让模型重写或删减原始内容。Runtime
@@ -306,6 +306,15 @@ Summary、Pack、Relation、Topic、Archive、反馈协调或 retention 候选�
 `qualified`、`disputed`、`superseded` 或 `retracted`；只有 `superseded` 可以指定证据集合中的 replacement Revision，
 并在同一事务中写入 Validity 与跨 Page `supersedes` Relation。目标、替代内容和审阅时的 Validity head 必须重验；
 `expectedAssessmentRevisionId` 为空表示审阅时尚无评估，不表示允许覆盖任意新评估。过期候选不得应用。
+
+判定理由 `rationale` 可省略；明确的替代或撤回由 standing、精确证据、Relation、操作者和时间表达，
+无需再复述一遍正文。有范围限制或需要解释的分歧时，可以补充简短理由和 scope。评估 Page 是审计记录，
+不进入普通页面列表、默认搜索、语义索引或据此生成的维护候选；仍可按精确 ID 或 Validity/History 投影读取。
+模型建议在审阅时仍应提供可核对的依据；审阅说明不因此成为独立知识。
+
+本机管理工具修正反馈正文时，应在同一事务中发布新 Revision 并续接反馈索引，保留被挑战、已使用和新证据的引用。
+只有当前有效反馈版本可进入后续协调；旧版本的待审提案和暂存批准失效，应按新正文重新分析尚未处理的目标。
+旧反馈和已应用的逐目标结果保留用于审计。编辑反馈不撤销或重做已经应用的 Validity 与 Relation；这些决定需要另行审阅。
 
 普通写入不自动断言替代。相似度、来源重合或时间先后只能用于找候选，不足以决定哪个内容正确；局部修正也不应
 抹去旧 Page 中仍有效的其他内容。低影响、同 Scope 的反馈决定可以按部署策略自动应用；跨 Scope 的协调、普通

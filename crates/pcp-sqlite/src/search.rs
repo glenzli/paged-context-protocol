@@ -256,6 +256,7 @@ fn browse_index_once(
                  AND json_extract(validity_revision.facets_json, '$.standing') = 'retracted'
            )",
     );
+    append_non_assessment_page_filter(&mut sql);
     if !excluded_page_kinds.is_empty() {
         sql.push_str(" AND p.kind NOT IN (");
         push_placeholders(&mut sql, excluded_page_kinds.len());
@@ -1275,6 +1276,7 @@ fn append_lifecycle_filter(
 }
 
 fn append_effective_page_filter(sql: &mut String) {
+    append_non_assessment_page_filter(sql);
     sql.push_str(
         " AND NOT EXISTS (
             SELECT 1 FROM pcp_relations newer
@@ -1297,6 +1299,18 @@ fn append_effective_page_filter(sql: &mut String) {
             WHERE validity_head.target_page_id = p.page_id
               AND validity_assessment.target_revision_id = r.revision_id
               AND json_extract(validity_revision.facets_json, '$.standing') = 'retracted'
+        )",
+    );
+}
+
+/// Validity Pages are audit records, not independent retrieval candidates.
+/// Use the structural binding, never a tenant-controlled kind label. Exact
+/// reads and Validity/History projections remain available under normal ACLs.
+fn append_non_assessment_page_filter(sql: &mut String) {
+    sql.push_str(
+        " AND NOT EXISTS (
+            SELECT 1 FROM pcp_validity_heads assessment_binding
+            WHERE assessment_binding.assessment_page_id = p.page_id
         )",
     );
 }

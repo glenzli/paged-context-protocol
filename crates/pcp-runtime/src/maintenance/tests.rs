@@ -39,6 +39,8 @@ struct FakeWorker {
     requests: Mutex<Vec<MaintenanceWorkerRequest>>,
 }
 
+#[path = "tests/feedback_edit.rs"]
+mod feedback_edit;
 #[path = "tests/update_discovery.rs"]
 mod update_discovery;
 

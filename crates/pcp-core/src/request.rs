@@ -303,6 +303,8 @@ pub struct AssessPageValidityRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_assessment_revision_id: Option<String>,
     pub standing: ValidityStanding,
+    /// Optional explanation; exact evidence and standing carry the decision.
+    #[serde(default)]
     pub rationale: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,

@@ -128,10 +128,10 @@ pub(crate) fn assess_page_validity_tx(
         tool_or_model: request.tool_or_model.clone(),
         reason: None,
     }];
-    let payload = PagePayload {
+    let payload = (!request.rationale.trim().is_empty()).then(|| PagePayload {
         media_type: "text/markdown".to_owned(),
         content: request.rationale.trim().to_owned(),
-    };
+    });
     let facets = json!({
         "standing": request.standing.as_str(),
         "scope": request.scope.clone(),
@@ -148,7 +148,7 @@ pub(crate) fn assess_page_validity_tx(
         None,
         None,
         &request.created_by,
-        Some(&payload),
+        payload.as_ref(),
         &[],
         Some(&facets),
         &provenance,
@@ -232,7 +232,7 @@ pub(crate) fn current_validity(
                    assessment_revision.previous_revision_id,
                    assessment.target_revision_id,
                    json_extract(assessment_revision.facets_json, '$.standing'),
-                   assessment_revision.payload_content,
+                   COALESCE(assessment_revision.payload_content, ''),
                    json_extract(assessment_revision.facets_json, '$.scope'),
                    assessment_revision.created_at,
                    assessment_revision.actor_type, assessment_revision.actor_id,
@@ -271,7 +271,7 @@ pub(crate) fn validity_history(
                    assessment_revision.previous_revision_id,
                    assessment.target_revision_id,
                    json_extract(assessment_revision.facets_json, '$.standing'),
-                   assessment_revision.payload_content,
+                   COALESCE(assessment_revision.payload_content, ''),
                    json_extract(assessment_revision.facets_json, '$.scope'),
                    assessment_revision.created_at,
                    assessment_revision.actor_type, assessment_revision.actor_id,
@@ -309,8 +309,8 @@ fn validate_assessment(request: &AssessPageValidityRequest) -> Result<()> {
         anyhow::bail!("PCP validity assessment requires a target Revision");
     }
     let rationale_chars = request.rationale.trim().chars().count();
-    if rationale_chars == 0 || rationale_chars > MAX_RATIONALE_CHARS {
-        anyhow::bail!("PCP validity rationale must contain 1-{MAX_RATIONALE_CHARS} characters");
+    if rationale_chars > MAX_RATIONALE_CHARS {
+        anyhow::bail!("PCP validity rationale exceeds {MAX_RATIONALE_CHARS} characters");
     }
     if request
         .scope

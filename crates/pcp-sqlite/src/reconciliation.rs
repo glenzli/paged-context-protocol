@@ -173,6 +173,10 @@ impl SqlitePcpStore {
                         feedback_kind, authority, status, created_at, response_ref
                  FROM pcp_feedback_signals
                  WHERE status = 'pending' AND namespace IN ({placeholders})
+                   AND EXISTS (SELECT 1 FROM pcp_pages p
+                       WHERE p.page_id = feedback_page_id
+                         AND p.current_revision_id = feedback_revision_id
+                         AND p.lifecycle_status = 'active')
                  ORDER BY created_at ASC, feedback_revision_id ASC
                  LIMIT ?"
             );
@@ -249,11 +253,17 @@ impl SqlitePcpStore {
             if let Some(feedback_revision_id) = request.feedback_revision_id.as_deref() {
             transaction
                 .query_row(
-                    "SELECT 1 FROM pcp_feedback_signals WHERE feedback_revision_id = ?1",
+                    "SELECT 1 FROM pcp_feedback_signals s JOIN pcp_pages p
+                     ON p.page_id = s.feedback_page_id
+                     WHERE s.feedback_revision_id = ?1
+                       AND p.current_revision_id = s.feedback_revision_id
+                       AND p.lifecycle_status = 'active'",
                     [feedback_revision_id],
                     |_| Ok(()),
                 )
-                .context("find PCP feedback signal")?;
+                .optional()
+                .context("read current PCP feedback signal")?
+                .context("reconciliation review is stale: feedback changed or is no longer active")?;
             ensure_revision_access(&transaction, feedback_revision_id, &allowed_scopes)?;
             ensure_revision_access(&transaction, &request.target.revision_id, &allowed_scopes)?;
             ensure_page_revision_pair(
@@ -443,6 +453,50 @@ impl SqlitePcpStore {
     }
 }
 
+/// Page repair and the feedback work index share one transaction. Keep original
+/// signals/results for audit; only the Page's current Revision is actionable.
+/// Copy resolved targets unchanged so an edit never undoes or repeats an approval.
+pub(crate) fn repair_feedback_binding(
+    transaction: &Transaction<'_>,
+    previous_revision_id: &str,
+    revision_id: &str,
+    payload: Option<&pcp_core::PagePayload>,
+    timestamp: &str,
+) -> Result<()> {
+    let exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pcp_feedback_signals WHERE feedback_revision_id = ?1)",
+        [previous_revision_id],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(());
+    }
+    let chars = payload.map_or(0, |payload| payload.content.trim().chars().count());
+    anyhow::ensure!(
+        (1..=MAX_FEEDBACK_CHARS).contains(&chars),
+        "feedback content must contain 1-{MAX_FEEDBACK_CHARS} characters"
+    );
+    transaction.execute(
+        "INSERT INTO pcp_feedback_signals (
+            feedback_revision_id, feedback_page_id, namespace, feedback_kind,
+            authority, response_ref, status, created_at, resolved_at
+         ) SELECT ?2, feedback_page_id, namespace, feedback_kind,
+                  authority, response_ref, status, ?3, resolved_at
+           FROM pcp_feedback_signals WHERE feedback_revision_id = ?1",
+        params![previous_revision_id, revision_id, timestamp],
+    )?;
+    transaction.execute(
+        "INSERT INTO pcp_feedback_targets (
+            feedback_revision_id, target_revision_id, target_page_id, target_role,
+            position, status, disposition, resolution_json, resolved_at
+         ) SELECT ?2, target_revision_id, target_page_id, target_role,
+                  position, status, disposition, resolution_json, resolved_at
+           FROM pcp_feedback_targets WHERE feedback_revision_id = ?1",
+        params![previous_revision_id, revision_id],
+    )?;
+    Ok(())
+}
+
 // A retry may replay the same decision, never turn one approval into another
 // replacement by reusing its idempotency key.
 fn is_identical_reconciliation_replay(
@@ -528,10 +582,6 @@ fn validate_feedback(request: &SubmitFeedbackRequest) -> Result<()> {
 }
 
 fn validate_reconciliation(request: &ApplyReconciliationRequest) -> Result<()> {
-    anyhow::ensure!(
-        !request.rationale.trim().is_empty(),
-        "reconciliation rationale is required"
-    );
     anyhow::ensure!(
         !request.basis_revision_ids.is_empty()
             && request.basis_revision_ids.len() <= MAX_FEEDBACK_TARGETS + 1,

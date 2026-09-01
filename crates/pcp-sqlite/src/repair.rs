@@ -27,7 +27,9 @@ impl SqlitePcpStore {
         validate_repair_request(&request)?;
         let allowed_scopes = allowed_scopes.into_iter().collect::<HashSet<_>>();
         self.run("Page repair", move |mut connection| {
-            let transaction = connection.transaction().context("start PCP Page repair")?;
+            let transaction = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .context("start PCP Page repair")?;
             let current = current_repair_state(&transaction, &request.page_id)?;
             anyhow::ensure!(
                 allowed_scopes.contains(&current.namespace),
@@ -120,6 +122,13 @@ impl SqlitePcpStore {
                 published == 1,
                 "revision conflict while publishing Page repair"
             );
+            crate::reconciliation::repair_feedback_binding(
+                &transaction,
+                &request.expected_revision_id,
+                &revision_id,
+                request.payload.as_ref(),
+                &timestamp,
+            )?;
             // A Summary is a Page as well as a routing projection. Keep its
             // target binding and search projection in the same transaction.
             if let Some(target) = summary_target {
