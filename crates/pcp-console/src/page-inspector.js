@@ -149,7 +149,9 @@ export function createPageInspector({ request, mutate, confirmAction, onMutation
       ["Mutability", page.page.mutability],
       ["Status", page.page.lifecycleStatus],
       ["Revision", page.revision.revisionId],
-      ["Observed", formatTime(page.revision.observedAt || page.revision.createdAt)],
+      ["Stored", formatTime(page.page.createdAt)],
+      ["Updated", formatTime(page.page.updatedAt)],
+      ...(page.revision.observedAt ? [["Observed", formatTime(page.revision.observedAt)]] : []),
       ["Created by", actorLabel(page.revision.createdBy)],
       ...(page.revision.sourceSpan ? [[
         "Source stream",

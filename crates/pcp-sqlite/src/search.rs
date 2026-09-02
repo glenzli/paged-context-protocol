@@ -598,6 +598,8 @@ fn append_content_library_query_filter(
 
 fn browse_index_order_by(order: &BrowseIndexOrder) -> &'static str {
     match order {
+        BrowseIndexOrder::Updated => "p.updated_at DESC, p.page_id DESC",
+        BrowseIndexOrder::LeastRecentlyUpdated => "p.updated_at ASC, p.page_id ASC",
         BrowseIndexOrder::Recent => {
             "COALESCE(r.observed_at, r.created_at) DESC, r.revision_id DESC"
         }

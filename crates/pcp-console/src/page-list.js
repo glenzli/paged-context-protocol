@@ -2,6 +2,19 @@
 const text = (value) => typeof value === "string" ? value.trim() : "";
 const compact = (value) => value.replace(/\s+/g, " ").trim();
 
+export function pageBrowseOrder(key, descending) {
+  if (key === "connections") return descending ? "most_connected" : "least_connected";
+  if (key === "observed") return descending ? "recent" : "oldest";
+  return descending ? "updated" : "least_recently_updated";
+}
+
+export function pageTimeFields(hit) {
+  return [
+    [hit.updatedAt ? "Updated" : "Stored", hit.updatedAt || hit.createdAt],
+    ...(hit.observedAt ? [["Observed", hit.observedAt]] : []),
+  ];
+}
+
 export const PAGE_ROLE_LABELS = Object.freeze({
   condensed: "Condensed summary",
   covered_source: "Summarized source",

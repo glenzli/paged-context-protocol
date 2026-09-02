@@ -1,5 +1,6 @@
 import { createPageInspector } from "/page-inspector.js?v=20260823.1";
-import { pageListPreview, pageCount, pageJump, PAGE_ROLE_LABELS, pageRoleBadge, appendPageFilters } from "/page-list.js";
+import { pageListPreview, pageCount, pageJump, PAGE_ROLE_LABELS, pageRoleBadge, appendPageFilters, pageBrowseOrder, pageTimeFields } from "/page-list.js";
+import { formatTimestamp } from "/time-format.js";
 import { reconciliationView } from "/maintenance-reconciliation.js";
 import { describePagePayload, pagePayloadPreviewText } from "/page-content.js?v=20260822.1";
 import { createHealthView } from "/health-view.js?v=20260816.3";
@@ -517,8 +518,11 @@ const ZH_MESSAGES = {
   "Reasons overlap; one Revision can match several rows.": "保护原因可以重叠；一个修订可能匹配多行。",
   "Recent data quality sample": "近期数据质量样本",
   "Recent events": "近期事件",
-  "Recent activity": "最近活动",
-  "Oldest first": "最早记录",
+  "Recently observed": "最近观察",
+  "Earliest observed": "最早观察",
+  "Recently updated": "最近更新",
+  "Least recently updated": "最早更新",
+  "Stored": "入库时间",
   "Most direct links": "直接关联最多",
   "Fewest direct links": "直接关联最少",
   "Largest content": "内容最大",
@@ -634,7 +638,6 @@ const ZH_MESSAGES = {
   "Loading": "正在加载",
   "Loading more": "正在加载更多",
   "Load failed": "加载失败",
-  "Activity time": "活动时间",
   "Ascending": "正序",
   "Descending": "逆序",
   "Filter Pages": "筛选页面",
@@ -851,8 +854,10 @@ function t(value) {
 }
 
 const PAGE_ORDER_LABELS = {
-  recent: "Recent activity",
-  oldest: "Oldest first",
+  updated: "Recently updated",
+  least_recently_updated: "Least recently updated",
+  recent: "Recently observed",
+  oldest: "Earliest observed",
   most_connected: "Most direct links",
   least_connected: "Fewest direct links",
   largest: "Largest content",
@@ -860,14 +865,13 @@ const PAGE_ORDER_LABELS = {
 };
 
 function pageOrderLabel(value) {
-  return t(PAGE_ORDER_LABELS[value] || PAGE_ORDER_LABELS.recent);
+  return t(PAGE_ORDER_LABELS[value] || PAGE_ORDER_LABELS.updated);
 }
 
 function pageOrderValue() {
   const key = state.pages.sortKey;
   const descending = byId("page-sort-direction").dataset.direction === "descending";
-  if (key === "connections") return descending ? "most_connected" : "least_connected";
-  return descending ? "recent" : "oldest";
+  return pageBrowseOrder(key, descending);
 }
 
 function pageMenuChoice(label, selected, dataset = {}) {
@@ -912,7 +916,7 @@ function renderActivePageFilters() {
 }
 
 function renderPageSortOptions() {
-  const options = [["activity", "Activity time"], ["connections", "Direct links"]];
+  const options = [["updated", "Updated"], ["observed", "Observed"], ["connections", "Direct links"]];
   byId("page-sort-options-list").replaceChildren(...options.map(([key, label]) => pageMenuChoice(
     t(label),
     key === state.pages.sortKey,
@@ -1021,7 +1025,7 @@ const state = {
     scope: "",
     role: "",
     withSummary: false,
-    sortKey: "activity",
+    sortKey: "updated",
     count: 0,
     total: 0,
     page: 1,
@@ -1250,9 +1254,7 @@ function formatCandidateGroups(value) {
 }
 
 function formatTime(value) {
-  if (!value) return "-";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString(currentLocale());
+  return formatTimestamp(value, currentLocale());
 }
 
 function formatInterval(seconds) {
@@ -1760,7 +1762,7 @@ function pageResultMeta(hit) {
   const entries = [
     [t("Kind"), hit.kind],
     [t("Source"), pageSourceLabel(hit)],
-    [t("Observed"), formatTime(hit.observedAt || hit.createdAt)],
+    ...pageTimeFields(hit).map(([label, value]) => [t(label), formatTime(value)]),
   ];
   meta.append(...entries.map(([label, value]) => {
     const item = element("span", "page-meta-item");
@@ -1909,7 +1911,7 @@ function governanceMeta(hit) {
   meta.append(
     element("span", "", `${t("Kind")}: ${hit.kind}`),
     element("span", "", `${t("Scope")}: ${scopeName(hit.namespace)}`),
-    element("span", "", `${t("Observed")}: ${formatTime(hit.observedAt || hit.createdAt)}`),
+    ...pageTimeFields(hit).map(([label, value]) => element("span", "", `${t(label)}: ${formatTime(value)}`)),
   );
   return meta;
 }

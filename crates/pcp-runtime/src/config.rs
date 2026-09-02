@@ -46,6 +46,7 @@ pub struct SemanticSearchConfig {
 #[serde(deny_unknown_fields)]
 pub struct IntentMatchConfig {
     pub credential_file: PathBuf,
+    /// Total Router workflow budget; synchronous queries cap this at 90 seconds.
     #[serde(default = "default_intent_match_timeout_seconds")]
     pub timeout_seconds: u64,
     #[serde(default = "default_intent_match_max_catalog_pages")]
@@ -218,11 +219,11 @@ fn default_semantic_max_indexed_pages() -> usize {
 }
 
 fn default_intent_match_timeout_seconds() -> u64 {
-    180
+    90
 }
 
 fn default_intent_match_max_catalog_pages() -> usize {
-    250
+    80
 }
 
 impl RuntimeEndpointConfig {

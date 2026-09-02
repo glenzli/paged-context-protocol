@@ -1,4 +1,9 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    future::Future,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
@@ -38,6 +43,10 @@ const MAX_SUMMARY_ENTRY_CHARS: usize = 1_600;
 const MAX_RELATED_ENTRY_CHARS: usize = 1_600;
 const MAX_QUERY_READ_CHARS: u32 = 64_000;
 const PROJECTION_TRUNCATION_MARKER: &str = "[projection truncated by host budget]";
+// Leave transport headroom before a synchronous MCP tunnel request expires.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(100);
+const AUDIT_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_QUERY_CHARS: usize = 4_000;
 
 #[derive(Clone)]
 struct PlannedHit {
@@ -142,13 +151,16 @@ async fn execute(
 ) -> Result<QueryContextResponse> {
     let started = Instant::now();
     let audit_scopes = audit_scopes(client, &request.scopes);
-    let result = execute_inner(
-        client,
-        semantic_search,
-        intent_match,
-        request,
-        method,
-        intent_effort,
+    let result = bounded_query(
+        QUERY_TIMEOUT,
+        execute_inner(
+            client,
+            semantic_search,
+            intent_match,
+            request,
+            method,
+            intent_effort,
+        ),
     )
     .await;
     let event = query_audit_event(
@@ -159,7 +171,14 @@ async fn execute(
         started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
         &result,
     );
-    if let Err(error) = audit_store.record_runtime_query_audit(event.clone()).await {
+    if let Err(error) = tokio::time::timeout(
+        AUDIT_TIMEOUT,
+        audit_store.record_runtime_query_audit(event.clone()),
+    )
+    .await
+    .context("query audit deadline")
+    .and_then(|result| result)
+    {
         // Observability must never turn an otherwise usable context pack into
         // a failure. The Runtime still reports this local persistence problem.
         eprintln!("PCP query audit write failed: {error:#}");
@@ -190,11 +209,23 @@ async fn execute(
             usage: Some(usage),
             failure_kind: event.failure_kind.clone(),
         };
-        if let Err(error) = audit_store.record_runtime_usage(usage_event).await {
+        if let Err(error) =
+            tokio::time::timeout(AUDIT_TIMEOUT, audit_store.record_runtime_usage(usage_event))
+                .await
+                .context("query usage audit deadline")
+                .and_then(|result| result)
+        {
             eprintln!("PCP Runtime model usage write failed: {error:#}");
         }
     }
     result
+}
+
+async fn bounded_query<T>(budget: Duration, future: impl Future<Output = Result<T>>) -> Result<T> {
+    tokio::time::timeout(budget, future).await.with_context(|| format!(
+        "PCP query timed out after {} seconds; retrieval is incomplete, not an empty result. Use a narrower semantic_search or exact Page lookup; do not repeat the same deep query.",
+        budget.as_secs()
+    ))?
 }
 
 async fn execute_inner(
@@ -205,8 +236,7 @@ async fn execute_inner(
     method: QueryMethod,
     intent_effort: IntentEffort,
 ) -> Result<QueryContextResponse> {
-    let query = request.query.trim();
-    ensure!(!query.is_empty(), "A query is required");
+    let query = checked_query(&request.query)?;
     let scopes = normalized_scopes(request.scopes);
     let top_k = request
         .result_limit
@@ -343,6 +373,16 @@ fn audit_scopes(client: &dyn PcpTenantApi, requested_scopes: &[String]) -> Vec<S
     scopes
 }
 
+fn checked_query(query: &str) -> Result<&str> {
+    let query = query.trim();
+    ensure!(!query.is_empty(), "A query is required");
+    ensure!(
+        query.chars().count() <= MAX_QUERY_CHARS,
+        "query exceeds 4000 characters; use a focused question, not a transcript"
+    );
+    Ok(query)
+}
+
 fn query_audit_event(
     client: &dyn PcpTenantApi,
     scopes: Vec<String>,
@@ -422,8 +462,10 @@ fn query_audit_event(
 }
 
 fn query_failure_kind(error: &anyhow::Error) -> String {
-    let message = error.to_string().to_ascii_lowercase();
-    if message.contains("a query is required") {
+    let message = format!("{error:#}").to_ascii_lowercase();
+    if message.contains("timed out") || message.contains("end-to-end budget") {
+        "query_timeout".to_owned()
+    } else if message.contains("a query is required") || message.contains("query exceeds") {
         "invalid_request".to_owned()
     } else if message.contains("unavailable") {
         "provider_unavailable".to_owned()
@@ -867,6 +909,38 @@ fn display_conversation_role(role: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn whole_query_timeout_is_an_error_not_empty_evidence() {
+        let result: Result<()> =
+            bounded_query(Duration::from_millis(5), std::future::pending()).await;
+        let error = result
+            .unwrap_err()
+            .context("intent matching is unavailable");
+        assert_eq!(query_failure_kind(&error), "query_timeout");
+        assert!(format!("{error:#}").contains("not an empty result"));
+        assert_eq!(
+            bounded_query(Duration::from_secs(1), async { Ok(42) })
+                .await
+                .unwrap(),
+            42
+        );
+        assert_eq!(
+            query_failure_kind(&anyhow::anyhow!(
+                "PCP intent Router exhausted its 90 second end-to-end budget"
+            )),
+            "query_timeout"
+        );
+    }
+
+    #[test]
+    fn query_limits_count_characters_not_utf8_bytes() {
+        assert!(checked_query(&"页".repeat(4_000)).is_ok());
+        let error = checked_query(&"页".repeat(4_001)).unwrap_err();
+        assert_eq!(query_failure_kind(&error), "invalid_request");
+        assert!(checked_query(" \n ").is_err());
+        assert_eq!(checked_query(" PCP ").unwrap(), "PCP");
+    }
 
     #[test]
     fn truncation_preserves_character_budget() {

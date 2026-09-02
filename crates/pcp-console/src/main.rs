@@ -144,6 +144,8 @@ struct ConsolePageHit {
     #[serde(flatten)]
     hit: SearchHit,
     #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     content_role: Option<ContentPageRole>,
     #[serde(skip_serializing_if = "Option::is_none")]
     preview_payload: Option<PagePayload>,
@@ -192,6 +194,7 @@ impl PageListRelationStats {
 }
 
 struct PageListMetadata {
+    updated_at: String,
     preview_payload: Option<PagePayload>,
     relation_stats: PageListRelationStats,
     source_span: Option<SourceSpan>,
@@ -343,6 +346,7 @@ fn router(state: AppState) -> Router {
         .route("/page-inspector.js", get(page_inspector_js))
         .route("/page-editor.js", get(page_editor_js))
         .route("/page-list.js", get(page_list_js))
+        .route("/time-format.js", get(time_format_js))
         .route(
             "/maintenance-reconciliation.js",
             get(maintenance_reconciliation_js),
@@ -615,6 +619,13 @@ async fn page_list_js() -> Response {
     static_asset(
         "text/javascript; charset=utf-8",
         include_str!("page-list.js"),
+    )
+}
+
+async fn time_format_js() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("time-format.js"),
     )
 }
 
@@ -1027,6 +1038,7 @@ async fn console_page_result(
             metadata.insert(
                 page.page.page_id.clone(),
                 PageListMetadata {
+                    updated_at: page.page.updated_at,
                     preview_payload: page.revision.payload,
                     relation_stats: PageListRelationStats::from_relations(
                         &page.page.page_id,
@@ -1047,6 +1059,9 @@ async fn console_page_result(
                     .as_ref()
                     .and_then(|metadata| metadata.source_span.clone());
                 ConsolePageHit {
+                    updated_at: page_metadata
+                        .as_ref()
+                        .map(|metadata| metadata.updated_at.clone()),
                     content_role: page_roles.remove(&hit.page_id),
                     preview_payload: page_metadata
                         .as_ref()
@@ -2067,7 +2082,9 @@ fn page_preview_projections() -> Vec<Projection> {
 }
 
 fn parse_browse_index_order(value: Option<&str>) -> Result<BrowseIndexOrder, ApiError> {
-    match value.unwrap_or("recent") {
+    match value.unwrap_or("updated") {
+        "updated" => Ok(BrowseIndexOrder::Updated),
+        "least_recently_updated" => Ok(BrowseIndexOrder::LeastRecentlyUpdated),
         "recent" => Ok(BrowseIndexOrder::Recent),
         "oldest" => Ok(BrowseIndexOrder::Oldest),
         "most_connected" => Ok(BrowseIndexOrder::MostConnected),
@@ -2231,8 +2248,20 @@ mod tests {
     fn console_browse_orders_are_explicitly_bounded() {
         assert_eq!(
             parse_browse_index_order(None).unwrap(),
-            BrowseIndexOrder::Recent
+            BrowseIndexOrder::Updated
         );
+        for (name, expected) in [
+            ("updated", BrowseIndexOrder::Updated),
+            (
+                "least_recently_updated",
+                BrowseIndexOrder::LeastRecentlyUpdated,
+            ),
+            ("recent", BrowseIndexOrder::Recent),
+            ("oldest", BrowseIndexOrder::Oldest),
+        ] {
+            assert_eq!(parse_browse_index_order(Some(name)).unwrap(), expected);
+            assert_eq!(serde_json::to_value(expected).unwrap(), name);
+        }
         assert_eq!(
             parse_browse_index_order(Some("most_connected")).unwrap(),
             BrowseIndexOrder::MostConnected

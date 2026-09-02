@@ -1,7 +1,7 @@
 {
   "name": "pcp",
-  "version": "0.1.1",
-  "description": "Read and selectively retain durable context through a local PCP Runtime.",
+  "version": "0.1.2",
+  "description": "Retrieve the user's long-term decisions, preferences, constraints, and cross-task context when they matter; selectively retain confirmed information.",
   "author": {
     "name": "Glen Li",
     "url": "https://github.com/glenzli"
@@ -18,8 +18,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "PCP",
-    "shortDescription": "Recall and selectively retain durable local context.",
-    "longDescription": "Connect Codex to one approved local PCP client for scoped retrieval, exact evidence reads, explicit feedback, and high-threshold durable capture.",
+    "shortDescription": "User context across conversations, projects, and tools.",
+    "longDescription": "Consult authorized long-term context when prior decisions, preferences, or constraints could change an answer or action. Read exact revision evidence, submit explicit feedback, and keep durable capture high-threshold through one approved local PCP client.",
     "developerName": "Glen Li",
     "category": "Productivity",
     "capabilities": [

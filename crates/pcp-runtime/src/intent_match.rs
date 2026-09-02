@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
     time::Duration,
 };
 
@@ -23,6 +24,9 @@ const MAX_PROFILE_CHARS: usize = 420;
 const MAX_CONSULT_CHARS: usize = 1_600;
 const MAX_EXACT_HITS_PER_TERM: u32 = 12;
 const MAX_GRAPH_NEIGHBORS_PER_SEED: u32 = 16;
+const MAX_INTENT_DURATION: Duration = Duration::from_secs(90);
+const CANCEL_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_CATALOG_CANDIDATES: usize = 80;
 
 fn record_usage(tally: &mut RouterTokenUsage, response: &ResponsesResult) {
     let Some(reported) = response.extra.get("usage").and_then(Value::as_object) else {
@@ -94,8 +98,8 @@ impl IntentMatchProvider {
                 .credential_file(config.credential_file)
                 .build()
                 .context("build Infer Runtime client for PCP intent matching")?,
-            timeout: Duration::from_secs(config.timeout_seconds),
-            max_catalog_pages: config.max_catalog_pages,
+            timeout: Duration::from_secs(config.timeout_seconds).min(MAX_INTENT_DURATION),
+            max_catalog_pages: config.max_catalog_pages.min(MAX_CATALOG_CANDIDATES),
         })
     }
 
@@ -124,8 +128,16 @@ impl IntentMatchProvider {
         let mut embedded_count: usize = 0;
         let mut semantic_model_calls: usize = 0;
         for probe in &semantic_probes {
-            let result = semantic_search
-                .search(client, probe, scopes, budget.semantic_candidates_per_probe)
+            let result = deadline
+                .run(
+                    "discover semantic candidates",
+                    semantic_search.search(
+                        client,
+                        probe,
+                        scopes,
+                        budget.semantic_candidates_per_probe,
+                    ),
+                )
                 .await
                 .with_context(|| {
                     format!("semantic candidate discovery for intent probe {probe:?}")
@@ -137,29 +149,39 @@ impl IntentMatchProvider {
         }
         let exact_terms = deduplicate_strings(plan.exact_terms, budget.exact_term_limit);
         for term in &exact_terms {
-            let result = client
-                .browse_retrieval_pages(
-                    scopes.to_vec(),
-                    Some(term.clone()),
-                    BrowseIndexOrder::Recent,
-                    MAX_EXACT_HITS_PER_TERM,
-                    None,
-                    16_000,
+            let result = deadline
+                .run(
+                    "discover exact candidates",
+                    client.browse_retrieval_pages(
+                        scopes.to_vec(),
+                        Some(term.clone()),
+                        BrowseIndexOrder::Recent,
+                        MAX_EXACT_HITS_PER_TERM,
+                        None,
+                        16_000,
+                    ),
                 )
                 .await
                 .with_context(|| format!("exact entity candidate discovery for {term:?}"))?;
             candidate_pool.add_exact_hits(result.hits, term);
         }
-        let mut relation_candidates_considered = self
-            .add_relation_candidates(
-                client,
-                &mut candidate_pool,
-                scopes,
-                budget.relation_seed_limit,
+        let mut relation_candidates_considered = deadline
+            .run(
+                "discover relation candidates",
+                self.add_relation_candidates(
+                    client,
+                    &mut candidate_pool,
+                    scopes,
+                    budget.relation_seed_limit,
+                ),
             )
             .await?;
         let catalog_pages_considered = if budget.include_catalog {
-            self.add_catalog_candidates(client, &mut candidate_pool, scopes)
+            deadline
+                .run(
+                    "browse candidate catalog",
+                    self.add_catalog_candidates(client, &mut candidate_pool, scopes),
+                )
                 .await?
         } else {
             0
@@ -181,12 +203,20 @@ impl IntentMatchProvider {
                 )
                 .await?;
             router_rounds += 1;
-            let expansion_probes =
-                deduplicate_strings(review.expansion_probes, budget.expansion_probe_limit);
+            let expansion_probes = new_expansion_probes(
+                review.expansion_probes,
+                &semantic_probes,
+                budget.expansion_probe_limit.min(
+                    budget
+                        .total_probe_limit
+                        .saturating_sub(semantic_probes.len()),
+                ),
+            );
             if expansion_probes.is_empty() || remaining_expansions == 0 {
                 break review.consult_page_ids;
             }
             remaining_expansions = remaining_expansions.saturating_sub(1);
+            let previous_candidates = candidate_pool.candidates.len();
             for probe in expansion_probes {
                 if semantic_probes.len() >= budget.total_probe_limit {
                     break;
@@ -197,8 +227,16 @@ impl IntentMatchProvider {
                 {
                     continue;
                 }
-                let result = semantic_search
-                    .search(client, &probe, scopes, budget.semantic_candidates_per_probe)
+                let result = deadline
+                    .run(
+                        "expand semantic candidates",
+                        semantic_search.search(
+                            client,
+                            &probe,
+                            scopes,
+                            budget.semantic_candidates_per_probe,
+                        ),
+                    )
                     .await
                     .with_context(|| format!("semantic expansion for intent probe {probe:?}"))?;
                 indexed_count = indexed_count.max(result.indexed_count);
@@ -208,18 +246,28 @@ impl IntentMatchProvider {
                 semantic_probes.push(probe);
             }
             relation_candidates_considered = relation_candidates_considered.saturating_add(
-                self.add_relation_candidates(
-                    client,
-                    &mut candidate_pool,
-                    scopes,
-                    budget.relation_seed_limit,
-                )
-                .await?,
+                deadline
+                    .run(
+                        "expand relation candidates",
+                        self.add_relation_candidates(
+                            client,
+                            &mut candidate_pool,
+                            scopes,
+                            budget.relation_seed_limit,
+                        ),
+                    )
+                    .await?,
             );
+            // Repeated evidence does not justify another model review round.
+            if candidate_pool.candidates.len() == previous_candidates {
+                break review.consult_page_ids;
+            }
         };
 
         let consult = candidate_pool.valid_page_ids(consult, budget.consult_limit);
-        let consulted = self.consult_cards(client, &consult).await?;
+        let consulted = deadline
+            .run("read consulted Pages", self.consult_cards(client, &consult))
+            .await?;
         let selection = self
             .finalize(
                 query,
@@ -491,6 +539,9 @@ impl IntentMatchProvider {
             input: Value::String(input),
             instructions: Some(Value::String(instructions.to_owned())),
             stream: false,
+            // Keep compatibility with Infer deployments without durable background
+            // execution. The provider deadline also bounds a submission that has
+            // not returned an ID; known pending responses are cancelled below.
             background: false,
             metadata: BTreeMap::from([
                 ("infer.priority".to_owned(), "background".to_owned()),
@@ -509,41 +560,72 @@ impl IntentMatchProvider {
             reasoning: Some(json!({"effort": effort_name(effort)})),
             max_output_tokens: None,
         };
-        let mut response = timeout(submission_budget, self.client.create_response(&request))
+        let response = timeout(submission_budget, self.client.create_response(&request))
             .await
             .context("PCP intent Router submission timed out")??;
-        loop {
-            match response.status.as_str() {
-                "completed" => return Ok(response),
-                "queued" | "in_progress" => {}
-                "failed" | "cancelled" | "incomplete" => anyhow::bail!(
-                    "PCP intent Router response {} ended with status {}",
-                    response.id,
-                    response.status
-                ),
-                status => anyhow::bail!(
-                    "PCP intent Router response {} returned unknown status {status}",
-                    response.id
-                ),
+        wait_for_router_response(
+            response,
+            deadline,
+            CANCEL_TIMEOUT,
+            |id| async move {
+                self.client
+                    .get_response(&id)
+                    .await
+                    .context("poll PCP intent Router")
+            },
+            |id| async move {
+                self.client
+                    .cancel_response(&id)
+                    .await
+                    .map(|_| ())
+                    .context("cancel PCP intent Router")
+            },
+        )
+        .await
+    }
+}
+
+// Polling and cancellation share one owner so every abandoned known job takes
+// the same bounded cleanup path, including transport errors during a poll.
+async fn wait_for_router_response<P, PF, C, CF>(
+    mut response: ResponsesResult,
+    deadline: &IntentDeadline,
+    cancel_timeout: Duration,
+    mut poll: P,
+    mut cancel: C,
+) -> Result<ResponsesResult>
+where
+    P: FnMut(String) -> PF,
+    PF: Future<Output = Result<ResponsesResult>>,
+    C: FnMut(String) -> CF,
+    CF: Future<Output = Result<()>>,
+{
+    loop {
+        match response.status.as_str() {
+            "completed" => return Ok(response),
+            "queued" | "in_progress" => {}
+            "failed" | "cancelled" | "incomplete" => anyhow::bail!(
+                "PCP intent Router response {} ended with status {}",
+                response.id,
+                response.status
+            ),
+            status => anyhow::bail!(
+                "PCP intent Router response {} returned unknown status {status}",
+                response.id
+            ),
+        }
+        let polled = deadline
+            .run("poll the intent Router", async {
+                sleep(POLL_INTERVAL).await;
+                poll(response.id.clone()).await
+            })
+            .await;
+        match polled {
+            Ok(next) => response = next,
+            Err(error) => {
+                let _ = timeout(cancel_timeout, cancel(response.id.clone())).await;
+                return Err(error);
             }
-            let remaining = match deadline.remaining("wait for the intent Router response") {
-                Ok(remaining) => remaining,
-                Err(error) => {
-                    let _ = self.client.cancel_response(&response.id).await;
-                    return Err(error);
-                }
-            };
-            sleep(POLL_INTERVAL.min(remaining)).await;
-            let remaining = match deadline.remaining("poll the intent Router response") {
-                Ok(remaining) => remaining,
-                Err(error) => {
-                    let _ = self.client.cancel_response(&response.id).await;
-                    return Err(error);
-                }
-            };
-            response = timeout(remaining, self.client.get_response(&response.id))
-                .await
-                .context("PCP intent Router polling timed out")??;
         }
     }
 }
@@ -573,6 +655,22 @@ impl IntentDeadline {
                 )
             })
     }
+
+    async fn run<T>(&self, stage: &str, future: impl Future<Output = Result<T>>) -> Result<T> {
+        timeout(self.remaining(stage)?, future)
+            .await
+            .with_context(|| format!("PCP query timed out while trying to {stage}"))?
+    }
+}
+
+fn new_expansion_probes(probes: Vec<String>, previous: &[String], limit: usize) -> Vec<String> {
+    deduplicate_strings(
+        probes
+            .into_iter()
+            .filter(|probe| !previous.iter().any(|old| equivalent(old, probe)))
+            .collect(),
+        limit,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -627,7 +725,7 @@ impl IntentBudget {
                 total_probe_limit: 8,
                 exact_term_limit: 4,
                 semantic_candidates_per_probe: 16,
-                candidate_card_limit: 250,
+                candidate_card_limit: 80,
                 relation_seed_limit: 8,
                 consult_limit: 12,
                 include_catalog: true,
@@ -901,6 +999,92 @@ mod tests {
             low.consult_limit < medium.consult_limit && medium.consult_limit < high.consult_limit
         );
         assert!(high.include_catalog);
+        assert_eq!(high.candidate_card_limit, 80);
+        assert_eq!(MAX_CATALOG_CANDIDATES, 80);
+        assert!(MAX_INTENT_DURATION + CANCEL_TIMEOUT < Duration::from_secs(100));
+    }
+
+    #[test]
+    fn repeated_or_exhausted_expansion_probes_stop() {
+        let previous = vec!["Shadow".into(), "图标".into()];
+        assert!(
+            new_expansion_probes(vec![" shadow ".into(), "图标".into()], &previous, 2).is_empty()
+        );
+        assert!(new_expansion_probes(vec!["new".into()], &previous, 0).is_empty());
+        assert_eq!(
+            new_expansion_probes(
+                vec!["new".into(), "NEW".into(), "other".into()],
+                &previous,
+                1
+            ),
+            vec!["new"]
+        );
+    }
+
+    #[tokio::test]
+    async fn deadline_also_bounds_non_router_discovery() {
+        let deadline = IntentDeadline::start(Duration::from_millis(5));
+        let result: Result<()> = deadline
+            .run("discover semantic candidates", std::future::pending())
+            .await;
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+        let mut invoked = false;
+        let result = deadline
+            .run("read Pages", async {
+                invoked = true;
+                Ok(())
+            })
+            .await;
+        assert!(result.is_err());
+        assert!(!invoked, "expired budget must not start another stage");
+    }
+
+    fn router_fixture(status: &str) -> ResponsesResult {
+        ResponsesResult {
+            id: "resp_test".into(),
+            object: "response".into(),
+            created_at: 0,
+            model: "test".into(),
+            status: status.into(),
+            output: Vec::new(),
+            extra: BTreeMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn abandoned_router_jobs_are_cancelled_and_cleanup_is_bounded() {
+        for polling_error in [false, true] {
+            let deadline = IntentDeadline::start(if polling_error {
+                Duration::from_secs(1)
+            } else {
+                Duration::from_millis(5)
+            });
+            let mut cancelled = Vec::new();
+            let result = wait_for_router_response(
+                router_fixture("queued"),
+                &deadline,
+                Duration::from_millis(5),
+                |_| async { anyhow::bail!("poll transport failed") },
+                |id| {
+                    cancelled.push(id);
+                    std::future::pending::<Result<()>>()
+                },
+            )
+            .await;
+            assert!(result.is_err());
+            assert_eq!(cancelled, vec!["resp_test"]);
+        }
+        let deadline = IntentDeadline::start(Duration::from_secs(1));
+        let result = wait_for_router_response(
+            router_fixture("completed"),
+            &deadline,
+            CANCEL_TIMEOUT,
+            |_| async { panic!("must not poll completed job") },
+            |_| async { panic!("must not cancel completed job") },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.status, "completed");
     }
 
     #[test]

@@ -125,9 +125,13 @@ impl SearchMode {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrowseIndexOrder {
+    /// Observation time (falling back to Revision creation time).
     #[default]
     Recent,
     Oldest,
+    /// Store-maintained Page update time, independent of source observation time.
+    Updated,
+    LeastRecentlyUpdated,
     MostConnected,
     LeastConnected,
     Largest,

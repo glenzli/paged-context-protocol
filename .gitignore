@@ -3,3 +3,4 @@
 /.local-backups/
 /.infer-runtime/
 /.agent-coordination/
+.DS_Store

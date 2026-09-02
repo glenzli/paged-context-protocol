@@ -1,7 +1,27 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { pageListPreview, pageCount, pageJump, pageRoleBadge, appendPageFilters } from "../src/page-list.js";
+import { pageListPreview, pageCount, pageJump, pageRoleBadge, appendPageFilters, pageTimeFields, pageBrowseOrder } from "../src/page-list.js";
+
+test("stored time and source observation time remain distinct", () => {
+  const createdAt = "2026-09-02T14:48:35Z";
+  const updatedAt = "2026-09-03T10:00:00Z";
+  assert.deepEqual(pageTimeFields({createdAt,updatedAt,observedAt:"2026-09-02"}), [
+    ["Updated",updatedAt], ["Observed","2026-09-02"],
+  ]);
+  assert.deepEqual(pageTimeFields({createdAt}), [["Stored",createdAt]]);
+  assert.deepEqual(pageTimeFields({createdAt,updatedAt}), [["Updated",updatedAt]]);
+});
+
+test("default update ordering and explicit observation ordering are independent", () => {
+  assert.equal(pageBrowseOrder("updated",true),"updated");
+  assert.equal(pageBrowseOrder("updated",false),"least_recently_updated");
+  assert.equal(pageBrowseOrder("observed",true),"recent");
+  assert.equal(pageBrowseOrder("observed",false),"oldest");
+  assert.equal(pageBrowseOrder("connections",true),"most_connected");
+  assert.equal(pageBrowseOrder("connections",false),"least_connected");
+  assert.equal(pageBrowseOrder(undefined,true),"updated");
+});
 
 test("content badges use structural metadata, not suggestive page kinds", () => {
   for (const hit of [{kind:"topic_summary"}, {kind:"summary_projection"}, {facets:{role:"condensed"}}, {summaryRevisionId:"rev_summary"}, {contentRole:"other"}]) {
