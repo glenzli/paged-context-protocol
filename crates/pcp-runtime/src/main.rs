@@ -343,8 +343,13 @@ async fn run_broker(config_path: PathBuf) -> Result<()> {
         store_path,
         runtime_socket_hint,
     )?;
-    let mut observer =
-        ObserverService::start(observer_config, enrollment_config, Arc::clone(&store)).await?;
+    let mut observer = ObserverService::start_with_query(
+        observer_config,
+        enrollment_config,
+        Arc::clone(&store),
+        Some(query_service),
+    )
+    .await?;
     let result =
         supervise_runtime(tokio::spawn(serve_unix_endpoints(endpoints)), &mut observer).await;
     if let Some(task) = maintenance_task {

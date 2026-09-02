@@ -20,6 +20,126 @@ use pcp_rpc::{
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 
+/// The service deliberately consults the supplied tenant, not the Store. This
+/// proves dynamic enrollment carries the service without borrowing operator ACLs.
+struct TenantQueryProbe;
+
+#[async_trait::async_trait]
+impl pcp_rpc::RuntimeQueryService for TenantQueryProbe {
+    async fn semantic_search(
+        &self,
+        client: &dyn PcpTenantApi,
+        request: pcp_core::QueryContextRequest,
+    ) -> anyhow::Result<pcp_core::QueryContextResponse> {
+        let (scopes, _) = client.list_scopes(request.scopes, None, 20, None).await?;
+        Ok(pcp_core::QueryContextResponse {
+            scopes: scopes.into_iter().map(|scope| scope.namespace).collect(),
+            visibility: pcp_core::QueryVisibility::Scoped,
+            result_limit: 4,
+            context_budget_chars: 1000,
+            anchor_count: 0,
+            related_count: 0,
+            semantic_indexed_count: Some(0),
+            semantic_embedded_count: Some(0),
+            semantic_model_calls: Some(0),
+            intent_match: None,
+            entries: Vec::new(),
+        })
+    }
+
+    async fn match_intent(
+        &self,
+        client: &dyn PcpTenantApi,
+        request: pcp_core::QueryContextRequest,
+        _effort: pcp_core::IntentEffort,
+    ) -> anyhow::Result<pcp_core::QueryContextResponse> {
+        self.semantic_search(client, request).await
+    }
+}
+
+#[tokio::test]
+async fn enrolled_endpoints_share_query_service_with_tenant_authority() {
+    let root = test_root("enrolled-query");
+    let store: Arc<dyn PcpStore> = Arc::new(
+        SqlitePcpStore::open(root.join("context.sqlite3"))
+            .await
+            .unwrap(),
+    );
+    let identity = store.identity_id().to_owned();
+    let config = ObserverConfig::for_test(root.clone(), identity.clone());
+    let enrollment = EnrollmentConfig::for_test(root.clone());
+    let admin = EnrollmentAdminClient::new(&enrollment.admin_socket_path);
+    let mut observer = ObserverService::start_with_query(
+        config,
+        enrollment,
+        store,
+        Some(Arc::new(TenantQueryProbe)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let credential = "cd".repeat(32);
+    let public = EnrollmentClient::new(observer.socket_path());
+    let request_id = match public
+        .begin(begin_params(&credential))
+        .await
+        .unwrap()
+        .result
+    {
+        EnrollmentResult::Pending { request_id, .. } => request_id,
+        other => panic!("expected pending enrollment: {other:?}"),
+    };
+    admin.approve(request_id.clone()).await.unwrap();
+    let session = match public
+        .status(EnrollmentStatusParams {
+            request_id,
+            credential,
+        })
+        .await
+        .unwrap()
+        .result
+    {
+        EnrollmentResult::Active { session } => session,
+        other => panic!("expected active enrollment: {other:?}"),
+    };
+    let client = RemotePcpClient::connect(root.join(&session.endpoint))
+        .await
+        .unwrap();
+    let request = pcp_core::QueryContextRequest {
+        query: "retention evidence".to_owned(),
+        scopes: vec![format!("user:{identity}")],
+        result_limit: Some(4),
+        context_budget_chars: Some(1000),
+    };
+    assert_eq!(
+        client
+            .semantic_search(request.clone())
+            .await
+            .unwrap()
+            .scopes,
+        request.scopes
+    );
+    assert!(
+        client
+            .match_intent(request.clone(), pcp_core::IntentEffort::Low)
+            .await
+            .is_ok()
+    );
+    let denied = pcp_core::QueryContextRequest {
+        scopes: vec!["private:ungranted".to_owned()],
+        ..request
+    };
+    assert!(client.semantic_search(denied.clone()).await.is_err());
+    assert!(
+        client
+            .match_intent(denied, pcp_core::IntentEffort::Low)
+            .await
+            .is_err()
+    );
+    observer.shutdown().await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test]
 async fn enrollment_approves_identity_bound_session_and_survives_generation_change() {
     let root = test_root("lifecycle");

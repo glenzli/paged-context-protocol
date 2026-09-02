@@ -53,9 +53,18 @@ impl RunningRuntimeEndpoint {
         listener: UnixListener,
         client: Arc<dyn PcpApi>,
     ) -> Self {
+        Self::from_bound_listener_with_query(socket_path, listener, client, None)
+    }
+
+    pub fn from_bound_listener_with_query(
+        socket_path: impl AsRef<Path>,
+        listener: UnixListener,
+        client: Arc<dyn PcpApi>,
+        query_service: Option<Arc<dyn RuntimeQueryService>>,
+    ) -> Self {
         let socket_path = socket_path.as_ref().to_path_buf();
         let task = tokio::spawn(async move {
-            if let Err(error) = serve_listener(listener, client, None).await {
+            if let Err(error) = serve_listener(listener, client, query_service).await {
                 eprintln!("PCP runtime endpoint failed: {error:#}");
             }
         });

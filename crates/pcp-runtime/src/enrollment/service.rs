@@ -46,6 +46,16 @@ impl EnrollmentManager {
         instance_id: String,
         generation: String,
     ) -> Result<Option<Self>> {
+        Self::start_with_query(config, store, instance_id, generation, None).await
+    }
+
+    pub async fn start_with_query(
+        config: EnrollmentConfig,
+        store: Arc<dyn PcpStore>,
+        instance_id: String,
+        generation: String,
+        query_service: Option<Arc<dyn pcp_rpc::RuntimeQueryService>>,
+    ) -> Result<Option<Self>> {
         if !config.enabled {
             return Ok(None);
         }
@@ -56,6 +66,7 @@ impl EnrollmentManager {
         let handler = EnrollmentHandler {
             inner: Arc::new(EnrollmentInner {
                 store,
+                query_service,
                 identity_id: instance_id.clone(),
                 service: EnrollmentServiceIdentity {
                     kind: "pcp".to_owned(),
@@ -99,6 +110,7 @@ pub(crate) struct EnrollmentHandler {
 
 struct EnrollmentInner {
     store: Arc<dyn PcpStore>,
+    query_service: Option<Arc<dyn pcp_rpc::RuntimeQueryService>>,
     identity_id: String,
     service: EnrollmentServiceIdentity,
     runtime_root: PathBuf,
@@ -335,7 +347,14 @@ impl EnrollmentHandler {
             .map_err(|_| ProtocolError::unavailable())?;
         let (endpoint, socket_path, listener) = bound.into_parts();
         let client = EmbeddedPcpClient::shared(Arc::clone(&self.inner.store), access.clone());
-        let running = RunningRuntimeEndpoint::from_bound_listener(&socket_path, listener, client);
+        // Reuse the broker's query implementation, but always execute against
+        // this enrolled tenant's client and ACL, never an operator client.
+        let running = RunningRuntimeEndpoint::from_bound_listener_with_query(
+            &socket_path,
+            listener,
+            client,
+            self.inner.query_service.clone(),
+        );
         let wire = EnrollmentSession {
             registration_id: registration.registration_id.clone(),
             service: self.inner.service.clone(),
