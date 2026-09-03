@@ -15,7 +15,10 @@
         "pcp_browse_index",
         "pcp_read_pages",
         "pcp_capture",
-        "pcp_submit_feedback"
+        "pcp_submit_feedback",
+        "pcp_submit_candidate",
+        "pcp_publish_activity",
+        "pcp_read_activity"
       ],
       "default_tools_approval_mode": "auto",
       "tools": {

@@ -1,4 +1,5 @@
 mod config;
+pub mod context_hub;
 mod enrollment;
 mod infra_socket;
 mod intent_match;

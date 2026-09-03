@@ -196,6 +196,8 @@ The release boundary is explicit: the PCP repository owns the Rust, plugin, and 
 
 ## Documentation
 
+- [Model-facing tools and compact responses](integrations/TOOL_INTEGRATION.md)
+
 - [Current specification](PROTOCOL-en.md)
 - [Chinese specification](PROTOCOL.md)
 - [Runtime notes](crates/pcp-runtime/README.md)

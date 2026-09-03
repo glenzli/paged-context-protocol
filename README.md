@@ -196,6 +196,7 @@ codex plugin add pcp@glenzli-marketplace
 
 ## 文档
 
+- [面向模型的工具接入与精简返回](integrations/TOOL_INTEGRATION.md)
 - [当前协议](PROTOCOL.md)
 - [英文协议](PROTOCOL-en.md)
 - [Runtime 说明](crates/pcp-runtime/README.md)

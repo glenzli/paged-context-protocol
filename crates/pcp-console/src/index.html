@@ -6,6 +6,7 @@
   <title>PCP Console</title>
   <link rel="icon" href="/pcp-icon.png?v=20260825.3" type="image/png">
   <link rel="stylesheet" href="/styles.css?v=20260825.1">
+  <link rel="stylesheet" href="/context-hub.css">
   <link rel="stylesheet" href="/page-content.css?v=20260816.3">
 </head>
 <body>
@@ -38,11 +39,13 @@
     <button class="tab" type="button" data-view="pages" data-i18n="Pages">Pages</button>
     <button class="tab" type="button" data-view="query" data-i18n="Query">Query</button>
     <button class="tab" type="button" data-view="maintenance" data-i18n="Maintenance">Maintenance</button>
+    <button class="tab" type="button" data-view="context-hub" data-i18n="Context inbox">Context inbox</button>
     <button class="tab" type="button" data-view="health" data-i18n="Runtime">Runtime</button>
     <button class="tab" type="button" data-view="access" data-i18n="Access">Access</button>
   </nav>
 
   <main>
+    <section id="view-context-hub" class="view"></section>
     <section id="view-overview" class="view active">
       <div id="metrics" class="metrics"></div>
       <div class="section-heading">

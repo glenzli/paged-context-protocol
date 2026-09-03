@@ -65,6 +65,10 @@ impl EnrollmentManager {
         state_file.write(&state)?;
         let handler = EnrollmentHandler {
             inner: Arc::new(EnrollmentInner {
+                context_hub: Arc::new(crate::context_hub::ContextHub::new(
+                    store.clone(),
+                    config.context_state_path,
+                )),
                 store,
                 query_service,
                 identity_id: instance_id.clone(),
@@ -109,6 +113,7 @@ pub(crate) struct EnrollmentHandler {
 }
 
 struct EnrollmentInner {
+    context_hub: Arc<crate::context_hub::ContextHub>,
     store: Arc<dyn PcpStore>,
     query_service: Option<Arc<dyn pcp_rpc::RuntimeQueryService>>,
     identity_id: String,
@@ -346,7 +351,10 @@ impl EnrollmentHandler {
         let bound = BoundInfraSocket::bind(&self.inner.runtime_root)
             .map_err(|_| ProtocolError::unavailable())?;
         let (endpoint, socket_path, listener) = bound.into_parts();
-        let client = EmbeddedPcpClient::shared(Arc::clone(&self.inner.store), access.clone());
+        let client = Arc::new(
+            EmbeddedPcpClient::new(Arc::clone(&self.inner.store), access.clone())
+                .with_context_hub(self.inner.context_hub.clone()),
+        );
         // Reuse the broker's query implementation, but always execute against
         // this enrolled tenant's client and ACL, never an operator client.
         let running = RunningRuntimeEndpoint::from_bound_listener_with_query(

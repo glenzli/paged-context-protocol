@@ -45,6 +45,7 @@ pub(crate) struct RpcRequest {
 #[serde(tag = "type", content = "params", rename_all = "snake_case")]
 pub(crate) enum RpcOperation {
     Describe,
+    ContextHub(pcp_client::context_hub::ContextHubRequest),
     IntegrityCheck,
     CreateScope(CreateScopeRequest),
     ListScopes {
@@ -173,6 +174,7 @@ pub(crate) enum RpcOutcome {
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub(crate) enum RpcValue {
     Descriptor(PcpDescriptor),
+    ContextHub(serde_json::Value),
     Integrity(String),
     Unit,
     Scopes {

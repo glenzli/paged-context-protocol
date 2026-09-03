@@ -136,6 +136,26 @@ async fn enrolled_endpoints_share_query_service_with_tenant_authority() {
             .await
             .is_err()
     );
+    assert!(
+        client
+            .capabilities()
+            .features
+            .iter()
+            .any(|f| f == "runtime_context_hub")
+    );
+    let hub_error = client
+        .context_hub(pcp_client::context_hub::ContextHubRequest::ReadActivity(
+            Default::default(),
+        ))
+        .await
+        .unwrap_err();
+    assert!(hub_error.to_string().contains("disabled"));
+    assert!(
+        client
+            .context_hub(pcp_client::context_hub::ContextHubRequest::Inspect)
+            .await
+            .is_err()
+    );
     observer.shutdown().await.unwrap();
     fs::remove_dir_all(root).unwrap();
 }

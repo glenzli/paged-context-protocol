@@ -46,6 +46,7 @@ const MAX_HISTORY_REVISIONS: usize = 20;
 const MAX_RETENTION_SAMPLE_LIMIT: u32 = 100;
 const CONSOLE_STATIC_CACHE_CONTROL: &str = "no-store";
 
+mod context_hub;
 mod graph_view;
 mod managed;
 mod page_actions;
@@ -340,6 +341,25 @@ async fn main() -> Result<()> {
 
 fn router(state: AppState) -> Router {
     Router::new()
+        .route(
+            "/api/context-hub",
+            get(context_hub::inspect).post(context_hub::mutate),
+        )
+        .route(
+            "/context-hub.js",
+            get(|| async {
+                static_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("context-hub.js"),
+                )
+            }),
+        )
+        .route(
+            "/context-hub.css",
+            get(|| async {
+                static_asset("text/css; charset=utf-8", include_str!("context-hub.css"))
+            }),
+        )
         .route("/", get(index))
         .route("/app.js", get(app_js))
         .route("/ui-icons.js", get(ui_icons_js))

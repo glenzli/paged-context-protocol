@@ -42,7 +42,13 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "codex".to_owned())
         .parse::<PcpMcpSurface>()
         .map_err(anyhow::Error::msg)?;
-    let service = PcpMcpServer::with_surface(client, surface)
+    let mut server = PcpMcpServer::with_surface(client, surface);
+    match env::var("PCP_MCP_TOOLSET").as_deref().unwrap_or("standard") {
+        "standard" => {}
+        "maintenance" => server = server.with_maintenance_tools(),
+        _ => anyhow::bail!("PCP_MCP_TOOLSET must be standard or maintenance"),
+    }
+    let service = server
         .serve(stdio())
         .await
         .context("start PCP MCP stdio server")?;

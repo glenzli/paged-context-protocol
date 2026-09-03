@@ -9,6 +9,7 @@ pub struct EnrollmentConfig {
     pub enabled: bool,
     pub runtime_root: PathBuf,
     pub state_path: PathBuf,
+    pub context_state_path: PathBuf,
     pub admin_socket_path: PathBuf,
     pub request_ttl: Duration,
 }
@@ -52,6 +53,7 @@ impl EnrollmentConfig {
         );
         Ok(Self {
             enabled,
+            context_state_path: crate::context_hub::ContextHub::state_path(&store_path),
             runtime_root,
             state_path,
             admin_socket_path,
@@ -62,6 +64,7 @@ impl EnrollmentConfig {
     #[cfg(test)]
     pub fn disabled_for_test(root: PathBuf) -> Self {
         Self {
+            context_state_path: root.join("context.json"),
             enabled: false,
             state_path: root.join("pcp-enrollments.json"),
             admin_socket_path: root.join("pcp-enrollment-admin.sock"),
@@ -73,6 +76,7 @@ impl EnrollmentConfig {
     #[cfg(test)]
     pub fn for_test(root: PathBuf) -> Self {
         Self {
+            context_state_path: root.join("context.json"),
             enabled: true,
             state_path: root.join("pcp-enrollments.json"),
             admin_socket_path: root.join("pcp-enrollment-admin.sock"),

@@ -284,6 +284,10 @@ async fn run_broker(config_path: PathBuf) -> Result<()> {
     );
     let identity_id = store.identity_id().to_owned();
     let store: Arc<dyn PcpStore> = store;
+    let context_hub = Arc::new(pcp_runtime::context_hub::ContextHub::new(
+        store.clone(),
+        pcp_runtime::context_hub::ContextHub::state_path(&config.store_path),
+    ));
     let query_service = Arc::new(QueryRuntime::from_config(
         Arc::clone(&store),
         config.semantic_search.clone(),
@@ -310,7 +314,8 @@ async fn run_broker(config_path: PathBuf) -> Result<()> {
             let mut client = EmbeddedPcpClient::new(
                 Arc::clone(&store),
                 endpoint.access_session(&identity_id, index)?,
-            );
+            )
+            .with_context_hub(context_hub.clone());
             if let Some(observer) = successful_write_observer.as_ref() {
                 client = client.with_successful_write_observer(Arc::clone(observer));
             }
@@ -404,7 +409,14 @@ async fn run_single_endpoint() -> Result<()> {
             .with_context(|| format!("open PCP Store {}", store_path.display()))?,
     );
     let identity_id = store.identity_id().to_owned();
-    let client = EmbeddedPcpClient::shared(Arc::clone(&store), access);
+    let client: Arc<dyn PcpApi> = Arc::new(
+        EmbeddedPcpClient::new(Arc::clone(&store), access).with_context_hub(Arc::new(
+            pcp_runtime::context_hub::ContextHub::new(
+                store.clone(),
+                pcp_runtime::context_hub::ContextHub::state_path(&store_path),
+            ),
+        )),
+    );
     let observer_config = ObserverConfig::from_env(&identity_id)?;
     let enrollment_config = EnrollmentConfig::from_env(
         observer_config.runtime_root.clone(),

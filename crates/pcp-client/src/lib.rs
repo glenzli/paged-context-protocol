@@ -1,4 +1,6 @@
 use std::sync::Arc;
+pub mod context_hub;
+pub mod model_context;
 use std::{
     collections::{BTreeSet, HashSet, VecDeque},
     str::FromStr,
@@ -141,6 +143,14 @@ pub trait PcpTenantApi: Send + Sync {
     fn identity_id(&self) -> &str;
     fn capabilities(&self) -> Capabilities;
     fn access(&self) -> &AccessSession;
+
+    /// Optional Runtime extension. Plain Store clients remain valid without it.
+    async fn context_hub(
+        &self,
+        _request: context_hub::ContextHubRequest,
+    ) -> Result<serde_json::Value> {
+        anyhow::bail!("Runtime context hub is unavailable on this endpoint")
+    }
 
     async fn list_scopes(
         &self,
@@ -427,6 +437,7 @@ pub struct EmbeddedPcpClient {
     store: Arc<dyn PcpStore>,
     access: AccessSession,
     successful_write_observer: Option<Arc<dyn Fn() + Send + Sync>>,
+    context_hub: Option<Arc<dyn context_hub::ContextHubService>>,
 }
 
 impl EmbeddedPcpClient {
@@ -435,6 +446,7 @@ impl EmbeddedPcpClient {
             store,
             access,
             successful_write_observer: None,
+            context_hub: None,
         }
     }
 
@@ -449,6 +461,11 @@ impl EmbeddedPcpClient {
 
     pub fn shared(store: Arc<dyn PcpStore>, access: AccessSession) -> Arc<dyn PcpApi> {
         Arc::new(Self::new(store, access))
+    }
+
+    pub fn with_context_hub(mut self, service: Arc<dyn context_hub::ContextHubService>) -> Self {
+        self.context_hub = Some(service);
+        self
     }
 
     pub fn tenant_shared(store: Arc<dyn PcpStore>, access: AccessSession) -> Arc<dyn PcpTenantApi> {
@@ -467,12 +484,36 @@ impl EmbeddedPcpClient {
 
 #[async_trait]
 impl PcpTenantApi for EmbeddedPcpClient {
+    async fn context_hub(
+        &self,
+        request: context_hub::ContextHubRequest,
+    ) -> Result<serde_json::Value> {
+        let service = self.context_hub.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Runtime context hub is unavailable on this endpoint")
+        })?;
+        let result = service.execute(&self.access, request).await;
+        // Only a formal promotion breaks maintenance backoff. Candidate/card
+        // traffic stays operational and must not schedule Page maintenance.
+        if result
+            .as_ref()
+            .is_ok_and(|value| value["status"] == "promoted")
+        {
+            self.observe_successful_write(result)
+        } else {
+            result
+        }
+    }
+
     fn identity_id(&self) -> &str {
         self.store.identity_id()
     }
 
     fn capabilities(&self) -> Capabilities {
-        self.store.capabilities()
+        let mut capabilities = self.store.capabilities();
+        if self.context_hub.is_some() {
+            capabilities.features.push("runtime_context_hub".into());
+        }
+        capabilities
     }
 
     fn access(&self) -> &AccessSession {

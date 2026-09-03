@@ -284,6 +284,9 @@ async fn dispatch(
     operation: RpcOperation,
 ) -> Result<RpcValue> {
     let value = match operation {
+        RpcOperation::ContextHub(request) => {
+            RpcValue::ContextHub(client.context_hub(request).await?)
+        }
         RpcOperation::Describe => RpcValue::Descriptor(PcpDescriptor {
             identity_id: client.identity_id().to_owned(),
             capabilities: client.capabilities(),

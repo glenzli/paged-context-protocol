@@ -1,6 +1,6 @@
 {
   "name": "pcp",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Retrieve the user's long-term decisions, preferences, constraints, and cross-task context when they matter; selectively retain confirmed information.",
   "author": {
     "name": "Glen Li",

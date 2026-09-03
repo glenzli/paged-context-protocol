@@ -186,6 +186,16 @@ fn unexpected(operation: &str) -> anyhow::Error {
 
 #[async_trait]
 impl PcpTenantApi for RemotePcpClient {
+    async fn context_hub(
+        &self,
+        request: pcp_client::context_hub::ContextHubRequest,
+    ) -> Result<serde_json::Value> {
+        match self.request(RpcOperation::ContextHub(request)).await? {
+            RpcValue::ContextHub(value) => Ok(value),
+            _ => anyhow::bail!("unexpected Runtime context hub response"),
+        }
+    }
+
     fn identity_id(&self) -> &str {
         &self.descriptor.identity_id
     }

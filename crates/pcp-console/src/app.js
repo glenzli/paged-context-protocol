@@ -6,6 +6,7 @@ import { describePagePayload, pagePayloadPreviewText } from "/page-content.js?v=
 import { createHealthView } from "/health-view.js?v=20260816.3";
 import { createRetentionView } from "/retention-view.js?v=20260818.1";
 import { createQueryView } from "/query-view.js?v=20260824.1";
+import { createContextHub } from "/context-hub.js";
 import { hydrateIcons, hydrateIconTooltips, icon, pathIcon } from "/ui-icons.js?v=20260824.7";
 import {
   RELATION_DECISION,
@@ -57,6 +58,7 @@ const MAINTENANCE_WORKSPACE_STORAGE_KEY = "pcp-console.maintenance-workspace.v1"
 let maintenanceStatusPoll = null;
 let maintenanceConvergenceActive = false;
 const ZH_MESSAGES = {
+  "Context inbox": "暂存与近况",
   "24 hours": "24 小时",
   "7 days": "7 天",
   "30 days": "30 天",
@@ -1442,6 +1444,9 @@ const queryView = createQueryView({
   openPage: (pageId) => pageInspector.open(pageId),
 });
 const healthView = createHealthView({ request: api, showError, formatNumber, t });
+const contextHub = createContextHub({ root: byId("view-context-hub"), request: api, mutate: maintenanceMutation,
+  confirmAction, icon, formatTime, onCommitted: loadOverview,
+  language: () => currentLanguage, openPage: (id) => pageInspector.open(id) });
 const retentionView = createRetentionView({
   request: api,
   showError,
@@ -5056,6 +5061,7 @@ async function activateView(name, { reload = false } = {}) {
   if (name === "pages" && (reload || !state.pages.loaded)) await loadPages();
   if (name === "query") await queryView.load({ reload });
   if (name === "maintenance") await loadMaintenance({ reload });
+  if (name === "context-hub") await contextHub.load();
   if (name === "health") {
     await healthView.load({ reload });
   }
@@ -5080,6 +5086,7 @@ async function refresh() {
     }
     if (state.activeView === "query") await queryView.load({ reload: true });
     if (state.activeView === "maintenance") await loadMaintenance({ reload: true });
+    if (state.activeView === "context-hub") await contextHub.load();
     if (state.activeView === "health") {
       await healthView.load({ reload: true });
       await retentionView.refreshIfOpen();
@@ -5089,6 +5096,7 @@ async function refresh() {
 }
 
 function rerenderForLocale() {
+  contextHub.render();
   if (state.overview) renderOverview(state.overview);
   const currentPage = state.pages.pageCache.get(state.pages.page);
   if (currentPage) renderPages(currentPage, state.pages.page);
