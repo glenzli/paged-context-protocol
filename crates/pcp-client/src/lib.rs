@@ -28,6 +28,14 @@ pub use pcp_store::{
     TombstoneCascadeResult, UnpackPageResult,
 };
 
+/// Runtime-local candidate inbox and bounded activity-card extension.
+///
+/// This operational facility belongs to one Store identity. It is not a
+/// cross-Store aggregation service and never promotes candidates automatically.
+pub const RUNTIME_CONTEXT_INBOX_FEATURE: &str = "runtime_context_inbox";
+/// Accepted by current adapters when connected to an older Runtime deployment.
+pub const LEGACY_RUNTIME_CONTEXT_HUB_FEATURE: &str = "runtime_context_hub";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AccessMode {
     Observe,
@@ -144,12 +152,12 @@ pub trait PcpTenantApi: Send + Sync {
     fn capabilities(&self) -> Capabilities;
     fn access(&self) -> &AccessSession;
 
-    /// Optional Runtime extension. Plain Store clients remain valid without it.
+    /// Optional Runtime context-inbox extension. Plain Store clients remain valid without it.
     async fn context_hub(
         &self,
         _request: context_hub::ContextHubRequest,
     ) -> Result<serde_json::Value> {
-        anyhow::bail!("Runtime context hub is unavailable on this endpoint")
+        anyhow::bail!("Runtime context inbox is unavailable on this endpoint")
     }
 
     async fn list_scopes(
@@ -489,7 +497,7 @@ impl PcpTenantApi for EmbeddedPcpClient {
         request: context_hub::ContextHubRequest,
     ) -> Result<serde_json::Value> {
         let service = self.context_hub.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("Runtime context hub is unavailable on this endpoint")
+            anyhow::anyhow!("Runtime context inbox is unavailable on this endpoint")
         })?;
         let result = service.execute(&self.access, request).await;
         // Only a formal promotion breaks maintenance backoff. Candidate/card
@@ -511,7 +519,9 @@ impl PcpTenantApi for EmbeddedPcpClient {
     fn capabilities(&self) -> Capabilities {
         let mut capabilities = self.store.capabilities();
         if self.context_hub.is_some() {
-            capabilities.features.push("runtime_context_hub".into());
+            capabilities
+                .features
+                .push(RUNTIME_CONTEXT_INBOX_FEATURE.into());
         }
         capabilities
     }

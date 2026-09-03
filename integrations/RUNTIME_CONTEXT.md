@@ -1,8 +1,9 @@
-# Runtime candidate inbox and activity cards
+# Runtime context inbox: candidates and activity cards
 
 These optional Runtime facilities sit beside the formal PCP Page Store. They do not introduce
 Page kinds into the protocol, enlarge normal recall, or turn source pointers into fetched content.
-Use them for human-reviewed candidate retention and occasional cross-client awareness.
+Use them for human-reviewed candidate staging and occasional cross-client awareness within one
+Runtime and Store identity.
 
 | Facility | Write | Read / decision | Formal recall |
 | --- | --- | --- | --- |
@@ -13,9 +14,14 @@ Use them for human-reviewed candidate retention and occasional cross-client awar
 ## Access and wiring
 
 Runtime attaches `ContextHubService` to both configured and enrolled clients and advertises
-`runtime_context_hub` in capabilities. `PcpTenantApi::context_hub(ContextHubRequest)` forwards
+`runtime_context_inbox` in capabilities. Current adapters also accept the former
+`runtime_context_hub` name from an older Runtime deployment.
+`PcpTenantApi::context_hub(ContextHubRequest)` forwards
 typed requests over the existing identity-bound RPC connection. A plain Embedded client without
 the service returns unavailable. There is no fallback into the Page Store.
+
+Despite the internal service type, this is not a cross-Store hub: it does not combine independent
+Runtime databases, infer agreement from recurrence, or promote anything without operator review.
 
 Each Principal starts with `submitCandidates`, `publishActivity`, and `readActivity` disabled.
 Enable the required switches in **Console → Context inbox → Client permissions**. This does not
@@ -26,8 +32,9 @@ require Store-wide `ManageScope` and `Write`; a tenant cannot approve itself.
 
 MCP exposes three additional tools when the Runtime advertises this extension:
 `pcp_submit_candidate`, `pcp_publish_activity`, `pcp_read_activity`. They produce one compact JSON
-text block, not duplicate raw and structured results. The ordinary catalog is 14 tools with this
-extension, 11 without it. Hosts may further restrict tools; discovery is not permission.
+receipt with a stable output schema. The bundled Codex and ChatGPT launchers select the `context`
+toolset: eight tools with this extension and five without it. The compatibility `standard` toolset
+has 14 or 11 respectively. Hosts may further restrict tools; discovery is not permission.
 
 Non-MCP applications should use the same client API, not read the operational file directly:
 
@@ -66,10 +73,10 @@ Page write, and ingestion uses a stable external event ID. If the process stops 
 the Page and saving the receipt, retrying the exact plan recovers the same Page. The UI shows
 such a plan as awaiting confirmation, not as a failed write that can safely be replaced.
 
-There are at most 50 undecided candidates/client and 500 retained items overall. Items and their
+There are at most 50 undecided candidates/client and 500 stored items overall. Items and their
 idempotency receipts expire 30 days after submission, except unresolved promotion plans. Approval
-does not extend candidate retention. Do not use this inbox as an audit log or resend old events
-after their retention window.
+does not extend the candidate's storage lifetime. Do not use this inbox as an audit log or resend
+old events after their storage window.
 
 ## Activity lifecycle and read cost
 

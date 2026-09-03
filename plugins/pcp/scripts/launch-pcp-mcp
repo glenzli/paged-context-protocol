@@ -27,4 +27,5 @@ fi
 PCP_CLIENT_ID="codex:pcp" \
 PCP_ENROLLMENT_FILE="$enrollment_file" \
 PCP_MCP_SURFACE="codex" \
+PCP_MCP_TOOLSET="${PCP_MCP_TOOLSET:-context}" \
 exec "$pcp_mcp_binary"

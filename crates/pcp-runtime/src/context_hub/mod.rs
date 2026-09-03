@@ -108,7 +108,7 @@ impl ContextHub {
         }
         ensure!(
             db.state.candidates.len() < 500,
-            "candidate retention capacity reached; wait for expiry, do not retry repeatedly"
+            "candidate inbox capacity reached; wait for expiry, do not retry repeatedly"
         );
         ensure!(
             db.state

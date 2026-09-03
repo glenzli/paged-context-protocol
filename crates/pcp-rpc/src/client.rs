@@ -192,7 +192,7 @@ impl PcpTenantApi for RemotePcpClient {
     ) -> Result<serde_json::Value> {
         match self.request(RpcOperation::ContextHub(request)).await? {
             RpcValue::ContextHub(value) => Ok(value),
-            _ => anyhow::bail!("unexpected Runtime context hub response"),
+            _ => anyhow::bail!("unexpected Runtime context inbox response"),
         }
     }
 

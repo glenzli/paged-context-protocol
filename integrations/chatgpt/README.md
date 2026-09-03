@@ -54,6 +54,12 @@ tunnel-client run --profile pcp-chatgpt
 
 Keep the tunnel process running. In ChatGPT Developer Mode, create an app using **Tunnel** and select the same tunnel ID. Review the discovered tools and their action controls before enabling writes.
 
+The launcher selects the compact `context` toolset: five core retrieval/write tools plus three
+candidate/activity tools when Runtime advertises that optional facility. Set
+`PCP_MCP_TOOLSET=standard` only for compatibility with workflows that require diagnostics, Scope
+listing, graph expansion, index browsing, or intent reranking. Maintenance tools are not part of
+the ChatGPT surface.
+
 ## 4. Run in the background on macOS
 
 After the foreground connection works, install a per-user LaunchAgent:
@@ -119,6 +125,7 @@ quota: PCP does not know ChatGPT turn boundaries.
 For a small agent-based check and its limitations, see
 [retrieval observation](../../crates/pcp-mcp/RETRIEVAL_OBSERVATION.md).
 
+When an integration explicitly selects the compatibility `standard` toolset,
 `pcp_match_intent` defaults to low effort. High effort is for explicit deeper
 investigation, with at most 80 candidate cards and 80 catalog Pages. Router work
 shares a 90-second deadline even if an older configuration specifies more;
@@ -136,7 +143,7 @@ and displays date-only observations without adding a clock time.
 
 ## Boundaries
 
-- `pcp_search_pages`, `pcp_semantic_search`, `pcp_read_pages`, and graph inspection are read-only.
+- `pcp_search_pages`, `pcp_semantic_search`, `pcp_read_pages`, and `pcp_read_activity` are read-only.
 - `pcp_capture` and `pcp_submit_feedback` are declared as write actions. ChatGPT captures use Page kind `chatgpt_capture` and facet `captureSurface: chatgpt`.
 - The MCP server instructions and tool descriptions carry the same proactive-read, high-threshold-write policy as the Codex plugin. ChatGPT does not load the Codex Skill. This guides tool selection; it does not guarantee invocation on every relevant task.
 - The tunnel does not grant PCP access. Runtime still requires the approved `chatgpt:pcp` enrollment on every MCP process start.

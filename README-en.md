@@ -49,6 +49,7 @@ New clients can discover Runtime through [Infra Discovery](https://github.com/gl
 - Summary, Topic, Validity, Relation, Provenance, archive/restore, lossless sealed-Page packing, and access audit.
 - Runtime-injected Identity and Actor for `ingest_page`, with optional `sourceSpan`, `basedOnRevisionIds`, and a minimal SourceRef.
 - Tenant `submit_feedback`, per-target reconciliation, atomic Validity/`supersedes` commits, and a bounded Luna-to-Sol-to-human escalation path.
+- A Runtime-local Context Inbox with explicitly enabled candidate staging and short-lived activity cards; only human promotion turns a candidate into a formal Page.
 - Embedded and RPC clients, approved enrollment, CLI, MCP, Console, a maintenance coordinator, and read-only infrastructure observation.
 - Deterministic Revision-retention planning, finite leases, and protected explicit collection.
 
@@ -61,6 +62,7 @@ New clients can discover Runtime through [Infra Discovery](https://github.com/gl
 - Durable Page deletion, cold storage, and Identity-wide Validity maintenance are not implemented; `purge` is outside v0.8.
 - External-source custody, parsing, retrieval, rendering, OCR, and transcription belong to tenants.
 - Semantic queries require an explicitly configured Provider. An unavailable Provider produces an unavailable result rather than an automatic keyword fallback.
+- The Context Inbox does not aggregate independent Stores or confirm and promote candidates from repeated mentions across clients.
 - Local Unix-socket mode `0600` is an OS-user boundary and does not defend against a hostile process running as the same user.
 - Public conformance is defined by [`PROTOCOL-en.md`](PROTOCOL-en.md), not by a specific backend or interface in this repository.
 

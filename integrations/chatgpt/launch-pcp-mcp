@@ -62,4 +62,5 @@ PCP_CLIENT_ID="chatgpt:pcp" \
 PCP_CLIENT_NAME="ChatGPT" \
 PCP_ENROLLMENT_FILE="$enrollment_file" \
 PCP_MCP_SURFACE="chatgpt" \
+PCP_MCP_TOOLSET="${PCP_MCP_TOOLSET:-context}" \
 exec "$pcp_mcp_binary"

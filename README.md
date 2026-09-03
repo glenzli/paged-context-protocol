@@ -49,6 +49,7 @@ PCP 不规定 Router、提示词格式、Chain-of-Thought、上下文窗口规�
 - Summary、Topic、Validity、Relation、Provenance、archive/restore、无损 sealed-Page packing 和访问审计。
 - Runtime 注入 Identity 与 Actor 的 `ingest_page`，包括可选 `sourceSpan`、`basedOnRevisionIds` 和最小 SourceRef。
 - 租户 `submit_feedback`、逐目标反馈协调、Validity/`supersedes` 原子提交，以及 Luna→Sol→人工的有界升级路径。
+- Runtime-local Context Inbox：经 Console 显式启用的候选暂存与短期活动卡；候选只有经人工晋升后才成为正式 Page。
 - embedded/RPC client、授权注册、CLI、MCP、Console、维护协调器和只读设施观测。
 - 确定性 Revision 保留规划、有限租约和受保护的显式回收。
 
@@ -61,6 +62,7 @@ PCP 不规定 Router、提示词格式、Chain-of-Thought、上下文窗口规�
 - Durable Page deletion、cold storage 和 Identity 全局 Validity 维护尚未实现；`purge` 不属于 v0.8。
 - 外部来源的托管、解析、检索、展示、OCR 和转写由租户实现。
 - 语义查询依赖显式配置的 Provider；缺少 Provider 时返回不可用，不自动改用关键词查询。
+- Context Inbox 不聚合独立 Store，不根据跨客户端重复提及自动确认或晋升候选。
 - 本地 Unix socket 的 `0600` 权限是 OS 用户边界，不能防御同一用户下运行的恶意进程。
 - 公共协议的合规边界以 [`PROTOCOL.md`](PROTOCOL.md) 为准，而不是本仓库的某个具体后端或界面。
 

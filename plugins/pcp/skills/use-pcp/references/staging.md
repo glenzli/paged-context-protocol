@@ -1,6 +1,7 @@
 # Optional candidates and activity
 
-These Runtime facilities are independently enabled for each client by the user in Console.
+These facilities are local to one Runtime and Store identity and are independently enabled for
+each client by the user in Console. They do not aggregate independent PCP Stores.
 Tool availability is not permission. Existing Scope access still applies; publishing shares
 content with authorized readers of that Scope. Do not include secrets or unrelated private material.
 

@@ -26,10 +26,10 @@ use serde_json::json;
 
 use super::SqlitePcpStore;
 
-#[path = "tests/content_filters.rs"]
-mod content_filters;
 #[path = "tests/browse_time.rs"]
 mod browse_time;
+#[path = "tests/content_filters.rs"]
+mod content_filters;
 #[path = "tests/page_actions.rs"]
 mod page_actions;
 #[path = "tests/reconciliation.rs"]

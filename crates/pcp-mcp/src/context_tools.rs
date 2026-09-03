@@ -4,19 +4,63 @@ use pcp_client::{
     context_hub::{ActivityInput, ActivityQuery, CandidateInput, ContextHubRequest},
 };
 use pcp_core::SourceRef;
-use rmcp::{
-    ErrorData,
-    handler::server::tool::IntoCallToolResult,
-    model::{CallToolResponse, CallToolResult, ContentBlock},
-};
+use rmcp::ErrorData;
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub struct HubReply(pub serde_json::Value);
-impl IntoCallToolResult for HubReply {
-    fn into_call_tool_result(self) -> Result<CallToolResponse, ErrorData> {
-        Ok(CallToolResult::success(vec![ContentBlock::text(self.0.to_string())]).into())
-    }
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateReply {
+    candidate_id: String,
+    status: String,
+    created: bool,
+    version: u64,
+    #[serde(default)]
+    result: Option<CandidateOutcome>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CandidateOutcome {
+    status: String,
+    #[serde(default)]
+    page_id: Option<String>,
+    #[serde(default)]
+    revision_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityWriteReply {
+    card_id: String,
+    version: u64,
+    changed: bool,
+    expires_at: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityReadReply {
+    items: Vec<ActivityCardReply>,
+    cursor: String,
+    unchanged: bool,
+    #[serde(default)]
+    replace: bool,
+    #[serde(default)]
+    truncated: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActivityCardReply {
+    card_id: String,
+    client_id: String,
+    scope: String,
+    topic_key: String,
+    summary: String,
+    version: u64,
+    updated_at: String,
+    expires_at: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -67,7 +111,7 @@ pub struct ActivityReadParams {
     pub include_own: bool,
 }
 
-pub async fn submit(client: &dyn PcpApi, p: CandidateParams) -> Result<HubReply, ErrorData> {
+pub async fn submit(client: &dyn PcpApi, p: CandidateParams) -> Result<CandidateReply, ErrorData> {
     invoke(
         client,
         ContextHubRequest::SubmitCandidate(CandidateInput {
@@ -78,10 +122,14 @@ pub async fn submit(client: &dyn PcpApi, p: CandidateParams) -> Result<HubReply,
             source_refs: p.source_refs,
             based_on_revision_ids: p.based_on_revision_ids,
         }),
+        "candidate submission",
     )
     .await
 }
-pub async fn publish(client: &dyn PcpApi, p: ActivityParams) -> Result<HubReply, ErrorData> {
+pub async fn publish(
+    client: &dyn PcpApi,
+    p: ActivityParams,
+) -> Result<ActivityWriteReply, ErrorData> {
     invoke(
         client,
         ContextHubRequest::PublishActivity(ActivityInput {
@@ -91,10 +139,14 @@ pub async fn publish(client: &dyn PcpApi, p: ActivityParams) -> Result<HubReply,
             expected_version: p.expected_version,
             ttl_hours: p.ttl_hours,
         }),
+        "activity publication",
     )
     .await
 }
-pub async fn read(client: &dyn PcpApi, p: ActivityReadParams) -> Result<HubReply, ErrorData> {
+pub async fn read(
+    client: &dyn PcpApi,
+    p: ActivityReadParams,
+) -> Result<ActivityReadReply, ErrorData> {
     invoke(
         client,
         ContextHubRequest::ReadActivity(ActivityQuery {
@@ -104,13 +156,53 @@ pub async fn read(client: &dyn PcpApi, p: ActivityReadParams) -> Result<HubReply
             limit: p.limit,
             include_own: p.include_own,
         }),
+        "activity read",
     )
     .await
 }
-async fn invoke(client: &dyn PcpApi, request: ContextHubRequest) -> Result<HubReply, ErrorData> {
-    client
+async fn invoke<T: DeserializeOwned>(
+    client: &dyn PcpApi,
+    request: ContextHubRequest,
+    operation: &'static str,
+) -> Result<T, ErrorData> {
+    let value = client
         .context_hub(request)
         .await
-        .map(HubReply)
-        .map_err(|e| ErrorData::invalid_request(format!("{e:#}"), None))
+        .map_err(|e| ErrorData::invalid_request(format!("{e:#}"), None))?;
+    serde_json::from_value(value).map_err(|error| {
+        ErrorData::internal_error(format!("decode PCP {operation} result: {error}"), None)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn bounded_runtime_replies_have_stable_typed_shapes() {
+        let candidate: CandidateReply = serde_json::from_value(json!({
+            "candidateId":"cand_1", "status":"pending", "created":true, "version":1
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(candidate).unwrap()["result"],
+            json!(null)
+        );
+
+        let published: ActivityWriteReply = serde_json::from_value(json!({
+            "cardId":"act_1", "version":2, "changed":true,
+            "expiresAt":"2026-09-06T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(serde_json::to_value(published).unwrap()["changed"], true);
+
+        let unchanged: ActivityReadReply = serde_json::from_value(json!({
+            "items":[], "cursor":"cursor_1", "unchanged":true
+        }))
+        .unwrap();
+        let stable = serde_json::to_value(unchanged).unwrap();
+        assert_eq!(stable["replace"], false);
+        assert_eq!(stable["truncated"], false);
+    }
 }

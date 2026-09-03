@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result};
 use pcp_client::{AccessMode, EmbeddedPcpClient, PcpApi};
 use pcp_core::{AccessPrincipal, AccessPrincipalType};
-use pcp_mcp::{PcpMcpServer, PcpMcpSurface};
+use pcp_mcp::{PcpMcpServer, PcpMcpSurface, PcpMcpToolset};
 use pcp_rpc::RemotePcpClient;
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
@@ -42,12 +42,11 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "codex".to_owned())
         .parse::<PcpMcpSurface>()
         .map_err(anyhow::Error::msg)?;
-    let mut server = PcpMcpServer::with_surface(client, surface);
-    match env::var("PCP_MCP_TOOLSET").as_deref().unwrap_or("standard") {
-        "standard" => {}
-        "maintenance" => server = server.with_maintenance_tools(),
-        _ => anyhow::bail!("PCP_MCP_TOOLSET must be standard or maintenance"),
-    }
+    let toolset = env::var("PCP_MCP_TOOLSET")
+        .unwrap_or_else(|_| "core".to_owned())
+        .parse::<PcpMcpToolset>()
+        .map_err(anyhow::Error::msg)?;
+    let server = PcpMcpServer::with_surface(client, surface).with_toolset(toolset);
     let service = server
         .serve(stdio())
         .await

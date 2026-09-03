@@ -141,7 +141,7 @@ async fn enrolled_endpoints_share_query_service_with_tenant_authority() {
             .capabilities()
             .features
             .iter()
-            .any(|f| f == "runtime_context_hub")
+            .any(|f| f == "runtime_context_inbox")
     );
     let hub_error = client
         .context_hub(pcp_client::context_hub::ContextHubRequest::ReadActivity(

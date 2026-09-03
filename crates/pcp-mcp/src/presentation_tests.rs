@@ -5,23 +5,40 @@ use rmcp::{ServiceExt, model::CallToolRequestParams};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
-fn optional_context_catalog_is_bounded_and_excludes_principal_arguments() {
-    let mut tools = PcpMcpServer::tool_router().list_all();
-    tools.retain(|tool| {
-        STANDARD_TOOLS.contains(&tool.name.as_ref()) || CONTEXT_TOOLS.contains(&tool.name.as_ref())
-    });
-    assert_eq!(tools.len(), 14);
-    let chars = serde_json::to_string(&tools).unwrap().chars().count();
+fn toolset_profiles_are_bounded_and_context_arguments_are_tenant_safe() {
+    let tools = PcpMcpServer::tool_router().list_all();
+    let profile = |toolset: PcpMcpToolset, context_available: bool| {
+        tools
+            .iter()
+            .filter(|tool| toolset.exposes(tool.name.as_ref(), context_available))
+            .collect::<Vec<_>>()
+    };
+    let core = profile(PcpMcpToolset::Core, true);
+    let context = profile(PcpMcpToolset::Context, true);
+    let standard = profile(PcpMcpToolset::Standard, true);
+    let maintenance = profile(PcpMcpToolset::Maintenance, true);
+    assert_eq!(core.len(), 5);
+    assert_eq!(context.len(), 8);
+    assert_eq!(standard.len(), 14);
+    assert_eq!(maintenance.len(), tools.len());
+    assert_eq!(profile(PcpMcpToolset::Context, false).len(), 5);
+    assert_eq!(profile(PcpMcpToolset::Standard, false).len(), 11);
+
+    let chars = serde_json::to_string(&context).unwrap().chars().count();
     let instructions = PcpMcpSurface::Codex.instructions().chars().count();
     assert!(
-        chars + instructions * tools.len() < 36_000,
+        chars + instructions * context.len() < 24_000,
         "catalog grew to {chars} characters plus repeated instructions"
     );
-    for tool in tools
+    for tool in context
         .iter()
         .filter(|tool| CONTEXT_TOOLS.contains(&tool.name.as_ref()))
     {
-        assert!(tool.output_schema.is_none());
+        assert!(
+            tool.output_schema.is_some(),
+            "{} has no output schema",
+            tool.name
+        );
         let properties = tool
             .input_schema
             .get("properties")
@@ -37,12 +54,52 @@ fn optional_context_catalog_is_bounded_and_excludes_principal_arguments() {
         }
     }
     eprintln!(
-        "PCP optional catalog: {chars} definition characters, {instructions} instruction characters"
+        "PCP context catalog: {chars} definition characters, {instructions} instruction characters"
     );
 }
 
+#[test]
+fn toolset_names_are_explicit_and_backward_compatible() {
+    for (name, expected) in [
+        ("core", PcpMcpToolset::Core),
+        ("context", PcpMcpToolset::Context),
+        ("standard", PcpMcpToolset::Standard),
+        ("maintenance", PcpMcpToolset::Maintenance),
+    ] {
+        assert_eq!(name.parse::<PcpMcpToolset>().unwrap(), expected);
+    }
+    assert!("all".parse::<PcpMcpToolset>().is_err());
+}
+
+#[test]
+fn literal_search_advertises_temporal_and_accepts_recent_as_a_legacy_alias() {
+    let tool = PcpMcpServer::tool_router()
+        .list_all()
+        .into_iter()
+        .find(|tool| tool.name == "pcp_search_pages")
+        .expect("search tool");
+    let strategies = tool.input_schema["$defs"]["SearchStrategy"]["enum"]
+        .as_array()
+        .expect("strategy enum");
+    assert!(strategies.contains(&json!("temporal")));
+    assert!(!strategies.contains(&json!("recent")));
+
+    let temporal: SearchPagesParams = serde_json::from_value(json!({
+        "query": "test",
+        "strategy": "temporal"
+    }))
+    .expect("canonical temporal strategy");
+    assert!(matches!(temporal.strategy, SearchStrategy::Temporal));
+    let recent: SearchPagesParams = serde_json::from_value(json!({
+        "query": "test",
+        "strategy": "recent"
+    }))
+    .expect("legacy recent strategy");
+    assert!(matches!(recent.strategy, SearchStrategy::Temporal));
+}
+
 #[tokio::test]
-async fn standard_wire_is_compact_retrievable_and_permission_bound() {
+async fn core_wire_is_compact_retrievable_and_permission_bound() {
     let root = std::env::temp_dir().join(format!(
         "pcp-model-wire-{}",
         SystemTime::now()
@@ -112,6 +169,15 @@ async fn standard_wire_is_compact_retrievable_and_permission_bound() {
     let raw_size = serde_json::to_string(&raw).unwrap().chars().count();
     let compact_size = serde_json::to_string(&expected).unwrap().chars().count();
     assert!(compact_size < raw_size);
+    let surface = server.surface_description();
+    assert_eq!(surface.toolset, "core");
+    assert_eq!(surface.available_tools.len(), CORE_TOOLS.len());
+    assert!(
+        surface
+            .available_tools
+            .contains(&"pcp_semantic_search".to_owned())
+    );
+    assert!(!surface.available_tools.contains(&"pcp_describe".to_owned()));
     let (server_io, client_io) = tokio::io::duplex(128 * 1024);
     let task = tokio::spawn(async move {
         server
@@ -124,18 +190,9 @@ async fn standard_wire_is_compact_retrievable_and_permission_bound() {
     });
     let client = ().serve(client_io).await.unwrap();
     let tools = client.list_all_tools().await.unwrap();
-    assert_eq!(tools.len(), STANDARD_TOOLS.len());
-    assert!(
-        tools
-            .iter()
-            .all(|t| STANDARD_TOOLS.contains(&t.name.as_ref()))
-    );
-    for name in [
-        "pcp_read_pages",
-        "pcp_search_pages",
-        "pcp_semantic_search",
-        "pcp_browse_index",
-    ] {
+    assert_eq!(tools.len(), CORE_TOOLS.len());
+    assert!(tools.iter().all(|t| CORE_TOOLS.contains(&t.name.as_ref())));
+    for name in ["pcp_read_pages", "pcp_search_pages", "pcp_semantic_search"] {
         assert!(
             tools
                 .iter()
@@ -150,7 +207,7 @@ async fn standard_wire_is_compact_retrievable_and_permission_bound() {
     let info = client.peer_info().unwrap();
     let instruction_chars = info.instructions.as_ref().unwrap().chars().count();
     assert!(instruction_chars <= 800);
-    assert!(definition_chars + instruction_chars * tools.len() < 30_000);
+    assert!(definition_chars + instruction_chars * tools.len() < 18_000);
     for format in ["json", "text"] {
         let result = client
             .call_tool(

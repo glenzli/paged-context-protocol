@@ -88,22 +88,43 @@ different current Page head without silently replacing the requested old snapsho
 
 ## MCP surface
 
-The ordinary MCP server advertises 11 tools. `PCP_MCP_TOOLSET=maintenance` explicitly exposes
-advanced tools as well; backend permissions still apply. Ordinary capture/feedback approval policy
-belongs to the host (the Codex plugin prompts for both). Do not treat tool discovery as a grant.
+MCP discovery is deliberately smaller than the complete API. `PCP_MCP_TOOLSET` selects one fixed
+catalog for a server process:
 
-When Runtime advertises `runtime_context_hub`, three optional candidate/activity tools are also
-available (14 ordinary tools total). They use a separate, bounded operational store and per-client
-opt-in. See [Runtime context](RUNTIME_CONTEXT.md) for API, permissions, retries and snapshot reads.
-They must not fall back to formal capture when disabled, and activity writes are never mandatory.
+| Toolset | Tools | Intended use |
+| --- | ---: | --- |
+| `core` (default) | 5 | literal/semantic search, exact read, durable capture and feedback |
+| `context` | 5–8 | `core` plus candidate/activity tools when Runtime supports the inbox |
+| `standard` | 11–14 | compatibility surface with diagnostics, Scope listing and advanced retrieval |
+| `maintenance` | all available | trusted operator and development workflows |
+
+The bundled Codex and ChatGPT launchers select `context`; without the Runtime inbox extension it
+contracts to the same five tools as `core`. `standard` preserves the former ordinary catalog for
+integrations that explicitly need it. Backend permissions still apply to every call, and ordinary
+capture/feedback approval policy belongs to the host (the Codex plugin prompts for both). Do not
+treat discovery or a hidden tool as an authorization boundary.
+
+When exposed by `standard` or `maintenance`, `pcp_describe.capabilities` is the provider-backend
+inventory: Store operations plus optional Runtime extensions. Feature names such as
+`access_audit` and `revision_retention_planning` are not MCP tool names and do not mean that a
+standard client can call maintenance operations. `pcp_describe.mcpSurface.availableTools` is the
+exact catalog for that server instance; MCP `tools/list` remains authoritative for discovery.
+
+When Runtime advertises `runtime_context_inbox`, the `context`, `standard`, and `maintenance`
+toolsets can expose three optional candidate/activity tools. They use a separate, bounded
+operational store and per-client opt-in. See [Runtime context](RUNTIME_CONTEXT.md) for API,
+permissions, retries and snapshot reads. They must not fall back to formal capture when disabled,
+and activity writes are never mandatory. This Runtime-local inbox is unrelated to Revision payload
+retention plans and leases.
 
 Recommended model flow:
 
 1. `pcp_semantic_search` for prior decisions/preferences/constraints; `pcp_search_pages` for literal
    text or known IDs. Do not query when supplied evidence already settles a self-contained task.
 2. `pcp_read_pages` on selected `revisionIds`. Use `view` to request only the follow-up needed.
-3. `pcp_expand_graph` only from relevant anchors. Use `pcp_match_intent` for a material unresolved
-   retrieval question, initially at low effort; stop searching when results add no value.
+3. On a `standard` surface, use `pcp_expand_graph` only from relevant anchors and
+   `pcp_match_intent` for a material unresolved retrieval question, initially at low effort. Do not
+   require these specialist tools for ordinary recall; stop searching when results add no value.
 4. `pcp_capture` only for confirmed reusable context or requested retention. Use
    `pcp_submit_feedback` for explicit corrections; feedback remains pending Console review.
 

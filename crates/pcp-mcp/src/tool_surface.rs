@@ -1,4 +1,6 @@
 //! MCP transport presentation. The reusable evidence projection lives in pcp-client.
+use std::str::FromStr;
+
 use pcp_client::model_context::ModelContext;
 use rmcp::{
     ErrorData,
@@ -7,6 +9,14 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
+
+pub const CORE_TOOLS: &[&str] = &[
+    "pcp_search_pages",
+    "pcp_semantic_search",
+    "pcp_read_pages",
+    "pcp_capture",
+    "pcp_submit_feedback",
+];
 
 pub const STANDARD_TOOLS: &[&str] = &[
     "pcp_describe",
@@ -27,6 +37,54 @@ pub const CONTEXT_TOOLS: &[&str] = &[
     "pcp_publish_activity",
     "pcp_read_activity",
 ];
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PcpMcpToolset {
+    #[default]
+    Core,
+    Context,
+    Standard,
+    Maintenance,
+}
+
+impl PcpMcpToolset {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Context => "context",
+            Self::Standard => "standard",
+            Self::Maintenance => "maintenance",
+        }
+    }
+
+    pub(crate) fn exposes(self, name: &str, context_available: bool) -> bool {
+        if CONTEXT_TOOLS.contains(&name) {
+            return context_available
+                && matches!(self, Self::Context | Self::Standard | Self::Maintenance);
+        }
+        match self {
+            Self::Core | Self::Context => CORE_TOOLS.contains(&name),
+            Self::Standard => STANDARD_TOOLS.contains(&name),
+            Self::Maintenance => true,
+        }
+    }
+}
+
+impl FromStr for PcpMcpToolset {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "core" => Ok(Self::Core),
+            "context" => Ok(Self::Context),
+            "standard" => Ok(Self::Standard),
+            "maintenance" => Ok(Self::Maintenance),
+            other => Err(format!(
+                "unsupported PCP_MCP_TOOLSET `{other}`; use core, context, standard, or maintenance"
+            )),
+        }
+    }
+}
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
