@@ -5,6 +5,9 @@
       "cwd": ".",
       "enabled": true,
       "enabled_tools": [
+        "pcp_describe",
+        "pcp_whoami",
+        "pcp_list_scopes",
         "pcp_search_pages",
         "pcp_semantic_search",
         "pcp_read_pages",

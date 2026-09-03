@@ -18,16 +18,16 @@ fn toolset_profiles_are_bounded_and_context_arguments_are_tenant_safe() {
     let standard = profile(PcpMcpToolset::Standard, true);
     let maintenance = profile(PcpMcpToolset::Maintenance, true);
     assert_eq!(core.len(), 5);
-    assert_eq!(context.len(), 8);
+    assert_eq!(context.len(), 11);
     assert_eq!(standard.len(), 14);
     assert_eq!(maintenance.len(), tools.len());
-    assert_eq!(profile(PcpMcpToolset::Context, false).len(), 5);
+    assert_eq!(profile(PcpMcpToolset::Context, false).len(), 8);
     assert_eq!(profile(PcpMcpToolset::Standard, false).len(), 11);
 
     let chars = serde_json::to_string(&context).unwrap().chars().count();
     let instructions = PcpMcpSurface::Codex.instructions().chars().count();
     assert!(
-        chars + instructions * context.len() < 24_000,
+        chars + instructions * context.len() < 31_000,
         "catalog grew to {chars} characters plus repeated instructions"
     );
     for tool in context
@@ -53,9 +53,79 @@ fn toolset_profiles_are_bounded_and_context_arguments_are_tenant_safe() {
             );
         }
     }
+    for tool in context
+        .iter()
+        .filter(|tool| DISCOVERY_TOOLS.contains(&tool.name.as_ref()))
+    {
+        assert!(
+            tool.output_schema.is_some(),
+            "{} has no output schema",
+            tool.name
+        );
+    }
     eprintln!(
         "PCP context catalog: {chars} definition characters, {instructions} instruction characters"
     );
+}
+
+#[tokio::test]
+async fn context_wire_advertises_and_dispatches_discovery_tools() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-context-discovery-wire-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("store.sqlite3"))
+            .await
+            .unwrap(),
+    );
+    let server = PcpMcpServer::new(tests::full_client(store, vec!["scope:discovery".into()]))
+        .with_toolset(PcpMcpToolset::Context);
+    server
+        .pcp_create_scope(Parameters(CreateScopeRequest {
+            namespace: "scope:discovery".into(),
+            display_name: "Discovery".into(),
+            description: None,
+            parent_namespace: None,
+        }))
+        .await
+        .unwrap();
+
+    let (server_io, client_io) = tokio::io::duplex(128 * 1024);
+    let task = tokio::spawn(async move {
+        server
+            .serve(server_io)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+            .unwrap();
+    });
+    let client = ().serve(client_io).await.unwrap();
+    let tools = client.list_all_tools().await.unwrap();
+    for name in DISCOVERY_TOOLS {
+        assert!(
+            tools.iter().any(|tool| tool.name == *name),
+            "missing {name}"
+        );
+        let request = CallToolRequestParams::new(*name)
+            .with_arguments(json!({}).as_object().unwrap().clone());
+        let response = client
+            .call_tool(request)
+            .await
+            .expect("dispatch discovery tool");
+        assert!(
+            response.structured_content.is_some(),
+            "{name} returned no data"
+        );
+    }
+    drop(client);
+    task.await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

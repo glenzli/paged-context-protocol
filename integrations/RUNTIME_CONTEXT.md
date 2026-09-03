@@ -33,8 +33,10 @@ require Store-wide `ManageScope` and `Write`; a tenant cannot approve itself.
 MCP exposes three additional tools when the Runtime advertises this extension:
 `pcp_submit_candidate`, `pcp_publish_activity`, `pcp_read_activity`. They produce one compact JSON
 receipt with a stable output schema. The bundled Codex and ChatGPT launchers select the `context`
-toolset: eight tools with this extension and five without it. The compatibility `standard` toolset
-has 14 or 11 respectively. Hosts may further restrict tools; discovery is not permission.
+toolset: eleven tools with this extension and eight without it. Three read-only discovery tools stay
+available in both cases so cached MCP catalogs can still inspect identity, grants and Scopes. The
+compatibility `standard` toolset has 14 or 11 respectively. Hosts may further restrict tools;
+discovery is not permission.
 
 Non-MCP applications should use the same client API, not read the operational file directly:
 

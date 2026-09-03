@@ -35,6 +35,23 @@ wait_for_console_exit() {
   done
 }
 
+bootstrap_console() {
+  attempt=0
+  while ! launchctl bootstrap "$DOMAIN" "$PLIST_PATH"; do
+    # launchd can report an error after accepting the job. Do not turn that race into a
+    # duplicate bootstrap, and otherwise give a just-removed label a bounded time to settle.
+    if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 50 ]; then
+      echo "PCP Console could not be loaded after $attempt attempts" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+}
+
 mkdir -p "$PCP_HOME" "$INSTALLED_BIN_DIR" "$LOG_DIR" "$PLIST_DIR"
 chmod 700 "$PCP_HOME" "$INSTALLED_BIN_DIR" "$LOG_DIR"
 
@@ -70,7 +87,7 @@ launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
 wait_for_console_exit
 mv "$temporary" "$PLIST_PATH"
 trap - EXIT
-launchctl bootstrap "$DOMAIN" "$PLIST_PATH"
+bootstrap_console
 launchctl enable "$DOMAIN/$LABEL"
 launchctl kickstart -k "$DOMAIN/$LABEL"
 

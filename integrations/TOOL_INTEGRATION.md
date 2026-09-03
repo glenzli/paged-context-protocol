@@ -94,7 +94,7 @@ catalog for a server process:
 | Toolset | Tools | Intended use |
 | --- | ---: | --- |
 | `core` (default) | 5 | literal/semantic search, exact read, durable capture and feedback |
-| `context` | 5–8 | `core` plus candidate/activity tools when Runtime supports the inbox |
+| `context` | 8–11 | `core`, read-only discovery, plus candidate/activity tools when Runtime supports the inbox |
 | `standard` | 11–14 | compatibility surface with diagnostics, Scope listing and advanced retrieval |
 | `maintenance` | all available | trusted operator and development workflows |
 
@@ -104,11 +104,16 @@ integrations that explicitly need it. Backend permissions still apply to every c
 capture/feedback approval policy belongs to the host (the Codex plugin prompts for both). Do not
 treat discovery or a hidden tool as an authorization boundary.
 
-When exposed by `standard` or `maintenance`, `pcp_describe.capabilities` is the provider-backend
+When exposed by `context`, `standard` or `maintenance`, `pcp_describe.capabilities` is the provider-backend
 inventory: Store operations plus optional Runtime extensions. Feature names such as
 `access_audit` and `revision_retention_planning` are not MCP tool names and do not mean that a
 standard client can call maintenance operations. `pcp_describe.mcpSurface.availableTools` is the
 exact catalog for that server instance; MCP `tools/list` remains authoritative for discovery.
+
+The `context` surface also keeps `pcp_whoami` and `pcp_list_scopes` callable so an agent can resolve
+a real grant or namespace ambiguity. They are not a required preamble for ordinary recall: search
+without explicit Scopes uses the server-injected access session, and Runtime permissions remain
+authoritative.
 
 When Runtime advertises `runtime_context_inbox`, the `context`, `standard`, and `maintenance`
 toolsets can expose three optional candidate/activity tools. They use a separate, bounded

@@ -18,6 +18,11 @@ pub const CORE_TOOLS: &[&str] = &[
     "pcp_submit_feedback",
 ];
 
+/// Read-only discovery calls remain on interactive client surfaces. Long-lived MCP hosts can
+/// retain an earlier catalog across a server restart, so removing these routes turns otherwise
+/// valid capability and authorization checks into `tool not found` failures.
+pub const DISCOVERY_TOOLS: &[&str] = &["pcp_describe", "pcp_whoami", "pcp_list_scopes"];
+
 pub const STANDARD_TOOLS: &[&str] = &[
     "pcp_describe",
     "pcp_whoami",
@@ -63,7 +68,8 @@ impl PcpMcpToolset {
                 && matches!(self, Self::Context | Self::Standard | Self::Maintenance);
         }
         match self {
-            Self::Core | Self::Context => CORE_TOOLS.contains(&name),
+            Self::Core => CORE_TOOLS.contains(&name),
+            Self::Context => CORE_TOOLS.contains(&name) || DISCOVERY_TOOLS.contains(&name),
             Self::Standard => STANDARD_TOOLS.contains(&name),
             Self::Maintenance => true,
         }
