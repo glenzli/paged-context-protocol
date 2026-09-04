@@ -615,43 +615,47 @@
       <button id="preferences-close" class="icon-button dialog-close-button" type="button" aria-label="Close" title="Close" data-i18n-aria-label="Close" data-i18n-title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
     </header>
     <nav class="preferences-tabs" role="tablist" aria-label="Settings sections" data-i18n-aria-label="Settings sections">
-      <button class="preferences-tab active" type="button" role="tab" aria-selected="true" data-preferences-tab="general" data-i18n="General">General</button>
-      <button id="maintenance-settings-tab" class="preferences-tab" type="button" role="tab" aria-selected="false" data-preferences-tab="maintenance" data-i18n="Automatic maintenance">Automatic maintenance</button>
+      <button id="preferences-general-tab" class="preferences-tab active" type="button" role="tab" aria-selected="true" aria-controls="preferences-general-panel" data-preferences-tab="general" data-i18n="General">General</button>
+      <button id="maintenance-settings-tab" class="preferences-tab" type="button" role="tab" aria-selected="false" aria-controls="maintenance-settings-section" data-preferences-tab="maintenance" data-i18n="Automatic maintenance">Automatic maintenance</button>
     </nav>
     <div class="preferences-content">
-      <section class="preferences-section preferences-panel active" data-preferences-panel="general">
-        <h2 data-i18n="Theme">Theme</h2>
-        <div class="segmented-control" role="group" aria-label="Theme" data-i18n-aria-label="Theme">
-          <button type="button" data-theme-setting="system" data-i18n="Follow system">Follow system</button>
-          <button type="button" data-theme-setting="light" data-i18n="Light">Light</button>
-          <button type="button" data-theme-setting="dark" data-i18n="Dark">Dark</button>
-        </div>
-      </section>
-      <section class="preferences-section preferences-panel" data-preferences-panel="general">
-        <h2 data-i18n="Language">Language</h2>
-        <div class="segmented-control" role="group" aria-label="Language" data-i18n-aria-label="Language">
-          <button type="button" data-language-setting="system" data-i18n="Follow system">Follow system</button>
-          <button type="button" data-language-setting="en" data-i18n="English">English</button>
-          <button type="button" data-language-setting="zh" data-i18n="Chinese">Chinese</button>
-        </div>
-      </section>
-      <section class="preferences-section preferences-panel" data-preferences-panel="general">
-        <h2 data-i18n="Page results">Page results</h2>
-        <label class="preferences-select"><span data-i18n="Results per page">Results per page</span><select id="page-limit-setting"><option value="10">10</option><option value="20">20</option><option value="30">30</option></select><small data-i18n="Changing this reloads the current page list.">Changing this reloads the current page list.</small></label>
-      </section>
-      <section id="maintenance-settings-section" class="preferences-section preferences-panel" data-preferences-panel="maintenance" hidden>
-        <h2 data-i18n="Automatic maintenance">Automatic maintenance</h2>
-        <p class="muted preferences-copy" data-i18n="Changes restart the Runtime. Suggested relations still require review.">Changes restart the Runtime. Suggested relations still require review.</p>
-        <form id="maintenance-settings-form" class="maintenance-settings-form">
-          <label class="maintenance-settings-toggle"><input id="maintenance-settings-enabled" type="checkbox"><span><strong data-i18n="Enable automatic maintenance">Enable automatic maintenance</strong><small data-i18n="When disabled, Runtime records no automatic maintenance heartbeat.">When disabled, Runtime records no automatic maintenance heartbeat.</small></span></label>
-          <label><span data-i18n="Mode">Mode</span><select id="maintenance-settings-mode"><option value="observe" data-i18n="Observe">Observe</option><option value="apply" data-i18n="Apply">Apply</option></select></label>
-          <div class="maintenance-settings-grid">
-            <label><span data-i18n="New Pages">New Pages</span><input id="maintenance-settings-min-pages" type="number" min="1" required></label>
-            <label><span data-i18n="Quiet period (minutes)">Quiet period (minutes)</span><input id="maintenance-settings-quiet" type="number" min="1" required></label>
-            <label><span data-i18n="Maximum wait (minutes)">Maximum wait (minutes)</span><input id="maintenance-settings-max-wait" type="number" min="1" required></label>
+      <section id="preferences-general-panel" class="preferences-panel active" role="tabpanel" aria-labelledby="preferences-general-tab" data-preferences-panel="general">
+        <section class="preferences-section">
+          <h2 data-i18n="Theme">Theme</h2>
+          <div class="segmented-control" role="group" aria-label="Theme" data-i18n-aria-label="Theme">
+            <button type="button" data-theme-setting="system" data-i18n="Follow system">Follow system</button>
+            <button type="button" data-theme-setting="light" data-i18n="Light">Light</button>
+            <button type="button" data-theme-setting="dark" data-i18n="Dark">Dark</button>
           </div>
-          <button id="maintenance-settings-save" class="primary-button semantic-button" type="submit" data-icon="restart"><span data-i18n="Save and restart Runtime">Save and restart Runtime</span></button>
-        </form>
+        </section>
+        <section class="preferences-section">
+          <h2 data-i18n="Language">Language</h2>
+          <div class="segmented-control" role="group" aria-label="Language" data-i18n-aria-label="Language">
+            <button type="button" data-language-setting="system" data-i18n="Follow system">Follow system</button>
+            <button type="button" data-language-setting="en" data-i18n="English">English</button>
+            <button type="button" data-language-setting="zh" data-i18n="Chinese">Chinese</button>
+          </div>
+        </section>
+        <section class="preferences-section">
+          <h2 data-i18n="Page results">Page results</h2>
+          <label class="preferences-select"><span data-i18n="Results per page">Results per page</span><select id="page-limit-setting"><option value="10">10</option><option value="20">20</option><option value="30">30</option></select><small data-i18n="Changing this reloads the current page list.">Changing this reloads the current page list.</small></label>
+        </section>
+      </section>
+      <section id="maintenance-settings-section" class="preferences-panel" role="tabpanel" aria-labelledby="maintenance-settings-tab" data-preferences-panel="maintenance" hidden>
+        <section class="preferences-section">
+          <h2 data-i18n="Automatic maintenance">Automatic maintenance</h2>
+          <p class="muted preferences-copy" data-i18n="Changes restart the Runtime. Suggested relations still require review.">Changes restart the Runtime. Suggested relations still require review.</p>
+          <form id="maintenance-settings-form" class="maintenance-settings-form">
+            <label class="maintenance-settings-toggle"><input id="maintenance-settings-enabled" type="checkbox"><span><strong data-i18n="Enable automatic maintenance">Enable automatic maintenance</strong><small data-i18n="When disabled, Runtime records no automatic maintenance heartbeat.">When disabled, Runtime records no automatic maintenance heartbeat.</small></span></label>
+            <label><span data-i18n="Mode">Mode</span><select id="maintenance-settings-mode"><option value="observe" data-i18n="Observe">Observe</option><option value="apply" data-i18n="Apply">Apply</option></select></label>
+            <div class="maintenance-settings-grid">
+              <label><span data-i18n="New Pages">New Pages</span><input id="maintenance-settings-min-pages" type="number" min="1" required></label>
+              <label><span data-i18n="Quiet period (minutes)">Quiet period (minutes)</span><input id="maintenance-settings-quiet" type="number" min="1" required></label>
+              <label><span data-i18n="Maximum wait (minutes)">Maximum wait (minutes)</span><input id="maintenance-settings-max-wait" type="number" min="1" required></label>
+            </div>
+            <button id="maintenance-settings-save" class="primary-button semantic-button" type="submit" data-icon="restart"><span data-i18n="Save and restart Runtime">Save and restart Runtime</span></button>
+          </form>
+        </section>
       </section>
     </div>
   </dialog>
