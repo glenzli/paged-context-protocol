@@ -24,7 +24,7 @@ use pcp_core::{
     SearchPagesRequest, SearchResult, SubmitFeedbackRequest, UnpackPageRequest, WritePageRequest,
     WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
-use tokio::net::UnixStream;
+use tokio::{net::UnixStream, sync::Mutex};
 
 use crate::wire::{
     PcpDescriptor, RpcOperation, RpcOutcome, RpcRequest, RpcResponse, RpcValue, read_frame,
@@ -37,16 +37,23 @@ const SEMANTIC_SEARCH_RPC_TIMEOUT: Duration = Duration::from_secs(90);
 // a transport safety fuse, and must not preempt a configured Router budget.
 const INTENT_MATCH_RPC_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
+/// Reauthenticate against a discovered Runtime using the existing approved enrollment.
+#[async_trait]
+pub trait RuntimeSessionConnector: Send + Sync {
+    async fn reconnect(&self) -> Result<RemotePcpClient>;
+}
+
 #[derive(Clone)]
 pub struct RemotePcpClient {
-    socket_path: Arc<PathBuf>,
+    socket_path: Arc<Mutex<PathBuf>>,
     descriptor: PcpDescriptor,
     next_request_id: Arc<AtomicU64>,
+    session_connector: Option<Arc<dyn RuntimeSessionConnector>>,
 }
 
 impl RemotePcpClient {
     pub async fn connect(socket_path: impl AsRef<Path>) -> Result<Self> {
-        let socket_path = Arc::new(socket_path.as_ref().to_path_buf());
+        let socket_path = socket_path.as_ref().to_path_buf();
         let descriptor = match request_at(&socket_path, 1, RpcOperation::Describe).await? {
             RpcValue::Descriptor(descriptor) => descriptor,
             _ => anyhow::bail!("PCP runtime returned an unexpected describe response"),
@@ -56,9 +63,10 @@ impl RemotePcpClient {
             "PCP runtime descriptor has no identityId"
         );
         Ok(Self {
-            socket_path,
+            socket_path: Arc::new(Mutex::new(socket_path)),
             descriptor,
             next_request_id: Arc::new(AtomicU64::new(2)),
+            session_connector: None,
         })
     }
 
@@ -79,13 +87,77 @@ impl RemotePcpClient {
         self.descriptor.server_pid
     }
 
+    pub fn with_session_connector(mut self, connector: Arc<dyn RuntimeSessionConnector>) -> Self {
+        self.session_connector = Some(connector);
+        self
+    }
+
+    fn validate_reconnected_descriptor(&self, descriptor: &PcpDescriptor) -> Result<()> {
+        // Synchronous metadata is pinned for the lifetime of this client. A new process
+        // session is expected; changing Store, access, or capabilities needs a host reload.
+        let mut access = descriptor.access.clone();
+        access.session_id = self.descriptor.access.session_id.clone();
+        anyhow::ensure!(
+            descriptor.identity_id == self.descriptor.identity_id
+                && access == self.descriptor.access
+                && serde_json::to_value(&descriptor.capabilities)?
+                    == serde_json::to_value(&self.descriptor.capabilities)?,
+            "PCP Store identity, access, or capabilities changed; reload the MCP connection"
+        );
+        Ok(())
+    }
+
+    async fn open_stream(&self) -> Result<UnixStream> {
+        let failed_path = self.socket_path.lock().await.clone();
+        match UnixStream::connect(&failed_path).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => {
+                if self.session_connector.is_none()
+                    || !matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                    )
+                {
+                    return Err(error)
+                        .with_context(|| format!("connect PCP runtime {}", failed_path.display()));
+                }
+            }
+        }
+        // No request bytes have been sent. Serialize recovery across cloned clients;
+        // waiting callers reuse the endpoint installed by the first successful recovery.
+        let mut path = self.socket_path.lock().await;
+        if *path == failed_path {
+            let remote = tokio::time::timeout(
+                RPC_TIMEOUT,
+                self.session_connector
+                    .as_ref()
+                    .expect("checked connector")
+                    .reconnect(),
+            )
+            .await
+            .context("PCP session recovery timed out; retry when Runtime is available")?
+            .context("reopen approved PCP session; request was not sent")?;
+            self.validate_reconnected_descriptor(&remote.descriptor)?;
+            *path = remote.socket_path.lock().await.clone();
+        }
+        UnixStream::connect(&*path)
+            .await
+            .context("connect recovered PCP session; request was not sent")
+    }
+
     pub fn server_started_at_unix_ms(&self) -> u64 {
         self.descriptor.server_started_at_unix_ms
     }
 
     async fn request(&self, operation: RpcOperation) -> Result<RpcValue> {
         let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        request_at(&self.socket_path, id, operation).await
+        tokio::time::timeout(rpc_timeout(&operation), async {
+            let stream = self.open_stream().await?;
+            // Never replay after dispatch: a missing response can hide a committed write.
+            exchange_on_stream(stream, id, operation).await
+        })
+        .await
+        .context("PCP runtime request timed out; dispatched writes may have completed")?
     }
 
     async fn semantic_search_rpc(
@@ -136,9 +208,17 @@ fn rpc_timeout(operation: &RpcOperation) -> Duration {
 }
 
 async fn exchange(socket_path: &Path, id: u64, operation: RpcOperation) -> Result<RpcValue> {
-    let mut stream = UnixStream::connect(socket_path)
+    let stream = UnixStream::connect(socket_path)
         .await
         .with_context(|| format!("connect PCP runtime {}", socket_path.display()))?;
+    exchange_on_stream(stream, id, operation).await
+}
+
+async fn exchange_on_stream(
+    mut stream: UnixStream,
+    id: u64,
+    operation: RpcOperation,
+) -> Result<RpcValue> {
     write_frame(&mut stream, &RpcRequest { id, operation }).await?;
     let response = read_frame::<RpcResponse>(&mut stream)
         .await?
@@ -149,6 +229,9 @@ async fn exchange(socket_path: &Path, id: u64, operation: RpcOperation) -> Resul
         RpcOutcome::Error { message } => anyhow::bail!("PCP runtime: {message}"),
     }
 }
+
+#[cfg(test)]
+mod reconnect_tests;
 
 #[cfg(test)]
 mod tests {
@@ -186,6 +269,15 @@ fn unexpected(operation: &str) -> anyhow::Error {
 
 #[async_trait]
 impl PcpTenantApi for RemotePcpClient {
+    async fn access_snapshot(&self) -> Result<AccessSession> {
+        match self.request(RpcOperation::Describe).await? {
+            RpcValue::Descriptor(descriptor) => {
+                self.validate_reconnected_descriptor(&descriptor)?;
+                Ok(descriptor.access)
+            }
+            _ => Err(unexpected("access_snapshot")),
+        }
+    }
     async fn context_hub(
         &self,
         request: pcp_client::context_hub::ContextHubRequest,

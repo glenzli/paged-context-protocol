@@ -342,6 +342,7 @@ impl EnrollmentHandler {
         let mut sessions = self.inner.sessions.lock().await;
         if let Some(session) = sessions.get(registration_id)
             && !session._endpoint.is_finished()
+            && session._endpoint.socket_path().exists()
             && session.wire.access == access
         {
             return Ok(session.wire.clone());

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow = "1.0"
+async-trait = "0.1"
 chrono = "0.4"
 pcp-client = { path = "../pcp-client" }
 pcp-core = { path = "../pcp-core" }

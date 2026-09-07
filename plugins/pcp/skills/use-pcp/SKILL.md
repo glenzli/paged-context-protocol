@@ -1,11 +1,21 @@
 ---
 name: use-pcp
-description: Retrieve user decisions, preferences, constraints and cross-task context when they could change an answer or action. Handle retention, corrections and optional client-enabled candidate or activity updates. Skip self-contained tasks; formal memory writes remain high-threshold.
+description: Retrieve prior decisions and cross-task context when they matter. With client opt-in, stage newly stated preferences or emerging decisions and share meaningful changes in direction, blockers or handoffs. Skip routine progress; formal memory writes remain high-threshold.
 ---
 
 # Use PCP
 
 PCP is authorized long-term context across conversations, projects and tools. Consult it when missing prior decisions, preferences, constraints or earlier findings could change the task. You do not need an explicit recall request or advance knowledge that a matching Page exists. Skip self-contained work and gaps already settled by supplied evidence.
+
+## Act on meaningful changes
+
+When the client has enabled staging in Console, use these event triggers without waiting for a separate request to remember. Read [staging.md](references/staging.md) before the first candidate or activity operation.
+
+- **Submit a candidate** when the user states a new potentially ongoing preference, constraint or emerging decision whose lasting usefulness is uncertain. Preserve their wording's scope and uncertainty; skip duplicates and facts cheaply recoverable from source code.
+- **Publish activity** when a decision changes the current direction, a cross-task blocker or handoff appears, or a previously shared blocker is resolved, and another conversation would benefit from the update. State the current situation under a stable topic, not a completion log.
+- **Read activity** when the user refers to another conversation or recent progress, or when resuming a topic with a current-context gap. Make one focused read. Same-client cards are included by default so other windows using the same identity remain visible; ignore context already known here.
+
+These are event triggers, not per-turn checks or end-of-session duties. Skip unchanged information, routine implementation progress and speculative user preferences. Staging stays within one Runtime and Store; it does not create formal Pages. If disabled, stop that operation and do not substitute formal capture.
 
 ## Retrieve
 
@@ -29,7 +39,3 @@ Feedback records a challenge for review; it does not apply a replacement or chan
 ## Source ownership
 
 Source references are coordinates, not fetched content. PCP does not parse every tenant's media or original records. Let the source owner resolve those materials; never invent provenance.
-
-## Optional staging and recent context
-
-When a client has enabled them, `pcp_submit_candidate` can stage grounded information whose long-term usefulness is uncertain; `pcp_publish_activity` can share a short current-topic update with other authorized clients of the same Runtime and Store. Read [staging.md](references/staging.md) before using either, or when `pcp_read_activity` could resolve a cross-window context gap. These are not formal Pages or a cross-Store synchronization layer. None is a per-turn or end-of-session duty; skip when there is no useful change. If disabled, do not substitute a formal capture.

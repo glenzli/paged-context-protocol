@@ -924,6 +924,7 @@ name = "pcp-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "pcp-client",
  "pcp-core",

@@ -152,6 +152,11 @@ pub trait PcpTenantApi: Send + Sync {
     fn capabilities(&self) -> Capabilities;
     fn access(&self) -> &AccessSession;
 
+    /// Read the current server-attested session. Remote clients must verify liveness.
+    async fn access_snapshot(&self) -> Result<AccessSession> {
+        Ok(self.access().clone())
+    }
+
     /// Optional Runtime context-inbox extension. Plain Store clients remain valid without it.
     async fn context_hub(
         &self,

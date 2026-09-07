@@ -4,7 +4,7 @@ mod query;
 mod server;
 mod wire;
 
-pub use client::RemotePcpClient;
+pub use client::{RemotePcpClient, RuntimeSessionConnector};
 pub use enrollment::*;
 pub use pcp_core::{
     ContextDetail, ContextPackEntry, IntentEffort, IntentMatchAudit, QueryAuditEvent,

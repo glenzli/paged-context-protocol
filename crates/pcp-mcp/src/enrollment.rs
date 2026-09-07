@@ -89,14 +89,37 @@ pub async fn run_command(command: Option<&str>) -> Result<()> {
 }
 
 pub async fn connect(state_path: PathBuf, expected_principal: &str) -> Result<Arc<dyn PcpApi>> {
-    let mut state = read_state(&state_path)?;
+    let connector = Arc::new(EnrolledSessionConnector {
+        state_path,
+        expected_principal: expected_principal.to_owned(),
+    });
+    let remote = open_session(&connector.state_path, &connector.expected_principal).await?;
+    Ok(Arc::new(remote.with_session_connector(connector)))
+}
+
+struct EnrolledSessionConnector {
+    state_path: PathBuf,
+    expected_principal: String,
+}
+
+#[async_trait::async_trait]
+impl pcp_rpc::RuntimeSessionConnector for EnrolledSessionConnector {
+    async fn reconnect(&self) -> Result<RemotePcpClient> {
+        // Re-read trusted enrollment and Discovery, then authenticate a new session.
+        // Never reuse a vanished per-process endpoint or bypass revoked enrollment.
+        open_session(&self.state_path, &self.expected_principal).await
+    }
+}
+
+async fn open_session(state_path: &Path, expected_principal: &str) -> Result<RemotePcpClient> {
+    let mut state = read_state(state_path)?;
     anyhow::ensure!(
         state.principal_id == expected_principal,
         "PCP enrollment Principal mismatch: expected {expected_principal}, state contains {}",
         state.principal_id
     );
     if state.registration_id.is_none() {
-        advance_enrollment(&state_path, &mut state).await?;
+        advance_enrollment(state_path, &mut state).await?;
     }
     let registration_id = state
         .registration_id
@@ -147,7 +170,7 @@ pub async fn connect(state_path: PathBuf, expected_principal: &str) -> Result<Ar
         remote.access() == &session.access,
         "PCP RPC access descriptor does not match enrollment session"
     );
-    Ok(Arc::new(remote))
+    Ok(remote)
 }
 
 async fn advance_enrollment(state_path: &Path, state: &mut McpEnrollmentState) -> Result<()> {

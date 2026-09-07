@@ -143,9 +143,25 @@ and displays date-only observations without adding a clock time.
 
 ## Boundaries
 
+Enrolled MCP clients recover a missing or refused Runtime session socket by re-reading
+Discovery and authenticating with their existing approved enrollment. Recovery is bounded
+and happens before sending the operation; an operation is never replayed after dispatch.
+Store identity, permissions, or capability changes require reloading the MCP connection.
+`pcp_whoami` reads the live session and reports connection failures instead of returning
+cached identity as apparent success. After installing an updated MCP binary, restart the
+tunnel service once so its existing child process uses the new binary. Runtime restarts
+then recover on the next call without restarting the tunnel.
+
+Managed Console checks its owned Runtime every five seconds. If the process exits or
+its operator socket or Discovery manifest disappears, Console restarts that Runtime
+to restore the endpoints and registration. Disabled Discovery is excluded from this
+check. Enrollment also replaces an unlinked tenant socket instead of returning its
+stale address. Do not clean the live Infra Protocol runtime directory during use.
+
 - `pcp_search_pages`, `pcp_semantic_search`, `pcp_read_pages`, and `pcp_read_activity` are read-only.
 - `pcp_capture` and `pcp_submit_feedback` are declared as write actions. ChatGPT captures use Page kind `chatgpt_capture` and facet `captureSurface: chatgpt`.
 - The MCP server instructions and tool descriptions carry the same proactive-read, high-threshold-write policy as the Codex plugin. ChatGPT does not load the Codex Skill. This guides tool selection; it does not guarantee invocation on every relevant task.
+- With Console opt-in, new user-stated preferences or emerging decisions can trigger candidate staging; changed direction, cross-task blockers and handoffs can trigger activity updates. Routine progress and duplicate content are skipped. Activity reads include same-client cards by default because windows share a client identity; `includeOwn=false` explicitly excludes that entire client. Scope grants and client opt-in still apply.
 - The tunnel does not grant PCP access. Runtime still requires the approved `chatgpt:pcp` enrollment on every MCP process start.
 - Do not put the PCP credential, Store, Runtime socket, tunnel runtime API key, or tunnel configuration in this repository.
 

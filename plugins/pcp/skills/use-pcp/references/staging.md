@@ -1,4 +1,4 @@
-# Optional candidates and activity
+# Candidates and recent activity
 
 These facilities are local to one Runtime and Store identity and are independently enabled for
 each client by the user in Console. They do not aggregate independent PCP Stores.
@@ -7,8 +7,11 @@ content with authorized readers of that Scope. Do not include secrets or unrelat
 
 ## Candidate memory
 
-Use `pcp_submit_candidate` when a grounded observation, tentative preference or emerging decision
-may be useful later, but does not yet meet the formal capture threshold. The lower threshold is
+Use `pcp_submit_candidate` for a new user-stated preference, potentially ongoing constraint or
+emerging decision that may help later but does not yet meet the formal capture threshold.
+For example, "I'm leaning toward keeping book exports separate from editable projects" is a
+tentative direction; "the export build passed" is ordinary progress and needs no candidate.
+Console opt-in enables this selective staging without an additional retention request. The lower threshold is
 about **future usefulness**, not factual accuracy. Preserve attribution and uncertainty. Do not
 turn a model guess into a user belief or use the inbox to dump transcripts.
 
@@ -22,16 +25,20 @@ turn a model guess into a user belief or use the inbox to dump transcripts.
   already represented. Repetition suggests review; it never proves truth or promotes automatically.
 - Do not submit every statement or resubmit a rejected item to obtain a different outcome.
   Up to 50 undecided candidates/client are retained; ordinary items expire after 30 days.
+- Reuse known context and receipts to avoid duplicates. If an existing memory is plausibly the
+  same subject and the answer is not already available, make one focused lookup before submitting.
 
 Formal `pcp_capture` and feedback retain their own higher threshold and host approval rules.
 Candidate submission is not a replacement route for a denied formal write.
 
 ## Recent activity
 
-Use `pcp_publish_activity` only when another authorized conversation would benefit from knowing
-a meaningful topic shift, current direction, unresolved question, or handoff. Most turns need no
-update. Do not call a model merely to summarize each session, and do not mechanically publish at
-the end of every task.
+Use `pcp_publish_activity` when another authorized conversation would benefit from a changed
+direction, cross-task blocker, unresolved dependency or handoff. Update a previously shared blocker
+when it is resolved so another window does not keep acting on stale status. For example, a change
+from "release blocked on the publication schema" to "schema agreed; release work can resume" is
+useful; a list of passing tests usually is not. Do not call a model merely to summarize each session
+or mechanically publish at the end of every task.
 
 - One short statement of the current discussion, at most 180 characters. No transcript, tool
   trace, instruction to another agent, or assertion that a proposed action has been completed.
@@ -45,7 +52,10 @@ the end of every task.
 
 Use `pcp_read_activity` when recent discussion elsewhere could change this task, not as a mandatory
 preflight. It returns at most five cards (at most 900 summary characters). A focused literal
-`query` can restrict topics. Own cards are excluded unless `includeOwn=true`.
+`query` can restrict topics. Same-client cards are included by default: client identity is shared
+across windows and cannot identify the current conversation. Set `includeOwn=false` only when
+intentionally asking for other clients' cards. Ignore already-known context; reading a card is
+not a reason to publish it again.
 
 Keep the `cursor` within this conversation and query; send it only when checking again is useful.
 `unchanged=true` means keep the prior snapshot. `replace=true` means replace it with the returned

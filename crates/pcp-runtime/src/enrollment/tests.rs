@@ -492,6 +492,27 @@ async fn enrollment_approves_identity_bound_session_and_survives_generation_chan
         other => panic!("expected active idempotent begin, got {other:?}"),
     }
 
+    // An unlinked socket leaves the accept task alive, but is no longer reachable.
+    // Reopening the same approved registration must allocate a reachable endpoint.
+    fs::remove_file(root.join(&refreshed.endpoint)).expect("unlink live tenant socket");
+    let restored = public
+        .open_session(OpenEnrollmentSessionParams {
+            registration_id: first_session.registration_id.clone(),
+            credential: credential.clone(),
+        })
+        .await
+        .expect("recover unlinked tenant endpoint");
+    let restored = match restored.result {
+        EnrollmentResult::Active { session } => session,
+        other => panic!("expected recovered session, got {other:?}"),
+    };
+    assert_ne!(restored.endpoint, refreshed.endpoint);
+    let restored_remote =
+        RemotePcpClient::connect_expected(root.join(&restored.endpoint), "host:symbiont-d")
+            .await
+            .expect("connect recovered tenant endpoint");
+    assert!(restored_remote.page_count(Vec::new()).await.is_ok());
+
     let registration_id = first_session.registration_id.clone();
     observer.shutdown().await.expect("stop first provider");
     let enrollment_config = EnrollmentConfig::for_test(root.clone());

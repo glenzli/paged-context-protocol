@@ -4,11 +4,16 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
 use anyhow::{Context, Result};
+use pcp_client::PcpTenantApi;
+use pcp_rpc::RemotePcpClient;
 use pcp_runtime::{MaintenanceMode, RuntimeConfig};
 use tokio::{
     process::{Child, Command},
@@ -18,6 +23,7 @@ use tokio::{
 
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const HEALTH_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub(super) struct ManagedOptions {
@@ -76,6 +82,8 @@ pub(super) struct ManagedRuntime {
     paths: ManagedPaths,
     runtime_binary: PathBuf,
     child: Mutex<Option<Child>>,
+    discovery_manifest: Mutex<Option<PathBuf>>,
+    stopping: AtomicBool,
 }
 
 #[derive(Clone, Debug)]
@@ -102,8 +110,25 @@ impl ManagedRuntime {
             paths,
             runtime_binary: options.runtime_binary,
             child: Mutex::new(None),
+            discovery_manifest: Mutex::new(None),
+            stopping: AtomicBool::new(false),
         });
         runtime.ensure_running().await?;
+        let weak = Arc::downgrade(&runtime);
+        tokio::spawn(async move {
+            loop {
+                sleep(HEALTH_INTERVAL).await;
+                let Some(runtime) = weak.upgrade() else {
+                    break;
+                };
+                if runtime.stopping.load(Ordering::Acquire) {
+                    break;
+                }
+                if let Err(error) = runtime.ensure_running().await {
+                    eprintln!("PCP managed Runtime recovery failed: {error:#}");
+                }
+            }
+        });
         Ok(runtime)
     }
 
@@ -134,6 +159,7 @@ impl ManagedRuntime {
     }
 
     pub(super) async fn shutdown(&self) -> Result<()> {
+        self.stopping.store(true, Ordering::Release);
         let mut child = self.child.lock().await;
         if let Some(child) = child.take() {
             stop_child(child).await?;
@@ -154,11 +180,23 @@ impl ManagedRuntime {
 
     async fn ensure_running(&self) -> Result<()> {
         let mut child = self.child.lock().await;
+        if self.stopping.load(Ordering::Acquire) {
+            return Ok(());
+        }
         if child
             .as_mut()
             .is_some_and(|process| process.try_wait().ok().flatten().is_none())
         {
-            return Ok(());
+            let manifest = self.discovery_manifest.lock().await.clone();
+            if !runtime_paths_missing(&self.paths.operator_socket, manifest.as_deref())? {
+                return Ok(());
+            }
+            eprintln!(
+                "PCP managed Runtime endpoint or Discovery registration disappeared; restarting owned Runtime"
+            );
+            if let Some(previous) = child.take() {
+                stop_child(previous).await?;
+            }
         }
         *child = None;
         self.start_locked(&mut child).await
@@ -182,6 +220,10 @@ impl ManagedRuntime {
         let started_at = tokio::time::Instant::now();
         loop {
             if socket_ready(&self.paths.operator_socket).await {
+                let client = RemotePcpClient::connect(&self.paths.operator_socket).await?;
+                let observer = pcp_runtime::ObserverConfig::from_env(client.identity_id())?;
+                *self.discovery_manifest.lock().await =
+                    observer.enabled.then(|| observer.manifest_path());
                 return Ok(());
             }
             if child
@@ -212,6 +254,17 @@ impl ManagedRuntime {
             home: self.paths.home.clone(),
         }
     }
+}
+
+fn runtime_paths_missing(
+    operator_socket: &Path,
+    discovery_manifest: Option<&Path>,
+) -> Result<bool> {
+    Ok(!operator_socket.try_exists()?
+        || match discovery_manifest {
+            Some(path) => !path.try_exists()?,
+            None => false,
+        })
 }
 
 impl MaintenanceSettings {
@@ -570,6 +623,26 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_detects_missing_discovery_even_when_operator_endpoint_remains() {
+        let root = std::env::temp_dir().join(format!("pcp-managed-health-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let operator = root.join("operator.sock");
+        let manifest = root.join("pcp.json");
+        fs::write(&operator, "endpoint marker").unwrap();
+        fs::write(&manifest, "manifest marker").unwrap();
+        assert!(!runtime_paths_missing(&operator, Some(&manifest)).unwrap());
+        fs::remove_file(&manifest).unwrap();
+        assert!(runtime_paths_missing(&operator, Some(&manifest)).unwrap());
+        assert!(
+            !runtime_paths_missing(&operator, None).unwrap(),
+            "disabled Discovery must not cause restarts"
+        );
+        fs::remove_file(&operator).unwrap();
+        assert!(runtime_paths_missing(&operator, None).unwrap());
+        fs::remove_dir(&root).unwrap();
+    }
 
     #[test]
     fn managed_home_initializes_a_private_runtime_layout() {

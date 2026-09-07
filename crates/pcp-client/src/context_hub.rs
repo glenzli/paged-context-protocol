@@ -43,7 +43,7 @@ pub struct ActivityInput {
     pub ttl_hours: Option<u32>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ActivityQuery {
     #[serde(default)]
@@ -55,8 +55,26 @@ pub struct ActivityQuery {
     pub cursor: Option<String>,
     #[serde(default)]
     pub limit: Option<u32>,
-    #[serde(default)]
+    /// Include this client's cards, including other windows sharing its identity.
+    /// Explicit false requests only other clients' cards.
+    #[serde(default = "include_same_client")]
     pub include_own: bool,
+}
+
+fn include_same_client() -> bool {
+    true
+}
+
+impl Default for ActivityQuery {
+    fn default() -> Self {
+        Self {
+            scopes: Vec::new(),
+            query: None,
+            cursor: None,
+            limit: None,
+            include_own: include_same_client(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

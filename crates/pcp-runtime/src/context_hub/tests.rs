@@ -178,6 +178,76 @@ async fn candidate_is_opt_in_isolated_idempotent_and_operator_reviewed() {
 }
 
 #[tokio::test]
+async fn same_client_windows_share_activity_by_default_without_crossing_scope_or_cursor_boundaries()
+{
+    let r = Rig::new().await;
+    r.enable("shared-client").await;
+    r.enable("other-client").await;
+    let publisher = r.client("shared-client", &["a", "b"]);
+    let mut reader_access = access("shared-client", &["a"], false);
+    reader_access.session_id = "another-window".into();
+    let reader =
+        EmbeddedPcpClient::new(r.store.clone(), reader_access).with_context_hub(r.hub.clone());
+    publisher
+        .context_hub(ContextHubRequest::PublishActivity(activity(
+            "shared-topic",
+            "direction changed",
+        )))
+        .await
+        .unwrap();
+    let mut private = activity("private-topic", "restricted context");
+    private.scope = "b".into();
+    publisher
+        .context_hub(ContextHubRequest::PublishActivity(private))
+        .await
+        .unwrap();
+    r.client("other-client", &["a"])
+        .context_hub(ContextHubRequest::PublishActivity(activity(
+            "other-topic",
+            "handoff ready",
+        )))
+        .await
+        .unwrap();
+
+    let snapshot = reader
+        .context_hub(ContextHubRequest::ReadActivity(ActivityQuery::default()))
+        .await
+        .unwrap();
+    let items = snapshot["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items.iter().all(|card| card["scope"] == "a"));
+    assert!(items.iter().any(|card| card["clientId"] == "shared-client"));
+    let cursor = snapshot["cursor"].as_str().unwrap().to_owned();
+    let unchanged = reader
+        .context_hub(ContextHubRequest::ReadActivity(ActivityQuery {
+            cursor: Some(cursor.clone()),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    assert_eq!(unchanged["unchanged"], true);
+
+    let excluded = reader
+        .context_hub(ContextHubRequest::ReadActivity(ActivityQuery {
+            include_own: false,
+            cursor: Some(cursor),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    assert_eq!(excluded["replace"], true);
+    assert_eq!(excluded["items"].as_array().unwrap().len(), 1);
+    assert_eq!(excluded["items"][0]["clientId"], "other-client");
+
+    assert!(
+        r.client("disabled-client", &["a"])
+            .context_hub(ContextHubRequest::ReadActivity(ActivityQuery::default()))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn activity_has_bounded_slots_versions_expiry_and_query_bound_snapshot_tokens() {
     let r = Rig::new().await;
     r.enable("publisher").await;

@@ -107,8 +107,9 @@ pub struct ActivityReadParams {
     /// At most five cards. Defaults to five.
     #[serde(default)]
     pub limit: Option<u32>,
+    /// Defaults to true for windows sharing a client identity. False excludes the whole client.
     #[serde(default)]
-    pub include_own: bool,
+    pub include_own: Option<bool>,
 }
 
 pub async fn submit(client: &dyn PcpApi, p: CandidateParams) -> Result<CandidateReply, ErrorData> {
@@ -149,16 +150,22 @@ pub async fn read(
 ) -> Result<ActivityReadReply, ErrorData> {
     invoke(
         client,
-        ContextHubRequest::ReadActivity(ActivityQuery {
+        ContextHubRequest::ReadActivity(p.into()),
+        "activity read",
+    )
+    .await
+}
+
+impl From<ActivityReadParams> for ActivityQuery {
+    fn from(p: ActivityReadParams) -> Self {
+        Self {
             scopes: p.scopes,
             query: p.query,
             cursor: p.cursor,
             limit: p.limit,
-            include_own: p.include_own,
-        }),
-        "activity read",
-    )
-    .await
+            include_own: p.include_own.unwrap_or_else(|| Self::default().include_own),
+        }
+    }
 }
 async fn invoke<T: DeserializeOwned>(
     client: &dyn PcpApi,
@@ -178,6 +185,24 @@ async fn invoke<T: DeserializeOwned>(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn activity_wire_defaults_match_runtime_and_preserve_explicit_exclusion() {
+        for (input, expected) in [
+            (json!({}), true),
+            (json!({"includeOwn":true}), true),
+            (json!({"includeOwn":false}), false),
+        ] {
+            let runtime: ActivityQuery = serde_json::from_value(input.clone()).unwrap();
+            let params: ActivityReadParams = serde_json::from_value(input).unwrap();
+            let mcp: ActivityQuery = params.into();
+            assert_eq!(runtime.include_own, expected);
+            assert_eq!(mcp.include_own, expected);
+        }
+        let mcp_default: ActivityQuery = ActivityReadParams::default().into();
+        assert!(mcp_default.include_own);
+        assert!(ActivityQuery::default().include_own);
+    }
 
     #[test]
     fn bounded_runtime_replies_have_stable_typed_shapes() {
