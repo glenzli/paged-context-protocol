@@ -1,6 +1,7 @@
 mod audit;
 mod config;
 mod coordinator;
+mod discovery;
 mod infer_worker;
 mod ledger;
 mod operator;
@@ -16,8 +17,9 @@ use anyhow::Result;
 pub use audit::{MaintenanceRunAudit, MaintenanceRunAuditRecord, persist_audit};
 pub use config::{
     MaintenanceConfig, MaintenanceMode, MaintenanceWorkerConfig, PackingMaintenanceConfig,
-    ReconciliationMaintenanceConfig, RelationMaintenanceConfig, RetentionMaintenanceConfig,
-    SummaryMaintenanceConfig, WriteTriggeredMaintenanceConfig,
+    PeriodicReviewConfig, ReconciliationMaintenanceConfig, RelationMaintenanceConfig,
+    RetentionMaintenanceConfig, SummaryMaintenanceConfig, TopicMaintenanceConfig,
+    WriteTriggeredMaintenanceConfig,
 };
 pub use coordinator::{
     AnalyzeMaintenanceArchiveRequest, AnalyzeMaintenancePacksRequest,
@@ -38,8 +40,8 @@ pub use coordinator::{
 };
 pub use infer_worker::InferRuntimeSemanticWorker;
 pub use ledger::{
-    MaintenanceAutomationState, MaintenanceAutomationStatus, MaintenanceDirtyRegionStatus,
-    MaintenanceRelationReviewPage, MaintenanceRelationReviewProposal,
+    MaintenanceAutomationState, MaintenanceAutomationStatus, MaintenanceCycleRecord,
+    MaintenanceDirtyRegionStatus, MaintenanceRelationReviewPage, MaintenanceRelationReviewProposal,
     MaintenanceRelationReviewStatus, MaintenanceWakeReason,
 };
 pub use operator::MaintenanceOperator;

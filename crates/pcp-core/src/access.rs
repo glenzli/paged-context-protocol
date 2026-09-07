@@ -303,3 +303,43 @@ pub struct OperationTelemetry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub projections: Vec<String>,
 }
+
+/// Operator audit query. Filters never widen the caller's Audit scopes.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessLogQuery {
+    pub principal_id: Option<String>,
+    pub operation: Option<String>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    #[serde(default)]
+    pub include_health_checks: bool,
+    pub limit: Option<u32>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessClientSummary {
+    pub principal: AccessPrincipal,
+    pub event_count: u64,
+    pub last_access_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessOperationSummary {
+    pub operation: String,
+    pub event_count: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessLogResult {
+    pub events: Vec<AccessAuditEvent>,
+    pub next_cursor: Option<String>,
+    pub total_events: u64,
+    /// All clients matching time/operation filters, independent of selected client.
+    pub clients: Vec<AccessClientSummary>,
+    pub operations: Vec<AccessOperationSummary>,
+}

@@ -1,3 +1,4 @@
+import { createAccessView } from "/access-view.js";
 import { createPageInspector } from "/page-inspector.js?v=20260823.1";
 import { pageListPreview, pageCount, pageJump, PAGE_ROLE_LABELS, pageRoleBadge, appendPageFilters, pageBrowseOrder, pageTimeFields } from "/page-list.js";
 import { formatTimestamp } from "/time-format.js";
@@ -46,7 +47,6 @@ hydrateIconTooltips(document);
 
 const DEFAULT_PAGE_LIMIT = 20;
 const PAGE_LIMIT_OPTIONS = new Set([10, 20, 30]);
-const ACCESS_LIMIT = 50;
 // Local summary workers receive one Page at a time so an incomplete response
 // affects only that Page and can be retried independently.
 const SUMMARY_REVIEW_BATCH_SIZE = 1;
@@ -64,6 +64,23 @@ const ZH_MESSAGES = {
   "30 days": "30 天",
   "90 days": "90 天",
   "Access": "访问",
+  "All clients": "全部客户端",
+  "Client access": "客户端访问记录",
+  "Details": "详情",
+  "Input": "输入",
+  "Last access": "最近访问",
+  "events": "条记录",
+  "No matching access events": "没有符合条件的访问记录",
+  "Show health checks": "显示健康检查",
+  "Audit filters": "访问记录筛选",
+  "All time": "全部时间",
+  "Last 24 hours": "最近 24 小时",
+  "Last 7 days": "最近 7 天",
+  "Last 30 days": "最近 30 天",
+  "Filter": "筛选",
+  "Exact operation name": "操作名（精确匹配，留空表示全部）",
+  "Counts cover all matching records, not only loaded events.": "统计覆盖全部匹配记录，不受已加载条数限制。",
+
   "Access audit": "访问审计",
   "active": "活跃",
   "Activity trend": "活动趋势",
@@ -1102,7 +1119,6 @@ const state = {
     completedAt: null,
     issue: null,
   },
-  access: { loaded: false, busy: false, cursor: null, count: 0, events: [] },
   enrollment: { available: false, seenPending: new Set() },
 };
 function element(tag, className, text) {
@@ -1630,14 +1646,6 @@ function topCounts(events, select) {
   return [...counts.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0])).slice(0, 6);
 }
 
-function renderAccessSummary() {
-  byId("access-summary").replaceChildren(
-    aggregatePanel(t("Operations"), topCounts(state.access.events, (event) => event.operation)),
-    aggregatePanel(t("Principals"), topCounts(state.access.events, (event) => event.principal.principalId)),
-    aggregatePanel(t("Decisions"), topCounts(state.access.events, (event) => event.decision)),
-  );
-}
-
 function pageResult(hit) {
   const result = element("article", "page-result");
   result.dataset.pageId = hit.pageId;
@@ -1819,31 +1827,6 @@ function renderPagePager() {
   byId("pages-previous").disabled = state.pages.busy || state.pages.page <= 1;
   byId("pages-next").disabled = state.pages.busy || state.pages.page >= count;
   byId("page-results").setAttribute("aria-busy", String(state.pages.busy));
-}
-
-function renderAccess(data, append) {
-  const rows = byId("access-rows");
-  const rendered = data.events.map((event) => {
-    const row = document.createElement("tr");
-    row.append(
-      element("td", "", formatTime(event.occurredAt)),
-      element("td", "mono", event.principal.principalId),
-      element("td", "mono", event.operation),
-      element("td", "mono", event.scopes.join(", ")),
-      element("td", `decision-${decisionTone(event.decision)}`, event.decision),
-    );
-    return row;
-  });
-  if (append) rows.append(...rendered);
-  else rows.replaceChildren(...rendered);
-  state.access.events = append ? state.access.events.concat(data.events) : data.events;
-  state.access.count = append ? state.access.count + data.events.length : data.events.length;
-  state.access.cursor = data.nextCursor || null;
-  state.access.loaded = true;
-  byId("access-status").textContent = t("Audit timeline");
-  byId("access-loaded").textContent = `${formatNumber(state.access.count)} ${t("loaded")}`;
-  byId("access-more").hidden = !state.access.cursor;
-  renderAccessSummary();
 }
 
 async function loadOverview() {
@@ -2452,23 +2435,7 @@ async function finishArchiveSession() {
   renderArchiveSession();
 }
 
-async function loadAccess({ append = false } = {}) {
-  if (state.access.busy) return;
-  state.access.busy = true;
-  byId("access-status").textContent = append ? t("Loading more") : t("Loading");
-  byId("access-more").disabled = true;
-  try {
-    const params = new URLSearchParams({ limit: String(ACCESS_LIMIT) });
-    if (append && state.access.cursor) params.set("cursor", state.access.cursor);
-    renderAccess(await api(`/api/access?${params}`), append);
-  } catch (error) {
-    showError(error);
-    byId("access-status").textContent = t("Load failed");
-  } finally {
-    state.access.busy = false;
-    byId("access-more").disabled = false;
-  }
-}
+async function loadAccess(options) { return accessView.load(options); }
 
 function emptyMaintenanceOutcome() {
   return {
@@ -2684,9 +2651,11 @@ function renderAutomationStatus() {
   );
   renderMaintenanceAutomationChart(status);
   const convergence = state.maintenance.convergence;
-  const currentReport = convergence.running
+  const showConvergence = convergence.running || (!automation.currentReport && convergence.completedAt
+    && (!automation.lastCompletedAt || Date.parse(convergence.completedAt) > Date.parse(automation.lastCompletedAt)));
+  const currentReport = showConvergence
     ? convergence.report
-    : automation.currentReport || convergence.report;
+    : automation.currentReport || automation.lastReport;
   const progress = byId("maintenance-automation-progress");
   progress.hidden = !currentReport;
   if (currentReport) {
@@ -2700,15 +2669,18 @@ function renderAutomationStatus() {
     const committed = (currentReport.summariesWritten || 0)
       + (currentReport.packsCommitted || 0)
       + (currentReport.relationsCommitted || 0)
+      + (currentReport.topicsWritten || 0)
       + (currentReport.reconciliationsCommitted || 0)
       + (currentReport.retentionLeasesWritten || 0);
     byId("maintenance-automation-progress-title").textContent = convergence.running
       ? (currentLanguage === "zh" ? `立即运行 · 已推进 ${formatNumber(convergence.steps)} 个工作单元` : `Run now · ${formatNumber(convergence.steps)} bounded jobs advanced`)
       : automation.state === "running"
       ? (currentLanguage === "zh" ? "本轮实时进度" : "Live cycle progress")
-      : convergence.completedAt
+      : showConvergence && convergence.completedAt
         ? t("Maintenance converged")
-        : (currentLanguage === "zh" ? "上次失败前的部分进度" : "Partial progress before the last failure");
+        : automation.currentReport
+          ? (currentLanguage === "zh" ? "上次失败前的部分进度" : "Partial progress before the last failure")
+          : (currentLanguage === "zh" ? (currentReport.periodicReview ? "上次旧页复查" : "上次自动巡检") : (currentReport.periodicReview ? "Last periodic review" : "Last automatic check"));
     byId("maintenance-automation-progress-metrics").replaceChildren(
       metric(t("Maintenance inventory"), formatNumber(currentReport.inspectedPages)),
       metric(t("Model calls"), formatNumber(currentReport.workerCalls), currentReport.workerCalls ? "info" : ""),
@@ -2723,6 +2695,10 @@ function renderAutomationStatus() {
     ? [
         started ? `${currentLanguage === "zh" ? "最近开始" : "Last started"}: ${formatTime(started)}` : "",
         completed ? `${t("Last completed")}: ${formatTime(completed)}` : "",
+        status.storeWide ? (currentLanguage === "zh" ? "覆盖全部 Scope" : "All Scopes") : "",
+        automation.lastAnalysisAt ? `${currentLanguage === "zh" ? "最近模型分析" : "Last model analysis"}: ${formatTime(automation.lastAnalysisAt)}` : "",
+        automation.lastContentChangeAt ? `${currentLanguage === "zh" ? "最近内容写入" : "Last content change"}: ${formatTime(automation.lastContentChangeAt)}` : "",
+        automation.nextPeriodicReviewAt ? `${currentLanguage === "zh" ? "下次旧页复查" : "Next periodic review"}: ${formatTime(automation.nextPeriodicReviewAt)}` : "",
         nextWake ? `${t("Next automatic check")}: ${formatTime(nextWake)}` : "",
         automation.idleCycles ? `${t("Idle backoff")}: ${formatNumber(automation.idleCycles)}` : "",
         automation.consecutiveFailures ? `${t("Consecutive failures")}: ${formatNumber(automation.consecutiveFailures)}` : "",
@@ -5065,7 +5041,7 @@ async function activateView(name, { reload = false } = {}) {
   if (name === "health") {
     await healthView.load({ reload });
   }
-  if (name === "access" && (reload || !state.access.loaded)) await loadAccess();
+  if (name === "access" && (reload || !accessView.loaded)) await loadAccess();
 }
 
 async function openScope(namespace) {
@@ -5096,6 +5072,7 @@ async function refresh() {
 }
 
 function rerenderForLocale() {
+  accessView.render();
   contextHub.render();
   if (state.overview) renderOverview(state.overview);
   const currentPage = state.pages.pageCache.get(state.pages.page);
@@ -5269,7 +5246,7 @@ byId("archive-rescan").addEventListener("click", () => scanArchiveCandidates().c
 byId("archive-finish").addEventListener("click", () => finishArchiveSession().catch(showError));
 byId("archive-start-new").addEventListener("click", () => startArchiveSession().catch(showError));
 byId("maintenance-settings-form").addEventListener("submit", (event) => saveMaintenanceSettings(event).catch(showError));
-byId("access-more").addEventListener("click", () => loadAccess({ append: true }).catch(showError));
+const accessView = createAccessView({ api, byId, element, t, formatTime, formatNumber, showError });
 byId("health-window").addEventListener("change", () => healthView.load({ reload: true }).catch(showError));
 setMaintenanceWorkspaceTab(state.maintenance.workspaceTab);
 refresh();

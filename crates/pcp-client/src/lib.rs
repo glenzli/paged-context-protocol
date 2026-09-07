@@ -428,6 +428,10 @@ pub trait PcpApi: PcpTenantApi {
         &self,
         excluded_page_kinds: Vec<String>,
     ) -> Result<Vec<DurablePageInventoryItem>>;
+    async fn query_access_log(
+        &self,
+        query: pcp_core::AccessLogQuery,
+    ) -> Result<pcp_core::AccessLogResult>;
     async fn access_log(
         &self,
         limit: u32,
@@ -830,6 +834,13 @@ impl PcpApi for EmbeddedPcpClient {
         self.store
             .durable_page_inventory(&self.access, excluded_page_kinds)
             .await
+    }
+
+    async fn query_access_log(
+        &self,
+        query: pcp_core::AccessLogQuery,
+    ) -> Result<pcp_core::AccessLogResult> {
+        self.store.query_access_log(&self.access, query).await
     }
 
     async fn access_log(

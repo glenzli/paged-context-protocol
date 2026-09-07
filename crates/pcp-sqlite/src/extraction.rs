@@ -38,7 +38,19 @@ impl SqlitePcpStore {
                 return Ok(existing);
             }
 
-            let namespace = validate_sources(&transaction, &request.source_pages, &allowed_scopes)?;
+            let source_scopes =
+                validate_sources(&transaction, &request.source_pages, &allowed_scopes)?;
+            let namespace = match request.target_namespace.as_ref() {
+                Some(namespace) => namespace.clone(),
+                None if source_scopes.len() == 1 => source_scopes.iter().next().unwrap().clone(),
+                None => {
+                    anyhow::bail!("mixed-Scope Topic sources require an explicit targetNamespace")
+                }
+            };
+            anyhow::ensure!(
+                allowed_scopes.contains(&namespace),
+                "Topic destination is outside the authorized PCP scopes"
+            );
             let refresh_target = resolve_refresh_target(
                 &transaction,
                 request.target_topic.as_ref(),
@@ -86,6 +98,7 @@ impl SqlitePcpStore {
                 "topicTitle": request.title.trim(),
                 "routingTier": "front",
                 "sourcePageCount": request.source_pages.len(),
+                "sourceScopes": source_scopes,
             });
             insert_revision(
                 &transaction,
@@ -355,6 +368,13 @@ fn retract_topic_source_relations(
 }
 
 fn validate_request(request: &ExtractTopicRequest) -> Result<()> {
+    anyhow::ensure!(
+        request
+            .target_namespace
+            .as_ref()
+            .is_none_or(|scope| !scope.trim().is_empty()),
+        "Topic targetNamespace must not be empty"
+    );
     if let Some(target) = request.target_topic.as_ref() {
         anyhow::ensure!(
             !target.page_id.trim().is_empty() && !target.revision_id.trim().is_empty(),
@@ -395,8 +415,8 @@ fn validate_sources(
     transaction: &Transaction<'_>,
     sources: &[PageRevisionRef],
     allowed_scopes: &HashSet<String>,
-) -> Result<String> {
-    let mut namespace = None;
+) -> Result<BTreeSet<String>> {
+    let mut namespaces = BTreeSet::new();
     for source in sources {
         let (resolved_page_id, resolved_namespace, lifecycle_status, kind): (
             String,
@@ -432,13 +452,8 @@ fn validate_sources(
             allowed_scopes.contains(&resolved_namespace),
             "topic extraction source is outside the authorized PCP scopes"
         );
-        match &namespace {
-            Some(existing) if existing != &resolved_namespace => {
-                anyhow::bail!("topic extraction sources must belong to one Scope")
-            }
-            Some(_) => {}
-            None => namespace = Some(resolved_namespace),
-        }
+        namespaces.insert(resolved_namespace);
     }
-    namespace.context("topic extraction requires sources")
+    anyhow::ensure!(!namespaces.is_empty(), "topic extraction requires sources");
+    Ok(namespaces)
 }

@@ -23,7 +23,7 @@ impl RuntimeMaintainer {
         // Older evidence may be outside the region that woke the scheduler.
         let inventory = self
             .client
-            .durable_page_inventory(self.config.allowed_scopes.clone())
+            .durable_page_inventory(self.config.query_scopes(self.client.identity_id()))
             .await?;
         let eligible_new: BTreeSet<_> = changed_region
             .iter()

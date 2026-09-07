@@ -475,6 +475,9 @@ async fn dispatch(
         RpcOperation::DurablePageInventory {
             excluded_page_kinds,
         } => RpcValue::Inventory(client.durable_page_inventory(excluded_page_kinds).await?),
+        RpcOperation::QueryAccessLog(query) => {
+            RpcValue::AccessLogResult(client.query_access_log(query).await?)
+        }
         RpcOperation::AccessLog { limit, cursor } => {
             let (events, next_cursor) = client.access_log(limit, cursor).await?;
             RpcValue::AccessLog {

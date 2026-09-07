@@ -30,6 +30,8 @@ use super::SqlitePcpStore;
 mod browse_time;
 #[path = "tests/content_filters.rs"]
 mod content_filters;
+#[path = "tests/cross_scope_topic.rs"]
+mod cross_scope_topic;
 #[path = "tests/page_actions.rs"]
 mod page_actions;
 #[path = "tests/reconciliation.rs"]
@@ -625,6 +627,7 @@ async fn topic_extraction_preserves_sources_but_routes_retrieval_through_topic_p
     let topic = store
         .extract_topic(
             ExtractTopicRequest {
+                target_namespace: None,
                 target_topic: None,
                 source_pages: vec![
                     PageRevisionRef {
@@ -651,6 +654,7 @@ async fn topic_extraction_preserves_sources_but_routes_retrieval_through_topic_p
     let duplicate = store
         .extract_topic(
             ExtractTopicRequest {
+                target_namespace: None,
                 target_topic: None,
                 source_pages: vec![
                     PageRevisionRef {
@@ -680,6 +684,7 @@ async fn topic_extraction_preserves_sources_but_routes_retrieval_through_topic_p
     let refreshed = store
         .extract_topic(
             ExtractTopicRequest {
+                target_namespace: None,
                 target_topic: Some(PageRevisionRef {
                     page_id: topic.page_id.clone(),
                     revision_id: topic.revision_id.clone(),

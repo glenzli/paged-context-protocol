@@ -756,6 +756,16 @@ impl PcpApi for RemotePcpClient {
         }
     }
 
+    async fn query_access_log(
+        &self,
+        query: pcp_core::AccessLogQuery,
+    ) -> Result<pcp_core::AccessLogResult> {
+        match self.request(RpcOperation::QueryAccessLog(query)).await? {
+            RpcValue::AccessLogResult(value) => Ok(value),
+            _ => Err(unexpected("query_access_log")),
+        }
+    }
+
     async fn access_log(
         &self,
         limit: u32,

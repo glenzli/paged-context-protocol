@@ -56,8 +56,10 @@ allow_cross_scope_derivation = true
 records its permissions separately from ordinary Scope grants, and Store
 authorization resolves an unscoped request against the current local Scope
 inventory. New Scopes therefore become visible without regenerating the
-session. Enrollment never issues Store-wide access, and the optional maintainer
-continues to use its independently configured `allowed_scopes`.
+session. Enrollment never issues Store-wide access. The local maintainer has an independent
+`maintenance.store_wide` opt-in; restricted deployments can retain explicit
+`allowed_scopes`. Store-wide maintenance applies to current and future Scopes in
+this Identity, without granting Scope management or enrollment authority.
 
 The maintainer is disabled unless `[maintenance]` is present with
 `enabled = true`. It never falls back to automatic similarity-based merging.
@@ -69,25 +71,56 @@ Semantic relation maintenance is independently disabled unless
 Principal: the worker still evaluates candidates, but Runtime cannot write an
 assessment, Summary, or replacement Page. `mode = "apply"` must be selected
 explicitly after the worker has been observed against the target Identity.
+Observe mode skips explicit feedback reconciliation because that queue requires
+the write-only `Assess` permission; other eligible semantic jobs remain available.
 `initial_delay_seconds` optionally delays the first inventory heartbeat after
 process start. Successful content writes through a Runtime endpoint wake the
 maintainer immediately and break any idle backoff; the wake only refreshes the
 inventory watermark and does not itself authorize a model call. Runtime
 persists changed regions, groups source-backed Pages by stream, and runs
-semantic maintenance only when `[maintenance.write_trigger]` has enough new
+write-triggered maintenance when `[maintenance.write_trigger]` has enough new
 Pages plus a completed quiet period, or reaches its absolute maximum wait.
+Subject-affinity neighbors can come from other authorized Scopes. Scope and
+chronology do not define a semantic subject.
 
 With no dirty regions, empty cycles back off exponentially from
 `interval_seconds` to `max_interval_seconds`. These timer wakes are safety polls
 for writes outside Runtime's observable endpoint path. Productive cycles that
 leave follow-up work retry after 30 seconds; failures use an independent bounded
-30-second exponential retry. The first heartbeat establishes a baseline rather
-than treating an existing Store backlog as newly written work.
+30-second exponential retry. The first heartbeat establishes a write baseline. Separately,
+`periodic_review` revisits unchanged Pages once per day by default, including
+an initial bounded review of an existing Store. Each batch uses the same
+`max_jobs_per_cycle` limit and bounded candidate windows. A full periodic batch
+does not start a rapid sweep. Never-reviewed windows precede previously reviewed
+windows; eligible old windows are ordered by their last review time, so early
+windows do not repeatedly displace the rest. The ledger persists cooldowns and
+semantic task rotation across restarts.
+
+Console distinguishes the last inventory check, model analysis, and content
+write. Its status API includes the next periodic review and the most recent 20
+cycle reports; an empty heartbeat is not evidence of content editing.
 
 ```toml
 [maintenance]
-interval_seconds = 1800
+store_wide = true
+allowed_scopes = []
+allow_cross_scope_derivation = true
+interval_seconds = 21600
 max_interval_seconds = 86400
+max_jobs_per_cycle = 3
+
+[maintenance.periodic_review]
+enabled = true
+interval_seconds = 86400
+
+[maintenance.topic]
+enabled = true
+minimum_pages = 4
+minimum_total_chars = 1200
+max_source_pages = 8
+# This Scope must already exist. Refreshes keep their original destination.
+target_scope = "user:{identity_id}"
+auto_apply = true
 
 [maintenance.reconciliation]
 enabled = true
@@ -101,8 +134,16 @@ retry_after_seconds = 3600
 Scheduled packing and Summary work may apply in `mode = "apply"`. A relation is
 applied automatically only for the narrow structural case of two continuous
 Pack Pages in one source stream with a shared protected identifier. General
-relations, Topic Pages, archive recommendations, and high-impact feedback reconciliation enter one persistent typed
-review queue even in apply mode. Background maintenance and Console `Run now`
+relations, archive recommendations, and high-impact feedback reconciliation enter
+one persistent typed review queue even in apply mode. Topic synthesis is separate
+from long-Page summarization: shared subject markers route short Pages together,
+and either `minimum_pages` or `minimum_total_chars` signals useful accumulation.
+The model must still select one narrow subject, preserve qualifications, and
+explain the retrieval benefit. Counts or lexical overlap alone never establish
+a Topic. With `topic.auto_apply = true`, apply mode may create or refresh a Topic
+whose selected sources meet that threshold and pass exact-head, duplicate, and
+authorization checks. Otherwise it becomes a review item. Source Pages are not
+rewritten or deleted. This opt-in defaults to false for existing configurations. Background maintenance and Console `Run now`
 use this same controller and queue; queued items affect neither retrieval nor
 lifecycle state before acceptance.
 
@@ -125,12 +166,12 @@ One cycle is bounded by `max_jobs_per_cycle`:
 3. Runtime deterministically forms a bounded analysis window of sealed leaves and packed anchors that share Scope, kind, and a contiguous SourceSpan, then sends compact head-and-tail routing text as `select_packing`. `analysis_window_pages` controls what the worker can compare; it is independent of the smaller `max_pages` commit limit.
 4. The worker may select one ordered coherent episode from that exact window. Lossless packing does not require every Page to state the same fact: questions, answers, corrections, qualifications, and short reasoning transitions may stay together. It does not generate packed content.
 5. Runtime validates the selected IDs, aggregate input size, and at most one packed anchor and, in apply mode, calls `pack_pages`; Store rechecks exact heads, source continuity, identity pins, anchor count, retention, and transaction invariants. It then reloads the current-Page inventory before the next phase.
-6. With `reconciliation.discover_updates`, ordinary writes may trigger a bounded `review_update` comparison before Summary work. At most 48 recent anchors contribute up to eight exact provenance inputs and two subject-overlap matches each. Older comparison Pages can come from other authorized Scopes. One eligible pair is analyzed per job, using complete bounded content; oversized or incomplete evidence is deferred. This is not an exhaustive semantic duplicate search. A later timestamp, similarity, or provenance never authorizes replacement. All discovered decisions require Console review, including in apply mode; there is no fabricated feedback Page. The operation uses the baseline reasoning route at high effort and is not in the default Sol escalation set.
+6. With `reconciliation.discover_updates`, ordinary writes or periodic review may trigger a bounded `review_update` comparison alongside Summary, Relation, and Topic work. At most 48 recent anchors contribute up to eight exact provenance inputs and two subject-overlap matches each. Older comparison Pages can come from other authorized Scopes. One eligible pair is analyzed per job, using complete bounded content; oversized or incomplete evidence is deferred. This is not an exhaustive semantic duplicate search. A later timestamp, similarity, or provenance never authorizes replacement. All discovered decisions require Console review, including in apply mode; there is no fabricated feedback Page. The operation uses the baseline reasoning route at high effort and is not in the default Sol escalation set.
    A long unsummarized Page may then be sent to the worker as `summarize_page`. Runtime reloads the inventory after a Summary write before relation work.
-7. Runtime may send overlapping bounded current-Page routing windows as `select_relation`. Exact current Page pairs connected by provenance inputs are offered before broad recency windows, but provenance never asserts a Relation. The request lists already related or previously reviewed pairs; the worker can return only two other offered Page IDs. Runtime fixes the relation to symmetric `related_to`, binds the exact current Revisions as basis, rejects stale or excluded pairs, and sends general semantic relations to review.
-8. After relation work quiesces, Runtime may ask for a source-grounded Topic front door. Valid Topic proposals and conservative archive recommendations are persisted as typed review items; archive is never applied automatically.
+7. Summary, Relation, Topic, and ordinary-update discovery take turns within the scheduled budget. Runtime may send subject-affinity and overlapping bounded current-Page routing windows as `select_relation`. Exact current Page pairs connected by provenance inputs are offered before broad recency windows, but provenance never asserts a Relation. The request lists already related or previously reviewed pairs; the worker can return only two other offered Page IDs. Runtime fixes the relation to symmetric `related_to`, binds the exact current Revisions as basis, rejects stale or excluded pairs, and sends general semantic relations to review.
+8. Runtime may synthesize a source-grounded Topic before all relation windows quiesce. Sources can span authorized Scopes; cross-Scope output requires `allow_cross_scope_derivation` and a writable destination. New Topics use `topic.target_scope` when set; otherwise the lexicographically first source Scope is selected explicitly. Refreshes preserve the existing Topic Scope. Valid accumulated Topics may apply under the opt-in above; other Topic proposals and archive recommendations are review items. Archive is never applied automatically.
 9. Runtime obtains a bounded dry-run Revision-payload retention plan and may ask the worker whether an eligible old Revision from that plan is a semantic milestone. These retention candidates are not Runtime context-inbox candidates.
-10. In apply mode only, validated low-risk reconciliation, Summary writes, packing, structurally low-risk Relations, or finite retention leases cross into the PCP commit API. Leases additionally require `maintenance.retention.write_leases = true`. Lease selection and physical collection remain separate operations; the current maintainer does not collect Revision payloads automatically.
+10. In apply mode only, validated low-risk reconciliation, Summary writes, packing, structurally low-risk Relations, eligible opted-in Topic synthesis, or finite retention leases cross into the PCP commit API. Leases additionally require `maintenance.retention.write_leases = true`. Lease selection and physical collection remain separate operations; the current maintainer does not collect Revision payloads automatically.
 
 Runtime keeps cooldown decisions in `state_path`. This operational state is not
 written as user memory. Successful Summary writes remain traceable through normal

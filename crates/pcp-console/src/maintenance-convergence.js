@@ -12,6 +12,7 @@ const ADDITIVE_REPORT_FIELDS = [
   "retentionLeasesWritten",
   "retentionLeasesProposed",
   "topicsProposed",
+  "topicsWritten",
   "archivesProposed",
   "reviewItemsProposed",
   "escalatedDecisions",

@@ -41,6 +41,8 @@ struct FakeWorker {
 
 #[path = "tests/feedback_edit.rs"]
 mod feedback_edit;
+#[path = "tests/periodic_review.rs"]
+mod periodic_review;
 #[path = "tests/update_discovery.rs"]
 mod update_discovery;
 
@@ -2180,7 +2182,7 @@ async fn convergence_filters_time_discontinuous_packing_before_worker() {
         "packing-convergence-time-gap:1",
         1,
     );
-    first.observed_at = Some("2026-08-24T00:00:00Z".to_owned());
+    first.observed_at = Some((chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339());
     let first = fixture
         .client
         .write_page(first)
@@ -2191,7 +2193,7 @@ async fn convergence_filters_time_discontinuous_packing_before_worker() {
         "packing-convergence-time-gap:2",
         2,
     );
-    second.observed_at = Some("2026-08-24T00:15:01Z".to_owned());
+    second.observed_at = Some((chrono::Utc::now() - chrono::Duration::minutes(44)).to_rfc3339());
     let second = fixture
         .client
         .write_page(second)
@@ -2206,6 +2208,7 @@ async fn convergence_filters_time_discontinuous_packing_before_worker() {
     config.summary.enabled = false;
     config.packing.enabled = true;
     config.relation.enabled = false;
+    config.topic.enabled = false;
     config.retention.enabled = false;
     let mut maintainer =
         RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
@@ -3576,14 +3579,17 @@ async fn operator_observe_once_runs_a_worker_without_persisting_scheduler_state(
     config.mode = MaintenanceMode::Observe;
     config.summary.enabled = false;
     config.packing.enabled = true;
+    config.reconciliation.enabled = true;
+    config.store_wide = true;
+    config.allowed_scopes.clear();
+    let access = config.access_session(&fixture.identity_id);
+    assert!(!access.allows(&fixture.namespace, AccessPermission::Assess));
+    let observe_client = EmbeddedPcpClient::shared(fixture.store.clone(), access);
     let state_path = config.state_path.clone();
-    let mut maintainer = RuntimeMaintainer::load_operator_observe_once(
-        fixture.client.clone(),
-        worker.clone(),
-        config,
-    )
-    .await
-    .expect("load operator observe maintenance");
+    let mut maintainer =
+        RuntimeMaintainer::load_operator_observe_once(observe_client, worker.clone(), config)
+            .await
+            .expect("load operator observe maintenance");
 
     let report = maintainer
         .run_operator_observe_once()
@@ -3889,6 +3895,13 @@ impl Fixture {
             enabled: true,
             mode: MaintenanceMode::Apply,
             state_path: self.root.join("maintenance.json"),
+            store_wide: false,
+            allow_cross_scope_derivation: false,
+            topic: crate::maintenance::TopicMaintenanceConfig::default(),
+            periodic_review: crate::maintenance::PeriodicReviewConfig {
+                enabled: false,
+                ..Default::default()
+            },
             allowed_scopes: vec![self.namespace.clone()],
             interval_seconds: 60,
             max_interval_seconds: 3_600,

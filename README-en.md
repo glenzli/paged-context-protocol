@@ -169,7 +169,7 @@ ChatGPT Developer Mode can call the local stdio `pcp-mcp` through OpenAI Secure 
 
 ### Maintenance, Console, and Observation
 
-Background maintenance and manual Console runs use the same persistent review queue. A worker produces candidates; Runtime and Store retain control of budgets, authorization, current-Revision checks, and commits. Relation, Topic, and Archive proposals requiring judgment are reviewed before application. Scheduling, model escalation, and failure backoff are documented in [`crates/pcp-runtime/README.md`](crates/pcp-runtime/README.md).
+Background maintenance and manual Console runs use the same persistent review queue. A worker produces candidates; Runtime and Store retain control of budgets, authorization, current-Revision checks, and commits. General Relation and Archive proposals require review. Store-wide maintenance can periodically revisit old Pages and synthesize Topics across authorized Scopes; accumulated short Pages can qualify without meeting the long-Page summary threshold. Topic auto-application is a separate deployment opt-in. Scheduling, model escalation, and failure backoff are documented in [`crates/pcp-runtime/README.md`](crates/pcp-runtime/README.md).
 
 Console should connect through a dedicated `audit` endpoint. It provides read-only Store inspection, query previews, enrollment management, maintenance review, and authorized archive/restore. Runtime's infrastructure observer returns aggregate, redacted operational data only; see [`crates/pcp-runtime/OBSERVER.md`](crates/pcp-runtime/OBSERVER.md).
 

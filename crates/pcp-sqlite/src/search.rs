@@ -378,16 +378,16 @@ fn browse_content_pages_once(
          ) relation_counts ON relation_counts.page_id = p.page_id
          WHERE r.namespace IN (",
         summary_revision = content_roles::CURRENT_SUMMARY,
-        content_role = content_roles::role_sql(),
+        content_role = content_roles::role_sql(scopes.len()),
     );
-    push_placeholders(&mut sql, scopes.len());
+    sql.push_str(&content_roles::scope_parameters(scopes.len()));
     sql.push(')');
     append_current_content_page_filter(&mut sql);
     if retrieval_only {
-        append_topic_front_door_filter(&mut sql);
+        append_topic_front_door_filter(&mut sql, scopes.len());
     }
     append_content_library_query_filter(&mut sql, &mut values, query);
-    content_roles::append_filter(&mut sql, &mut values, filter);
+    content_roles::append_filter(&mut sql, &mut values, filter, scopes.len());
     sql.push_str(" ORDER BY ");
     sql.push_str(browse_index_order_by(order));
     sql.push_str(" LIMIT ? OFFSET ?");
@@ -541,10 +541,10 @@ fn content_library_totals_once(
     sql.push(')');
     append_current_content_page_filter(&mut sql);
     if retrieval_only {
-        append_topic_front_door_filter(&mut sql);
+        append_topic_front_door_filter(&mut sql, scopes.len());
     }
     append_content_library_query_filter(&mut sql, &mut values, query);
-    content_roles::append_filter(&mut sql, &mut values, filter);
+    content_roles::append_filter(&mut sql, &mut values, filter, scopes.len());
     let (page_count, content_chars) = connection
         .query_row(&sql, params_from_iter(values.iter()), |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
@@ -571,9 +571,9 @@ fn append_current_content_page_filter(sql: &mut String) {
 /// A topic extraction changes default retrieval routing, not source retention:
 /// its active current topic Page is the front door while the exact member
 /// revisions remain readable by ID and traversable through `summarizes`.
-fn append_topic_front_door_filter(sql: &mut String) {
+fn append_topic_front_door_filter(sql: &mut String, scope_count: usize) {
     sql.push_str(" AND NOT ");
-    sql.push_str(content_roles::CURRENT_TOPIC_COVERAGE);
+    sql.push_str(&content_roles::current_topic_coverage(scope_count));
 }
 
 fn append_content_library_query_filter(

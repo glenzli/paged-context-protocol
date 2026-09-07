@@ -276,13 +276,18 @@ pub struct WriteSummaryRequest {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractTopicRequest {
+    /// Destination Scope for a new Topic. Required for mixed-Scope sources.
+    /// Cross-Scope extraction requires derive_across_scopes on this destination.
+    /// Omission preserves same-Scope extraction and an existing Topic's Scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_namespace: Option<String>,
     /// Existing current Topic head to refresh. Omit only when creating a new
     /// stable subject. The Store rejects an exact logical-source duplicate
     /// when this target is missing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_topic: Option<PageRevisionRef>,
     /// Ordered exact source Revisions. They must be current, active Pages in
-    /// one Scope at the time the extraction is committed.
+    /// authorized Scopes at the time the extraction is committed.
     pub source_pages: Vec<PageRevisionRef>,
     pub title: String,
     pub content: String,

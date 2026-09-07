@@ -142,6 +142,7 @@ pub(crate) enum RpcOperation {
     DurablePageInventory {
         excluded_page_kinds: Vec<String>,
     },
+    QueryAccessLog(pcp_core::AccessLogQuery),
     AccessLog {
         limit: u32,
         cursor: Option<String>,
@@ -207,6 +208,7 @@ pub(crate) enum RpcValue {
     ReconciliationResult(ReconciliationResult),
     TombstoneCascade(TombstoneCascadeResult),
     Inventory(Vec<DurablePageInventoryItem>),
+    AccessLogResult(pcp_core::AccessLogResult),
     AccessLog {
         events: Vec<AccessAuditEvent>,
         next_cursor: Option<String>,

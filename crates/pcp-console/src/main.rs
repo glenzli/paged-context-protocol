@@ -201,12 +201,6 @@ struct PageListMetadata {
     source_span: Option<SourceSpan>,
 }
 
-#[derive(Default, Deserialize)]
-struct AccessQuery {
-    cursor: Option<String>,
-    limit: Option<u32>,
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct IntentQueryRequest {
@@ -362,6 +356,7 @@ fn router(state: AppState) -> Router {
         )
         .route("/", get(index))
         .route("/app.js", get(app_js))
+        .route("/access-view.js", get(access_view_js))
         .route("/ui-icons.js", get(ui_icons_js))
         .route("/page-inspector.js", get(page_inspector_js))
         .route("/page-editor.js", get(page_editor_js))
@@ -580,6 +575,13 @@ fn static_binary_asset(content_type: &'static str, contents: &'static [u8]) -> R
 
 async fn index() -> Response {
     static_asset("text/html; charset=utf-8", include_str!("index.html"))
+}
+
+async fn access_view_js() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("access-view.js"),
+    )
 }
 
 async fn app_js() -> Response {
@@ -1287,6 +1289,18 @@ async fn maintenance_status(State(state): State<AppState>) -> Result<Json<Value>
         "intervalSeconds": maintenance.interval_seconds,
         "maxIntervalSeconds": maintenance.max_interval_seconds,
         "maxJobsPerCycle": maintenance.max_jobs_per_cycle,
+        "storeWide": maintenance.store_wide,
+        "allowedScopes": maintenance.allowed_scopes,
+        "crossScopeDerivation": maintenance.allow_cross_scope_derivation,
+        "periodicReview": { "enabled": maintenance.periodic_review.enabled, "intervalSeconds": maintenance.periodic_review.interval_seconds },
+        "topic": {
+            "enabled": maintenance.topic.enabled,
+            "minimumPages": maintenance.topic.minimum_pages,
+            "minimumTotalChars": maintenance.topic.minimum_total_chars,
+            "maxSourcePages": maintenance.topic.max_source_pages,
+            "targetScope": maintenance.topic.target_scope,
+            "autoApply": maintenance.topic.auto_apply,
+        },
         "writeTrigger": {
             "minNewPages": maintenance.write_trigger.min_new_pages,
             "quietPeriodSeconds": maintenance.write_trigger.quiet_period_seconds,
@@ -1983,13 +1997,9 @@ async fn maintenance_operator_for_console(
 
 async fn access_log(
     State(state): State<AppState>,
-    Query(query): Query<AccessQuery>,
-) -> Result<Json<Value>, ApiError> {
-    let (events, next_cursor) = state
-        .client
-        .access_log(query.limit.unwrap_or(100).clamp(1, 500), query.cursor)
-        .await?;
-    Ok(Json(json!({"events": events, "nextCursor": next_cursor})))
+    Query(query): Query<pcp_core::AccessLogQuery>,
+) -> Result<Json<pcp_core::AccessLogResult>, ApiError> {
+    Ok(Json(state.client.query_access_log(query).await?))
 }
 
 async fn enrollment_snapshot(

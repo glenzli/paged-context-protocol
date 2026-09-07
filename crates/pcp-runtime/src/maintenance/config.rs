@@ -26,7 +26,14 @@ pub struct MaintenanceConfig {
     #[serde(default)]
     pub mode: MaintenanceMode,
     pub state_path: PathBuf,
+    /// Local service authority for every current and future Scope in this Store.
+    /// Explicit allowlists remain supported for restricted deployments.
+    #[serde(default)]
+    pub store_wide: bool,
+    #[serde(default)]
     pub allowed_scopes: Vec<String>,
+    #[serde(default)]
+    pub allow_cross_scope_derivation: bool,
     #[serde(default = "default_interval_seconds")]
     pub interval_seconds: u64,
     /// Longest idle safety-poll interval after repeated cycles observe no
@@ -51,6 +58,10 @@ pub struct MaintenanceConfig {
     pub packing: PackingMaintenanceConfig,
     #[serde(default)]
     pub relation: RelationMaintenanceConfig,
+    #[serde(default)]
+    pub topic: TopicMaintenanceConfig,
+    #[serde(default)]
+    pub periodic_review: PeriodicReviewConfig,
     #[serde(default)]
     pub reconciliation: ReconciliationMaintenanceConfig,
     #[serde(default)]
@@ -303,6 +314,48 @@ pub struct RelationMaintenanceConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+pub struct TopicMaintenanceConfig {
+    pub enabled: bool,
+    /// Accumulation is a routing signal, not a conclusion that a Topic exists.
+    pub minimum_pages: usize,
+    pub minimum_total_chars: u64,
+    pub max_source_pages: usize,
+    /// Optional destination for new Topics; refreshes retain their existing Scope.
+    pub target_scope: Option<String>,
+    pub auto_apply: bool,
+}
+
+impl Default for TopicMaintenanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            minimum_pages: 4,
+            minimum_total_chars: 1_200,
+            max_source_pages: 8,
+            target_scope: None,
+            auto_apply: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PeriodicReviewConfig {
+    pub enabled: bool,
+    pub interval_seconds: u64,
+}
+
+impl Default for PeriodicReviewConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_seconds: 86_400,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct RetentionMaintenanceConfig {
     pub enabled: bool,
     pub write_leases: bool,
@@ -391,7 +444,7 @@ impl MaintenanceConfig {
             return Ok(());
         }
         anyhow::ensure!(
-            !self.allowed_scopes.is_empty(),
+            self.store_wide || !self.allowed_scopes.is_empty(),
             "enabled PCP maintenance requires at least one allowed Scope"
         );
         anyhow::ensure!(
@@ -429,6 +482,23 @@ impl MaintenanceConfig {
             "PCP maintenance principal_id must not be empty"
         );
         self.worker.validate()?;
+        anyhow::ensure!(
+            !self.periodic_review.enabled || self.periodic_review.interval_seconds > 0,
+            "PCP periodic review interval_seconds must be positive"
+        );
+        anyhow::ensure!(
+            (2..=64).contains(&self.topic.minimum_pages)
+                && (self.topic.minimum_pages..=64).contains(&self.topic.max_source_pages)
+                && self.topic.minimum_total_chars > 0,
+            "PCP Topic thresholds require 2..=max_source_pages<=64 and positive content size"
+        );
+        anyhow::ensure!(
+            self.topic
+                .target_scope
+                .as_ref()
+                .is_none_or(|scope| !scope.trim().is_empty()),
+            "PCP Topic target_scope must not be empty"
+        );
         anyhow::ensure!(
             !self.summary.enabled || self.summary.minimum_chars > 0,
             "PCP summary maintenance minimum_chars must be positive"
@@ -495,6 +565,17 @@ impl MaintenanceConfig {
         self.worker.resolve_paths(base);
     }
 
+    pub(crate) fn query_scopes(&self, identity_id: &str) -> Vec<String> {
+        if self.store_wide {
+            Vec::new()
+        } else {
+            self.allowed_scopes
+                .iter()
+                .map(|scope| scope.replace("{identity_id}", identity_id))
+                .collect()
+        }
+    }
+
     pub fn access_session(&self, identity_id: &str) -> AccessSession {
         let started = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -510,22 +591,39 @@ impl MaintenanceConfig {
         } else {
             AccessMode::Read
         };
-        let mut session = access_mode.session(
-            AccessPrincipal {
-                principal_id: self.principal_id.clone(),
-                principal_type: AccessPrincipalType::Service,
-                display_name: Some(self.principal_name.clone()),
-            },
-            format!("pcp-maintenance:{}:{started}", std::process::id()),
-            scopes,
-            false,
-        );
+        let principal = AccessPrincipal {
+            principal_id: self.principal_id.clone(),
+            principal_type: AccessPrincipalType::Service,
+            display_name: Some(self.principal_name.clone()),
+        };
+        let session_id = format!("pcp-maintenance:{}:{started}", std::process::id());
+        let mut session = if self.store_wide {
+            access_mode.store_wide_session(
+                principal,
+                session_id,
+                scopes,
+                self.allow_cross_scope_derivation,
+            )
+        } else {
+            access_mode.session(
+                principal,
+                session_id,
+                scopes,
+                self.allow_cross_scope_derivation,
+            )
+        };
         if self.retention.enabled {
+            if self.store_wide {
+                session.store_permissions.push(AccessPermission::Audit);
+            }
             for grant in &mut session.grants {
                 grant.permissions.push(AccessPermission::Audit);
             }
         }
         if self.packing.enabled && self.applies_changes() {
+            if self.store_wide {
+                session.store_permissions.push(AccessPermission::Collect);
+            }
             for grant in &mut session.grants {
                 grant.permissions.push(AccessPermission::Collect);
             }
@@ -546,19 +644,30 @@ impl MaintenanceConfig {
             .iter()
             .map(|scope| scope.replace("{identity_id}", identity_id))
             .collect();
-        AccessMode::Admin.session(
-            AccessPrincipal {
-                principal_id: format!("{}:pack-repair", self.principal_id),
-                principal_type: AccessPrincipalType::Service,
-                display_name: Some("PCP maintenance Pack repair".to_owned()),
-            },
-            format!(
-                "pcp-maintenance-pack-repair:{}:{started}",
-                std::process::id()
-            ),
-            scopes,
-            false,
-        )
+        let principal = AccessPrincipal {
+            principal_id: format!("{}:pack-repair", self.principal_id),
+            principal_type: AccessPrincipalType::Service,
+            display_name: Some("PCP maintenance Pack repair".to_owned()),
+        };
+        let session_id = format!(
+            "pcp-maintenance-pack-repair:{}:{started}",
+            std::process::id()
+        );
+        if self.store_wide {
+            AccessMode::Admin.store_wide_session(
+                principal,
+                session_id,
+                scopes,
+                self.allow_cross_scope_derivation,
+            )
+        } else {
+            AccessMode::Admin.session(
+                principal,
+                session_id,
+                scopes,
+                self.allow_cross_scope_derivation,
+            )
+        }
     }
 
     pub fn applies_changes(&self) -> bool {

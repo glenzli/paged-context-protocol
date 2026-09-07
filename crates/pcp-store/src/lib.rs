@@ -332,6 +332,11 @@ pub trait PcpStore: Send + Sync {
         access: &AccessSession,
         excluded_page_kinds: Vec<String>,
     ) -> Result<Vec<DurablePageInventoryItem>>;
+    async fn query_access_log(
+        &self,
+        access: &AccessSession,
+        query: pcp_core::AccessLogQuery,
+    ) -> Result<pcp_core::AccessLogResult>;
     async fn access_log(
         &self,
         access: &AccessSession,

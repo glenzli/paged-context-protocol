@@ -487,11 +487,24 @@
       <div class="view-heading">
         <div><h2 data-i18n="Access">Access</h2><span id="access-status" class="muted" aria-live="polite" data-i18n="Not loaded">Not loaded</span></div>
       </div>
-      <div id="access-summary" class="aggregate-grid"></div>
-      <div class="section-heading"><h2 data-i18n="Recent events">Recent events</h2></div>
+      <form id="access-filters" class="access-filters" aria-label="Audit filters" data-i18n-aria-label="Audit filters">
+        <select id="access-period" aria-label="Time" data-i18n-aria-label="Time">
+          <option value="0" data-i18n="All time">All time</option>
+          <option value="24" data-i18n="Last 24 hours">Last 24 hours</option>
+          <option value="168" data-i18n="Last 7 days">Last 7 days</option>
+          <option value="720" data-i18n="Last 30 days">Last 30 days</option>
+        </select>
+        <input id="access-operation" type="search" aria-label="Operation" data-i18n-aria-label="Operation" placeholder="Exact operation name" data-i18n-placeholder="Exact operation name">
+        <button class="compact-button secondary-button" type="submit" data-i18n="Filter">Filter</button>
+        <label><input id="access-health" type="checkbox"><span data-i18n="Show health checks">Show health checks</span></label>
+      </form>
+      <p class="muted" data-i18n="Counts cover all matching records, not only loaded events.">Counts cover all matching records, not only loaded events.</p>
+      <div id="access-clients" class="access-clients" aria-label="Client access" data-i18n-aria-label="Client access"></div>
+      <div class="section-heading"><h2 id="access-selected" data-i18n="All clients">All clients</h2></div>
+      <div id="access-summary" class="access-operations"></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th data-i18n="Time">Time</th><th data-i18n="Principal">Principal</th><th data-i18n="Operation">Operation</th><th data-i18n="Scopes">Scopes</th><th data-i18n="Decision">Decision</th></tr></thead>
+          <thead><tr><th data-i18n="Time">Time</th><th data-i18n="Principal">Principal</th><th data-i18n="Operation">Operation</th><th data-i18n="Scopes">Scopes</th><th data-i18n="Decision">Decision</th><th data-i18n="Details">Details</th></tr></thead>
           <tbody id="access-rows"></tbody>
         </table>
       </div>

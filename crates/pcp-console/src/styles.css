@@ -812,7 +812,7 @@ input:focus, select:focus { border-color: var(--accent); }
 .empty, .loading { padding: 18px; color: var(--muted); text-align: center; }
 .overview-secondary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; }
 #view-access .view-heading { margin-bottom: 18px; }
-#view-access #access-status { display: none; }
+#view-access #access-status { display: inline; }
 #view-access .section-heading { margin-top: 26px; }
 #view-overview .section-heading { margin-top: 24px; margin-bottom: 8px; }
 #view-overview .metrics { box-shadow: none; }
@@ -1221,3 +1221,15 @@ pre { margin: 0; max-height: 420px; overflow: auto; padding: 11px; border: 1px s
   min-width: 0;
   overflow-wrap: anywhere;
 }
+
+.access-filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.access-filters input[type="search"] { flex: 1; min-width: 220px; }
+.access-filters label { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+.access-clients { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-top: 18px; }
+.access-client { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; text-align: left; padding: 12px; overflow-wrap: anywhere; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); }
+.access-client[aria-pressed="true"] { outline: 2px solid var(--accent); outline-offset: -2px; }
+.access-client span { font-size: 12px; }
+.access-operations { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.access-event-details { min-width: 130px; max-width: 360px; overflow-wrap: anywhere; }
+.access-event-details summary { cursor: pointer; color: var(--accent); }
+#view-access td { vertical-align: top; }

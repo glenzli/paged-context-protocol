@@ -55,6 +55,16 @@ pub struct MaintenanceAutomationStatus {
     pub last_started_at: Option<String>,
     pub last_completed_at: Option<String>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub last_analysis_at: Option<String>,
+    #[serde(default)]
+    pub last_content_change_at: Option<String>,
+    #[serde(default)]
+    pub last_periodic_review_at: Option<String>,
+    #[serde(default)]
+    pub next_periodic_review_at: Option<String>,
+    #[serde(default)]
+    pub recent_cycles: Vec<MaintenanceCycleRecord>,
     pub last_report: Option<MaintenanceCycleReport>,
     #[serde(default)]
     pub current_report: Option<MaintenanceCycleReport>,
@@ -72,6 +82,13 @@ pub struct MaintenanceAutomationStatus {
     pub pending_relation_review_count: usize,
     pub pending_review_count: usize,
     pub dirty_regions: Vec<MaintenanceDirtyRegionStatus>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceCycleRecord {
+    pub completed_at: String,
+    pub report: MaintenanceCycleReport,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -159,6 +176,16 @@ struct DirtyRegion {
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SchedulerLedger {
+    #[serde(default)]
+    last_analysis_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    last_content_change_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    last_periodic_review_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    recent_cycles: Vec<MaintenanceCycleRecord>,
+    #[serde(default)]
+    semantic_turn: usize,
     last_started_at_unix_ms: Option<u64>,
     last_completed_at_unix_ms: Option<u64>,
     last_error: Option<String>,
@@ -291,6 +318,39 @@ impl MaintenanceLedger {
         self.entries
             .get(key)
             .is_none_or(|entry| entry.retry_after_unix_ms <= now_unix_ms())
+    }
+
+    pub(crate) fn last_reviewed(&self, key: &str) -> u64 {
+        self.entries
+            .get(key)
+            .map_or(0, |entry| entry.updated_at_unix_ms)
+    }
+
+    pub(crate) fn semantic_turn(&self) -> usize {
+        self.scheduler.semantic_turn % 4
+    }
+
+    pub(crate) fn advance_semantic_turn(&mut self, turn: usize) {
+        self.scheduler.semantic_turn = (turn + 1) % 4;
+    }
+
+    pub(crate) fn periodic_review_due(&self, config: &MaintenanceConfig) -> bool {
+        config.periodic_review.enabled && self.periodic_review_delay(config) == 0
+    }
+
+    fn periodic_review_delay(&self, config: &MaintenanceConfig) -> u64 {
+        self.scheduler
+            .last_periodic_review_at_unix_ms
+            .map_or(0, |last| {
+                last.saturating_add(
+                    config
+                        .periodic_review
+                        .interval_seconds
+                        .saturating_mul(1_000),
+                )
+                .saturating_sub(now_unix_ms())
+                .div_ceil(1_000)
+            })
     }
 
     pub(crate) fn record(&mut self, key: String, outcome: &str, retry_after_seconds: u64) {
@@ -660,7 +720,23 @@ impl MaintenanceLedger {
     }
 
     pub(crate) fn complete_scheduled_cycle(&mut self, report: MaintenanceCycleReport) {
-        self.scheduler.last_completed_at_unix_ms = Some(now_unix_ms());
+        let now = now_unix_ms();
+        self.scheduler.last_completed_at_unix_ms = Some(now);
+        if report.worker_calls > 0 {
+            self.scheduler.last_analysis_at_unix_ms = Some(now);
+        }
+        if report.content_changes() > 0 {
+            self.scheduler.last_content_change_at_unix_ms = Some(now);
+        }
+        if report.periodic_review {
+            self.scheduler.last_periodic_review_at_unix_ms = Some(now);
+        }
+        self.scheduler.recent_cycles.push(MaintenanceCycleRecord {
+            completed_at: timestamp_string(now),
+            report: report.clone(),
+        });
+        let excess = self.scheduler.recent_cycles.len().saturating_sub(20);
+        self.scheduler.recent_cycles.drain(..excess);
         self.scheduler.last_error = None;
         self.scheduler.last_report = Some(report);
         self.scheduler.current_report = None;
@@ -678,7 +754,8 @@ impl MaintenanceLedger {
         report: &MaintenanceCycleReport,
     ) -> u64 {
         self.scheduler.consecutive_failures = 0;
-        let delay = if report.jobs_advanced >= config.max_jobs_per_cycle {
+        let delay = if !report.periodic_review && report.jobs_advanced >= config.max_jobs_per_cycle
+        {
             self.scheduler.idle_cycles = 0;
             ACTIVE_RETRY_SECONDS
         } else if !self.write_trigger.dirty_regions.is_empty() {
@@ -699,6 +776,11 @@ impl MaintenanceLedger {
                 config.max_interval_seconds,
                 self.scheduler.idle_cycles.saturating_sub(1),
             )
+        };
+        let delay = if config.periodic_review.enabled {
+            delay.min(self.periodic_review_delay(config).max(1))
+        } else {
+            delay
         };
         self.record_next_wake(delay);
         delay
@@ -801,6 +883,24 @@ impl MaintenanceLedger {
                 .last_completed_at_unix_ms
                 .map(timestamp_string),
             last_error: self.scheduler.last_error.clone(),
+            last_analysis_at: self
+                .scheduler
+                .last_analysis_at_unix_ms
+                .map(timestamp_string),
+            last_content_change_at: self
+                .scheduler
+                .last_content_change_at_unix_ms
+                .map(timestamp_string),
+            last_periodic_review_at: self
+                .scheduler
+                .last_periodic_review_at_unix_ms
+                .map(timestamp_string),
+            next_periodic_review_at: config.periodic_review.enabled.then(|| {
+                timestamp_string(
+                    now.saturating_add(self.periodic_review_delay(config).saturating_mul(1_000)),
+                )
+            }),
+            recent_cycles: self.scheduler.recent_cycles.clone(),
             last_report: self.scheduler.last_report.clone(),
             current_report: self.scheduler.current_report.clone(),
             next_wake_at: self.scheduler.next_wake_at_unix_ms.map(timestamp_string),
@@ -1050,6 +1150,13 @@ mod tests {
             enabled: true,
             mode: MaintenanceMode::Apply,
             state_path: PathBuf::from("maintenance-test.json"),
+            store_wide: false,
+            allow_cross_scope_derivation: false,
+            topic: crate::maintenance::TopicMaintenanceConfig::default(),
+            periodic_review: crate::maintenance::PeriodicReviewConfig {
+                enabled: false,
+                ..Default::default()
+            },
             allowed_scopes: vec!["conversation:test".to_owned()],
             interval_seconds: 10,
             max_interval_seconds: 80,
@@ -1232,6 +1339,56 @@ mod tests {
         assert_eq!(ledger.schedule_after_success(&config, &report), 80);
         assert_eq!(ledger.scheduler.idle_cycles, 5);
         assert!(ledger.scheduler.next_wake_at_unix_ms.is_some());
+    }
+
+    #[test]
+    fn periodic_review_has_an_independent_budget_and_persisted_deadline() {
+        let mut config = scheduler_config();
+        config.periodic_review.enabled = true;
+        config.periodic_review.interval_seconds = 40;
+        let mut ledger = MaintenanceLedger::default();
+        assert!(ledger.periodic_review_due(&config));
+        let report = MaintenanceCycleReport {
+            periodic_review: true,
+            jobs_advanced: config.max_jobs_per_cycle,
+            worker_calls: 2,
+            topics_written: 1,
+            ..Default::default()
+        };
+        ledger.advance_semantic_turn(1);
+        ledger.complete_scheduled_cycle(report.clone());
+        assert!(!ledger.periodic_review_due(&config));
+        let delay = ledger.schedule_after_success(&config, &report);
+        assert_eq!(delay, config.interval_seconds);
+        assert_ne!(
+            delay, ACTIVE_RETRY_SECONDS,
+            "a full old-page batch must not cause an unbounded active sweep"
+        );
+        let reloaded: MaintenanceLedger =
+            serde_json::from_slice(&serde_json::to_vec(&ledger).unwrap()).unwrap();
+        assert!(!reloaded.periodic_review_due(&config));
+        assert_eq!(reloaded.semantic_turn(), 2);
+        assert!(
+            reloaded
+                .automation_status(&config)
+                .last_content_change_at
+                .is_some()
+        );
+        ledger.scheduler.last_periodic_review_at_unix_ms =
+            Some(now_unix_ms().saturating_sub(41_000));
+        assert!(ledger.periodic_review_due(&config));
+        assert_eq!(
+            ledger.schedule_after_success(&config, &MaintenanceCycleReport::default()),
+            1
+        );
+    }
+
+    #[test]
+    fn never_reviewed_windows_precede_expired_old_windows() {
+        let mut ledger = MaintenanceLedger::default();
+        ledger.record("old".into(), "no_candidate", 0);
+        assert!(ledger.eligible("old") && ledger.eligible("unseen"));
+        assert!(ledger.last_reviewed("unseen") < ledger.last_reviewed("old"));
     }
 
     #[test]

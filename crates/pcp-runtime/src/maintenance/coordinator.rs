@@ -43,6 +43,7 @@ use super::{
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct MaintenanceCycleReport {
+    pub periodic_review: bool,
     pub inspected_pages: usize,
     pub jobs_advanced: u32,
     pub worker_calls: u32,
@@ -55,6 +56,7 @@ pub struct MaintenanceCycleReport {
     pub retention_leases_written: u32,
     pub retention_leases_proposed: u32,
     pub topics_proposed: u32,
+    pub topics_written: u32,
     pub archives_proposed: u32,
     pub reconciliations_committed: u32,
     pub reconciliations_proposed: u32,
@@ -64,7 +66,17 @@ pub struct MaintenanceCycleReport {
 }
 
 impl MaintenanceCycleReport {
+    pub(super) fn content_changes(&self) -> u32 {
+        self.summaries_written
+            .saturating_add(self.packs_committed)
+            .saturating_add(self.relations_committed)
+            .saturating_add(self.topics_written)
+            .saturating_add(self.reconciliations_committed)
+    }
+
     fn merge(&mut self, report: Self) {
+        self.periodic_review |= report.periodic_review;
+        self.topics_written = self.topics_written.saturating_add(report.topics_written);
         self.inspected_pages = self.inspected_pages.max(report.inspected_pages);
         self.jobs_advanced = self.jobs_advanced.saturating_add(report.jobs_advanced);
         self.worker_calls = self.worker_calls.saturating_add(report.worker_calls);
@@ -729,6 +741,7 @@ impl RuntimeMaintainer {
                         || report.relations_committed > 0
                         || report.relations_proposed > 0
                         || report.topics_proposed > 0
+                        || report.topics_written > 0
                         || report.archives_proposed > 0
                         || report.review_items_proposed > 0
                         || report.retention_leases_written > 0
@@ -751,7 +764,8 @@ impl RuntimeMaintainer {
                         );
                     }
                     let jobs_advanced = report.jobs_advanced;
-                    let active_retry = jobs_advanced >= self.config.max_jobs_per_cycle
+                    let active_retry = (!report.periodic_review
+                        && jobs_advanced >= self.config.max_jobs_per_cycle)
                         || (jobs_advanced > 0 && self.ledger.has_dirty_regions());
                     let delay = self.ledger.schedule_after_success(&self.config, &report);
                     let timer_reason = if active_retry {
@@ -809,9 +823,8 @@ impl RuntimeMaintainer {
         Ok(aggregate)
     }
 
-    /// The long-running scheduler is write-driven.  Its interval is only the
-    /// maximum discovery latency for a lightweight inventory watermark; no
-    /// semantic worker is called until a dirty region becomes eligible.
+    /// Writes wake eligible regions. A separate low-frequency review budget
+    /// revisits unchanged Pages, with persistent per-window history and fairness.
     #[cfg(test)]
     pub(crate) async fn run_scheduled_cycle(&mut self) -> Result<MaintenanceCycleReport> {
         self.run_scheduled_cycle_for(MaintenanceWakeReason::Timer)
@@ -851,13 +864,25 @@ impl RuntimeMaintainer {
         self.ledger.update_scheduled_cycle(aggregate.clone());
         self.ledger.save(&self.config.state_path).await?;
         let regions = self.ledger.ready_regions(&self.config.write_trigger);
-        if regions.is_empty() {
+        let periodic_review = self.ledger.periodic_review_due(&self.config);
+        if regions.is_empty() && !periodic_review {
             return Ok(aggregate);
         }
+        aggregate.periodic_review = periodic_review;
         let expected = MaintenanceLedger::region_snapshot(&inventory, &regions);
         while aggregate.jobs_advanced < self.config.max_jobs_per_cycle {
             let report = self
-                .run_once_inner(false, 1, Some(&regions), true, true)
+                .run_once_inner(
+                    false,
+                    1,
+                    if periodic_review {
+                        None
+                    } else {
+                        Some(&regions)
+                    },
+                    true,
+                    true,
+                )
                 .await?;
             let jobs_advanced = report.jobs_advanced;
             aggregate.merge(report);
@@ -883,10 +908,32 @@ impl RuntimeMaintainer {
     ) -> Result<Vec<pcp_store::DurablePageInventoryItem>> {
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
         Ok(match regions {
-            Some(regions) => inventory
-                .into_iter()
-                .filter(|page| regions.contains(&maintenance_region_key(page)))
-                .collect(),
+            Some(regions) => {
+                let mut selected = inventory
+                    .iter()
+                    .filter(|page| regions.contains(&maintenance_region_key(page)))
+                    .map(|page| page.page_id.clone())
+                    .collect::<BTreeSet<_>>();
+                let anchors = selected.clone();
+                for window in super::discovery::affinity_windows(
+                    &inventory,
+                    self.config.relation.candidate_window,
+                ) {
+                    if window.iter().any(|page| anchors.contains(&page.page_id)) {
+                        selected.extend(window.iter().map(|page| page.page_id.clone()));
+                    }
+                }
+                inventory
+                    .into_iter()
+                    .filter(|page| {
+                        selected.contains(&page.page_id)
+                            || page
+                                .topic_source_page_ids
+                                .iter()
+                                .any(|id| selected.contains(id))
+                    })
+                    .collect()
+            }
             None => inventory,
         })
     }
@@ -1185,8 +1232,13 @@ impl RuntimeMaintainer {
             &self.config.relation,
             &active_packing_page_ids,
         );
-        let topic =
-            topic_scan_from_inventory(&inventory, &self.config.relation, &active_packing_page_ids);
+        let topic = topic_scan_from_inventory(
+            &inventory,
+            &self.config.relation,
+            &self.config.topic,
+            self.config.allow_cross_scope_derivation,
+            &active_packing_page_ids,
+        );
         Ok(MaintenanceWorkScan {
             captured_at,
             inspected_pages: inventory.len(),
@@ -1729,10 +1781,6 @@ impl RuntimeMaintainer {
             })
             .collect::<Result<Vec<_>>>()?;
         selected.sort_by(|left, right| left.page_id.cmp(&right.page_id));
-        anyhow::ensure!(
-            selected[0].namespace == selected[1].namespace,
-            "maintenance relation candidate Pages no longer share a Scope"
-        );
         let candidate = build_relation_candidate(&selected);
         anyhow::ensure!(
             candidate.candidate_id == request.candidate_id,
@@ -1833,10 +1881,6 @@ impl RuntimeMaintainer {
             })
             .collect::<Result<Vec<_>>>()?;
         selected.sort_by(|left, right| left.page_id.cmp(&right.page_id));
-        anyhow::ensure!(
-            selected[0].namespace == selected[1].namespace,
-            "maintenance relation candidate Pages no longer share a Scope"
-        );
         let candidate = build_relation_candidate(&selected);
         anyhow::ensure!(
             candidate.candidate_id == request.candidate_id,
@@ -1868,14 +1912,24 @@ impl RuntimeMaintainer {
     ) -> Result<MaintenanceTopicAnalysis> {
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
         let active_packing_page_ids = self.active_packing_page_ids();
-        let scan =
-            topic_scan_from_inventory(&inventory, &self.config.relation, &active_packing_page_ids);
+        let scan = topic_scan_from_inventory(
+            &inventory,
+            &self.config.relation,
+            &self.config.topic,
+            self.config.allow_cross_scope_derivation,
+            &active_packing_page_ids,
+        );
         anyhow::ensure!(
             request.scan_id == scan.scan_id,
             "maintenance Topic scan is stale; scan the Store again"
         );
-        let windows =
-            topic_candidate_windows(&inventory, &self.config.relation, &active_packing_page_ids);
+        let windows = topic_candidate_windows(
+            &inventory,
+            &self.config.relation,
+            &self.config.topic,
+            self.config.allow_cross_scope_derivation,
+            &active_packing_page_ids,
+        );
         let Some(window) = windows
             .into_iter()
             .find(|window| topic_scan_group_id(window) == request.group_id)
@@ -1899,7 +1953,7 @@ impl RuntimeMaintainer {
                     })
                     .collect(),
                 existing_topics: existing_topics.clone(),
-                max_source_pages: 8,
+                max_source_pages: self.config.topic.max_source_pages,
             })
             .await?;
         let response = response.response;
@@ -1923,7 +1977,7 @@ impl RuntimeMaintainer {
             };
         };
         anyhow::ensure!(
-            (2..=8).contains(&page_ids.len())
+            (2..=self.config.topic.max_source_pages).contains(&page_ids.len())
                 && page_ids.iter().collect::<BTreeSet<_>>().len() == page_ids.len()
                 && page_ids.iter().all(|page_id| offered.contains(page_id)),
             "semantic worker selected invalid Topic sources for the reviewed window"
@@ -1942,13 +1996,49 @@ impl RuntimeMaintainer {
             &existing_topics,
             refresh_topic_page_id.as_deref(),
         )?;
+        let namespace = self.topic_destination(&inventory, &selected, refresh_target.as_ref())?;
         Ok(MaintenanceTopicAnalysis::candidate(build_topic_candidate(
             &selected,
             title,
             content,
             Some(reason),
             refresh_target,
+            namespace,
         )?))
+    }
+
+    fn topic_destination(
+        &self,
+        inventory: &[pcp_store::DurablePageInventoryItem],
+        selected: &[&pcp_store::DurablePageInventoryItem],
+        refresh: Option<&MaintenanceTopicRefreshTarget>,
+    ) -> Result<String> {
+        let target = if let Some(refresh) = refresh {
+            inventory
+                .iter()
+                .find(|page| page.page_id == refresh.page_id)
+                .context("Topic refresh target is unavailable")?
+                .namespace
+                .clone()
+        } else if let Some(scope) = &self.config.topic.target_scope {
+            scope.replace("{identity_id}", self.client.identity_id())
+        } else {
+            selected
+                .iter()
+                .map(|page| &page.namespace)
+                .min()
+                .context("Topic requires sources")?
+                .clone()
+        };
+        if selected.iter().any(|page| page.namespace != target) {
+            anyhow::ensure!(
+                self.client
+                    .access()
+                    .allows(&target, pcp_core::AccessPermission::DeriveAcrossScopes),
+                "cross-Scope Topic extraction is not enabled for this maintenance session"
+            );
+        }
+        Ok(target)
     }
 
     pub async fn apply_topic_candidate(
@@ -1981,16 +2071,19 @@ impl RuntimeMaintainer {
             );
             selected.push(current);
         }
+        let refresh_target = topic_refresh_target_from_request(
+            &inventory,
+            &selected,
+            request.refresh_target.as_ref(),
+        )?;
+        let namespace = self.topic_destination(&inventory, &selected, refresh_target.as_ref())?;
         let candidate = build_topic_candidate(
             &selected,
             request.title.clone(),
             request.content.clone(),
             None,
-            topic_refresh_target_from_request(
-                &inventory,
-                &selected,
-                request.refresh_target.as_ref(),
-            )?,
+            refresh_target,
+            namespace,
         )?;
         anyhow::ensure!(
             candidate.candidate_id == request.candidate_id,
@@ -1998,6 +2091,7 @@ impl RuntimeMaintainer {
         );
         self.client
             .extract_topic(ExtractTopicRequest {
+                target_namespace: Some(candidate.namespace.clone()),
                 target_topic: candidate
                     .refresh_target
                     .as_ref()
@@ -2071,7 +2165,11 @@ impl RuntimeMaintainer {
             MaintenanceReviewOrigin::Manual
         };
 
-        if self.config.reconciliation.enabled
+        // Feedback reconciliation requires Assess permission, which an observe
+        // session deliberately lacks. Keep observation read-only and continue
+        // with the semantic jobs that can run with reading permissions.
+        if self.config.applies_changes()
+            && self.config.reconciliation.enabled
             && jobs_remaining > 0
             && self
                 .run_reconciliation_job(&mut report, review_origin)
@@ -2103,50 +2201,49 @@ impl RuntimeMaintainer {
             report.inspected_pages = report.inspected_pages.max(inventory.len());
         }
 
-        if self.config.reconciliation.enabled
-            && self.config.reconciliation.discover_updates
-            && jobs_remaining > 0
-            && self
-                .run_update_discovery(&inventory, &mut report, review_origin)
-                .await
-                .context("review PCP content updates")?
-        {
-            report.jobs_advanced += 1;
-            jobs_remaining -= 1;
-        }
-
-        let summary_ran = self.config.summary.enabled
-            && jobs_remaining > 0
-            && self
-                .run_summary_job(&inventory, &mut report, review_origin)
-                .await
-                .context("run PCP Summary maintenance job")?;
-        if summary_ran {
-            report.jobs_advanced += 1;
-            jobs_remaining -= 1;
-            inventory = self.scoped_inventory(regions).await?;
-            report.inspected_pages = report.inspected_pages.max(inventory.len());
-        }
-        if self.config.relation.enabled
-            && jobs_remaining > 0
-            && self
-                .run_relation_job(&inventory, &mut report)
-                .await
-                .context("run PCP relation maintenance job")?
-        {
-            report.jobs_advanced += 1;
-            jobs_remaining -= 1;
-        }
-        if include_governance
-            && self.config.relation.enabled
-            && jobs_remaining > 0
-            && self
-                .run_topic_review_job(&inventory, &mut report, review_origin)
-                .await
-                .context("run PCP Topic maintenance review job")?
-        {
-            report.jobs_advanced += 1;
-            jobs_remaining -= 1;
+        // Rotate semantic work so relation discovery cannot monopolize a small
+        // automatic job budget and permanently starve topic synthesis.
+        let first = if scheduled {
+            self.ledger.semantic_turn()
+        } else {
+            3
+        };
+        for offset in 0..4 {
+            if jobs_remaining == 0 {
+                break;
+            }
+            let turn = (first + offset) % 4;
+            let ran = match turn {
+                0 if self.config.summary.enabled => self
+                    .run_summary_job(&inventory, &mut report, review_origin)
+                    .await
+                    .context("run PCP Summary maintenance job")?,
+                1 if self.config.relation.enabled => self
+                    .run_relation_job(&inventory, &mut report)
+                    .await
+                    .context("run PCP relation maintenance job")?,
+                2 if include_governance && self.config.topic.enabled => self
+                    .run_topic_review_job(&inventory, &mut report, review_origin)
+                    .await
+                    .context("run PCP Topic maintenance job")?,
+                3 if self.config.reconciliation.enabled
+                    && self.config.reconciliation.discover_updates =>
+                {
+                    self.run_update_discovery(&inventory, &mut report, review_origin)
+                        .await
+                        .context("review PCP content updates")?
+                }
+                _ => false,
+            };
+            if scheduled {
+                self.ledger.advance_semantic_turn(turn);
+            }
+            if ran {
+                report.jobs_advanced += 1;
+                jobs_remaining -= 1;
+                inventory = self.scoped_inventory(regions).await?;
+                report.inspected_pages = report.inspected_pages.max(inventory.len());
+            }
         }
         if include_governance
             && jobs_remaining > 0
@@ -2182,7 +2279,7 @@ impl RuntimeMaintainer {
         self.refresh_feedback_reviews().await?;
         let signals = self
             .client
-            .pending_feedback(self.config.allowed_scopes.clone(), 32)
+            .pending_feedback(self.config.query_scopes(self.client.identity_id()), 32)
             .await?;
         let Some(signal) = signals.into_iter().find_map(|mut signal| {
             signal.challenged_revision_ids.retain(|revision_id| {
@@ -2557,8 +2654,16 @@ impl RuntimeMaintainer {
         let Some(candidates) =
             relation_candidate_windows(inventory, &self.config.relation, &active_packing_page_ids)
                 .into_iter()
-                .find(|pages| {
+                .filter(|pages| {
                     self.ledger.eligible(&relation_window_key(
+                        &pages
+                            .iter()
+                            .map(|page| page.revision_id.clone())
+                            .collect::<Vec<_>>(),
+                    ))
+                })
+                .min_by_key(|pages| {
+                    self.ledger.last_reviewed(&relation_window_key(
                         &pages
                             .iter()
                             .map(|page| page.revision_id.clone())
@@ -2764,18 +2869,30 @@ impl RuntimeMaintainer {
         review_origin: MaintenanceReviewOrigin,
     ) -> Result<bool> {
         let active_packing_page_ids = self.active_packing_page_ids();
-        let Some(window) =
-            topic_candidate_windows(inventory, &self.config.relation, &active_packing_page_ids)
-                .into_iter()
-                .find(|pages| {
-                    self.ledger.eligible(&topic_window_key(
-                        &pages
-                            .iter()
-                            .map(|page| page.revision_id.clone())
-                            .collect::<Vec<_>>(),
-                    ))
-                })
-        else {
+        let Some(window) = topic_candidate_windows(
+            inventory,
+            &self.config.relation,
+            &self.config.topic,
+            self.config.allow_cross_scope_derivation,
+            &active_packing_page_ids,
+        )
+        .into_iter()
+        .filter(|pages| {
+            self.ledger.eligible(&topic_window_key(
+                &pages
+                    .iter()
+                    .map(|page| page.revision_id.clone())
+                    .collect::<Vec<_>>(),
+            ))
+        })
+        .min_by_key(|pages| {
+            self.ledger.last_reviewed(&topic_window_key(
+                &pages
+                    .iter()
+                    .map(|page| page.revision_id.clone())
+                    .collect::<Vec<_>>(),
+            ))
+        }) else {
             return Ok(false);
         };
         let key = topic_window_key(
@@ -2801,7 +2918,7 @@ impl RuntimeMaintainer {
                     })
                     .collect(),
                 existing_topics: existing_topics.clone(),
-                max_source_pages: 8,
+                max_source_pages: self.config.topic.max_source_pages,
             })
             .await?;
         report.worker_calls = report.worker_calls.saturating_add(outcome.model_attempts);
@@ -2819,7 +2936,7 @@ impl RuntimeMaintainer {
                 refresh_topic_page_id,
             } => {
                 anyhow::ensure!(
-                    (2..=8).contains(&page_ids.len())
+                    (2..=self.config.topic.max_source_pages).contains(&page_ids.len())
                         && page_ids.iter().collect::<BTreeSet<_>>().len() == page_ids.len()
                         && page_ids.iter().all(|page_id| offered.contains(page_id)),
                     "semantic worker selected invalid Topic sources"
@@ -2838,8 +2955,48 @@ impl RuntimeMaintainer {
                     &existing_topics,
                     refresh_topic_page_id.as_deref(),
                 )?;
-                let candidate =
-                    build_topic_candidate(&selected, title, content, Some(reason), refresh_target)?;
+                let namespace =
+                    self.topic_destination(inventory, &selected, refresh_target.as_ref())?;
+                let candidate = build_topic_candidate(
+                    &selected,
+                    title,
+                    content,
+                    Some(reason),
+                    refresh_target,
+                    namespace,
+                )?;
+                if self.config.applies_changes()
+                    && self.config.topic.auto_apply
+                    && super::discovery::accumulated(&selected, &self.config.topic)
+                {
+                    self.apply_topic_candidate(ApplyMaintenanceTopicRequest {
+                        candidate_id: candidate.candidate_id.clone(),
+                        pages: candidate
+                            .pages
+                            .iter()
+                            .map(|page| PageRevisionRef {
+                                page_id: page.page_id.clone(),
+                                revision_id: page.revision_id.clone(),
+                            })
+                            .collect(),
+                        title: candidate.title.clone(),
+                        content: candidate.content.clone(),
+                        refresh_target: candidate.refresh_target.as_ref().map(|page| {
+                            PageRevisionRef {
+                                page_id: page.page_id.clone(),
+                                revision_id: page.revision_id.clone(),
+                            }
+                        }),
+                    })
+                    .await?;
+                    self.ledger.record(
+                        key,
+                        "topic_written",
+                        self.config.relation.retry_after_seconds,
+                    );
+                    report.topics_written += 1;
+                    return Ok(true);
+                }
                 self.ledger.enqueue_review(
                     MaintenanceReviewPayload::Topic(candidate),
                     review_origin,
@@ -3502,17 +3659,14 @@ fn relation_candidate_windows(
     config: &RelationMaintenanceConfig,
     active_packing_page_ids: &BTreeSet<String>,
 ) -> Vec<Vec<pcp_store::DurablePageInventoryItem>> {
-    // Relation writes are namespace-local. Preserve the inventory ordering inside
-    // each namespace, but never offer the worker a pair that `apply_relation_candidate`
-    // would have to reject later. Apart from wasting a review round, mixed windows
-    // made a semantically relevant local Page compete with unrelated Pages from a
-    // different source scope.
+    // The client inventory is already authorized. Scope records provenance and
+    // access, not semantic separation: related subjects may cross namespaces.
     let mut eligible_by_namespace = BTreeMap::<String, Vec<_>>::new();
     for page in inventory.iter().filter(|page| {
         !active_packing_page_ids.contains(&page.page_id) && relation_page_eligible(page, config)
     }) {
         eligible_by_namespace
-            .entry(page.namespace.clone())
+            .entry(String::new())
             .or_default()
             .push(page.clone());
     }
@@ -3537,6 +3691,9 @@ fn relation_candidate_windows(
         append_relation_window(&mut windows, &mut seen_windows, window);
     }
     for eligible in eligible_by_namespace.into_values() {
+        for window in super::discovery::affinity_windows(&eligible, window_size) {
+            append_relation_window(&mut windows, &mut seen_windows, window);
+        }
         let mut start = 0;
         while start < eligible.len() {
             let end = start.saturating_add(window_size).min(eligible.len());
@@ -3963,10 +4120,18 @@ fn relation_scan_from_inventory(
 fn topic_scan_from_inventory(
     inventory: &[pcp_store::DurablePageInventoryItem],
     config: &RelationMaintenanceConfig,
+    topic: &super::TopicMaintenanceConfig,
+    cross_scope: bool,
     active_packing_page_ids: &BTreeSet<String>,
 ) -> MaintenanceTopicScan {
-    let windows = if config.enabled {
-        topic_candidate_windows(inventory, config, active_packing_page_ids)
+    let windows = if topic.enabled {
+        topic_candidate_windows(
+            inventory,
+            config,
+            topic,
+            cross_scope,
+            active_packing_page_ids,
+        )
     } else {
         Vec::new()
     };
@@ -3977,7 +4142,7 @@ fn topic_scan_from_inventory(
             page_count: window.len(),
         })
         .collect::<Vec<_>>();
-    let eligible_pages = if config.enabled {
+    let eligible_pages = if topic.enabled {
         inventory
             .iter()
             .filter(|page| {
@@ -4002,21 +4167,69 @@ fn topic_scan_from_inventory(
 fn topic_candidate_windows(
     inventory: &[pcp_store::DurablePageInventoryItem],
     config: &RelationMaintenanceConfig,
+    topic: &super::TopicMaintenanceConfig,
+    cross_scope: bool,
     active_packing_page_ids: &BTreeSet<String>,
 ) -> Vec<Vec<pcp_store::DurablePageInventoryItem>> {
-    // Reuse namespace-local structural windows, but make them deliberately
-    // smaller than relation reviews. They are prompts for semantic judgment,
-    // never a claim that adjacent Pages constitute a Topic.
-    let mut seen = BTreeSet::new();
-    relation_candidate_windows(inventory, config, active_packing_page_ids)
+    let eligible = inventory
+        .iter()
+        .filter(|page| {
+            !active_packing_page_ids.contains(&page.page_id)
+                && relation_page_eligible(page, config)
+                && page.kind != "topic_summary"
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut groups = super::discovery::affinity_windows(&eligible, topic.max_source_pages)
         .into_iter()
-        .filter_map(|window| {
-            let pages = window
-                .into_iter()
-                .filter(|page| page.kind != "topic_summary")
-                .take(8)
+        .filter(|group| super::discovery::accumulated(&group.iter().collect::<Vec<_>>(), topic))
+        .collect::<Vec<_>>();
+    // Affinity only prioritizes candidates. Overlapping bounded structural
+    // windows also let the model discover subjects whose wording differs.
+    for window in relation_candidate_windows(inventory, config, active_packing_page_ids) {
+        let pages = window
+            .into_iter()
+            .filter(|page| page.kind != "topic_summary")
+            .collect::<Vec<_>>();
+        let stride = (topic.max_source_pages / 2).max(1);
+        for start in (0..pages.len()).step_by(stride) {
+            let end = (start + topic.max_source_pages).min(pages.len());
+            if end - start >= 2 {
+                groups.push(pages[start..end].to_vec());
+            }
+            if end == pages.len() {
+                break;
+            }
+        }
+    }
+    if !cross_scope {
+        groups = groups
+            .into_iter()
+            .flat_map(|group| {
+                let mut by_scope: BTreeMap<String, Vec<_>> = BTreeMap::new();
+                for page in group {
+                    by_scope
+                        .entry(page.namespace.clone())
+                        .or_default()
+                        .push(page);
+                }
+                by_scope
+                    .into_values()
+                    .filter(|group| group.len() >= 2)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+    }
+    let mut seen = BTreeSet::new();
+    groups
+        .into_iter()
+        .filter(|pages| {
+            let mut revisions = pages
+                .iter()
+                .map(|page| page.revision_id.clone())
                 .collect::<Vec<_>>();
-            (pages.len() >= 2 && seen.insert(topic_scan_group_id(&pages))).then_some(pages)
+            revisions.sort();
+            seen.insert(revisions)
         })
         .collect()
 }
@@ -4033,9 +4246,9 @@ fn existing_topics_for_selected(
     inventory: &[pcp_store::DurablePageInventoryItem],
     selected: &[&pcp_store::DurablePageInventoryItem],
 ) -> Vec<ExistingTopicPage> {
-    let Some(namespace) = selected.first().map(|page| page.namespace.as_str()) else {
+    if selected.is_empty() {
         return Vec::new();
-    };
+    }
     let selected_page_ids = selected
         .iter()
         .map(|page| page.page_id.as_str())
@@ -4044,8 +4257,7 @@ fn existing_topics_for_selected(
     inventory
         .iter()
         .filter(|page| {
-            page.namespace == namespace
-                && page.kind == "topic_summary"
+            page.kind == "topic_summary"
                 && !page.superseded
                 && page
                     .topic_source_page_ids
@@ -4819,7 +5031,6 @@ fn build_relation_candidate(
         .collect::<Vec<_>>();
     inputs.sort_by(|left, right| left.page_id.cmp(&right.page_id));
     let namespace = pages[0].namespace.clone();
-    assert!(pages.iter().all(|page| page.namespace == namespace));
     let mut digest = Sha256::new();
     for page in &inputs {
         digest.update(page.page_id.as_bytes());
@@ -4895,6 +5106,7 @@ fn build_topic_candidate(
     content: String,
     reason: Option<String>,
     refresh_target: Option<MaintenanceTopicRefreshTarget>,
+    namespace: String,
 ) -> Result<MaintenanceTopicCandidate> {
     let title = title.trim().to_owned();
     let content = content.trim().to_owned();
@@ -4908,17 +5120,18 @@ fn build_topic_candidate(
         "semantic maintenance worker returned an invalid Topic content"
     );
     anyhow::ensure!(
-        (2..=64).contains(&pages.len())
-            && pages
-                .iter()
-                .all(|page| page.namespace == pages[0].namespace),
-        "maintenance Topic sources must be 2..=64 Pages in one Scope"
+        (2..=64).contains(&pages.len()),
+        "maintenance Topic sources must be 2..=64 Pages"
     );
     let mut digest = Sha256::new();
     for page in pages {
         digest.update(page.page_id.as_bytes());
         digest.update([0]);
         digest.update(page.revision_id.as_bytes());
+        digest.update([0]);
+    }
+    if pages.iter().any(|page| page.namespace != namespace) {
+        digest.update(namespace.as_bytes());
         digest.update([0]);
     }
     digest.update(title.as_bytes());
@@ -4937,7 +5150,7 @@ fn build_topic_candidate(
     let encoded = format!("{:x}", digest.finalize());
     Ok(MaintenanceTopicCandidate {
         candidate_id: format!("mtp_{}", &encoded[..24]),
-        namespace: pages[0].namespace.clone(),
+        namespace,
         title,
         content,
         reason,
@@ -5273,7 +5486,7 @@ mod relation_window_tests {
     }
 
     #[test]
-    fn relation_windows_never_cross_namespaces() {
+    fn relation_windows_include_cross_scope_pairs_with_bounded_inputs() {
         let inventory = vec![
             page("conversation:alpha", "alpha-1"),
             page("conversation:beta", "beta-1"),
@@ -5288,13 +5501,18 @@ mod relation_window_tests {
 
         let windows = relation_candidate_windows(&inventory, &config, &BTreeSet::new());
 
-        assert_eq!(windows.len(), 2);
-        assert!(windows.iter().all(|window| {
-            window
+        assert!(windows.iter().all(|window| window.len() <= 2));
+        assert!(
+            windows
                 .iter()
-                .map(|page| &page.namespace)
-                .all(|namespace| namespace == &window[0].namespace)
-        }));
+                .any(|window| window[0].namespace != window[1].namespace)
+        );
+        let offered = windows
+            .iter()
+            .flatten()
+            .map(|page| page.page_id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(offered.len(), inventory.len());
     }
 
     #[test]

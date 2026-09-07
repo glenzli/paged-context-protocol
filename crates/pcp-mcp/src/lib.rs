@@ -451,11 +451,14 @@ pub struct WriteSummaryParams {
 #[derive(Debug, JsonSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractTopicParams {
+    /// Destination Scope; required for sources spanning Scopes.
+    #[serde(default)]
+    pub target_namespace: Option<String>,
     /// Existing Topic head to refresh when the selected sources continue the
     /// same stable subject.
     #[serde(default)]
     target_topic: Option<PageRevisionRef>,
-    /// Ordered exact current source Page/revision pairs from one Scope.
+    /// Ordered exact current source Page/revision pairs from authorized Scopes.
     source_pages: Vec<PageRevisionRef>,
     title: String,
     content: String,
@@ -1380,7 +1383,7 @@ impl PcpMcpServer {
 
     #[tool(
         name = "pcp_extract_topic",
-        description = "Create a revisioned topic front-door Page from two or more exact source Revisions in one Scope. This is logical, reversible routing compaction: sources remain readable evidence, but semantic and intent retrieval will prefer the topic Page until it is superseded.",
+        description = "Create a revisioned topic Page from exact current source Revisions. Mixed-Scope sources need targetNamespace and cross-Scope derivation permission; refreshes retain their destination. Sources remain readable evidence. Retrieval prefers the Topic only where it is visible.",
         annotations(
             title = "Extract PCP Topic",
             read_only_hint = false,
@@ -1428,6 +1431,7 @@ impl PcpMcpServer {
         let written = self
             .client
             .extract_topic(ExtractTopicRequest {
+                target_namespace: params.target_namespace,
                 target_topic: params.target_topic,
                 source_pages: params.source_pages,
                 title: params.title,

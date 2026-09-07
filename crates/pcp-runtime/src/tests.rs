@@ -90,6 +90,23 @@ max_pages = 6
     assert!(maintenance_access.allows("user:owner-test", AccessPermission::Collect));
     assert!(!maintenance_access.allows("user:owner-test", AccessPermission::ManageScope));
     assert!(!maintenance_access.allows("user:owner-test", AccessPermission::Audit));
+    let mut all_scopes = maintenance.clone();
+    all_scopes.store_wide = true;
+    all_scopes.allowed_scopes.clear();
+    all_scopes.allow_cross_scope_derivation = true;
+    all_scopes
+        .validate()
+        .expect("explicit Store-wide maintenance configuration");
+    let all_access = all_scopes.access_session("owner-test");
+    assert!(all_access.allows("future:scope", AccessPermission::Write));
+    assert!(all_access.allows("future:scope", AccessPermission::DeriveAcrossScopes));
+    assert!(!all_access.allows("future:scope", AccessPermission::ManageScope));
+    all_scopes.mode = crate::MaintenanceMode::Observe;
+    assert!(
+        !all_scopes
+            .access_session("owner-test")
+            .allows("future:scope", AccessPermission::Write)
+    );
     let access = config.endpoints[0]
         .access_session("owner-test", 0)
         .expect("build endpoint access session");
@@ -680,6 +697,24 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
     assert_eq!(retention.scanned_pages, 1);
     assert_eq!(retention.scanned_revisions, 1);
     let (audit, _) = remote.access_log(50, None).await.expect("read access log");
+    let filtered = remote
+        .query_access_log(pcp_core::AccessLogQuery {
+            principal_id: Some("host:runtime-test".into()),
+            operation: Some("search_pages".into()),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .await
+        .expect("filtered audit across RPC");
+    assert!(filtered.total_events >= 1);
+    assert_eq!(filtered.events.len(), 1);
+    assert_eq!(filtered.events[0].operation, "search_pages");
+    assert_eq!(
+        filtered.events[0].principal.principal_id,
+        "host:runtime-test"
+    );
+    assert_eq!(filtered.operations.len(), 1);
+
     assert!(audit.iter().all(|event| {
         event.principal.principal_id == "host:runtime-test"
             || event.principal.principal_id == "system:pcp"

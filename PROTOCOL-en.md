@@ -74,12 +74,17 @@ When a long-lived topic spans several Pages, a Runtime maintainer may execute
 `extract_topic(sourcePages[{pageId, revisionId}], title, content)`. It creates a separate revisioned
 Topic Page with `kind = topic_summary`, retains exact provenance for every input, and writes a
 `summarizes` Relation from the Topic to every source Page. Inputs MUST be 2-64 distinct, active,
-current Revisions in one Scope; a Topic cannot be a Topic input. This is **logical extraction**:
+current Revisions in authorized Scopes; a Topic cannot be a Topic input.
+Mixed-Scope sources require an explicit `targetNamespace` for a new Topic,
+`read_detail` and `link` on every source Scope, `summarize` and `link` on the
+destination, and `derive_across_scopes` on the destination. An omitted destination
+preserves same-Scope creation or the existing Topic's Scope on refresh. This is **logical extraction**:
 source Pages and exact Revisions are not deleted, remain readable by ID, and may return as evidence
 through high-relevance Relation expansion. Only the default candidate surface for `semantic_search`
 and `match_intent` is represented by the current Topic Page. A Topic update publishes a new Revision;
 it suppresses a source from default candidates only while that current Revision still lists the same
-source Revision.
+source Revision and the Topic is visible in the queried Scopes. A source-only
+reader retains its original retrieval surface when the Topic is outside its view.
 
 A maintenance worker's consolidation recommendation must also include a short,
 source-grounded reason. The reason is review material for Console; it is not a

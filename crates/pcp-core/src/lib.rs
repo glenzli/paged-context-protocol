@@ -6,8 +6,9 @@ mod request;
 mod retention;
 
 pub use access::{
-    AccessAuditEvent, AccessDecision, AccessPermission, AccessPrincipal, AccessPrincipalType,
-    AccessSession, OperationTelemetry, ScopeGrant,
+    AccessAuditEvent, AccessClientSummary, AccessDecision, AccessLogQuery, AccessLogResult,
+    AccessOperationSummary, AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession,
+    OperationTelemetry, ScopeGrant,
 };
 pub use model::{
     Actor, ActorType, BrowseIndexOrder, Capabilities, GraphEdgeDirection, GraphEdgeKind,

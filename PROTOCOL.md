@@ -159,11 +159,14 @@ Page，产生新 Revision，而不是制造新 Page。
 当一个长期主题跨越多个 Page 时，Runtime maintainer 可以执行
 `extract_topic(sourcePages[{pageId, revisionId}], title, content)`。它创建独立的、`kind =
 topic_summary` 的 revisioned Topic Page，并为每个输入保留精确 provenance 与从 Topic 到源 Page 的
-`summarizes` Relation。输入必须是同一 Scope 内 2–64 个互异、active 的当前 Revision；Topic 不能再作为
-Topic 输入。此操作是**逻辑提取**：源 Page 和精确 Revision 不会被删除，仍可通过 ID 读取并在高相关的
+`summarizes` Relation。输入必须是授权 Scope 内 2–64 个互异、active 的当前 Revision；Topic 不能再作为
+Topic 输入。跨 Scope 新建必须显式给出 `targetNamespace`，具备每个来源 Scope 的 `read_detail`、
+`link` 以及目标 Scope 的 `summarize`、`link`、`derive_across_scopes` 权限。省略目标时沿用同 Scope
+创建行为，或保留被刷新 Topic 的 Scope。此操作是**逻辑提取**：源 Page 和精确 Revision 不会被删除，仍可通过 ID 读取并在高相关的
 Relation 展开中作为证据返回；只是默认 `semantic_search` 和 `match_intent` 的候选面由当前 Topic Page
 代表这些源 Page。Topic 更新必须发布新 Revision；只有其当前 Revision 仍列出同一源 Revision 时才继续
-压住对应默认候选。
+压住对应默认候选，且该 Topic 必须在本次查询的 Scope 范围内可见。只读来源 Scope、无法看到目标
+Topic 的客户端，仍以原页面作为检索入口。
 
 维护 worker 的凝练建议还必须附带简短、来源可核对的理由；它不是写入字段，也不参与 Topic 的恒等性，
 仅用于 Console 审阅时解释为什么这一组 Page 值得先被凝练为独立入口。

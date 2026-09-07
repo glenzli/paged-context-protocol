@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessDecision, AccessPermission, AccessPrincipalType, AccessSession, Actor,
@@ -1441,7 +1441,7 @@ impl PcpStore for SqlitePcpStore {
     async fn extract_topic(
         &self,
         access: &AccessSession,
-        request: ExtractTopicRequest,
+        mut request: ExtractTopicRequest,
     ) -> Result<WriteResult> {
         let observation = OperationObservation::start().with_input_count(
             request.source_pages.len()
@@ -1472,17 +1472,38 @@ impl PcpStore for SqlitePcpStore {
             }
         };
         let authorization = async {
-            anyhow::ensure!(
-                scopes.len() == 1,
-                "topic extraction sources must belong to one Scope"
-            );
-            let scope = scopes
-                .first()
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("topic extraction requires source Revisions"))?;
-            authorize_exact(access, &scope, AccessPermission::Summarize)?;
-            authorize_exact(access, &scope, AccessPermission::Link)?;
-            authorize_exact(access, &scope, AccessPermission::ReadDetail)?;
+            let target = if let Some(namespace) = request.target_namespace.as_ref() {
+                anyhow::ensure!(
+                    !namespace.trim().is_empty(),
+                    "Topic targetNamespace must not be empty"
+                );
+                namespace.clone()
+            } else if let Some(topic) = request.target_topic.as_ref() {
+                self.page_namespaces(vec![topic.page_id.clone()])
+                    .await?
+                    .into_iter()
+                    .next()
+                    .context("Topic refresh target is unavailable")?
+            } else {
+                anyhow::ensure!(
+                    scopes.len() == 1,
+                    "mixed-Scope Topic sources require an explicit targetNamespace"
+                );
+                scopes
+                    .first()
+                    .cloned()
+                    .context("topic extraction requires source Revisions")?
+            };
+            for scope in &scopes {
+                authorize_exact(access, scope, AccessPermission::ReadDetail)?;
+                authorize_exact(access, scope, AccessPermission::Link)?;
+            }
+            authorize_exact(access, &target, AccessPermission::Summarize)?;
+            authorize_exact(access, &target, AccessPermission::Link)?;
+            enforce_cross_scope_derivation(access, &target, &scopes)?;
+            let scope = target;
+            request.target_namespace = Some(scope.clone());
+            extend_unique(&mut scopes, vec![scope.clone()]);
             let provenance_scopes =
                 authorize_provenance(self, access, &scope, &request.provenance).await?;
             extend_unique(&mut scopes, provenance_scopes);
@@ -1908,6 +1929,15 @@ impl PcpStore for SqlitePcpStore {
             observation,
         )
         .await
+    }
+
+    async fn query_access_log(
+        &self,
+        access: &AccessSession,
+        query: pcp_core::AccessLogQuery,
+    ) -> Result<pcp_core::AccessLogResult> {
+        let scopes = authorize_scopes(self, access, &[AccessPermission::Audit], &[]).await?;
+        self.query_access_audit(scopes, query).await
     }
 
     async fn access_log(

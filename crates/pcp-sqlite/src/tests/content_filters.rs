@@ -118,6 +118,7 @@ async fn content_roles_filter_before_pagination_and_follow_exact_revisions() {
     let topic = store
         .extract_topic(
             ExtractTopicRequest {
+                target_namespace: None,
                 target_topic: None,
                 source_pages: pages[..2]
                     .iter()
