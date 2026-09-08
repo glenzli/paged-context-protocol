@@ -13,6 +13,9 @@ const ADDITIVE_REPORT_FIELDS = [
   "retentionLeasesProposed",
   "topicsProposed",
   "topicsWritten",
+  "duplicateTopicsSkipped",
+  "unchangedTopicsSkipped",
+  "isolatedJobs",
   "archivesProposed",
   "reviewItemsProposed",
   "escalatedDecisions",
@@ -21,7 +24,7 @@ const ADDITIVE_REPORT_FIELDS = [
 
 export function mergeConvergenceReport(current, report) {
   if (!current) return { ...report };
-  const merged = { ...current };
+  const merged = { ...current, topicBacklogPaused: Boolean(current.topicBacklogPaused || report.topicBacklogPaused) };
   merged.inspectedPages = Math.max(current.inspectedPages || 0, report.inspectedPages || 0);
   ADDITIVE_REPORT_FIELDS.forEach((key) => {
     merged[key] = (current[key] || 0) + (report[key] || 0);

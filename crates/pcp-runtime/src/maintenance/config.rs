@@ -306,6 +306,9 @@ pub struct PackingMaintenanceConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct RelationMaintenanceConfig {
     pub enabled: bool,
+    /// Verify full sources before automatically adding ordinary related_to edges.
+    #[serde(default)]
+    pub auto_apply_verified: bool,
     pub candidate_window: usize,
     pub routing_chars_per_page: usize,
     pub retry_after_seconds: u64,
@@ -323,6 +326,8 @@ pub struct TopicMaintenanceConfig {
     /// Optional destination for new Topics; refreshes retain their existing Scope.
     pub target_scope: Option<String>,
     pub auto_apply: bool,
+    /// Stop discovering more Topics while the unresolved Topic queue is full.
+    pub max_pending_reviews: usize,
 }
 
 impl Default for TopicMaintenanceConfig {
@@ -334,6 +339,7 @@ impl Default for TopicMaintenanceConfig {
             max_source_pages: 8,
             target_scope: None,
             auto_apply: false,
+            max_pending_reviews: 24,
         }
     }
 }
@@ -423,6 +429,7 @@ impl Default for RelationMaintenanceConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            auto_apply_verified: false,
             candidate_window: 24,
             routing_chars_per_page: 800,
             retry_after_seconds: 86_400,
@@ -489,7 +496,8 @@ impl MaintenanceConfig {
         anyhow::ensure!(
             (2..=64).contains(&self.topic.minimum_pages)
                 && (self.topic.minimum_pages..=64).contains(&self.topic.max_source_pages)
-                && self.topic.minimum_total_chars > 0,
+                && self.topic.minimum_total_chars > 0
+                && (1..=1000).contains(&self.topic.max_pending_reviews),
             "PCP Topic thresholds require 2..=max_source_pages<=64 and positive content size"
         );
         anyhow::ensure!(

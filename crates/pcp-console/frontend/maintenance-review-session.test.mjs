@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   REVIEW_DECISION,
+  groupReviewTopics,
   partitionReviewSession,
   reconcileReviewDecisions,
   restoreReviewDecisions,
@@ -90,3 +91,16 @@ test("legacy staged decisions require a fresh review instead of unbound approval
   reconcileReviewDecisions([review("old", "reconciliation")], restored);
   assert.equal(restored.size, 0);
 });
+
+ test("topic grouping keeps distinct decisions and rejection reasons survive reload", () => {
+ const a = review("a", "topic"), b = review("b", "topic"), c = review("c", "topic");
+ a.payload.candidate = {title:"PCP review", pages:[{pageId:"1"},{pageId:"2"}]};
+ b.payload.candidate = {title:"Reworded", pages:[{pageId:"1"},{pageId:"2"}]};
+ c.payload.candidate = {title:"Unrelated", pages:[{pageId:"3"}]};
+ assert.deepEqual(groupReviewTopics([a,b,c]).map(g => g.map(r => r.candidateId)), [["a","b"],["c"]]);
+ const decisions = new Map();
+ stageReviewDecision(decisions, a, REVIEW_DECISION.REJECT).reason = "no_increment";
+ const restored = restoreReviewDecisions(serializeReviewDecisions(decisions));
+ assert.equal(restored.get("a").reason, "no_increment");
+ assert.deepEqual(partitionReviewSession([a,b,c], restored).pending, [b,c]);
+ });

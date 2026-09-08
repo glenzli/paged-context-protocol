@@ -435,6 +435,10 @@ fn router(state: AppState) -> Router {
             post(reject_maintenance_review),
         )
         .route(
+            "/api/maintenance/reviews/{candidate_id}/reason",
+            post(record_maintenance_review_reason),
+        )
+        .route(
             "/api/maintenance/reviews/{candidate_id}/defer",
             post(defer_maintenance_review),
         )
@@ -1292,6 +1296,7 @@ async fn maintenance_status(State(state): State<AppState>) -> Result<Json<Value>
         "storeWide": maintenance.store_wide,
         "allowedScopes": maintenance.allowed_scopes,
         "crossScopeDerivation": maintenance.allow_cross_scope_derivation,
+        "relation": { "autoApplyVerified": maintenance.relation.auto_apply_verified },
         "periodicReview": { "enabled": maintenance.periodic_review.enabled, "intervalSeconds": maintenance.periodic_review.interval_seconds },
         "topic": {
             "enabled": maintenance.topic.enabled,
@@ -1300,6 +1305,7 @@ async fn maintenance_status(State(state): State<AppState>) -> Result<Json<Value>
             "maxSourcePages": maintenance.topic.max_source_pages,
             "targetScope": maintenance.topic.target_scope,
             "autoApply": maintenance.topic.auto_apply,
+            "maxPendingReviews": maintenance.topic.max_pending_reviews,
         },
         "writeTrigger": {
             "minNewPages": maintenance.write_trigger.min_new_pages,
@@ -1547,16 +1553,59 @@ async fn accept_maintenance_review(
     })))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewReasonInput {
+    reason: String,
+}
+
+async fn record_maintenance_review_reason(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(candidate_id): Path<String>,
+    Json(input): Json<ReviewReasonInput>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let mut operator = maintenance_operator_for_console(&state).await?;
+    let item = operator
+        .review_item(&candidate_id)
+        .context("unknown maintenance review")?;
+    if !matches!(item.payload, MaintenanceReviewPayload::Topic(_)) {
+        return Err(anyhow::anyhow!("reason updates require a Topic review").into());
+    }
+    operator
+        .record_review_reason(&candidate_id, input.reason)
+        .await?;
+    Ok(Json(
+        json!({"candidateId": candidate_id, "status": item.status}),
+    ))
+}
+
 async fn reject_maintenance_review(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(candidate_id): Path<String>,
+    body: axum::body::Bytes,
 ) -> Result<Json<Value>, ApiError> {
     require_console_mutation(&headers)?;
     let mut operator = maintenance_operator_for_console(&state).await?;
     let item = operator
         .review_item(&candidate_id)
         .context("unknown PCP maintenance review candidate")?;
+    if !body.is_empty() {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct DecisionInput {
+            reason: Option<String>,
+        }
+        let input: DecisionInput =
+            serde_json::from_slice(&body).context("invalid review decision body")?;
+        if let Some(reason) = input.reason {
+            if matches!(item.payload, MaintenanceReviewPayload::Topic(_)) {
+                operator.record_review_reason(&candidate_id, reason).await?;
+            }
+        }
+    }
     match item.payload {
         MaintenanceReviewPayload::Relation(_) if candidate_id.starts_with("mrr_") => {
             operator

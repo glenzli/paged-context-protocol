@@ -63,6 +63,8 @@ pub struct MaintenanceReviewItem {
     pub model_attempts: u32,
     #[serde(default)]
     pub escalated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_reason: Option<String>,
     pub payload: MaintenanceReviewPayload,
 }
 
@@ -85,6 +87,7 @@ impl MaintenanceReviewItem {
             reason,
             model_attempts: model_attempts.max(1),
             escalated,
+            decision_reason: None,
             payload,
         }
     }
@@ -110,6 +113,7 @@ impl MaintenanceReviewItem {
             reason: proposal.review_reason,
             model_attempts: proposal.model_attempts,
             escalated: proposal.escalated,
+            decision_reason: None,
             payload,
         }
     }

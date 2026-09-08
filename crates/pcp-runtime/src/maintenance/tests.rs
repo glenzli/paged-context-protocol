@@ -43,6 +43,8 @@ struct FakeWorker {
 mod feedback_edit;
 #[path = "tests/periodic_review.rs"]
 mod periodic_review;
+#[path = "tests/topic_convergence.rs"]
+mod topic_convergence;
 #[path = "tests/update_discovery.rs"]
 mod update_discovery;
 
@@ -3653,6 +3655,7 @@ async fn convergence_enqueues_a_typed_topic_review_after_relation_quiesces() {
             reason: "The two Pages define the shared controller and its review boundary.".to_owned(),
             refresh_topic_page_id: None,
         },
+        topic_convergence::verification(super::VerificationVerdict::NeedsReview),
     ]));
     let mut config = fixture.config();
     config.summary.enabled = false;

@@ -57,6 +57,10 @@ pub struct MaintenanceCycleReport {
     pub retention_leases_proposed: u32,
     pub topics_proposed: u32,
     pub topics_written: u32,
+    pub duplicate_topics_skipped: u32,
+    pub unchanged_topics_skipped: u32,
+    pub isolated_jobs: u32,
+    pub topic_backlog_paused: bool,
     pub archives_proposed: u32,
     pub reconciliations_committed: u32,
     pub reconciliations_proposed: u32,
@@ -76,6 +80,10 @@ impl MaintenanceCycleReport {
 
     fn merge(&mut self, report: Self) {
         self.periodic_review |= report.periodic_review;
+        self.duplicate_topics_skipped += report.duplicate_topics_skipped;
+        self.unchanged_topics_skipped += report.unchanged_topics_skipped;
+        self.isolated_jobs += report.isolated_jobs;
+        self.topic_backlog_paused |= report.topic_backlog_paused;
         self.topics_written = self.topics_written.saturating_add(report.topics_written);
         self.inspected_pages = self.inspected_pages.max(report.inspected_pages);
         self.jobs_advanced = self.jobs_advanced.saturating_add(report.jobs_advanced);
@@ -496,6 +504,8 @@ pub struct MaintenanceTopicCandidate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_target: Option<MaintenanceTopicRefreshTarget>,
     pub pages: Vec<MaintenanceTopicInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<super::MaintenanceVerification>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1070,6 +1080,11 @@ impl RuntimeMaintainer {
                 .filter(|proposal| proposal.status == MaintenanceRelationReviewStatus::Pending)
                 .map(MaintenanceReviewItem::relation)
         })
+    }
+
+    pub async fn record_review_reason(&mut self, candidate_id: &str, reason: String) -> Result<()> {
+        self.ledger.set_review_reason(candidate_id, reason)?;
+        self.ledger.save(&self.config.state_path).await
     }
 
     pub async fn resolve_review(
@@ -1936,10 +1951,6 @@ impl RuntimeMaintainer {
         else {
             return Ok(MaintenanceTopicAnalysis::no_candidate());
         };
-        let offered = window
-            .iter()
-            .map(|page| page.page_id.clone())
-            .collect::<BTreeSet<_>>();
         let existing_topics = existing_topics_for_window(&inventory, &window);
         let response = self
             .evaluate_worker(MaintenanceWorkerRequest::ExtractTopic {
@@ -1954,6 +1965,8 @@ impl RuntimeMaintainer {
                     .collect(),
                 existing_topics: existing_topics.clone(),
                 max_source_pages: self.config.topic.max_source_pages,
+                review_feedback: self.ledger.topic_feedback(&window),
+                correction: None,
             })
             .await?;
         let response = response.response;
@@ -1976,35 +1989,41 @@ impl RuntimeMaintainer {
                 ),
             };
         };
-        anyhow::ensure!(
-            (2..=self.config.topic.max_source_pages).contains(&page_ids.len())
-                && page_ids.iter().collect::<BTreeSet<_>>().len() == page_ids.len()
-                && page_ids.iter().all(|page_id| offered.contains(page_id)),
-            "semantic worker selected invalid Topic sources for the reviewed window"
-        );
-        let selected = page_ids
-            .iter()
-            .map(|page_id| {
-                window
-                    .iter()
-                    .find(|page| page.page_id == *page_id)
-                    .expect("offered Topic Page exists")
-            })
-            .collect::<Vec<_>>();
-        let refresh_target = select_topic_refresh_target(
-            &selected,
+        let mut candidate = self.topic_from_response(
+            &inventory,
+            &window,
             &existing_topics,
-            refresh_topic_page_id.as_deref(),
+            MaintenanceWorkerResponse::ExtractTopic {
+                page_ids,
+                title,
+                content,
+                reason,
+                refresh_topic_page_id,
+            },
         )?;
-        let namespace = self.topic_destination(&inventory, &selected, refresh_target.as_ref())?;
-        Ok(MaintenanceTopicAnalysis::candidate(build_topic_candidate(
-            &selected,
-            title,
-            content,
-            Some(reason),
-            refresh_target,
-            namespace,
-        )?))
+        if self.ledger.topic_evidence_reviewed(&candidate) {
+            return Ok(MaintenanceTopicAnalysis::no_candidate());
+        }
+        let assessment = self
+            .verify_maintenance_candidate(
+                "topic",
+                candidate
+                    .pages
+                    .iter()
+                    .map(|p| p.revision_id.clone())
+                    .collect(),
+                candidate.title.clone(),
+                candidate.content.clone(),
+                existing_topics,
+                candidate.refresh_target.as_ref().map(|t| t.page_id.clone()),
+                &mut MaintenanceCycleReport::default(),
+            )
+            .await?;
+        if matches!(assessment.verdict, super::VerificationVerdict::NoChange) {
+            return Ok(MaintenanceTopicAnalysis::no_candidate());
+        }
+        candidate.verification = Some(assessment);
+        Ok(MaintenanceTopicAnalysis::candidate(candidate))
     }
 
     fn topic_destination(
@@ -2721,7 +2740,7 @@ impl RuntimeMaintainer {
             .saturating_add(u32::from(outcome.escalated));
         let model_attempts = outcome.model_attempts;
         let escalated = outcome.escalated;
-        let (mut page_ids, relation_reason) = match outcome.response {
+        let (mut page_ids, mut relation_reason) = match outcome.response {
             MaintenanceWorkerResponse::Relate { page_ids, reason } => {
                 (page_ids, validate_relation_reason(reason)?)
             }
@@ -2801,8 +2820,65 @@ impl RuntimeMaintainer {
                     .expect("validated relation Page is offered")
             })
             .collect::<Vec<_>>();
-        let requires_review =
-            !self.config.applies_changes() || !is_low_risk_automatic_relation(&selected_pages);
+        let mut verified = false;
+        if self.config.applies_changes()
+            && self.config.relation.auto_apply_verified
+            && !is_low_risk_automatic_relation(&selected_pages)
+        {
+            match self
+                .verify_maintenance_candidate(
+                    "relation",
+                    revision_ids.clone(),
+                    String::new(),
+                    relation_reason.clone(),
+                    Vec::new(),
+                    None,
+                    report,
+                )
+                .await
+            {
+                Ok(assessment) => {
+                    relation_reason = format!("{}\n\n{}", relation_reason, assessment.reason);
+                    verified = matches!(assessment.verdict, super::VerificationVerdict::Approve);
+                    if matches!(assessment.verdict, super::VerificationVerdict::NoChange) {
+                        let pages = selected_pages
+                            .iter()
+                            .map(|page| MaintenanceRelationReviewPage {
+                                page_id: page.page_id.clone(),
+                                revision_id: page.revision_id.clone(),
+                                preview: page.snippet.clone(),
+                            })
+                            .collect::<Vec<_>>();
+                        self.ledger.reject_relation_pair(
+                            candidates[0].namespace.clone(),
+                            [pages[0].clone(), pages[1].clone()],
+                            assessment.reason,
+                        )?;
+                        self.ledger.record(
+                            window_key,
+                            "relation_verification_rejected",
+                            self.config.relation.retry_after_seconds,
+                        );
+                        return Ok(true);
+                    }
+                }
+                Err(error) => {
+                    self.ledger.isolate_job(
+                        window_key,
+                        "verify_relation",
+                        revision_ids,
+                        format!("{error:#}"),
+                        model_attempts + 1,
+                        self.config.relation.retry_after_seconds.max(3600),
+                    );
+                    report.isolated_jobs += 1;
+                    report.deferred += 1;
+                    return Ok(true);
+                }
+            }
+        }
+        let requires_review = !self.config.applies_changes()
+            || !(is_low_risk_automatic_relation(&selected_pages) || verified);
         if requires_review {
             let selected = page_ids
                 .iter()
@@ -2862,12 +2938,171 @@ impl RuntimeMaintainer {
         Ok(true)
     }
 
-    async fn run_topic_review_job(
+    pub(super) fn topic_from_response(
+        &self,
+        inventory: &[pcp_store::DurablePageInventoryItem],
+        window: &[pcp_store::DurablePageInventoryItem],
+        existing_topics: &[ExistingTopicPage],
+        response: MaintenanceWorkerResponse,
+    ) -> Result<MaintenanceTopicCandidate> {
+        let MaintenanceWorkerResponse::ExtractTopic {
+            page_ids,
+            title,
+            content,
+            reason,
+            refresh_topic_page_id,
+        } = response
+        else {
+            anyhow::bail!("expected extract_topic, no_candidate or defer");
+        };
+        anyhow::ensure!(
+            (2..=self.config.topic.max_source_pages).contains(&page_ids.len())
+                && page_ids.iter().collect::<BTreeSet<_>>().len() == page_ids.len()
+                && page_ids
+                    .iter()
+                    .all(|id| window.iter().any(|p| &p.page_id == id)),
+            "Topic sources must contain 2..={} distinct offered Page IDs",
+            self.config.topic.max_source_pages
+        );
+        let mut selected = page_ids
+            .iter()
+            .map(|id| window.iter().find(|p| &p.page_id == id).unwrap())
+            .collect::<Vec<_>>();
+        let target = select_topic_refresh_target(
+            &selected,
+            existing_topics,
+            refresh_topic_page_id.as_deref(),
+        )?;
+        if let Some(target) = &target {
+            let old = existing_topics
+                .iter()
+                .find(|t| t.page_id == target.page_id)
+                .context("missing offered Topic")?;
+            for id in &old.source_page_ids {
+                if !selected.iter().any(|p| &p.page_id == id) {
+                    let source = inventory
+                        .iter()
+                        .find(|p| &p.page_id == id && p.kind != "topic_summary")
+                        .context("cannot refresh a Topic without all of its existing sources")?;
+                    selected.push(source);
+                }
+            }
+        }
+        anyhow::ensure!(
+            selected.len() <= 64,
+            "Topic refresh source union exceeds bounded review limit"
+        );
+        selected.sort_by(|a, b| a.page_id.cmp(&b.page_id));
+        let namespace = self.topic_destination(inventory, &selected, target.as_ref())?;
+        build_topic_candidate(&selected, title, content, Some(reason), target, namespace)
+    }
+
+    async fn verify_maintenance_candidate(
+        &self,
+        kind: &str,
+        revisions: Vec<String>,
+        title: String,
+        content: String,
+        mut existing_topics: Vec<ExistingTopicPage>,
+        refresh_topic_page_id: Option<String>,
+        report: &mut MaintenanceCycleReport,
+    ) -> Result<super::MaintenanceVerification> {
+        let pages = self.read_detail_pages(revisions.clone(), 64_000).await?;
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        // Never approve from silently truncated or stale full-text projections.
+        let complete = pages.len() == revisions.len()
+            && pages.iter().all(|p| {
+                inventory.iter().any(|i| {
+                    i.page_id == p.page_id
+                        && i.revision_id == p.revision_id
+                        && p.content
+                            .as_ref()
+                            .is_some_and(|text| text.chars().count() as u64 >= i.content_chars)
+                })
+            });
+        if !complete {
+            return Ok(super::MaintenanceVerification {
+                verdict: super::VerificationVerdict::NeedsReview,
+                reason:
+                    "Full source evidence is unavailable, changed, or exceeds the review budget."
+                        .to_owned(),
+                added_information: String::new(),
+                preserved_boundaries: String::new(),
+                concerns: vec!["Incomplete full-source review".to_owned()],
+            });
+        }
+        let topic_revisions = existing_topics
+            .iter()
+            .map(|t| t.revision_id.clone())
+            .collect::<Vec<_>>();
+        if !topic_revisions.is_empty() {
+            let full_topics = self.read_detail_pages(topic_revisions, 64_000).await?;
+            for topic in &mut existing_topics {
+                let full = full_topics
+                    .iter()
+                    .find(|p| p.revision_id == topic.revision_id)
+                    .and_then(|p| p.content.as_ref())
+                    .context("existing Topic full content unavailable")?;
+                let expected = inventory
+                    .iter()
+                    .find(|p| p.page_id == topic.page_id)
+                    .context("existing Topic is no longer available")?;
+                anyhow::ensure!(
+                    expected.revision_id == topic.revision_id
+                        && full.chars().count() as u64 >= expected.content_chars,
+                    "existing Topic changed or exceeds full-review budget"
+                );
+                topic.routing_text = full.clone();
+            }
+        }
+        let outcome = self
+            .evaluate_worker(MaintenanceWorkerRequest::VerifyMaintenance {
+                kind: kind.to_owned(),
+                pages,
+                title,
+                content,
+                existing_topics,
+                refresh_topic_page_id,
+            })
+            .await?;
+        report.worker_calls += outcome.model_attempts;
+        report.escalated_decisions += u32::from(outcome.escalated);
+        let MaintenanceWorkerResponse::VerifyMaintenance { mut assessment } = outcome.response
+        else {
+            anyhow::bail!("verification worker returned an unexpected response");
+        };
+        anyhow::ensure!(
+            !assessment.reason.trim().is_empty()
+                && assessment.reason.chars().count() <= 1200
+                && assessment.added_information.chars().count() <= 1200
+                && assessment.preserved_boundaries.chars().count() <= 1200
+                && assessment.concerns.len() <= 8
+                && assessment
+                    .concerns
+                    .iter()
+                    .all(|c| c.chars().count() <= 1200),
+            "invalid verification explanation"
+        );
+        if matches!(assessment.verdict, super::VerificationVerdict::Approve)
+            && (!assessment.concerns.is_empty()
+                || assessment.preserved_boundaries.trim().is_empty()
+                || assessment.added_information.trim().is_empty())
+        {
+            assessment.verdict = super::VerificationVerdict::NeedsReview;
+        }
+        Ok(assessment)
+    }
+
+    pub(super) async fn run_topic_review_job(
         &mut self,
         inventory: &[pcp_store::DurablePageInventoryItem],
         report: &mut MaintenanceCycleReport,
         review_origin: MaintenanceReviewOrigin,
     ) -> Result<bool> {
+        if self.ledger.topic_pending_count() >= self.config.topic.max_pending_reviews {
+            report.topic_backlog_paused = true;
+            return Ok(false);
+        }
         let active_packing_page_ids = self.active_packing_page_ids();
         let Some(window) = topic_candidate_windows(
             inventory,
@@ -2881,7 +3116,7 @@ impl RuntimeMaintainer {
             self.ledger.eligible(&topic_window_key(
                 &pages
                     .iter()
-                    .map(|page| page.revision_id.clone())
+                    .map(|p| p.revision_id.clone())
                     .collect::<Vec<_>>(),
             ))
         })
@@ -2889,149 +3124,204 @@ impl RuntimeMaintainer {
             self.ledger.last_reviewed(&topic_window_key(
                 &pages
                     .iter()
-                    .map(|page| page.revision_id.clone())
+                    .map(|p| p.revision_id.clone())
                     .collect::<Vec<_>>(),
             ))
         }) else {
             return Ok(false);
         };
-        let key = topic_window_key(
-            &window
-                .iter()
-                .map(|page| page.revision_id.clone())
-                .collect::<Vec<_>>(),
-        );
-        let offered = window
+        let revisions = window
             .iter()
-            .map(|page| page.page_id.clone())
-            .collect::<BTreeSet<_>>();
+            .map(|p| p.revision_id.clone())
+            .collect::<Vec<_>>();
+        let key = topic_window_key(&revisions);
         let existing_topics = existing_topics_for_window(inventory, &window);
-        let outcome = self
-            .evaluate_worker(MaintenanceWorkerRequest::ExtractTopic {
-                pages: window
-                    .iter()
-                    .map(|page| {
-                        RelationCandidatePage::from_inventory(
-                            page,
-                            self.config.relation.routing_chars_per_page,
-                        )
-                    })
-                    .collect(),
-                existing_topics: existing_topics.clone(),
-                max_source_pages: self.config.topic.max_source_pages,
-            })
-            .await?;
-        report.worker_calls = report.worker_calls.saturating_add(outcome.model_attempts);
-        report.escalated_decisions = report
-            .escalated_decisions
-            .saturating_add(u32::from(outcome.escalated));
-        let model_attempts = outcome.model_attempts;
-        let escalated = outcome.escalated;
-        match outcome.response {
-            MaintenanceWorkerResponse::ExtractTopic {
-                page_ids,
-                title,
-                content,
-                reason,
-                refresh_topic_page_id,
-            } => {
-                anyhow::ensure!(
-                    (2..=self.config.topic.max_source_pages).contains(&page_ids.len())
-                        && page_ids.iter().collect::<BTreeSet<_>>().len() == page_ids.len()
-                        && page_ids.iter().all(|page_id| offered.contains(page_id)),
-                    "semantic worker selected invalid Topic sources"
-                );
-                let selected = page_ids
-                    .iter()
-                    .map(|page_id| {
-                        window
-                            .iter()
-                            .find(|page| page.page_id == *page_id)
-                            .expect("validated Topic Page is offered")
-                    })
-                    .collect::<Vec<_>>();
-                let refresh_target = select_topic_refresh_target(
-                    &selected,
-                    &existing_topics,
-                    refresh_topic_page_id.as_deref(),
-                )?;
-                let namespace =
-                    self.topic_destination(inventory, &selected, refresh_target.as_ref())?;
-                let candidate = build_topic_candidate(
-                    &selected,
-                    title,
-                    content,
-                    Some(reason),
-                    refresh_target,
-                    namespace,
-                )?;
-                if self.config.applies_changes()
-                    && self.config.topic.auto_apply
-                    && super::discovery::accumulated(&selected, &self.config.topic)
-                {
-                    self.apply_topic_candidate(ApplyMaintenanceTopicRequest {
-                        candidate_id: candidate.candidate_id.clone(),
-                        pages: candidate
-                            .pages
-                            .iter()
-                            .map(|page| PageRevisionRef {
-                                page_id: page.page_id.clone(),
-                                revision_id: page.revision_id.clone(),
-                            })
-                            .collect(),
-                        title: candidate.title.clone(),
-                        content: candidate.content.clone(),
-                        refresh_target: candidate.refresh_target.as_ref().map(|page| {
-                            PageRevisionRef {
-                                page_id: page.page_id.clone(),
-                                revision_id: page.revision_id.clone(),
-                            }
-                        }),
-                    })
-                    .await?;
+        let mut request = MaintenanceWorkerRequest::ExtractTopic {
+            pages: window
+                .iter()
+                .map(|p| {
+                    RelationCandidatePage::from_inventory(
+                        p,
+                        self.config.relation.routing_chars_per_page,
+                    )
+                })
+                .collect(),
+            existing_topics: existing_topics.clone(),
+            max_source_pages: self.config.topic.max_source_pages,
+            review_feedback: self.ledger.topic_feedback(&window),
+            correction: None,
+        };
+        let mut candidate = None;
+        let mut attempts = 0;
+        let mut escalated = false;
+        for repair in 0..2 {
+            let outcome = self.evaluate_worker(request.clone()).await?;
+            attempts += outcome.model_attempts;
+            escalated |= outcome.escalated;
+            report.worker_calls += outcome.model_attempts;
+            report.escalated_decisions += u32::from(outcome.escalated);
+            match outcome.response {
+                MaintenanceWorkerResponse::Defer => {
                     self.ledger.record(
-                        key,
-                        "topic_written",
+                        key.clone(),
+                        "topic_deferred",
                         self.config.relation.retry_after_seconds,
                     );
-                    report.topics_written += 1;
+                    self.ledger.clear_job_issue(&key);
+                    report.deferred += 1;
                     return Ok(true);
                 }
-                self.ledger.enqueue_review(
-                    MaintenanceReviewPayload::Topic(candidate),
-                    review_origin,
-                    "A cross-Page Topic front door requires operator approval.".to_owned(),
-                    model_attempts,
-                    escalated,
-                );
-                self.ledger.record(
+                MaintenanceWorkerResponse::NoCandidate => {
+                    self.ledger.record(
+                        key.clone(),
+                        "no_topic_increment",
+                        self.config.relation.retry_after_seconds,
+                    );
+                    self.ledger.clear_job_issue(&key);
+                    report.unchanged_topics_skipped += 1;
+                    return Ok(true);
+                }
+                response => {
+                    match self.topic_from_response(inventory, &window, &existing_topics, response) {
+                        Ok(value) => {
+                            candidate = Some(value);
+                            break;
+                        }
+                        Err(error) => {
+                            if repair == 0 {
+                                if let MaintenanceWorkerRequest::ExtractTopic {
+                                    correction, ..
+                                } = &mut request
+                                {
+                                    *correction = Some(format!(
+                                        "Previous response was rejected: {error:#}. Select only offered Page IDs and offered refresh targets; do not guess identifiers. If no valid candidate exists, return no_candidate."
+                                    ));
+                                }
+                            } else {
+                                self.ledger.isolate_job(
+                                    key,
+                                    "extract_topic",
+                                    revisions,
+                                    format!("{error:#}"),
+                                    attempts,
+                                    self.config.relation.retry_after_seconds.max(3600),
+                                );
+                                report.isolated_jobs += 1;
+                                report.deferred += 1;
+                                return Ok(true);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut candidate = candidate.context("Topic validation produced no result")?;
+        if self.ledger.topic_evidence_reviewed(&candidate) {
+            self.ledger.record(
+                key.clone(),
+                "topic_evidence_already_reviewed",
+                self.config.relation.retry_after_seconds,
+            );
+            self.ledger.clear_job_issue(&key);
+            report.duplicate_topics_skipped += 1;
+            return Ok(true);
+        }
+        let calls_before_verification = report.worker_calls;
+        let assessment = match self
+            .verify_maintenance_candidate(
+                "topic",
+                candidate
+                    .pages
+                    .iter()
+                    .map(|p| p.revision_id.clone())
+                    .collect(),
+                candidate.title.clone(),
+                candidate.content.clone(),
+                existing_topics,
+                candidate.refresh_target.as_ref().map(|t| t.page_id.clone()),
+                report,
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                self.ledger.isolate_job(
                     key,
-                    "topic_pending_review",
-                    self.config.relation.retry_after_seconds,
+                    "verify_topic",
+                    revisions,
+                    format!("{error:#}"),
+                    attempts,
+                    self.config.relation.retry_after_seconds.max(3600),
                 );
+                report.isolated_jobs += 1;
+                report.deferred += 1;
+                return Ok(true);
+            }
+        };
+        attempts += report.worker_calls - calls_before_verification;
+        let no_change = matches!(assessment.verdict, super::VerificationVerdict::NoChange);
+        let approved = matches!(assessment.verdict, super::VerificationVerdict::Approve);
+        let verification_reason = assessment.reason.clone();
+        candidate.verification = Some(assessment);
+        // Persist no-change decisions too, so other windows cannot regenerate a paraphrase.
+        let id = self.ledger.enqueue_review(
+            MaintenanceReviewPayload::Topic(candidate.clone()),
+            review_origin,
+            verification_reason.clone(),
+            attempts,
+            escalated,
+        );
+        if no_change {
+            self.ledger
+                .resolve_review(&id, MaintenanceReviewStatus::Rejected)?;
+            self.ledger
+                .set_review_reason(&id, format!("no_increment: {verification_reason}"))?;
+            report.unchanged_topics_skipped += 1;
+        } else {
+            let selected = candidate
+                .pages
+                .iter()
+                .filter_map(|p| inventory.iter().find(|i| i.page_id == p.page_id))
+                .collect::<Vec<_>>();
+            if approved
+                && self.config.applies_changes()
+                && self.config.topic.auto_apply
+                && super::discovery::accumulated(&selected, &self.config.topic)
+            {
+                self.apply_topic_candidate(ApplyMaintenanceTopicRequest {
+                    candidate_id: candidate.candidate_id.clone(),
+                    title: candidate.title,
+                    content: candidate.content,
+                    pages: candidate
+                        .pages
+                        .into_iter()
+                        .map(|p| PageRevisionRef {
+                            page_id: p.page_id,
+                            revision_id: p.revision_id,
+                        })
+                        .collect(),
+                    refresh_target: candidate.refresh_target.map(|p| PageRevisionRef {
+                        page_id: p.page_id,
+                        revision_id: p.revision_id,
+                    }),
+                })
+                .await?;
+                self.ledger
+                    .resolve_review(&id, MaintenanceReviewStatus::Accepted)?;
+                self.ledger
+                    .set_review_reason(&id, format!("verified: {verification_reason}"))?;
+                report.topics_written += 1;
+            } else {
                 report.topics_proposed += 1;
                 report.review_items_proposed += 1;
             }
-            MaintenanceWorkerResponse::NoCandidate => {
-                self.ledger.record(
-                    key,
-                    "no_topic_candidate",
-                    self.config.relation.retry_after_seconds,
-                );
-            }
-            MaintenanceWorkerResponse::Defer => {
-                self.ledger.record(
-                    key,
-                    "topic_deferred",
-                    self.config.relation.retry_after_seconds,
-                );
-                report.deferred += 1;
-            }
-            other => anyhow::bail!(
-                "semantic worker returned {} for an extract_topic request",
-                response_name(&other)
-            ),
         }
+        self.ledger.record(
+            key.clone(),
+            "topic_reviewed",
+            self.config.relation.retry_after_seconds,
+        );
+        self.ledger.clear_job_issue(&key);
         Ok(true)
     }
 
@@ -4254,19 +4544,32 @@ fn existing_topics_for_selected(
         .map(|page| page.page_id.as_str())
         .collect::<BTreeSet<_>>();
 
-    inventory
+    let mut candidates = inventory
         .iter()
-        .filter(|page| {
-            page.kind == "topic_summary"
-                && !page.superseded
-                && page
-                    .topic_source_page_ids
-                    .iter()
-                    .filter(|page_id| selected_page_ids.contains(page_id.as_str()))
-                    .take(2)
-                    .count()
-                    >= 2
+        .filter(|page| page.kind == "topic_summary" && !page.superseded)
+        .filter_map(|page| {
+            let shared = page
+                .topic_source_page_ids
+                .iter()
+                .filter(|id| selected_page_ids.contains(id.as_str()))
+                .count();
+            let affinity = selected
+                .iter()
+                .map(|source| super::topic_policy::subject_affinity(page, source))
+                .max()
+                .unwrap_or(0);
+            (shared > 0 || affinity > 0).then_some((page, shared, affinity))
         })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| b.2.cmp(&a.2))
+            .then_with(|| a.0.page_id.cmp(&b.0.page_id))
+    });
+    candidates
+        .into_iter()
+        .take(12)
+        .map(|(page, _, _)| page)
         .map(|page| ExistingTopicPage {
             page_id: page.page_id.clone(),
             revision_id: page.revision_id.clone(),
@@ -4326,9 +4629,8 @@ fn select_topic_refresh_target(
     let shared_source_page_count = topic_source_ids.intersection(&selected_page_ids).count();
     let union_source_page_count = topic_source_ids.union(&selected_page_ids).count();
     anyhow::ensure!(
-        shared_source_page_count >= 2
-            && shared_source_page_count.saturating_mul(2) >= union_source_page_count,
-        "Topic refresh target does not substantially overlap the selected source Pages"
+        union_source_page_count <= 64,
+        "Topic refresh source union exceeds bounded review limit"
     );
     Ok(Some(MaintenanceTopicRefreshTarget {
         page_id: topic.page_id.clone(),
@@ -5154,6 +5456,7 @@ fn build_topic_candidate(
         title,
         content,
         reason,
+        verification: None,
         refresh_target,
         pages: pages
             .iter()
@@ -5344,6 +5647,7 @@ fn worker_operation(request: &MaintenanceWorkerRequest) -> &'static str {
         MaintenanceWorkerRequest::AnalyzePacking { .. } => "analyze_packing",
         MaintenanceWorkerRequest::SelectRelation { .. } => "select_relation",
         MaintenanceWorkerRequest::ExtractTopic { .. } => "extract_topic",
+        MaintenanceWorkerRequest::VerifyMaintenance { .. } => "verify_maintenance",
         MaintenanceWorkerRequest::AssessArchive { .. } => "assess_archive",
         MaintenanceWorkerRequest::ReconcileFeedback { .. } => "reconcile_feedback",
         MaintenanceWorkerRequest::ReviewUpdate { .. } => "review_update",
@@ -5357,7 +5661,8 @@ fn worker_scopes(request: &MaintenanceWorkerRequest, access: &AccessSession) -> 
             vec![target.namespace.clone(), evidence.namespace.clone()]
         }
         MaintenanceWorkerRequest::SummarizePage { page } => vec![page.namespace.clone()],
-        MaintenanceWorkerRequest::SummarizePages { pages } => {
+        MaintenanceWorkerRequest::VerifyMaintenance { pages, .. }
+        | MaintenanceWorkerRequest::SummarizePages { pages } => {
             pages.iter().map(|page| page.namespace.clone()).collect()
         }
         MaintenanceWorkerRequest::AssessArchive { page } => vec![page.page.namespace.clone()],
@@ -5396,6 +5701,7 @@ fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
         MaintenanceWorkerResponse::PackingCandidates { .. } => "packing_candidates",
         MaintenanceWorkerResponse::Relate { .. } => "relate",
         MaintenanceWorkerResponse::ExtractTopic { .. } => "extract_topic",
+        MaintenanceWorkerResponse::VerifyMaintenance { .. } => "verify_maintenance",
         MaintenanceWorkerResponse::ArchiveReview { .. } => "archive_review",
         MaintenanceWorkerResponse::ReconcileFeedback { .. } => "reconcile_feedback",
         MaintenanceWorkerResponse::Retain { .. } => "retain",

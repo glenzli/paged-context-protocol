@@ -80,12 +80,13 @@ export function reviewDecisionCounts(decisions) {
 }
 
 export function serializeReviewDecisions(decisions) {
-  return JSON.stringify([...decisions.values()].map(({ candidateId, kind, decision, stagedAt, snapshot }) => ({
+  return JSON.stringify([...decisions.values()].map(({ candidateId, kind, decision, stagedAt, snapshot, reason }) => ({
     candidateId,
     kind,
     decision,
     stagedAt,
     snapshot,
+    reason,
   })));
 }
 
@@ -105,4 +106,29 @@ export function restoreReviewDecisions(serialized) {
   } catch (_) {
     return new Map();
   }
+}
+
+// Group for presentation only: every alternative retains its own explicit decision.
+export function groupReviewTopics(reviews) {
+  const groups = [];
+  const terms = (title) => {
+    const text = String(title || "").toLowerCase().replace(/[\s\p{P}\p{S}]/gu, "");
+    return new Set(Array.from({ length: Math.max(0, text.length - 2) }, (_, i) => text.slice(i, i + 3)));
+  };
+  const related = (a, b) => {
+    const ca = a.payload.candidate, cb = b.payload.candidate;
+    if (ca.refreshTarget?.pageId && ca.refreshTarget.pageId === cb.refreshTarget?.pageId) return true;
+    const sources = new Set((ca.pages || []).map((p) => p.pageId));
+    if ((cb.pages || []).filter((p) => sources.has(p.pageId)).length >= 2) return true;
+    const left = terms(ca.title), right = terms(cb.title);
+    const shared = [...left].filter((t) => right.has(t)).length;
+    return shared >= 4 && shared / Math.max(1, left.size + right.size - shared) >= 0.55;
+  };
+  for (const review of reviews) {
+    const group = reviewKind(review) === "topic"
+      ? groups.find((g) => reviewKind(g[0]) === "topic" && related(g[0], review)) : null;
+    if (group) group.push(review);
+    else groups.push([review]);
+  }
+  return groups;
 }

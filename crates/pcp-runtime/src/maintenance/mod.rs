@@ -7,6 +7,7 @@ mod ledger;
 mod operator;
 mod reconciliation;
 mod review;
+mod topic_policy;
 mod update_discovery;
 mod worker;
 
@@ -52,9 +53,10 @@ pub use review::{
 };
 pub use worker::{
     CommandSemanticWorker, MaintenanceDetailPage, MaintenanceRelation, MaintenanceRoutingPage,
-    MaintenanceSummarySelection, MaintenanceWorkerOutcome, MaintenanceWorkerRequest,
-    MaintenanceWorkerResponse, PackingCandidateGroup, RelationCandidatePage, RetentionMilestone,
-    SemanticMaintenanceWorker,
+    MaintenanceSummarySelection, MaintenanceVerification, MaintenanceWorkerOutcome,
+    MaintenanceWorkerRequest, MaintenanceWorkerResponse, PackingCandidateGroup,
+    RelationCandidatePage, RetentionMilestone, SemanticMaintenanceWorker, TopicReviewFeedback,
+    VerificationVerdict,
 };
 
 pub fn build_semantic_worker(

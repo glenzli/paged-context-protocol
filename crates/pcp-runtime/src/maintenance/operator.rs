@@ -199,6 +199,12 @@ impl MaintenanceOperator {
         self.maintainer.review_item(candidate_id)
     }
 
+    pub async fn record_review_reason(&mut self, candidate_id: &str, reason: String) -> Result<()> {
+        self.maintainer
+            .record_review_reason(candidate_id, reason)
+            .await
+    }
+
     pub async fn resolve_review(
         &mut self,
         candidate_id: &str,

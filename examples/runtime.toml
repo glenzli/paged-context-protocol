@@ -53,7 +53,8 @@ allowed_scopes = [
 # minimum_total_chars = 1200
 # max_source_pages = 8
 # target_scope = "user:{identity_id}" # must already exist; refreshes retain their Scope
-# auto_apply = true # still requires apply mode and validated, accumulated sources
+# auto_apply = true # requires apply mode, accumulated sources and independent full-text approval
+# max_pending_reviews = 24 # pause new Topic proposals while the review inbox is full
 #
 # [maintenance.worker]
 # provider = "infer_runtime"
@@ -87,6 +88,7 @@ allowed_scopes = [
 # excluded_page_kinds = ["pcp_summary", "summary_projection", "validity_assessment", "tombstone"]
 #
 # [maintenance.relation]
+# auto_apply_verified = true # ordinary relations require independent full-source approval
 # enabled = true
 # candidate_window = 24
 # routing_chars_per_page = 800

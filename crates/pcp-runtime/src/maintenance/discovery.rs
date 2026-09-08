@@ -92,7 +92,7 @@ pub(super) fn affinity_windows(
     groups.into_iter().map(|(_, pages)| pages).collect()
 }
 
-fn subject_terms(page: &DurablePageInventoryItem) -> BTreeSet<String> {
+pub(super) fn subject_terms(page: &DurablePageInventoryItem) -> BTreeSet<String> {
     let mut terms = BTreeSet::new();
     if let Some(facets) = page.facets.as_ref().and_then(|value| value.as_object()) {
         for key in [

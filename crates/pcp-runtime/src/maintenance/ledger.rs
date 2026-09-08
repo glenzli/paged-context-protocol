@@ -36,6 +36,18 @@ pub(crate) struct MaintenanceLedger {
     review_items: BTreeMap<String, MaintenanceReviewItem>,
     #[serde(default)]
     scheduler: SchedulerLedger,
+    #[serde(default)]
+    job_issues: BTreeMap<String, MaintenanceJobIssue>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceJobIssue {
+    pub operation: String,
+    pub source_revision_ids: Vec<String>,
+    pub reason: String,
+    pub attempts: u32,
+    pub retry_at: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -82,6 +94,8 @@ pub struct MaintenanceAutomationStatus {
     pub pending_relation_review_count: usize,
     pub pending_review_count: usize,
     pub dirty_regions: Vec<MaintenanceDirtyRegionStatus>,
+    #[serde(default)]
+    pub job_issues: Vec<MaintenanceJobIssue>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -593,6 +607,131 @@ impl MaintenanceLedger {
         Ok(())
     }
 
+    pub(crate) fn topic_pending_count(&self) -> usize {
+        self.review_items
+            .values()
+            .filter(|item| {
+                item.status == MaintenanceReviewStatus::Pending
+                    && matches!(item.payload, MaintenanceReviewPayload::Topic(_))
+            })
+            .count()
+    }
+
+    pub(crate) fn topic_evidence_reviewed(
+        &self,
+        candidate: &super::MaintenanceTopicCandidate,
+    ) -> bool {
+        self.review_items.values().any(|item| {
+            matches!(&item.payload, MaintenanceReviewPayload::Topic(old)
+                if item.status != MaintenanceReviewStatus::Stale
+                    && super::topic_policy::same_evidence(old, candidate))
+        })
+    }
+
+    pub(crate) fn topic_feedback(
+        &self,
+        window: &[DurablePageInventoryItem],
+    ) -> Vec<super::TopicReviewFeedback> {
+        let ids = window
+            .iter()
+            .map(|p| p.page_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut items = self
+            .review_items
+            .values()
+            .filter_map(|item| {
+                let MaintenanceReviewPayload::Topic(candidate) = &item.payload else {
+                    return None;
+                };
+                if item.status == MaintenanceReviewStatus::Stale
+                    || candidate
+                        .pages
+                        .iter()
+                        .filter(|p| ids.contains(p.page_id.as_str()))
+                        .count()
+                        < 2
+                {
+                    return None;
+                }
+                Some((item, candidate))
+            })
+            .collect::<Vec<_>>();
+        items.sort_by(|a, b| b.0.updated_at.cmp(&a.0.updated_at));
+        items
+            .into_iter()
+            .take(16)
+            .map(|(item, candidate)| super::TopicReviewFeedback {
+                source_revision_ids: candidate
+                    .pages
+                    .iter()
+                    .map(|p| p.revision_id.clone())
+                    .collect(),
+                source_page_ids: candidate.pages.iter().map(|p| p.page_id.clone()).collect(),
+                title: candidate.title.clone(),
+                status: format!("{:?}", item.status).to_lowercase(),
+                reason: item.decision_reason.clone().unwrap_or_else(|| {
+                    if item.status == MaintenanceReviewStatus::Rejected {
+                        "Rejected; no explicit reason was recorded.".to_owned()
+                    } else {
+                        item.reason.clone()
+                    }
+                }),
+            })
+            .collect()
+    }
+
+    pub(crate) fn set_review_reason(&mut self, id: &str, reason: String) -> Result<()> {
+        anyhow::ensure!(
+            !reason.trim().is_empty() && reason.chars().count() <= 1200,
+            "review reason must contain 1..=1200 characters"
+        );
+        let item = self
+            .review_items
+            .get_mut(id)
+            .context("unknown maintenance review")?;
+        item.decision_reason = Some(reason.trim().to_owned());
+        item.updated_at = chrono::Utc::now().to_rfc3339();
+        Ok(())
+    }
+
+    pub(crate) fn isolate_job(
+        &mut self,
+        key: String,
+        operation: &str,
+        revisions: Vec<String>,
+        reason: String,
+        attempts: u32,
+        retry_seconds: u64,
+    ) {
+        self.record(key.clone(), "isolated_job", retry_seconds.max(60));
+        self.job_issues.insert(
+            key,
+            MaintenanceJobIssue {
+                operation: operation.to_owned(),
+                source_revision_ids: revisions,
+                reason: reason.chars().take(1200).collect(),
+                attempts,
+                retry_at: timestamp_string(
+                    now_unix_ms().saturating_add(retry_seconds.max(60) * 1000),
+                ),
+            },
+        );
+        // Diagnostics are bounded; source Revision keys make new evidence independently eligible.
+        while self.job_issues.len() > 24 {
+            let key = self
+                .job_issues
+                .iter()
+                .min_by_key(|(_, v)| &v.retry_at)
+                .map(|(k, _)| k.clone())
+                .unwrap();
+            self.job_issues.remove(&key);
+        }
+    }
+
+    pub(crate) fn clear_job_issue(&mut self, key: &str) {
+        self.job_issues.remove(key);
+    }
+
     pub(crate) fn enqueue_review(
         &mut self,
         payload: MaintenanceReviewPayload,
@@ -601,6 +740,15 @@ impl MaintenanceLedger {
         model_attempts: u32,
         escalated: bool,
     ) -> String {
+        if let MaintenanceReviewPayload::Topic(candidate) = &payload {
+            if let Some(item) = self.review_items.values().find(|item| {
+                matches!(&item.payload, MaintenanceReviewPayload::Topic(old)
+                    if item.status != MaintenanceReviewStatus::Stale
+                        && super::topic_policy::same_evidence(old, candidate))
+            }) {
+                return item.candidate_id.clone();
+            }
+        }
         let candidate_id = payload.candidate_id().to_owned();
         let retry_reconciliation = matches!(payload, MaintenanceReviewPayload::Reconciliation(_))
             && self
@@ -916,6 +1064,7 @@ impl MaintenanceLedger {
                 .len()
                 .saturating_add(self.relation_reviews().len()),
             dirty_regions,
+            job_issues: self.job_issues.values().cloned().collect(),
         }
     }
 

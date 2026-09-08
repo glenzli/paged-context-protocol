@@ -67,14 +67,14 @@ async fn periodic_review_synthesizes_short_pages_across_existing_and_future_scop
         content: "OET proofs retain explicit assumptions. Each application uses a local certificate to delimit its supported claim. The source Pages record these proof boundaries; this Topic provides an entry point to their exact evidence.".into(),
         reason: "Four short Pages describe complementary aspects of the same proof boundary.".into(),
         refresh_topic_page_id: None,
-    }]));
+    }, topic_convergence::verification(crate::maintenance::VerificationVerdict::Approve)]));
     let mut maintainer =
         RuntimeMaintainer::for_test(client.clone(), worker.clone(), config.clone());
     let report = maintainer.run_scheduled_cycle().await.unwrap();
     assert!(report.periodic_review);
     assert_eq!(report.inspected_pages, 5);
     assert_eq!(report.topics_written, 1);
-    assert_eq!(report.worker_calls, 1);
+    assert_eq!(report.worker_calls, 2);
     let inventory = client.durable_page_inventory(vec![]).await.unwrap();
     let topic = inventory
         .iter()
@@ -96,7 +96,7 @@ async fn periodic_review_synthesizes_short_pages_across_existing_and_future_scop
     assert!(state.last_periodic_review_at.is_some() && state.next_periodic_review_at.is_some());
     assert_eq!(state.recent_cycles.len(), 2);
     assert_eq!(state.recent_cycles[0].report.topics_written, 1);
-    assert_eq!(worker.request_count(), 1);
+    assert_eq!(worker.request_count(), 2);
     drop(maintainer);
     drop(client);
     drop(operator);

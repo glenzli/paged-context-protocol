@@ -169,7 +169,7 @@ ChatGPT Developer Mode 可以通过 OpenAI Secure MCP Tunnel 调用本机的 std
 
 ### 维护、Console 与观测
 
-后台维护与 Console 手动运行共用持久审阅队列。Worker 只产生候选，Runtime 和 Store 负责预算、授权、当前 Revision 校验与提交；普通语义 Relation、Archive 和高影响反馈协调建议在应用前审阅。自动维护可覆盖全部授权 Scope，并低频复查旧页；同主题短页的数量或总内容量积累也可触发提炼，不只检查单页长度。达到门槛的 Topic 自动生成需单独启用，跨 Scope 提炼保留全部来源修订与明确的目标 Scope。反馈协调默认由低成本模型判断；只有不确定项才升级一次，更高影响的 `superseded`/`retracted` 仍需人工批准。调度、模型升级和失败退避见 [`crates/pcp-runtime/README.md`](crates/pcp-runtime/README.md)。
+后台维护与 Console 手动运行共用持久审阅队列。Worker 只产生候选，Runtime 和 Store 负责预算、授权、当前 Revision 校验与提交；普通语义 Relation 可单独启用全文独立复核，通过后自动应用；未通过、Archive 和高影响反馈协调建议保留人工审阅。自动维护可覆盖全部授权 Scope，并低频复查旧页；同主题短页的数量或总内容量积累也可触发提炼，不只检查单页长度。Topic 按精确来源修订去重，并参考相邻主题与已记录的拒绝原因；独立全文复核确认新增信息和原有限定后，才可自动写入。无效候选修正一次后隔离，待审 Topic 达到上限时暂停新增提案。达到门槛的 Topic 自动生成需单独启用，跨 Scope 提炼保留全部来源修订与明确的目标 Scope。反馈协调默认由低成本模型判断；只有不确定项才升级一次，更高影响的 `superseded`/`retracted` 仍需人工批准。调度、模型升级和失败退避见 [`crates/pcp-runtime/README.md`](crates/pcp-runtime/README.md)。
 
 Console 应连接独立的 `audit` endpoint。它提供只读 Store 检查、查询预览、注册管理、维护审阅和受权 archive/restore。Runtime 的设施 observer 只返回聚合且脱敏的运行数据；合同见 [`crates/pcp-runtime/OBSERVER.md`](crates/pcp-runtime/OBSERVER.md)。
 

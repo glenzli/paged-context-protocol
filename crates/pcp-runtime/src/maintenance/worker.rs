@@ -38,6 +38,19 @@ pub enum MaintenanceWorkerRequest {
         #[serde(default)]
         existing_topics: Vec<ExistingTopicPage>,
         max_source_pages: usize,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        review_feedback: Vec<TopicReviewFeedback>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        correction: Option<String>,
+    },
+    VerifyMaintenance {
+        kind: String,
+        pages: Vec<MaintenanceDetailPage>,
+        title: String,
+        content: String,
+        existing_topics: Vec<ExistingTopicPage>,
+        #[serde(default)]
+        refresh_topic_page_id: Option<String>,
     },
     /// A manual content-governance review. The worker can recommend archive,
     /// retain, or defer, but never changes lifecycle state itself.
@@ -98,6 +111,37 @@ pub struct RelationCandidatePage {
     pub facets: Option<Value>,
     #[serde(default)]
     pub relation_types: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicReviewFeedback {
+    pub source_revision_ids: Vec<String>,
+    pub source_page_ids: Vec<String>,
+    pub title: String,
+    pub status: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationVerdict {
+    Approve,
+    NoChange,
+    NeedsReview,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceVerification {
+    pub verdict: VerificationVerdict,
+    pub reason: String,
+    #[serde(default)]
+    pub added_information: String,
+    #[serde(default)]
+    pub preserved_boundaries: String,
+    #[serde(default)]
+    pub concerns: Vec<String>,
 }
 
 /// Existing Topic front door offered to the semantic worker as a possible
@@ -235,6 +279,9 @@ pub enum MaintenanceWorkerResponse {
         reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         refresh_topic_page_id: Option<String>,
+    },
+    VerifyMaintenance {
+        assessment: MaintenanceVerification,
     },
     ArchiveReview {
         outcome: ArchiveWorkerDecision,

@@ -34,6 +34,7 @@ import {
 } from "/maintenance-operation-state.js?v=20260824.1";
 import {
   REVIEW_DECISION,
+  groupReviewTopics,
   partitionReviewSession,
   restoreReviewDecisions,
   reviewDecisionCounts,
@@ -2685,9 +2686,20 @@ function renderAutomationStatus() {
       metric(t("Maintenance inventory"), formatNumber(currentReport.inspectedPages)),
       metric(t("Model calls"), formatNumber(currentReport.workerCalls), currentReport.workerCalls ? "info" : ""),
       metric(t("Proposals"), formatNumber(proposed), proposed ? "warning" : ""),
+      metric(currentLanguage === "zh" ? "避免重复／无增量" : "Duplicates / no increment avoided", formatNumber((currentReport.duplicateTopicsSkipped || 0) + (currentReport.unchangedTopicsSkipped || 0))),
+      ...(currentReport.topicBacklogPaused ? [metric(currentLanguage === "zh" ? "主题发现" : "Topic discovery", currentLanguage === "zh" ? "等待审阅减负" : "Waiting for review capacity")] : []),
       metric(t("Applied"), formatNumber(committed), committed ? "positive" : "", `${formatNumber(currentReport.deferred || 0)} ${t("Deferred")} · ${formatNumber(currentReport.escalatedDecisions || 0)} ${t("Model escalation")}`),
     );
   }
+  let issueList = byId("maintenance-job-issues");
+  if (!issueList) {
+    issueList = element("div", "maintenance-review-evidence"); issueList.id = "maintenance-job-issues";
+    byId("maintenance-automation-detail").after(issueList);
+  }
+  issueList.replaceChildren(...(automation.jobIssues || []).map((issue) => element("p", "", currentLanguage === "zh"
+    ? `已隔离 ${issue.operation}：${issue.reason} · ${issue.attempts} 次尝试 · ${formatTime(issue.retryAt)} 后可重试 · ${issue.sourceRevisionIds.join(", ")}`
+    : `Isolated ${issue.operation}: ${issue.reason} · ${issue.attempts} attempts · eligible after ${formatTime(issue.retryAt)} · ${issue.sourceRevisionIds.join(", ")}`)));
+  issueList.hidden = !(automation.jobIssues || []).length;
   const completed = automation.lastCompletedAt;
   const started = automation.lastStartedAt;
   const nextWake = automation.nextWakeAt;
@@ -2862,7 +2874,13 @@ function renderRelationReviews() {
 
   byId("maintenance-relation-review-cards").replaceChildren(
     ...(pending.length
-      ? pending.map(maintenanceReviewCard)
+      ? groupReviewTopics(pending).map((group) => {
+          if (group.length === 1) return maintenanceReviewCard(group[0]);
+          const details = element("details", "maintenance-review-topic-group");
+          const summary = element("summary", "", `${group[0].payload.candidate.title} · ${group.length} ${currentLanguage === "zh" ? "个相关提案，逐项决定" : "related proposals; decide individually"}`);
+          details.append(summary, ...group.map(maintenanceReviewCard));
+          return details;
+        })
       : total
         ? []
         : [element("div", "maintenance-review-empty", t("Review inbox is clear"))]),
@@ -3110,7 +3128,29 @@ function maintenanceReviewCard(review) {
     );
     actions.append(suppress);
   }
-  card.append(heading, reason, maintenanceReviewContent(review), actions);
+  card.append(heading, reason);
+  if (candidate.verification) {
+    const verification = candidate.verification;
+    const evidence = element("div", "maintenance-review-evidence");
+    [
+      [currentLanguage === "zh" ? "新增信息／检索价值" : "New information / retrieval value", verification.addedInformation],
+      [currentLanguage === "zh" ? "保留的边界" : "Preserved boundaries", verification.preservedBoundaries],
+      [currentLanguage === "zh" ? "需要判断" : "Needs judgment", (verification.concerns || []).join(" · ")],
+    ].forEach(([label, value]) => { if (value) evidence.append(element("p", "", `${label}：${value}`)); });
+    card.append(evidence);
+  }
+  card.append(maintenanceReviewContent(review));
+  if (payload.kind === "topic") {
+    const label = element("label", "muted", currentLanguage === "zh" ? "拒绝原因（可选） " : "Rejection reason (optional) ");
+    const select = element("select", "");
+    [["", "未指定", "Not specified"], ["duplicate", "同题重复", "Duplicate subject"], ["no_increment", "没有新增信息", "No new information"], ["attribution_or_time", "归属、时效或事实不准确", "Attribution, time or factual drift"], ["lost_boundaries", "丢失原有信息或限定", "Lost information or qualifications"], ["uncertain", "证据不足", "Insufficient evidence"]].forEach(([value, zh, en]) => {
+      const option = element("option", "", currentLanguage === "zh" ? zh : en); option.value = value; select.append(option);
+    });
+    select.value = review.decisionNote || "";
+    select.addEventListener("change", () => { review.decisionNote = select.value; });
+    label.append(select); card.append(label);
+  }
+  card.append(actions);
   return card;
 }
 
@@ -3134,7 +3174,8 @@ function persistMaintenanceReviewSession() {
 
 function stageMaintenanceReview(review, decision) {
   if (state.maintenance.reviewCommitBusy) return;
-  stageReviewDecision(state.maintenance.reviewDecisions, review, decision);
+  const staged = stageReviewDecision(state.maintenance.reviewDecisions, review, decision);
+  if (decision === REVIEW_DECISION.REJECT && review.decisionNote) staged.reason = review.decisionNote;
   persistMaintenanceReviewSession();
   renderRelationReviews();
 }
@@ -3179,7 +3220,7 @@ async function commitMaintenanceReviewSession() {
     try {
       await maintenanceMutation(
         `/api/maintenance/reviews/${encodeURIComponent(review.candidateId)}/${decision.decision}`,
-        {},
+        decision.decision === REVIEW_DECISION.REJECT && decision.reason ? { reason: decision.reason } : {},
       );
       state.maintenance.reviewDecisions.delete(review.candidateId);
       state.maintenance.relationReviews = state.maintenance.relationReviews

@@ -1233,3 +1233,9 @@ pre { margin: 0; max-height: 420px; overflow: auto; padding: 11px; border: 1px s
 .access-event-details { min-width: 130px; max-width: 360px; overflow-wrap: anywhere; }
 .access-event-details summary { cursor: pointer; color: var(--accent); }
 #view-access td { vertical-align: top; }
+
+.maintenance-review-topic-group { border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+.maintenance-review-topic-group > summary { cursor: pointer; font-weight: 600; padding: 6px; }
+.maintenance-review-topic-group[open] > summary { margin-bottom: 12px; }
+.maintenance-review-topic-group .maintenance-review-card + .maintenance-review-card { margin-top: 12px; }
+.maintenance-review-evidence { border-left: 3px solid var(--border); padding-left: 12px; font-size: .9rem; overflow-wrap: anywhere; }
