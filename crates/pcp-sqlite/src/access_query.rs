@@ -28,6 +28,7 @@ impl SqlitePcpStore {
         &self,
         scopes: Vec<String>,
         mut query: AccessLogQuery,
+        include_scope_free: bool,
     ) -> Result<AccessLogResult> {
         self.flush_access_audit().await?;
         query.since = query.since.as_deref().map(timestamp).transpose()?;
@@ -46,11 +47,11 @@ impl SqlitePcpStore {
             .map(serde_json::from_str)
             .transpose()
             .context("invalid audit cursor")?;
-        if scopes.is_empty() {
+        if scopes.is_empty() && !include_scope_free {
             return Ok(AccessLogResult::default());
         }
         self.run("filtered access audit", move |connection| {
-            query_audit(connection, scopes, query, cursor)
+            query_audit(connection, scopes, query, cursor, include_scope_free)
         })
         .await
     }
@@ -61,6 +62,7 @@ fn query_audit(
     scopes: Vec<String>,
     query: AccessLogQuery,
     cursor: Option<Cursor>,
+    include_scope_free: bool,
 ) -> Result<AccessLogResult> {
     // Keep counts and rows in one read snapshot. Filter authorization before
     // aggregation, then project each returned event onto the same scopes.
@@ -68,7 +70,28 @@ fn query_audit(
     let mut filter = "EXISTS (SELECT 1 FROM json_each(scopes_json) scope
         WHERE scope.value IN (SELECT value FROM json_each(?)))"
         .to_string();
+    if include_scope_free {
+        // Scope-free endpoint calls are visible only to store-wide auditors.
+        filter = format!("(json_array_length(scopes_json) = 0 OR {filter})");
+    }
     let mut values = vec![Value::Text(serde_json::to_string(&scopes)?)];
+    match query.view.as_deref().unwrap_or("operations") {
+        "requests" => {
+            filter.push_str(" AND json_extract(telemetry_json, '$.request.root') = 1");
+            // A request aggregate is visible only when every contributing scope
+            // is authorized; projecting scopes alone would leak hidden counts.
+            filter.push_str(" AND NOT EXISTS (SELECT 1 FROM json_each(scopes_json) s WHERE s.value NOT IN (SELECT value FROM json_each(?)))");
+            values.push(Value::Text(serde_json::to_string(&scopes)?));
+        }
+        "operations" => filter.push_str(" AND COALESCE(json_extract(telemetry_json, '$.request.root'), 0) = 0"),
+        "background" => filter.push_str(" AND json_extract(telemetry_json, '$.origin') = 'background'"),
+        "uncorrelated" => filter.push_str(" AND json_extract(telemetry_json, '$.request.id') IS NULL AND COALESCE(json_extract(telemetry_json, '$.origin'), '') <> 'background'"),
+        _ => anyhow::bail!("unknown audit view"),
+    }
+    if let Some(id) = &query.request_id {
+        filter.push_str(" AND json_extract(telemetry_json, '$.request.id') = ?");
+        values.push(Value::Text(id.clone()));
+    }
     if !query.include_health_checks {
         filter.push_str(" AND operation <> 'health_snapshot'");
     }
@@ -266,6 +289,219 @@ mod tests {
         }).await.unwrap();
         (store, path)
     }
+    #[tokio::test]
+    async fn request_failures_preserve_denial_and_scope_free_calls_require_store_audit() {
+        let (store, path) = fixture().await;
+        let session = access(true);
+        let (result, event) =
+            pcp_store::request_audit::capture(&session, "read_pages".into(), async {
+                store
+                    .record_access(
+                        &session,
+                        "read_pages",
+                        &["a".into()],
+                        &AccessDecision::Denied,
+                        None,
+                        None,
+                    )
+                    .await?;
+                anyhow::bail!("private error must not be copied into request audit")
+            })
+            .await;
+        let result: anyhow::Result<()> = result;
+        assert!(result.is_err());
+        assert_eq!(event.decision, AccessDecision::Denied);
+        assert_eq!(event.detail.as_deref(), Some("request failed"));
+        store.record_runtime_request_audit(event).await.unwrap();
+        let operator =
+            AccessSession::store_wide_full_control(session.principal.clone(), "operator");
+        let (_, event) =
+            pcp_store::request_audit::capture(&operator, "describe".into(), async { Ok(()) }).await;
+        assert!(event.scopes.is_empty());
+        store.record_runtime_request_audit(event).await.unwrap();
+        let query = AccessLogQuery {
+            view: Some("requests".into()),
+            operation: Some("describe".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            store
+                .query_access_log(&session, query.clone())
+                .await
+                .unwrap()
+                .total_events,
+            0
+        );
+        assert_eq!(
+            store
+                .query_access_log(&operator, query)
+                .await
+                .unwrap()
+                .total_events,
+            1
+        );
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn request_audit_keeps_concurrent_calls_separate_and_filters_aggregates() {
+        let (store, path) = fixture().await;
+        let session = access(true);
+        let run = |count, scopes: Vec<String>| {
+            let store = &store;
+            let session = &session;
+            async move {
+                let (result, event) =
+                    pcp_store::request_audit::capture(session, "semantic_search".into(), async {
+                        for _ in 0..2 {
+                            tokio::task::yield_now().await;
+                            store
+                                .record_access(
+                                    session,
+                                    "read_pages",
+                                    &scopes,
+                                    &AccessDecision::Allowed,
+                                    None,
+                                    Some(&pcp_core::OperationTelemetry {
+                                        input_count: Some(count),
+                                        ..Default::default()
+                                    }),
+                                )
+                                .await?;
+                        }
+                        Ok(())
+                    })
+                    .await;
+                result.unwrap();
+                let metadata = event.telemetry.request.as_ref().unwrap();
+                assert_eq!(metadata.internal_operations, 2);
+                assert_eq!(metadata.page_visits, 2 * count);
+                assert_eq!(metadata.batch_reads, if count > 1 { 2 } else { 0 });
+                let id = metadata.id.clone();
+                store.record_runtime_request_audit(event).await.unwrap();
+                id
+            }
+        };
+        let (id, other_id) = tokio::join!(
+            run(8, vec!["a".into()]),
+            run(1, vec!["a".into(), "b".into()])
+        );
+        assert_ne!(id, other_id);
+        let roots = store
+            .query_access_log(
+                &session,
+                AccessLogQuery {
+                    view: Some("requests".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        // A partial-scope auditor cannot see the other request's aggregate.
+        assert_eq!(roots.total_events, 1);
+        assert_eq!(roots.clients[0].event_count, 1);
+        assert_eq!(roots.operations[0].event_count, 1);
+        assert_eq!(
+            roots.events[0]
+                .telemetry
+                .as_ref()
+                .unwrap()
+                .origin
+                .as_deref(),
+            Some("client_request")
+        );
+        let children = store
+            .query_access_log(
+                &session,
+                AccessLogQuery {
+                    request_id: Some(id.clone()),
+                    limit: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(children.total_events, 2);
+        assert_eq!(children.events.len(), 1);
+        assert_eq!(
+            children.events[0].telemetry.as_ref().unwrap().input_count,
+            Some(8)
+        );
+        let second = store
+            .query_access_log(
+                &session,
+                AccessLogQuery {
+                    request_id: Some(id),
+                    cursor: children.next_cursor,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.events.len(), 1);
+        assert_ne!(children.events[0].event_id, second.events[0].event_id);
+        let hidden_children = store
+            .query_access_log(
+                &session,
+                AccessLogQuery {
+                    request_id: Some(other_id),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            hidden_children
+                .events
+                .iter()
+                .all(|event| event.scopes == ["a"])
+        );
+        // Legacy rows remain available, without inventing request identities.
+        let legacy = store
+            .query_access_log(
+                &session,
+                AccessLogQuery {
+                    view: Some("uncorrelated".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(legacy.total_events, 3);
+        pcp_store::request_audit::background(store.record_access(
+            &session,
+            "maintenance",
+            &["a".into()],
+            &AccessDecision::Allowed,
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+        let background = store
+            .query_access_log(
+                &session,
+                AccessLogQuery {
+                    view: Some("background".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(background.total_events, 1);
+        assert!(
+            background.events[0]
+                .telemetry
+                .as_ref()
+                .unwrap()
+                .request
+                .is_none()
+        );
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
     #[tokio::test]
     async fn audit_query_filters_before_counts_and_projects_authorized_scopes() {
         let (store, path) = fixture().await;

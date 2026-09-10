@@ -5,6 +5,7 @@ import {
   REVIEW_DECISION,
   groupReviewTopics,
   partitionReviewSession,
+  partitionReviewQueues,
   reconcileReviewDecisions,
   restoreReviewDecisions,
   reviewDecisionCounts,
@@ -16,6 +17,19 @@ import {
 function review(candidateId, kind = "summary") {
   return { candidateId, payload: { kind, candidate: {} } };
 }
+
+test("automatic, budget, and accumulation waits never count as human decisions or disappear", () => {
+  const human = review("human");
+  const waiting = ["automatic", "waiting_budget", "waiting_accumulation", "paused", "stale"].map((state) => ({ ...review(state, "topic"), queue: { state } }));
+  const reviews = [human, ...waiting];
+  assert.deepEqual(partitionReviewQueues(reviews), { human: [human], background: waiting });
+  const decisions = new Map();
+  stageReviewDecision(decisions, waiting[2], REVIEW_DECISION.DEFER);
+  const session = partitionReviewSession(reviews, decisions);
+  assert.equal(session.staged.length, 1);
+  assert.equal(partitionReviewQueues(session.pending).background.length, 4);
+  assert.equal(reviews.length, 6);
+});
 
 test("review decisions remain reversible until the review session is committed", () => {
   const reviews = [review("summary-1"), review("relation-1", "relation")];

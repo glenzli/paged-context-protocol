@@ -70,6 +70,17 @@ export function partitionReviewSession(reviews, decisions) {
   return { pending, staged };
 }
 
+// Routing is supplied by Runtime from current evidence/configuration. The UI
+// never infers approval or silently discards an item to make the inbox smaller.
+export function partitionReviewQueues(reviews) {
+  const human = [], background = [];
+  for (const review of reviews) {
+    if (!review.queue || review.queue.state === "human") human.push(review);
+    else background.push(review);
+  }
+  return { human, background };
+}
+
 export function reviewDecisionCounts(decisions) {
   const counts = { accept: 0, reject: 0, defer: 0, suppress: 0, total: 0 };
   for (const staged of decisions.values()) {

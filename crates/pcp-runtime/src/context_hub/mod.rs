@@ -19,6 +19,8 @@ use std::{
     sync::Arc,
 };
 
+const MAX_ACTIVITY_TOPICS_PER_CLIENT: usize = 12;
+
 pub struct ContextHub {
     store: Arc<dyn PcpStore>,
     path: PathBuf,
@@ -174,7 +176,7 @@ impl ContextHub {
             .iter()
             .filter(|c| &c.client_id == client)
             .collect();
-        if own.len() >= 3 {
+        if own.len() >= MAX_ACTIVITY_TOPICS_PER_CLIENT {
             let oldest = own
                 .iter()
                 .min_by_key(|c| &c.updated_at)

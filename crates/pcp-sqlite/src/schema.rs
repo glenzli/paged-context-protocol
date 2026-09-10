@@ -409,6 +409,11 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 WHERE json_extract(facets_json, '$.standing') IS NOT NULL;
             CREATE INDEX IF NOT EXISTS pcp_access_log_time
                 ON pcp_access_log(occurred_at DESC, event_id DESC);
+            CREATE INDEX IF NOT EXISTS pcp_access_log_request
+                ON pcp_access_log(json_extract(telemetry_json, '$.request.id'), occurred_at DESC, event_id DESC);
+            CREATE INDEX IF NOT EXISTS pcp_access_log_request_roots
+                ON pcp_access_log(occurred_at DESC, event_id DESC)
+                WHERE json_extract(telemetry_json, '$.request.root') = 1;
             CREATE INDEX IF NOT EXISTS pcp_query_audit_time
                 ON pcp_query_audit(occurred_at DESC, event_id DESC);
             CREATE INDEX IF NOT EXISTS pcp_runtime_usage_time

@@ -13,6 +13,10 @@ pub(super) fn verification(verdict: VerificationVerdict) -> MaintenanceWorkerRes
             preserved_boundaries:
                 "Keeps attribution and the distinction between proposal and approval.".into(),
             concerns: vec![],
+            revision: None,
+            requires_user_input: false,
+            review_state: None,
+            review_steps: vec![],
         },
     }
 }
@@ -236,5 +240,468 @@ async fn refresh_preserves_all_existing_source_references() {
         candidate.refresh_target.unwrap().revision_id,
         "rev_existing_topic"
     );
+    f.close().await;
+}
+
+#[tokio::test]
+async fn verified_repair_changes_candidate_identity_and_applies_only_repaired_content() {
+    let f = Fixture::open("topic-verified-repair").await;
+    let pages = sources(&f).await;
+    let mut assessment = verification(VerificationVerdict::Approve);
+    let repaired = "The repaired retrieval entry preserves source provenance and distinguishes a proposed change from an approved decision. It explicitly retains the historical context and the user's authority over acceptance.";
+    if let MaintenanceWorkerResponse::VerifyMaintenance { assessment } = &mut assessment {
+        assessment.revision = Some(crate::maintenance::worker::VerifiedMaintenanceRevision {
+            title: "Repaired source provenance".into(),
+            content: repaired.into(),
+        });
+    }
+    let worker = Arc::new(FakeWorker::new(vec![proposal(&pages), assessment]));
+    let mut c = config(&f);
+    c.topic.minimum_pages = 2;
+    c.topic.minimum_total_chars = 1;
+    let mut m = RuntimeMaintainer::for_test(f.client.clone(), worker, c);
+    let original = m
+        .topic_from_response(&pages, &pages, &[], proposal(&pages))
+        .unwrap();
+    let report = m.run_convergence_once(1).await.unwrap();
+    assert_eq!(report.topics_written, 1);
+    let inventory = f.client.durable_page_inventory(vec![]).await.unwrap();
+    let topic = inventory
+        .iter()
+        .find(|p| p.kind == "topic_summary")
+        .unwrap();
+    let detail = m
+        .read_detail_pages(vec![topic.revision_id.clone()], 64000)
+        .await
+        .unwrap();
+    assert!(detail[0].content.as_ref().unwrap().contains(repaired));
+    assert!(m.ledger.review_item(&original.candidate_id).is_none());
+    f.close().await;
+}
+
+#[tokio::test]
+async fn late_topic_application_respects_persisted_human_rejection() {
+    let f = Fixture::open("topic-late-rejection").await;
+    let pages = sources(&f).await;
+    let mut m = RuntimeMaintainer::for_test(
+        f.client.clone(),
+        Arc::new(FakeWorker::new(vec![])),
+        config(&f),
+    );
+    let candidate = m
+        .topic_from_response(&pages, &pages, &[], proposal(&pages))
+        .unwrap();
+    m.ledger.enqueue_review(
+        MaintenanceReviewPayload::Topic(candidate.clone()),
+        MaintenanceReviewOrigin::Manual,
+        "review".into(),
+        1,
+        false,
+    );
+    m.ledger.save(&m.config.state_path).await.unwrap();
+    let mut other = RuntimeMaintainer::for_test(
+        f.client.clone(),
+        Arc::new(FakeWorker::new(vec![])),
+        config(&f),
+    );
+    other
+        .resolve_review(&candidate.candidate_id, MaintenanceReviewStatus::Rejected)
+        .await
+        .unwrap();
+    let result = m
+        .apply_topic_candidate(crate::maintenance::ApplyMaintenanceTopicRequest {
+            candidate_id: candidate.candidate_id,
+            title: candidate.title,
+            content: candidate.content,
+            pages: candidate
+                .pages
+                .into_iter()
+                .map(|p| pcp_core::PageRevisionRef {
+                    page_id: p.page_id,
+                    revision_id: p.revision_id,
+                })
+                .collect(),
+            refresh_target: None,
+        })
+        .await;
+    assert!(result.unwrap_err().to_string().contains("already decided"));
+    assert!(
+        !f.client
+            .durable_page_inventory(vec![])
+            .await
+            .unwrap()
+            .iter()
+            .any(|p| p.kind == "topic_summary")
+    );
+    f.close().await;
+}
+
+#[tokio::test]
+async fn budget_wait_resumes_exact_proposal_and_stale_sources_skip_inference() {
+    for stale in [false, true] {
+        let f = Fixture::open(&format!("budget-resume-{stale}")).await;
+        let pages = sources(&f).await;
+        let worker = Arc::new(FakeWorker::new(if stale {
+            vec![]
+        } else {
+            vec![verification(VerificationVerdict::Approve)]
+        }));
+        let mut c = config(&f);
+        c.topic.minimum_pages = 2;
+        c.topic.minimum_total_chars = 1;
+        c.worker=serde_json::from_value(serde_json::json!({"provider":"infer_runtime","credential_file":"/tmp/unused.token","actor_id":"model:test","review_budget":{"enabled":true}})).unwrap();
+        let mut m = RuntimeMaintainer::for_test(f.client.clone(), worker.clone(), c);
+        let mut candidate = m
+            .topic_from_response(&pages, &pages, &[], proposal(&pages))
+            .unwrap();
+        let MaintenanceWorkerResponse::VerifyMaintenance { mut assessment } =
+            verification(VerificationVerdict::NeedsReview)
+        else {
+            panic!()
+        };
+        assessment.review_state = Some("waiting_budget".into());
+        candidate.verification = Some(assessment);
+        if stale {
+            candidate.pages[0].revision_id = "changed-evidence".into();
+        }
+        let id = m.ledger.enqueue_review(
+            MaintenanceReviewPayload::Topic(candidate),
+            MaintenanceReviewOrigin::Automatic,
+            "budget wait".into(),
+            2,
+            true,
+        );
+        m.ledger.save(&m.config.state_path).await.unwrap();
+        let report = m.run_convergence_once(1).await.unwrap();
+        assert_eq!(worker.request_count(), usize::from(!stale));
+        assert_eq!(report.topics_written, u32::from(!stale));
+        assert!(
+            worker
+                .requests()
+                .iter()
+                .all(|r| matches!(r, MaintenanceWorkerRequest::VerifyMaintenance { .. }))
+        );
+        assert_eq!(
+            m.ledger.review_item(&id).unwrap().status,
+            if stale {
+                MaintenanceReviewStatus::Stale
+            } else {
+                MaintenanceReviewStatus::Accepted
+            }
+        );
+        f.close().await;
+    }
+}
+
+fn enable_review(c: &mut MaintenanceConfig) {
+    c.worker = serde_json::from_value(serde_json::json!({"provider":"infer_runtime","credential_file":"/tmp/unused.token","actor_id":"model:test","review_budget":{"enabled":true}})).unwrap();
+}
+
+fn approved() -> MaintenanceVerification {
+    let MaintenanceWorkerResponse::VerifyMaintenance { assessment } =
+        verification(VerificationVerdict::Approve)
+    else {
+        unreachable!()
+    };
+    assessment
+}
+
+#[tokio::test]
+async fn approved_small_topics_wait_without_human_backpressure_or_repeat_calls() {
+    let f = Fixture::open("approved-small-queue").await;
+    let pages = sources(&f).await;
+    let worker = Arc::new(FakeWorker::new(vec![]));
+    let mut c = config(&f);
+    enable_review(&mut c);
+    let mut m = RuntimeMaintainer::for_test(f.client.clone(), worker.clone(), c.clone());
+    let mut candidate = m
+        .topic_from_response(&pages, &pages, &[], proposal(&pages[..2]))
+        .unwrap();
+    candidate.verification = Some(approved());
+    let id = m.ledger.enqueue_review(
+        MaintenanceReviewPayload::Topic(candidate),
+        MaintenanceReviewOrigin::Automatic,
+        "approved".into(),
+        2,
+        false,
+    );
+    m.ledger.save(&c.state_path).await.unwrap();
+    let queue = m.routed_reviews(&c).await.unwrap();
+    let route = queue[0].queue.as_ref().unwrap();
+    assert_eq!(route.state, "waiting_accumulation");
+    assert_eq!(route.accumulation.as_ref().unwrap().source_pages, 2);
+    assert_eq!(m.ledger.topic_pending_count(), 0);
+    assert!(
+        !m.resume_budget_review(&pages, &mut MaintenanceCycleReport::default())
+            .await
+            .unwrap()
+    );
+    assert_eq!(worker.request_count(), 0);
+    assert_eq!(
+        m.ledger.review_item(&id).unwrap().status,
+        MaintenanceReviewStatus::Pending
+    );
+    f.close().await;
+}
+
+struct ResumeOnlyWorker(Mutex<u32>);
+#[async_trait]
+impl SemanticMaintenanceWorker for ResumeOnlyWorker {
+    async fn evaluate(&self, _: MaintenanceWorkerRequest) -> Result<MaintenanceWorkerResponse> {
+        anyhow::bail!("baseline must not be generated again")
+    }
+    async fn review_existing_with_usage(
+        &self,
+        request: MaintenanceWorkerRequest,
+        baseline: MaintenanceVerification,
+    ) -> Result<crate::maintenance::MaintenanceWorkerOutcome> {
+        assert!(matches!(
+            request,
+            MaintenanceWorkerRequest::VerifyMaintenance { .. }
+        ));
+        assert!(baseline.requires_user_input);
+        *self.0.lock().unwrap() += 1;
+        Ok(crate::maintenance::MaintenanceWorkerOutcome {
+            response: verification(VerificationVerdict::NoChange),
+            usage: None,
+            model_attempts: 1,
+            escalated: true,
+        })
+    }
+}
+
+#[tokio::test]
+async fn old_baseline_uncertainty_resumes_once_without_regenerating_it() {
+    let f = Fixture::open("resume-baseline-once").await;
+    let pages = sources(&f).await;
+    let worker = Arc::new(ResumeOnlyWorker(Mutex::new(0)));
+    let mut c = config(&f);
+    enable_review(&mut c);
+    let mut m = RuntimeMaintainer::for_test(f.client.clone(), worker.clone(), c.clone());
+    let mut candidate = m
+        .topic_from_response(&pages, &pages, &[], proposal(&pages))
+        .unwrap();
+    let mut v = approved();
+    v.verdict = VerificationVerdict::NeedsReview;
+    v.requires_user_input = true;
+    candidate.verification = Some(v);
+    let id = m.ledger.enqueue_review(
+        MaintenanceReviewPayload::Topic(candidate),
+        MaintenanceReviewOrigin::Automatic,
+        "choose duplicate target".into(),
+        2,
+        false,
+    );
+    m.ledger.save(&c.state_path).await.unwrap();
+    assert_eq!(
+        m.routed_reviews(&c).await.unwrap()[0]
+            .queue
+            .as_ref()
+            .unwrap()
+            .state,
+        "automatic"
+    );
+    let mut report = MaintenanceCycleReport::default();
+    assert!(m.resume_budget_review(&pages, &mut report).await.unwrap());
+    assert!(!m.resume_budget_review(&pages, &mut report).await.unwrap());
+    assert_eq!(*worker.0.lock().unwrap(), 1);
+    assert_eq!(
+        m.ledger.review_item(&id).unwrap().status,
+        MaintenanceReviewStatus::Rejected
+    );
+    assert_eq!(report.worker_calls, 1);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn competing_pending_titles_route_comparison_without_merging_sources() {
+    let f = Fixture::open("pending-topic-overlap").await;
+    let pages = sources(&f).await;
+    let mut c = config(&f);
+    enable_review(&mut c);
+    let mut m = RuntimeMaintainer::for_test(
+        f.client.clone(),
+        Arc::new(FakeWorker::new(vec![])),
+        c.clone(),
+    );
+    let mut ids = vec![];
+    for subset in [&pages[..2], &pages[2..]] {
+        let mut candidate = m
+            .topic_from_response(&pages, &pages, &[], proposal(subset))
+            .unwrap();
+        candidate.verification = Some(approved());
+        ids.push(m.ledger.enqueue_review(
+            MaintenanceReviewPayload::Topic(candidate),
+            MaintenanceReviewOrigin::Automatic,
+            "approved".into(),
+            2,
+            false,
+        ));
+    }
+    m.ledger.save(&c.state_path).await.unwrap();
+    assert!(m.refresh_maintenance_reviews().await.unwrap());
+    let routed = m.routed_reviews(&c).await.unwrap();
+    assert_eq!(routed.len(), 2);
+    assert_eq!(
+        routed
+            .iter()
+            .filter(|r| r.queue.as_ref().unwrap().state == "automatic")
+            .count(),
+        1
+    );
+    assert_eq!(
+        routed
+            .iter()
+            .filter(|r| r.queue.as_ref().unwrap().state == "waiting_accumulation")
+            .count(),
+        1
+    );
+    let feedback = m.ledger.pending_topic_feedback(
+        "PCP source provenance and review",
+        &pages[2..]
+            .iter()
+            .map(|p| p.revision_id.clone())
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(feedback.len(), 1);
+    assert!(feedback[0].content.is_some());
+    assert_eq!(feedback[0].source_page_ids.len(), 2);
+    assert!(!m.refresh_maintenance_reviews().await.unwrap());
+    assert!(
+        ids.iter()
+            .all(|id| m.ledger.review_item(id).unwrap().status == MaintenanceReviewStatus::Pending)
+    );
+    f.close().await;
+}
+
+#[tokio::test]
+async fn automatic_short_draft_waits_before_spending_on_verification() {
+    let f = Fixture::open("short-topic-no-verifier").await;
+    let pages = sources(&f).await;
+    let worker = Arc::new(FakeWorker::new(vec![proposal(&pages[..2])]));
+    let mut m = RuntimeMaintainer::for_test(f.client.clone(), worker.clone(), config(&f));
+    let mut report = MaintenanceCycleReport::default();
+    m.run_topic_review_job(&pages, &mut report, MaintenanceReviewOrigin::Automatic)
+        .await
+        .unwrap();
+    assert_eq!(worker.request_count(), 1);
+    assert_eq!(report.deferred, 1);
+    assert!(m.pending_reviews().is_empty());
+    f.close().await;
+}
+
+#[tokio::test]
+async fn queued_relation_resolves_existing_reverse_edge_without_duplicate() {
+    let fixture = Fixture::open("review-existing-reverse-edge").await;
+    let first = fixture
+        .client
+        .write_page(fixture.page("First durable context.", "reverse:1"))
+        .await
+        .unwrap();
+    let second = fixture
+        .client
+        .write_page(fixture.page("Second durable context.", "reverse:2"))
+        .await
+        .unwrap();
+    let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
+        page_ids: [first.page_id.clone(), second.page_id.clone()],
+        reason: "The sources share one stable subject.".into(),
+    }]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = true;
+    let mut maintainer = RuntimeMaintainer::for_test(fixture.client.clone(), worker, config);
+    maintainer.run_once().await.unwrap();
+    let pending = maintainer.pending_relation_reviews();
+    assert_eq!(pending.len(), 1);
+    let existing = fixture
+        .client
+        .link_pages(LinkPagesRequest {
+            from_page_id: second.page_id.clone(),
+            relation_type: "related_to".into(),
+            to_page_id: first.page_id.clone(),
+            basis_revision_ids: vec![first.revision_id, second.revision_id],
+            created_by: Actor {
+                actor_type: ActorType::Tool,
+                actor_id: "tool:concurrent-operator".into(),
+            },
+            idempotency_key: Some("external:reverse-edge".into()),
+        })
+        .await
+        .unwrap();
+    let resolved = maintainer
+        .approve_relation_review(&pending[0].candidate_id)
+        .await
+        .unwrap();
+    assert_eq!(resolved.relation_id, existing.relation_id);
+    assert!(maintainer.pending_relation_reviews().is_empty());
+    let pages = fixture
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![first.page_id],
+            revision_ids: vec![],
+            projections: vec![Projection::Manifest, Projection::Relations],
+            max_chars: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        pages[0]
+            .relations
+            .iter()
+            .filter(|r| r.relation_type == "related_to")
+            .count(),
+        1
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn scheduled_review_runs_without_new_writes_or_periodic_scan() {
+    let f = Fixture::open("scheduled-baseline-once").await;
+    let pages = sources(&f).await;
+    let worker = Arc::new(ResumeOnlyWorker(Mutex::new(0)));
+    let mut c = config(&f);
+    enable_review(&mut c);
+    c.periodic_review.enabled = false;
+    let mut m = RuntimeMaintainer::for_test(f.client.clone(), worker.clone(), c.clone());
+    let mut candidate = m
+        .topic_from_response(&pages, &pages, &[], proposal(&pages))
+        .unwrap();
+    let mut v = approved();
+    v.verdict = VerificationVerdict::NeedsReview;
+    v.requires_user_input = true;
+    candidate.verification = Some(v);
+    let id = m.ledger.enqueue_review(
+        MaintenanceReviewPayload::Topic(candidate),
+        MaintenanceReviewOrigin::Automatic,
+        "choose duplicate target".into(),
+        2,
+        false,
+    );
+    m.ledger.save(&c.state_path).await.unwrap();
+    assert_eq!(
+        m.routed_reviews(&c).await.unwrap()[0]
+            .queue
+            .as_ref()
+            .unwrap()
+            .state,
+        "automatic"
+    );
+    assert_eq!(m.review_wake_delay(21600).await.unwrap(), 30);
+    let report = m.run_scheduled_cycle().await.unwrap();
+    assert_eq!(report.jobs_advanced, 1);
+    assert_eq!(report.worker_calls, 1);
+    assert!(!report.periodic_review);
+    assert_eq!(m.review_wake_delay(21600).await.unwrap(), 21600);
+    let again = m.run_scheduled_cycle().await.unwrap();
+    assert_eq!(again.worker_calls, 0);
+    assert_eq!(*worker.0.lock().unwrap(), 1);
+    assert_eq!(
+        m.ledger.review_item(&id).unwrap().status,
+        MaintenanceReviewStatus::Rejected
+    );
+    assert_eq!(report.worker_calls, 1);
     f.close().await;
 }

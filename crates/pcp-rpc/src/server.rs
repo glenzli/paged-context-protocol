@@ -207,13 +207,23 @@ async fn handle_connection(
     verify_peer_user(&stream)?;
     while let Some(request) = read_frame::<RpcRequest>(&mut stream).await? {
         let id = request.id;
-        let outcome =
-            match dispatch(client.as_ref(), query_service.as_deref(), request.operation).await {
-                Ok(value) => RpcOutcome::Ok(Box::new(value)),
-                Err(error) => RpcOutcome::Error {
-                    message: format!("{error:#}"),
-                },
-            };
+        let operation_name = request.operation.audit_name().to_owned();
+        let (result, event) = pcp_client::request_audit::capture(
+            client.access(),
+            operation_name,
+            dispatch(client.as_ref(), query_service.as_deref(), request.operation),
+        )
+        .await;
+        // Audit failures must not turn an already-completed mutation into a retry.
+        if let Err(error) = client.record_runtime_request_audit(event).await {
+            eprintln!("PCP request audit failed: {error:#}");
+        }
+        let outcome = match result {
+            Ok(value) => RpcOutcome::Ok(Box::new(value)),
+            Err(error) => RpcOutcome::Error {
+                message: format!("{error:#}"),
+            },
+        };
         write_frame(&mut stream, &RpcResponse { id, outcome }).await?;
     }
     Ok(())

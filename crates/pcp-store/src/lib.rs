@@ -1,4 +1,5 @@
 mod health;
+pub mod request_audit;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -346,6 +347,12 @@ pub trait PcpStore: Send + Sync {
     /// Runtime-owned, content-free query observability. This is intentionally
     /// separate from tenant operations: the Runtime writes it after an actual
     /// provider query has completed.
+    async fn record_runtime_request_audit(
+        &self,
+        _event: request_audit::CompletedRequest,
+    ) -> Result<()> {
+        anyhow::bail!("runtime request audit is unavailable for this Store")
+    }
     async fn record_runtime_query_audit(&self, event: QueryAuditEvent) -> Result<()>;
     /// Content-free model usage emitted by Runtime query and maintenance
     /// workers. This must never contain prompts, Page content, or output text.

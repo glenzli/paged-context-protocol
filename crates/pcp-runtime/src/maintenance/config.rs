@@ -91,14 +91,16 @@ pub enum MaintenanceWorkerConfig {
         reasoning_deployment_id: String,
         #[serde(default)]
         relation_deployment_id: Option<String>,
-        /// Optional higher-capability deployment used only after the baseline
-        /// worker explicitly defers an eligible semantic decision.
+        /// Legacy deployment field accepted for configuration compatibility.
+        /// Upgrades now require review_budget.enabled and use its deployments.
         #[serde(default)]
         escalation_deployment_id: Option<String>,
         /// Operation names eligible for one bounded escalation attempt. Keep
         /// Summary and retention work on the inexpensive baseline by default.
         #[serde(default = "default_infer_escalation_operations")]
         escalation_operations: Vec<String>,
+        #[serde(default)]
+        review_budget: super::review_budget::ReviewBudgetConfig,
         actor_id: String,
         #[serde(default = "default_worker_actor_type")]
         actor_type: String,
@@ -158,6 +160,7 @@ impl MaintenanceWorkerConfig {
                 relation_deployment_id,
                 escalation_deployment_id,
                 escalation_operations,
+                review_budget,
                 ..
             } => {
                 anyhow::ensure!(
@@ -184,6 +187,7 @@ impl MaintenanceWorkerConfig {
                         .is_none_or(|deployment_id| !deployment_id.trim().is_empty()),
                     "PCP Infer Runtime escalation_deployment_id must not be empty"
                 );
+                review_budget.validate()?;
                 const SUPPORTED_ESCALATION_OPERATIONS: &[&str] = &[
                     "select_packing",
                     "analyze_packing",
@@ -571,6 +575,15 @@ impl MaintenanceConfig {
             self.state_path = base.join(&self.state_path);
         }
         self.worker.resolve_paths(base);
+        if let MaintenanceWorkerConfig::InferRuntime { review_budget, .. } = &mut self.worker {
+            if review_budget.state_path.as_os_str().is_empty() {
+                review_budget.state_path = self
+                    .state_path
+                    .with_file_name("maintenance-review-budget.json");
+            } else if review_budget.state_path.is_relative() {
+                review_budget.state_path = base.join(&review_budget.state_path);
+            }
+        }
     }
 
     pub(crate) fn query_scopes(&self, identity_id: &str) -> Vec<String> {

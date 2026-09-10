@@ -478,7 +478,7 @@ fn operation_events(
             SELECT occurred_at, principal_json, operation, scopes_json,
                    decision, telemetry_json
             FROM pcp_access_log
-            WHERE occurred_at >= ?1
+            WHERE occurred_at >= ?1 AND COALESCE(json_extract(telemetry_json, '$.request.root'), 0) = 0
             ORDER BY occurred_at, event_id
             ",
         )

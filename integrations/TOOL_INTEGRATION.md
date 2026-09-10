@@ -101,7 +101,7 @@ catalog for a server process:
 The bundled Codex and ChatGPT launchers select `context`; without the Runtime inbox extension it
 contracts to the same five tools as `core`. `standard` preserves the former ordinary catalog for
 integrations that explicitly need it. Backend permissions still apply to every call, and ordinary
-capture/feedback approval policy belongs to the host (the Codex plugin prompts for both). Do not
+capture/feedback approval policy belongs to the host; check both write actions in the shared ChatGPT connection settings. Do not
 treat discovery or a hidden tool as an authorization boundary.
 
 When exposed by `context`, `standard` or `maintenance`, `pcp_describe.capabilities` is the provider-backend
@@ -119,7 +119,7 @@ When Runtime advertises `runtime_context_inbox`, the `context`, `standard`, and 
 toolsets can expose three optional candidate/activity tools. They use a separate, bounded
 operational store and per-client opt-in. See [Runtime context](RUNTIME_CONTEXT.md) for API,
 permissions, retries and snapshot reads. They must not fall back to formal capture when disabled,
-and activity writes are never mandatory. This Runtime-local inbox is unrelated to Revision payload
+and they create no per-turn write quota. Activity should be read when starting or resuming substantive topics and updated when useful topic state changes, including milestones and completion. This Runtime-local inbox is unrelated to Revision payload
 retention plans and leases.
 
 Recommended model flow:

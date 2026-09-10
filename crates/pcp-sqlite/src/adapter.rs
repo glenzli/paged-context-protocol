@@ -1937,7 +1937,12 @@ impl PcpStore for SqlitePcpStore {
         query: pcp_core::AccessLogQuery,
     ) -> Result<pcp_core::AccessLogResult> {
         let scopes = authorize_scopes(self, access, &[AccessPermission::Audit], &[]).await?;
-        self.query_access_audit(scopes, query).await
+        self.query_access_audit(
+            scopes,
+            query,
+            access.has_store_permissions(&[AccessPermission::Audit]),
+        )
+        .await
     }
 
     async fn access_log(
@@ -1952,6 +1957,21 @@ impl PcpStore for SqlitePcpStore {
 
     async fn record_runtime_query_audit(&self, event: QueryAuditEvent) -> Result<()> {
         SqlitePcpStore::record_runtime_query_audit(self, event).await
+    }
+
+    async fn record_runtime_request_audit(
+        &self,
+        event: pcp_store::request_audit::CompletedRequest,
+    ) -> Result<()> {
+        self.record_access(
+            &event.access,
+            &event.operation,
+            &event.scopes,
+            &event.decision,
+            event.detail.as_deref(),
+            Some(&event.telemetry),
+        )
+        .await
     }
 
     async fn record_runtime_usage(&self, event: RuntimeUsageEvent) -> Result<()> {
@@ -2186,6 +2206,8 @@ impl OperationObservation {
     fn finish<T: Serialize>(&self, result: Option<&T>) -> OperationTelemetry {
         let output = result.and_then(|value| serde_json::to_value(value).ok());
         OperationTelemetry {
+            request: None,
+            origin: None,
             duration_ms: self
                 .started
                 .elapsed()

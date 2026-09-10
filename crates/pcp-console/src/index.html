@@ -212,6 +212,7 @@
         </div>
         <div id="maintenance-review-progress" class="maintenance-review-progress" hidden></div>
         <div id="maintenance-relation-review-cards" class="maintenance-relation-review-cards"></div>
+        <details id="maintenance-review-background" class="maintenance-review-topic-group" hidden></details>
         <div id="maintenance-review-settled" class="maintenance-review-settled" aria-live="polite"></div>
         <footer id="maintenance-review-session-actions" class="maintenance-review-session-actions" hidden>
           <span id="maintenance-review-session-summary" class="muted" data-i18n="No decision has been written yet.">No decision has been written yet.</span>
@@ -494,6 +495,12 @@
           <option value="168" data-i18n="Last 7 days">Last 7 days</option>
           <option value="720" data-i18n="Last 30 days">Last 30 days</option>
         </select>
+        <select id="access-view" aria-label="Audit view" data-i18n-aria-label="Audit view">
+          <option value="requests" data-i18n="API requests">API requests</option>
+          <option value="operations" data-i18n="Internal operations">Internal operations</option>
+          <option value="background" data-i18n="Background operations">Background operations</option>
+          <option value="uncorrelated" data-i18n="Uncorrelated operations">Uncorrelated operations</option>
+        </select>
         <input id="access-operation" type="search" aria-label="Operation" data-i18n-aria-label="Operation" placeholder="Exact operation name" data-i18n-placeholder="Exact operation name">
         <button class="compact-button secondary-button" type="submit" data-i18n="Filter">Filter</button>
         <label><input id="access-health" type="checkbox"><span data-i18n="Show health checks">Show health checks</span></label>
@@ -666,6 +673,22 @@
               <label><span data-i18n="Quiet period (minutes)">Quiet period (minutes)</span><input id="maintenance-settings-quiet" type="number" min="1" required></label>
               <label><span data-i18n="Maximum wait (minutes)">Maximum wait (minutes)</span><input id="maintenance-settings-max-wait" type="number" min="1" required></label>
             </div>
+            <fieldset id="review-budget-settings">
+              <legend data-i18n="Upgraded review">Upgraded review</legend>
+              <label><input id="review-budget-enabled" type="checkbox"><span data-i18n="Enable upgraded review">Enable upgraded review</span></label>
+              <label><input id="review-budget-astra-enabled" type="checkbox"><span data-i18n="Enable Astra Low">Enable Astra Low</span></label>
+              <p class="muted" data-i18n="Rolling 24 hours. Saving or restarting preserves usage.">Rolling 24 hours. Saving or restarting preserves usage.</p>
+              <div class="maintenance-settings-grid">
+                <label><span data-i18n="Sol deployment">Sol deployment</span><input id="review-budget-sol-deployment" required></label>
+                <label><span data-i18n="Sol calls">Sol calls</span><input id="review-budget-sol-calls" type="number" min="1" value="300" required></label>
+                <label><span data-i18n="Sol total tokens">Sol total tokens</span><input id="review-budget-sol-tokens" type="number" min="1" value="6000000" required></label>
+                <label><span data-i18n="Astra deployment">Astra deployment</span><input id="review-budget-astra-deployment" required></label>
+                <label><span data-i18n="Astra calls">Astra calls</span><input id="review-budget-astra-calls" type="number" min="1" value="10" required></label>
+                <label><span data-i18n="Astra tokens (optional)">Astra tokens (optional)</span><input id="review-budget-astra-tokens" type="number" min="1"></label>
+              </div>
+              <p class="muted" data-i18n="The budget gates new calls using actual usage and reservations. Started calls finish normally; the final call may exceed the token threshold.">The budget gates new calls using actual usage and reservations. Started calls finish normally; the final call may exceed the token threshold.</p>
+              <div id="review-budget-status" aria-live="polite"></div>
+            </fieldset>
             <button id="maintenance-settings-save" class="primary-button semantic-button" type="submit" data-icon="restart"><span data-i18n="Save and restart Runtime">Save and restart Runtime</span></button>
           </form>
         </section>

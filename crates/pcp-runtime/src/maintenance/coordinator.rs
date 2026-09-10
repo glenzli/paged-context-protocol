@@ -459,6 +459,8 @@ pub struct MaintenanceRelationCandidate {
     pub pages: [MaintenanceRelationInput; 2],
     #[serde(default)]
     pub relation_reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<super::MaintenanceVerification>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -663,10 +665,25 @@ impl RuntimeMaintainer {
         &self,
         request: MaintenanceWorkerRequest,
     ) -> Result<MaintenanceWorkerOutcome> {
+        self.evaluate_review_worker(request, None).await
+    }
+
+    async fn evaluate_review_worker(
+        &self,
+        request: MaintenanceWorkerRequest,
+        baseline: Option<super::MaintenanceVerification>,
+    ) -> Result<MaintenanceWorkerOutcome> {
         let operation = worker_operation(&request).to_owned();
         let scopes = worker_scopes(&request, self.client.access());
         let started = Instant::now();
-        let outcome = self.worker.evaluate_with_usage(request).await;
+        let outcome = match baseline {
+            Some(baseline) => {
+                self.worker
+                    .review_existing_with_usage(request, baseline)
+                    .await
+            }
+            None => self.worker.evaluate_with_usage(request).await,
+        };
         let duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         let (usage, failure_kind) = match &outcome {
             Ok(outcome) => (outcome.usage.clone(), None),
@@ -728,16 +745,33 @@ impl RuntimeMaintainer {
         outcome
     }
 
-    pub async fn run_forever(mut self) -> Result<()> {
-        let mut wake_reason = if self.config.initial_delay_seconds > 0 {
-            self.ledger
-                .schedule_initial_wake(self.config.initial_delay_seconds);
-            self.ledger.save(&self.config.state_path).await?;
-            self.wait_for_wakeup(
-                self.config.initial_delay_seconds,
-                MaintenanceWakeReason::Startup,
+    // Pending review is work in its own right, independent of new Page writes.
+    pub(super) async fn review_wake_delay(&self, normal_delay: u64) -> Result<u64> {
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        let pending = self.pending_reviews().iter().any(|item| {
+            matches!(
+                super::review::review_queue(item, &self.config, &inventory)
+                    .state
+                    .as_str(),
+                "automatic" | "waiting_budget" | "stale"
             )
-            .await
+        });
+        Ok(if pending {
+            normal_delay.min(30)
+        } else {
+            normal_delay
+        })
+    }
+
+    pub async fn run_forever(mut self) -> Result<()> {
+        let initial_delay = self
+            .review_wake_delay(self.config.initial_delay_seconds)
+            .await?;
+        let mut wake_reason = if initial_delay > 0 {
+            self.ledger.schedule_initial_wake(initial_delay);
+            self.ledger.save(&self.config.state_path).await?;
+            self.wait_for_wakeup(initial_delay, MaintenanceWakeReason::Startup)
+                .await
         } else {
             MaintenanceWakeReason::Startup
         };
@@ -778,6 +812,8 @@ impl RuntimeMaintainer {
                         && jobs_advanced >= self.config.max_jobs_per_cycle)
                         || (jobs_advanced > 0 && self.ledger.has_dirty_regions());
                     let delay = self.ledger.schedule_after_success(&self.config, &report);
+                    let delay = self.review_wake_delay(delay).await.unwrap_or(delay);
+                    self.ledger.schedule_initial_wake(delay);
                     let timer_reason = if active_retry {
                         MaintenanceWakeReason::ActiveRetry
                     } else {
@@ -873,6 +909,21 @@ impl RuntimeMaintainer {
         };
         self.ledger.update_scheduled_cycle(aggregate.clone());
         self.ledger.save(&self.config.state_path).await?;
+        // Scheduled cycles save their aggregate ledger externally, so the inner
+        // cycle's persist_ledger flag is false. Drain reviews explicitly here
+        // before the new-write / periodic-discovery gate.
+        if self.refresh_maintenance_reviews().await? {
+            aggregate.jobs_advanced += 1;
+        }
+        while aggregate.jobs_advanced < self.config.max_jobs_per_cycle {
+            let current = self.client.durable_page_inventory(Vec::new()).await?;
+            if !self.resume_budget_review(&current, &mut aggregate).await? {
+                break;
+            }
+            aggregate.jobs_advanced += 1;
+            self.ledger.update_scheduled_cycle(aggregate.clone());
+            self.ledger.save(&self.config.state_path).await?;
+        }
         let regions = self.ledger.ready_regions(&self.config.write_trigger);
         let periodic_review = self.ledger.periodic_review_due(&self.config);
         if regions.is_empty() && !periodic_review {
@@ -1073,6 +1124,29 @@ impl RuntimeMaintainer {
         reviews
     }
 
+    pub async fn routed_reviews(
+        &self,
+        config: &MaintenanceConfig,
+    ) -> Result<Vec<MaintenanceReviewItem>> {
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        let mut reviews = self.pending_reviews();
+        for item in &mut reviews {
+            item.queue = Some(super::review::review_queue(item, config, &inventory));
+            item.escalated |= match &item.payload {
+                MaintenanceReviewPayload::Topic(c) => c
+                    .verification
+                    .as_ref()
+                    .is_some_and(|v| !v.review_steps.is_empty()),
+                MaintenanceReviewPayload::Relation(c) => c
+                    .verification
+                    .as_ref()
+                    .is_some_and(|v| !v.review_steps.is_empty()),
+                _ => false,
+            };
+        }
+        Ok(reviews)
+    }
+
     pub fn review_item(&self, candidate_id: &str) -> Option<MaintenanceReviewItem> {
         self.ledger.review_item(candidate_id).or_else(|| {
             self.ledger
@@ -1083,6 +1157,8 @@ impl RuntimeMaintainer {
     }
 
     pub async fn record_review_reason(&mut self, candidate_id: &str, reason: String) -> Result<()> {
+        let _decision = MaintenanceLedger::decision_lock(&self.config.state_path).await?;
+        self.ledger = MaintenanceLedger::load(&self.config.state_path).await?;
         self.ledger.set_review_reason(candidate_id, reason)?;
         self.ledger.save(&self.config.state_path).await
     }
@@ -1092,6 +1168,18 @@ impl RuntimeMaintainer {
         candidate_id: &str,
         status: MaintenanceReviewStatus,
     ) -> Result<()> {
+        let _decision = MaintenanceLedger::decision_lock(&self.config.state_path).await?;
+        let fresh = MaintenanceLedger::load(&self.config.state_path).await?;
+        if let Some(item) = fresh.review_item(candidate_id) {
+            if item.status == MaintenanceReviewStatus::Accepted && status == item.status {
+                return Ok(());
+            }
+            anyhow::ensure!(
+                item.status == MaintenanceReviewStatus::Pending,
+                "review is no longer pending"
+            );
+            self.ledger = fresh;
+        }
         if status == MaintenanceReviewStatus::Deferred {
             self.ledger
                 .snooze_review(candidate_id, REVIEW_SNOOZE_SECONDS)?;
@@ -1111,6 +1199,11 @@ impl RuntimeMaintainer {
             self.config.applies_changes(),
             "PCP relation review approval requires apply mode"
         );
+        let _decision = MaintenanceLedger::decision_lock(&self.config.state_path).await?;
+        let fresh = MaintenanceLedger::load(&self.config.state_path).await?;
+        if fresh.relation_review(candidate_id).is_some() {
+            self.ledger = fresh;
+        }
         let proposal = self
             .ledger
             .relation_review(candidate_id)
@@ -1137,10 +1230,12 @@ impl RuntimeMaintainer {
             proposal.pages[0].page_id.clone(),
             proposal.pages[1].page_id.clone(),
         ];
-        anyhow::ensure!(
-            !self.related_pair_exists(&page_ids, &revision_ids).await?,
-            "PCP relation review candidate is already explicitly related"
-        );
+        if let Some(relation) = self.existing_related_pair(&page_ids, &revision_ids).await? {
+            self.ledger
+                .resolve_relation_review(candidate_id, MaintenanceRelationReviewStatus::Accepted)?;
+            self.ledger.save(&self.config.state_path).await?;
+            return Ok(relation);
+        }
         let relation = self
             .client
             .link_pages(LinkPagesRequest {
@@ -1220,6 +1315,11 @@ impl RuntimeMaintainer {
         candidate_id: &str,
         suppress: bool,
     ) -> Result<()> {
+        let _decision = MaintenanceLedger::decision_lock(&self.config.state_path).await?;
+        let fresh = MaintenanceLedger::load(&self.config.state_path).await?;
+        if fresh.relation_review(candidate_id).is_some() {
+            self.ledger = fresh;
+        }
         let status = if suppress {
             MaintenanceRelationReviewStatus::Suppressed
         } else {
@@ -1770,6 +1870,8 @@ impl RuntimeMaintainer {
             self.config.mode == MaintenanceMode::Apply,
             "maintenance relation optimization requires apply mode"
         );
+        let _decision = MaintenanceLedger::decision_lock(&self.config.state_path).await?;
+        let fresh = MaintenanceLedger::load(&self.config.state_path).await?;
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
         let current_by_id = inventory
             .iter()
@@ -1803,8 +1905,7 @@ impl RuntimeMaintainer {
         );
         let page_ids = [selected[0].page_id.clone(), selected[1].page_id.clone()];
         anyhow::ensure!(
-            !self
-                .ledger
+            !fresh
                 .suppressed_relation_pairs()
                 .into_iter()
                 .any(|pair| pair == page_ids),
@@ -1815,9 +1916,7 @@ impl RuntimeMaintainer {
             selected[1].revision_id.clone(),
         ];
         anyhow::ensure!(
-            !self
-                .ledger
-                .relation_pair_is_rejected(&page_ids, &revision_ids),
+            !fresh.relation_pair_is_rejected(&page_ids, &revision_ids),
             "maintenance relation candidate was rejected for the reviewed revisions"
         );
         if self.related_pair_exists(&page_ids, &revision_ids).await? {
@@ -1862,6 +1961,8 @@ impl RuntimeMaintainer {
         request: ApplyMaintenanceRelationRequest,
         status: MaintenanceRelationReviewStatus,
     ) -> Result<()> {
+        let _decision = MaintenanceLedger::decision_lock(&self.config.state_path).await?;
+        self.ledger.save(&self.config.state_path).await?;
         anyhow::ensure!(
             matches!(
                 status,
@@ -2016,12 +2117,14 @@ impl RuntimeMaintainer {
                 candidate.content.clone(),
                 existing_topics,
                 candidate.refresh_target.as_ref().map(|t| t.page_id.clone()),
+                None,
                 &mut MaintenanceCycleReport::default(),
             )
             .await?;
         if matches!(assessment.verdict, super::VerificationVerdict::NoChange) {
             return Ok(MaintenanceTopicAnalysis::no_candidate());
         }
+        apply_verified_topic_revision(&mut candidate, &assessment, &inventory)?;
         candidate.verification = Some(assessment);
         Ok(MaintenanceTopicAnalysis::candidate(candidate))
     }
@@ -2068,6 +2171,22 @@ impl RuntimeMaintainer {
             self.config.mode == MaintenanceMode::Apply,
             "maintenance Topic extraction requires apply mode"
         );
+        let _decision = MaintenanceLedger::decision_lock(&self.config.state_path).await?;
+        let mut fresh = MaintenanceLedger::load(&self.config.state_path).await?;
+        let queued = fresh.review_item(&request.candidate_id);
+        if let Some(item) = &queued {
+            anyhow::ensure!(
+                item.status == MaintenanceReviewStatus::Pending,
+                "review was already decided"
+            );
+            let MaintenanceReviewPayload::Topic(candidate) = &item.payload else {
+                anyhow::bail!("review is not a Topic");
+            };
+            anyhow::ensure!(
+                candidate.title == request.title && candidate.content == request.content,
+                "review content changed before application"
+            );
+        }
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
         anyhow::ensure!(
             (2..=64).contains(&request.pages.len()),
@@ -2108,7 +2227,28 @@ impl RuntimeMaintainer {
             candidate.candidate_id == request.candidate_id,
             "maintenance Topic candidate identity no longer matches the reviewed Pages"
         );
-        self.client
+        anyhow::ensure!(
+            !fresh.topic_evidence_decided(&candidate),
+            "this Topic evidence already has a human or completed decision"
+        );
+        anyhow::ensure!(
+            queued.is_some() || !fresh.topic_evidence_reviewed(&candidate),
+            "this Topic evidence already has a pending review"
+        );
+        // Manual analyze/apply uses the same durable evidence boundary as
+        // scheduled synthesis; another wording cannot create a parallel Page.
+        if queued.is_none() {
+            fresh.enqueue_review(
+                MaintenanceReviewPayload::Topic(candidate.clone()),
+                MaintenanceReviewOrigin::Manual,
+                "Explicit operator application".into(),
+                1,
+                false,
+            );
+            fresh.save(&self.config.state_path).await?;
+        }
+        let result = self
+            .client
             .extract_topic(ExtractTopicRequest {
                 target_namespace: Some(candidate.namespace.clone()),
                 target_topic: candidate
@@ -2126,7 +2266,10 @@ impl RuntimeMaintainer {
                 provenance: Vec::new(),
                 idempotency_key: Some(format!("maintenance:topic:{}", candidate.candidate_id)),
             })
-            .await
+            .await?;
+        fresh.resolve_review(&request.candidate_id, MaintenanceReviewStatus::Accepted)?;
+        fresh.save(&self.config.state_path).await?;
+        Ok(result)
     }
 
     pub async fn run_once_with_job_limit(
@@ -2172,17 +2315,51 @@ impl RuntimeMaintainer {
         scheduled: bool,
         include_governance: bool,
     ) -> Result<MaintenanceCycleReport> {
+        pcp_store::request_audit::background(self.run_cycle(
+            persist_ledger,
+            max_jobs,
+            regions,
+            scheduled,
+            include_governance,
+        ))
+        .await
+    }
+
+    async fn run_cycle(
+        &mut self,
+        persist_ledger: bool,
+        max_jobs: u32,
+        regions: Option<&BTreeSet<String>>,
+        scheduled: bool,
+        include_governance: bool,
+    ) -> Result<MaintenanceCycleReport> {
+        let reconciled = persist_ledger && self.refresh_maintenance_reviews().await?;
         let mut inventory = self.scoped_inventory(regions).await?;
         let mut report = MaintenanceCycleReport {
             inspected_pages: inventory.len(),
+            jobs_advanced: u32::from(reconciled),
             ..MaintenanceCycleReport::default()
         };
-        let mut jobs_remaining = max_jobs;
+        let mut jobs_remaining = max_jobs.saturating_sub(u32::from(reconciled));
         let review_origin = if scheduled {
             MaintenanceReviewOrigin::Automatic
         } else {
             MaintenanceReviewOrigin::Manual
         };
+
+        if persist_ledger
+            && jobs_remaining > 0
+            && self
+                .resume_budget_review(
+                    &self.client.durable_page_inventory(Vec::new()).await?,
+                    &mut report,
+                )
+                .await?
+        {
+            report.jobs_advanced += 1;
+            jobs_remaining -= 1;
+            inventory = self.scoped_inventory(regions).await?;
+        }
 
         // Feedback reconciliation requires Assess permission, which an observe
         // session deliberately lacks. Keep observation read-only and continue
@@ -2821,6 +2998,8 @@ impl RuntimeMaintainer {
             })
             .collect::<Vec<_>>();
         let mut verified = false;
+        let mut relation_verification = None;
+        let calls_before_verification = report.worker_calls;
         if self.config.applies_changes()
             && self.config.relation.auto_apply_verified
             && !is_low_risk_automatic_relation(&selected_pages)
@@ -2833,12 +3012,17 @@ impl RuntimeMaintainer {
                     relation_reason.clone(),
                     Vec::new(),
                     None,
+                    None,
                     report,
                 )
                 .await
             {
                 Ok(assessment) => {
-                    relation_reason = format!("{}\n\n{}", relation_reason, assessment.reason);
+                    if matches!(assessment.verdict, super::VerificationVerdict::Approve) {
+                        if let Some(revision) = &assessment.revision {
+                            relation_reason = revision.content.clone();
+                        }
+                    }
                     verified = matches!(assessment.verdict, super::VerificationVerdict::Approve);
                     if matches!(assessment.verdict, super::VerificationVerdict::NoChange) {
                         let pages = selected_pages
@@ -2861,6 +3045,7 @@ impl RuntimeMaintainer {
                         );
                         return Ok(true);
                     }
+                    relation_verification = Some(assessment);
                 }
                 Err(error) => {
                     self.ledger.isolate_job(
@@ -2894,16 +3079,49 @@ impl RuntimeMaintainer {
                     }
                 })
                 .collect::<Vec<_>>();
-            self.ledger.propose_relation_review(
+            let review_id = self.ledger.propose_relation_review(
                 candidates[0].namespace.clone(),
                 [selected[0].clone(), selected[1].clone()],
                 relation_reason,
-                model_attempts,
-                escalated,
+                model_attempts + report.worker_calls - calls_before_verification,
+                escalated
+                    || relation_verification
+                        .as_ref()
+                        .is_some_and(|v| !v.review_steps.is_empty()),
             );
+            self.ledger
+                .set_relation_verification(&review_id, relation_verification)?;
             report.relations_proposed += 1;
             report.review_items_proposed += 1;
         } else if self.config.applies_changes() {
+            // Automatic and manual commits share this lock. A proposal made
+            // before another operator's decision must not create a second edge
+            // or override that operator's rejection/suppression.
+            let _decision = MaintenanceLedger::decision_lock(&self.config.state_path).await?;
+            let fresh = MaintenanceLedger::load(&self.config.state_path).await?;
+            let revisions = [revision_ids[0].clone(), revision_ids[1].clone()];
+            if fresh.suppressed_relation_pairs().contains(&page_ids)
+                || fresh.relation_pair_is_rejected(&page_ids, &revisions)
+                || self.related_pair_exists(&page_ids, &revision_ids).await?
+            {
+                self.ledger.record(
+                    pair_key,
+                    "relation_already_decided",
+                    self.config.relation.retry_after_seconds,
+                );
+                self.ledger.record(
+                    window_key,
+                    "relation_already_decided",
+                    self.config.relation.retry_after_seconds,
+                );
+                return Ok(true);
+            }
+            for (id, revision) in page_ids.iter().zip(&revision_ids) {
+                anyhow::ensure!(
+                    self.client.current_revision_id(id.clone()).await? == *revision,
+                    "relation evidence changed before application"
+                );
+            }
             self.client
                 .link_pages(LinkPagesRequest {
                     from_page_id: page_ids[0].clone(),
@@ -3005,6 +3223,7 @@ impl RuntimeMaintainer {
         content: String,
         mut existing_topics: Vec<ExistingTopicPage>,
         refresh_topic_page_id: Option<String>,
+        baseline: Option<super::MaintenanceVerification>,
         report: &mut MaintenanceCycleReport,
     ) -> Result<super::MaintenanceVerification> {
         let pages = self.read_detail_pages(revisions.clone(), 64_000).await?;
@@ -3029,6 +3248,10 @@ impl RuntimeMaintainer {
                 added_information: String::new(),
                 preserved_boundaries: String::new(),
                 concerns: vec!["Incomplete full-source review".to_owned()],
+                revision: None,
+                requires_user_input: true,
+                review_state: Some("missing_evidence".into()),
+                review_steps: vec![],
             });
         }
         let topic_revisions = existing_topics
@@ -3055,15 +3278,24 @@ impl RuntimeMaintainer {
                 topic.routing_text = full.clone();
             }
         }
+        let review_feedback = if kind == "topic" {
+            self.ledger.pending_topic_feedback(&title, &revisions)
+        } else {
+            Vec::new()
+        };
         let outcome = self
-            .evaluate_worker(MaintenanceWorkerRequest::VerifyMaintenance {
-                kind: kind.to_owned(),
-                pages,
-                title,
-                content,
-                existing_topics,
-                refresh_topic_page_id,
-            })
+            .evaluate_review_worker(
+                MaintenanceWorkerRequest::VerifyMaintenance {
+                    kind: kind.to_owned(),
+                    pages,
+                    title,
+                    content,
+                    existing_topics,
+                    review_feedback,
+                    refresh_topic_page_id,
+                },
+                baseline,
+            )
             .await?;
         report.worker_calls += outcome.model_attempts;
         report.escalated_decisions += u32::from(outcome.escalated);
@@ -3091,6 +3323,336 @@ impl RuntimeMaintainer {
             assessment.verdict = super::VerificationVerdict::NeedsReview;
         }
         Ok(assessment)
+    }
+
+    /// Cheap reconciliation never calls a model. Old revisions and edges that
+    /// already exist cannot keep occupying the pending queue after a restart.
+    pub(super) async fn refresh_maintenance_reviews(&mut self) -> Result<bool> {
+        let _decision = MaintenanceLedger::decision_lock(&self.config.state_path).await?;
+        self.ledger.save(&self.config.state_path).await?;
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        let mut reviews = self.ledger.review_items();
+        reviews.sort_by(|a, b| {
+            a.proposed_at
+                .cmp(&b.proposed_at)
+                .then_with(|| a.candidate_id.cmp(&b.candidate_id))
+        });
+        let mut retained_topics = Vec::<super::MaintenanceTopicCandidate>::new();
+        let mut changed = false;
+        for item in reviews {
+            let MaintenanceReviewPayload::Topic(c) = &item.payload else {
+                continue;
+            };
+            let stale =
+                super::review::review_queue(&item, &self.config, &inventory).state == "stale";
+            let duplicate = retained_topics
+                .iter()
+                .any(|old| super::topic_policy::same_evidence(old, c));
+            if stale || duplicate {
+                self.ledger
+                    .resolve_review(&item.candidate_id, MaintenanceReviewStatus::Stale)?;
+                self.ledger.set_review_reason(&item.candidate_id, if stale {
+                    "Source or target revisions changed; retire this obsolete proposal."
+                } else {
+                    "An earlier pending proposal already reviews this exact evidence and target."
+                }.into())?;
+                changed = true;
+            } else {
+                if let Some(earlier) = retained_topics.iter().find(|old| {
+                    old.namespace == c.namespace
+                        && super::topic_policy::related_titles(&old.title, &c.title)
+                }) {
+                    changed |= self
+                        .ledger
+                        .flag_topic_overlap(&item.candidate_id, &earlier.candidate_id);
+                }
+                retained_topics.push(c.clone());
+            }
+        }
+        for proposal in self.ledger.relation_reviews() {
+            let current = proposal.pages.iter().all(|source| {
+                inventory.iter().any(|p| {
+                    p.page_id == source.page_id
+                        && p.revision_id == source.revision_id
+                        && !p.superseded
+                })
+            });
+            let status = if !current {
+                Some(MaintenanceRelationReviewStatus::Stale)
+            } else {
+                let pair = [
+                    proposal.pages[0].page_id.clone(),
+                    proposal.pages[1].page_id.clone(),
+                ];
+                let revisions = proposal
+                    .pages
+                    .iter()
+                    .map(|p| p.revision_id.clone())
+                    .collect::<Vec<_>>();
+                self.related_pair_exists(&pair, &revisions)
+                    .await?
+                    .then_some(MaintenanceRelationReviewStatus::Accepted)
+            };
+            if let Some(status) = status {
+                self.ledger
+                    .resolve_relation_review(&proposal.candidate_id, status)?;
+                changed = true;
+            }
+        }
+        if changed {
+            self.ledger.save(&self.config.state_path).await?;
+        }
+        Ok(changed)
+    }
+
+    pub(super) async fn resume_budget_review(
+        &mut self,
+        inventory: &[pcp_store::DurablePageInventoryItem],
+        report: &mut MaintenanceCycleReport,
+    ) -> Result<bool> {
+        let Some(item) = self
+            .ledger
+            .review_items()
+            .into_iter()
+            .filter(|item| {
+                matches!(item.payload, MaintenanceReviewPayload::Topic(_))
+                    && self
+                        .ledger
+                        .eligible(&format!("review_resume:{}", item.candidate_id))
+                    && matches!(
+                        super::review::review_queue(item, &self.config, inventory)
+                            .state
+                            .as_str(),
+                        "automatic" | "waiting_budget"
+                    )
+            })
+            .min_by(|a, b| a.proposed_at.cmp(&b.proposed_at))
+        else {
+            return self.resume_relation_budget_review(inventory, report).await;
+        };
+        let MaintenanceReviewPayload::Topic(mut candidate) = item.payload.clone() else {
+            return Ok(false);
+        };
+        let current = candidate.pages.iter().all(|p| {
+            inventory
+                .iter()
+                .any(|i| i.page_id == p.page_id && i.revision_id == p.revision_id)
+        }) && candidate.refresh_target.as_ref().is_none_or(|p| {
+            inventory
+                .iter()
+                .any(|i| i.page_id == p.page_id && i.revision_id == p.revision_id)
+        });
+        if !current {
+            self.resolve_review(&item.candidate_id, MaintenanceReviewStatus::Stale)
+                .await?;
+            return Ok(true);
+        }
+        // Reuse this exact proposal: generating a new draft would prevent
+        // replay of the already-paid review and repair stages.
+        let selected = candidate
+            .pages
+            .iter()
+            .filter_map(|p| inventory.iter().find(|i| i.page_id == p.page_id))
+            .collect::<Vec<_>>();
+        let existing = existing_topics_for_selected(inventory, &selected);
+        let before = report.worker_calls;
+        let assessment = if candidate
+            .verification
+            .as_ref()
+            .is_some_and(|v| matches!(v.verdict, super::VerificationVerdict::Approve))
+        {
+            candidate.verification.clone().unwrap()
+        } else {
+            self.verify_maintenance_candidate(
+                "topic",
+                candidate
+                    .pages
+                    .iter()
+                    .map(|p| p.revision_id.clone())
+                    .collect(),
+                candidate.title.clone(),
+                candidate.content.clone(),
+                existing,
+                candidate.refresh_target.as_ref().map(|p| p.page_id.clone()),
+                candidate.verification.clone(),
+                report,
+            )
+            .await?
+        };
+        apply_verified_topic_revision(&mut candidate, &assessment, inventory)?;
+        let no_change = matches!(assessment.verdict, super::VerificationVerdict::NoChange);
+        let approved = matches!(assessment.verdict, super::VerificationVerdict::Approve);
+        let reason = assessment.reason.clone();
+        candidate.verification = Some(assessment);
+        {
+            let _decision = MaintenanceLedger::decision_lock(&self.config.state_path).await?;
+            let mut fresh = MaintenanceLedger::load(&self.config.state_path).await?;
+            if fresh.review_item(&item.candidate_id).is_none_or(|current| {
+                current.status != MaintenanceReviewStatus::Pending
+                    || current.updated_at != item.updated_at
+            }) {
+                self.ledger = fresh;
+                return Ok(true);
+            }
+            fresh.replace_pending_review(
+                &item,
+                MaintenanceReviewPayload::Topic(candidate.clone()),
+                reason,
+                report.worker_calls - before,
+            )?;
+            if no_change {
+                fresh.resolve_review(&candidate.candidate_id, MaintenanceReviewStatus::Rejected)?;
+            }
+            fresh.save(&self.config.state_path).await?;
+            self.ledger = fresh;
+        }
+        if candidate
+            .verification
+            .as_ref()
+            .is_some_and(|v| v.review_state.as_deref() == Some("waiting_budget"))
+        {
+            self.ledger.record(
+                format!("review_resume:{}", candidate.candidate_id),
+                "waiting_budget",
+                300,
+            );
+        }
+        if approved
+            && self.config.applies_changes()
+            && self.config.topic.auto_apply
+            && super::discovery::accumulated(&selected, &self.config.topic)
+        {
+            self.apply_topic_candidate(ApplyMaintenanceTopicRequest {
+                candidate_id: candidate.candidate_id.clone(),
+                title: candidate.title,
+                content: candidate.content,
+                pages: candidate
+                    .pages
+                    .into_iter()
+                    .map(|p| PageRevisionRef {
+                        page_id: p.page_id,
+                        revision_id: p.revision_id,
+                    })
+                    .collect(),
+                refresh_target: candidate.refresh_target.map(|p| PageRevisionRef {
+                    page_id: p.page_id,
+                    revision_id: p.revision_id,
+                }),
+            })
+            .await?;
+            self.ledger
+                .resolve_review(&candidate.candidate_id, MaintenanceReviewStatus::Accepted)?;
+            report.topics_written += 1;
+        }
+        Ok(true)
+    }
+
+    async fn resume_relation_budget_review(
+        &mut self,
+        inventory: &[pcp_store::DurablePageInventoryItem],
+        report: &mut MaintenanceCycleReport,
+    ) -> Result<bool> {
+        let Some(proposal) = self
+            .ledger
+            .relation_reviews()
+            .into_iter()
+            .filter(|p| {
+                self.ledger
+                    .eligible(&format!("review_resume:{}", p.candidate_id))
+                    && matches!(
+                        super::review::review_queue(
+                            &MaintenanceReviewItem::relation(p.clone()),
+                            &self.config,
+                            inventory
+                        )
+                        .state
+                        .as_str(),
+                        "automatic" | "waiting_budget"
+                    )
+            })
+            .min_by(|a, b| a.proposed_at.cmp(&b.proposed_at))
+        else {
+            return Ok(false);
+        };
+        let before = report.worker_calls;
+        let assessment = if proposal
+            .verification
+            .as_ref()
+            .is_some_and(|v| matches!(v.verdict, super::VerificationVerdict::Approve))
+        {
+            proposal.verification.clone().unwrap()
+        } else {
+            self.verify_maintenance_candidate(
+                "relation",
+                proposal
+                    .pages
+                    .iter()
+                    .map(|p| p.revision_id.clone())
+                    .collect(),
+                String::new(),
+                proposal.relation_reason.clone(),
+                Vec::new(),
+                None,
+                proposal.verification.clone(),
+                report,
+            )
+            .await?
+        };
+        let waiting_budget = assessment.review_state.as_deref() == Some("waiting_budget");
+        let approved = matches!(assessment.verdict, super::VerificationVerdict::Approve);
+        let no_change = matches!(assessment.verdict, super::VerificationVerdict::NoChange);
+        let current = proposal.pages.iter().all(|p| {
+            inventory
+                .iter()
+                .any(|i| i.page_id == p.page_id && i.revision_id == p.revision_id)
+        });
+        {
+            let _decision = MaintenanceLedger::decision_lock(&self.config.state_path).await?;
+            let mut fresh = MaintenanceLedger::load(&self.config.state_path).await?;
+            let unchanged = fresh
+                .relation_review(&proposal.candidate_id)
+                .is_some_and(|p| {
+                    serde_json::to_value(&p).ok() == serde_json::to_value(&proposal).ok()
+                });
+            if !unchanged {
+                self.ledger = fresh;
+                return Ok(true);
+            }
+            fresh.update_relation_verification(
+                &proposal.candidate_id,
+                assessment,
+                report.worker_calls - before,
+            )?;
+            if !current {
+                fresh.resolve_relation_review(
+                    &proposal.candidate_id,
+                    MaintenanceRelationReviewStatus::Stale,
+                )?;
+            } else if no_change {
+                fresh.resolve_relation_review(
+                    &proposal.candidate_id,
+                    MaintenanceRelationReviewStatus::Rejected,
+                )?;
+            }
+            fresh.save(&self.config.state_path).await?;
+            self.ledger = fresh;
+        }
+        if waiting_budget {
+            self.ledger.record(
+                format!("review_resume:{}", proposal.candidate_id),
+                "waiting_budget",
+                300,
+            );
+        }
+        if current
+            && approved
+            && self.config.applies_changes()
+            && self.config.relation.auto_apply_verified
+        {
+            self.approve_relation_review(&proposal.candidate_id).await?;
+            report.relations_committed += 1;
+        }
+        Ok(true)
     }
 
     pub(super) async fn run_topic_review_job(
@@ -3226,6 +3788,27 @@ impl RuntimeMaintainer {
             report.duplicate_topics_skipped += 1;
             return Ok(true);
         }
+        let selected = candidate
+            .pages
+            .iter()
+            .filter_map(|p| inventory.iter().find(|i| i.page_id == p.page_id))
+            .collect::<Vec<_>>();
+        if review_origin == MaintenanceReviewOrigin::Automatic
+            && self.config.topic.auto_apply
+            && !super::discovery::accumulated(&selected, &self.config.topic)
+        {
+            // A short automatic draft is not a human decision. Keep the source
+            // Pages and wait for additional evidence instead of paying for a
+            // verifier and filling an inbox that cannot apply it yet.
+            self.ledger.record(
+                key.clone(),
+                "topic_waiting_accumulation",
+                self.config.relation.retry_after_seconds,
+            );
+            self.ledger.clear_job_issue(&key);
+            report.deferred += 1;
+            return Ok(true);
+        }
         let calls_before_verification = report.worker_calls;
         let assessment = match self
             .verify_maintenance_candidate(
@@ -3239,6 +3822,7 @@ impl RuntimeMaintainer {
                 candidate.content.clone(),
                 existing_topics,
                 candidate.refresh_target.as_ref().map(|t| t.page_id.clone()),
+                None,
                 report,
             )
             .await
@@ -3262,20 +3846,38 @@ impl RuntimeMaintainer {
         let no_change = matches!(assessment.verdict, super::VerificationVerdict::NoChange);
         let approved = matches!(assessment.verdict, super::VerificationVerdict::Approve);
         let verification_reason = assessment.reason.clone();
+        apply_verified_topic_revision(&mut candidate, &assessment, &inventory)?;
         candidate.verification = Some(assessment);
         // Persist no-change decisions too, so other windows cannot regenerate a paraphrase.
-        let id = self.ledger.enqueue_review(
-            MaintenanceReviewPayload::Topic(candidate.clone()),
-            review_origin,
-            verification_reason.clone(),
-            attempts,
-            escalated,
-        );
+        let id = {
+            let _decision = MaintenanceLedger::decision_lock(&self.config.state_path).await?;
+            self.ledger.save(&self.config.state_path).await?;
+            if self.ledger.topic_evidence_reviewed(&candidate) {
+                report.duplicate_topics_skipped += 1;
+                self.ledger.record(
+                    key,
+                    "topic_evidence_already_reviewed",
+                    self.config.relation.retry_after_seconds,
+                );
+                return Ok(true);
+            }
+            let id = self.ledger.enqueue_review(
+                MaintenanceReviewPayload::Topic(candidate.clone()),
+                review_origin,
+                verification_reason.clone(),
+                attempts,
+                escalated,
+            );
+            if no_change {
+                self.ledger
+                    .resolve_review(&id, MaintenanceReviewStatus::Rejected)?;
+                self.ledger
+                    .set_review_reason(&id, format!("no_increment: {verification_reason}"))?;
+            }
+            self.ledger.save(&self.config.state_path).await?;
+            id
+        };
         if no_change {
-            self.ledger
-                .resolve_review(&id, MaintenanceReviewStatus::Rejected)?;
-            self.ledger
-                .set_review_reason(&id, format!("no_increment: {verification_reason}"))?;
             report.unchanged_topics_skipped += 1;
         } else {
             let selected = candidate
@@ -3283,6 +3885,7 @@ impl RuntimeMaintainer {
                 .iter()
                 .filter_map(|p| inventory.iter().find(|i| i.page_id == p.page_id))
                 .collect::<Vec<_>>();
+            self.ledger.save(&self.config.state_path).await?;
             if approved
                 && self.config.applies_changes()
                 && self.config.topic.auto_apply
@@ -3764,6 +4367,17 @@ impl RuntimeMaintainer {
         page_ids: &[String; 2],
         revision_ids: &[String],
     ) -> Result<bool> {
+        Ok(self
+            .existing_related_pair(page_ids, revision_ids)
+            .await?
+            .is_some())
+    }
+
+    async fn existing_related_pair(
+        &self,
+        page_ids: &[String; 2],
+        revision_ids: &[String],
+    ) -> Result<Option<pcp_core::Relation>> {
         let pages = self
             .client
             .read_pages(ReadPagesRequest {
@@ -3774,15 +4388,17 @@ impl RuntimeMaintainer {
             })
             .await?;
         anyhow::ensure!(pages.len() == 2, "relation candidates disappeared");
-        Ok(pages.iter().any(|page| {
-            page.relations.iter().any(|relation| {
+        Ok(pages
+            .iter()
+            .flat_map(|page| &page.relations)
+            .find(|relation| {
                 relation.relation_type == "related_to"
                     && ((relation.from_page_id == page_ids[0]
                         && relation.to_page_id == page_ids[1])
                         || (relation.from_page_id == page_ids[1]
                             && relation.to_page_id == page_ids[0]))
             })
-        }))
+            .cloned())
     }
 
     async fn existing_related_pairs(
@@ -5348,6 +5964,7 @@ fn build_relation_candidate(
             .try_into()
             .expect("relation candidate has exactly two inputs"),
         relation_reason: String::new(),
+        verification: None,
     }
 }
 
@@ -5400,6 +6017,38 @@ fn validate_relation_reason(reason: String) -> Result<String> {
         "semantic worker relation review evidence exceeds 480 characters"
     );
     Ok(reason)
+}
+
+fn apply_verified_topic_revision(
+    candidate: &mut MaintenanceTopicCandidate,
+    assessment: &super::MaintenanceVerification,
+    inventory: &[pcp_store::DurablePageInventoryItem],
+) -> Result<()> {
+    if !matches!(assessment.verdict, super::VerificationVerdict::Approve) {
+        return Ok(());
+    }
+    let Some(revision) = &assessment.revision else {
+        return Ok(());
+    };
+    let pages = candidate
+        .pages
+        .iter()
+        .map(|p| {
+            inventory
+                .iter()
+                .find(|i| i.page_id == p.page_id && i.revision_id == p.revision_id)
+                .context("repaired Topic source became stale")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    *candidate = build_topic_candidate(
+        &pages,
+        revision.title.clone(),
+        revision.content.clone(),
+        candidate.reason.clone(),
+        candidate.refresh_target.clone(),
+        candidate.namespace.clone(),
+    )?;
+    Ok(())
 }
 
 fn build_topic_candidate(

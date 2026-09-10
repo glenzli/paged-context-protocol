@@ -904,7 +904,7 @@ html.relation-comparison-open body { position: fixed; top: var(--relation-compar
 .action-dialog-form { display: grid; margin: 0; }
 .action-dialog-copy { margin: 0; padding: 17px 15px; color: var(--text); line-height: 1.55; }
 .action-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 15px 15px; border-top: 1px solid var(--line); }
-.preferences-dialog { width: min(560px, calc(100vw - 32px)); overflow: visible; }
+.preferences-dialog { width: min(560px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); overflow: auto; }
 .preferences-tabs { display: flex; gap: 16px; padding: 0 15px; border-bottom: 1px solid var(--line); background: var(--surface); }
 .preferences-tab { min-height: 39px; padding: 8px 1px 7px; border: 0; border-radius: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); }
 .preferences-tab:hover { background: transparent; color: var(--text); }
@@ -919,6 +919,14 @@ html.relation-comparison-open body { position: fixed; top: var(--relation-compar
 .maintenance-settings-toggle small { margin-top: 3px; color: var(--muted); font-size: 12px; font-weight: 400; line-height: 1.45; }
 .maintenance-settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .maintenance-settings-grid > label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; font-weight: 650; }
+#review-budget-settings { display: grid; min-width: 0; gap: 12px; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: var(--card-radius); }
+#review-budget-settings[hidden] { display: none; }
+#review-budget-settings legend { padding: 0 5px; font-size: 13px; font-weight: 650; }
+#review-budget-settings > label { display: flex; align-items: center; gap: 8px; }
+#review-budget-settings > label:has(select) { display: grid; gap: 5px; }
+#review-budget-settings input[type="checkbox"] { width: 16px; min-height: 16px; margin: 0; }
+#review-budget-settings p { margin: 0; line-height: 1.5; }
+#review-budget-status { display: grid; gap: 7px; font-size: 12px; overflow-wrap: anywhere; }
 .preferences-copy { margin: -4px 0 0; line-height: 1.45; }
 .preferences-content { display: grid; padding: 0 15px; }
 .preferences-panel { display: none; min-width: 0; }
@@ -1231,6 +1239,9 @@ pre { margin: 0; max-height: 420px; overflow: auto; padding: 11px; border: 1px s
 .access-client span { font-size: 12px; }
 .access-operations { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
 .access-event-details { min-width: 130px; max-width: 360px; overflow-wrap: anywhere; }
+.access-expanded-panel { padding: 14px 18px; overflow-wrap: anywhere; background: var(--surface); }
+.access-internal-operations { max-height: 22rem; overflow: auto; margin: 10px 0; line-height: 1.7; }
+.access-internal-operations > div { padding: 4px 0; border-bottom: 1px solid var(--line); }
 .access-event-details summary { cursor: pointer; color: var(--accent); }
 #view-access td { vertical-align: top; }
 
@@ -1239,3 +1250,19 @@ pre { margin: 0; max-height: 420px; overflow: auto; padding: 11px; border: 1px s
 .maintenance-review-topic-group[open] > summary { margin-bottom: 12px; }
 .maintenance-review-topic-group .maintenance-review-card + .maintenance-review-card { margin-top: 12px; }
 .maintenance-review-evidence { border-left: 3px solid var(--border); padding-left: 12px; font-size: .9rem; overflow-wrap: anywhere; }
+
+/* Usage quantities use localized units; raw values remain available on focus/hover. */
+#health-model-usage { grid-template-columns: minmax(240px, 1fr) minmax(0, 2fr); }
+#health-model-usage .usage-quantity, #health-metrics .usage-quantity { white-space: nowrap; font-variant-numeric: tabular-nums; }
+#health-metrics .usage-quantity { font-size: 23px; }
+.usage-workflow-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(90px, auto) minmax(125px, auto); align-items: center; gap: 16px; padding: 11px 12px; border-bottom: 1px solid var(--line); }
+.usage-workflow-row:last-child { border-bottom: 0; }
+.usage-column-labels { color: var(--muted); font-size: 11px; background: var(--surface-subtle); }
+.usage-workflow-name { display: grid; gap: 3px; min-width: 0; }
+.usage-workflow-name code { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.usage-workflow-row > :nth-child(n+2) { text-align: right; font-variant-numeric: tabular-nums; }
+.usage-coverage { white-space: nowrap; color: var(--muted); font-size: 12px; }
+@media (max-width: 760px) {
+  #health-model-usage { grid-template-columns: minmax(0, 1fr); }
+  .usage-workflow-row { grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; }
+}

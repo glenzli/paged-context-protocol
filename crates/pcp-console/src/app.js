@@ -1,10 +1,11 @@
 import { createAccessView } from "/access-view.js";
 import { createPageInspector } from "/page-inspector.js?v=20260823.1";
 import { pageListPreview, pageCount, pageJump, PAGE_ROLE_LABELS, pageRoleBadge, appendPageFilters, pageBrowseOrder, pageTimeFields } from "/page-list.js";
+import { compactQuantity } from "/quantity-format.js";
 import { formatTimestamp } from "/time-format.js";
 import { reconciliationView } from "/maintenance-reconciliation.js";
 import { describePagePayload, pagePayloadPreviewText } from "/page-content.js?v=20260822.1";
-import { createHealthView } from "/health-view.js?v=20260816.3";
+import { createHealthView } from "/health-view.js?v=20260909.1";
 import { createRetentionView } from "/retention-view.js?v=20260818.1";
 import { createQueryView } from "/query-view.js?v=20260824.1";
 import { createContextHub } from "/context-hub.js";
@@ -36,12 +37,13 @@ import {
   REVIEW_DECISION,
   groupReviewTopics,
   partitionReviewSession,
+  partitionReviewQueues,
   restoreReviewDecisions,
   reviewDecisionCounts,
   serializeReviewDecisions,
   stageReviewDecision,
   undoReviewDecision,
-} from "/maintenance-review-session.js?v=20260824.1";
+} from "/maintenance-review-session.js?v=20260909.2";
 
 hydrateIcons(document);
 hydrateIconTooltips(document);
@@ -131,6 +133,18 @@ const ZH_MESSAGES = {
   "Settings": "设置",
   "General": "通用",
   "Settings sections": "设置分区",
+  "Upgraded review": "升级审阅",
+  "Enable upgraded review": "启用升级审阅",
+  "Enable Astra Low": "启用 Astra Low",
+  "Rolling 24 hours. Saving or restarting preserves usage.": "按滚动 24 小时计量。保存或重启不会重置用量。",
+  "Sol deployment": "Sol 部署",
+  "Sol calls": "Sol 调用次数",
+  "Sol total tokens": "Sol 总 token",
+  "Astra deployment": "Astra 部署",
+  "Astra calls": "Astra 调用次数",
+  "Astra tokens (optional)": "Astra token 上限（可选）",
+  "Token limit": "Token 限制方式",
+  "The budget gates new calls using actual usage and reservations. Started calls finish normally; the final call may exceed the token threshold.": "预算按实际用量与预占控制新调用准入。已开始的调用正常完成，最后一笔可能超过 Token 阈值。",
   "Automatic maintenance settings": "自动维护设置",
   "Changes restart the Runtime. Suggested relations still require review.": "保存后会重启 Runtime；建议关联仍需人工审核。",
   "Enable automatic maintenance": "启用自动维护",
@@ -159,6 +173,22 @@ const ZH_MESSAGES = {
   "Ready regions": "已就绪范围",
   "Pending relation review": "待审关联",
   "Pending review": "待审决策",
+  "Pending work": "待处理工作",
+  "Human decisions": "需要人工决定",
+  "No human decisions needed": "目前没有需要人工决定的事项",
+  "Automatic and waiting proposals": "自动处理与等待中的提案",
+  "Awaiting upgraded review or application": "等待自动复核或应用",
+  "Approved; waiting for accumulation": "已通过，等待资料积累",
+  "Waiting for review budget": "等待审核预算",
+  "Automatic processing paused": "自动处理已暂停",
+  "Obsolete evidence; awaiting cleanup": "证据已变化，等待清理",
+  "Source or target revisions changed; the old proposal will be retired.": "来源或目标版本已变化，旧提案将退出队列。",
+  "This operation requires an explicit review decision.": "这项操作需要明确的人工决定。",
+  "Automatic application is disabled; the proposal remains available for manual review.": "自动应用未启用；仍可手动审阅此提案。",
+  "Model review passed; awaiting current-evidence checks and application.": "模型审核已通过，等待应用前的最新证据检查。",
+  "Awaiting bounded upgraded review; the baseline has not established a need for human input.": "等待有限次数的升级复核；初审尚不足以确认必须由人工决定。",
+  "Upgraded review is disabled; baseline uncertainty has not been resolved.": "升级审核未启用，初审的疑问尚未解决。",
+  "No automatic verification is recorded for this proposal.": "此提案没有自动核验记录。",
   "Maintenance review inbox": "维护审阅箱",
   "Review decisions stay reversible in this session. Nothing changes in the Store until you finish and apply the review.": "审阅决定在本次会话中始终可以撤销；只有完成并应用审阅后，才会写入 Store。",
   "Review progress": "审阅进度",
@@ -289,6 +319,8 @@ const ZH_MESSAGES = {
   "Token reporting": "Token 报告覆盖",
   "Reported tokens": "已报告 Token",
   "By workflow": "按工作流",
+  "Reported / total calls": "已报告 / 总调用",
+  "No token usage reported": "尚未报告 token 用量",
   "Intent matching": "意图匹配",
   "Manual maintenance": "手动维护",
   "Manual maintenance in progress": "分阶段维护进行中",
@@ -647,6 +679,18 @@ const ZH_MESSAGES = {
   "Updated": "更新时间",
   "Unavailable": "不可用",
   "Available": "可用",
+  "Audit view": "审计视图",
+  "API requests": "API 请求",
+  "requests": "个请求",
+  "Internal operations": "底层操作记录",
+  "Uncorrelated operations": "未关联操作（历史 / 本地）",
+  "Background operations": "后台维护操作",
+  "reads": "次读取",
+  "Batch reads": "批量读取",
+  "Single reads": "单页读取",
+  "Page visits": "页面访问次数",
+  "Request ID": "请求 ID",
+  "No retained internal operations": "没有保留的底层操作记录",
   "Audit timeline": "审计时间线",
   "Conversation pack": "对话 Pack",
   "explicit": "显式",
@@ -1460,7 +1504,7 @@ const queryView = createQueryView({
   openPageIcon: () => icon("open"),
   openPage: (pageId) => pageInspector.open(pageId),
 });
-const healthView = createHealthView({ request: api, showError, formatNumber, t });
+const healthView = createHealthView({ request: api, showError, formatNumber, t, locale: currentLocale });
 const contextHub = createContextHub({ root: byId("view-context-hub"), request: api, mutate: maintenanceMutation,
   confirmAction, icon, formatTime, onCommitted: loadOverview,
   language: () => currentLanguage, openPage: (id) => pageInspector.open(id) });
@@ -2590,7 +2634,7 @@ function renderMaintenanceAutomationChart(status) {
   const queueValues = [
     [t("Dirty regions"), automation.dirtyRegionCount || 0, "warning"],
     [t("Ready regions"), automation.readyRegionCount || 0, "accent"],
-    [t("Pending review"), automation.pendingReviewCount || 0, "positive"],
+    [t("Pending work"), automation.pendingReviewCount || 0, "positive"],
   ];
   const queueMax = Math.max(1, ...queueValues.map(([, value]) => value));
   const queue = element("section", "maintenance-chart-card maintenance-queue-chart");
@@ -2648,7 +2692,8 @@ function renderAutomationStatus() {
     ),
     metric(t("Dirty regions"), formatNumber(automation.dirtyRegionCount), automation.dirtyRegionCount ? "warning" : ""),
     metric(t("Ready regions"), formatNumber(automation.readyRegionCount), automation.readyRegionCount ? "info" : ""),
-    metric(t("Pending review"), formatNumber(automation.pendingReviewCount), automation.pendingReviewCount ? "warning" : ""),
+    metric(t("Pending work"), formatNumber(automation.pendingReviewCount)),
+    metric(t("Human decisions"), formatNumber(partitionReviewQueues(state.maintenance.relationReviews).human.length)),
   );
   renderMaintenanceAutomationChart(status);
   const convergence = state.maintenance.convergence;
@@ -2733,12 +2778,51 @@ function populateMaintenanceSettings() {
   byId("maintenance-settings-tab").hidden = !configurable;
   if (!configurable && activePreferencesTab === "maintenance") activePreferencesTab = "general";
   if (!configurable) return;
+  renderReviewBudgetSettings(status.reviewBudget);
   const trigger = status.writeTrigger || {};
   byId("maintenance-settings-enabled").checked = Boolean(status.enabled);
   byId("maintenance-settings-mode").value = status.mode || "observe";
   byId("maintenance-settings-min-pages").value = trigger.minNewPages || 8;
   byId("maintenance-settings-quiet").value = Math.max(1, Math.round((trigger.quietPeriodSeconds || 600) / 60));
   byId("maintenance-settings-max-wait").value = Math.max(1, Math.round((trigger.maxWaitSeconds || 3600) / 60));
+}
+
+function renderReviewBudgetSettings(budget) {
+  byId("review-budget-settings").hidden = !budget;
+  byId("review-budget-settings").disabled = !budget;
+  if (!budget) return;
+  const c = budget.config;
+  byId("review-budget-enabled").checked = c.enabled;
+  byId("review-budget-astra-enabled").checked = c.astra_enabled;
+  [["sol-deployment", "sol_deployment_id"], ["astra-deployment", "astra_deployment_id"], ["sol-calls", "sol_max_calls"], ["sol-tokens", "sol_max_tokens"], ["astra-calls", "astra_max_calls"], ["astra-tokens", "astra_max_tokens"]].forEach(([id,key]) => { byId(`review-budget-${id}`).value = c[key] ?? ""; });
+  const host = byId("review-budget-status"); host.replaceChildren();
+  if (budget.error) { host.append(element("p", "error", budget.error)); return; }
+  const status = budget.status;
+  const zh = currentLanguage === "zh";
+  for (const tier of [status.sol, status.astra]) {
+    const tokens = tier.remainingTokens == null ? "—" : compactQuantity(tier.remainingTokens, currentLocale());
+    host.append(element("p", "", `${tier.tier.toUpperCase()}: ${tier.usedCalls}/${tier.maxCalls} ${zh ? "次调用" : "calls"} · ${zh ? "实际" : "actual"} ${compactQuantity(tier.actualTokens, currentLocale())} tokens · ${zh ? "预占" : "reserved"} ${compactQuantity(tier.reservedTokens, currentLocale())} · ${zh ? "剩余" : "remaining"} ${tokens}`));
+    host.lastElementChild.title = `${tier.actualTokens.toLocaleString(currentLocale())} tokens · ${tier.reservedTokens.toLocaleString(currentLocale())} reserved · ${tier.remainingTokens == null ? "—" : tier.remainingTokens.toLocaleString(currentLocale())} remaining`;
+    if (tier.nextReleaseAtMs) host.append(element("small", "muted", `${zh ? "最早释放" : "Next release"}: ${new Date(tier.nextReleaseAtMs).toLocaleString()}`));
+  }
+  host.append(element("p", "muted", `${zh ? "未结请求" : "Unsettled"}: ${status.inFlight}`));
+  for (const attempt of (status.attempts || []).slice(0, 8)) host.append(element("p", "muted", `${attempt.tier} ${attempt.effort} · ${attempt.stage} · ${attempt.state} · ${attempt.actualTokens ?? "usage unknown"} tokens · ${attempt.responseId || "request identity unknown"}`));
+}
+
+function readReviewBudgetSettings() {
+  const previous = state.maintenance.status?.reviewBudget?.config;
+  if (!previous) return null;
+  return { ...previous,
+    enabled: byId("review-budget-enabled").checked,
+    astra_enabled: byId("review-budget-astra-enabled").checked,
+    sol_deployment_id: byId("review-budget-sol-deployment").value.trim(),
+    astra_deployment_id: byId("review-budget-astra-deployment").value.trim(),
+    sol_max_calls: Number(byId("review-budget-sol-calls").value),
+    sol_max_tokens: Number(byId("review-budget-sol-tokens").value),
+    astra_max_calls: Number(byId("review-budget-astra-calls").value),
+    astra_max_tokens: byId("review-budget-astra-tokens").value ? Number(byId("review-budget-astra-tokens").value) : null,
+    token_limit_mode: "admission",
+  };
 }
 
 function renderPreferencesTabs() {
@@ -2778,6 +2862,7 @@ async function saveMaintenanceSettings(event) {
       minNewPages,
       quietPeriodSeconds,
       maxWaitSeconds,
+      reviewBudget: readReviewBudgetSettings(),
     });
     byId("preferences-dialog").close();
     await refresh();
@@ -2840,12 +2925,13 @@ function renderRelationReviews() {
   section.hidden = !maintenanceAvailable();
   if (section.hidden) return;
   const { pending, staged } = partitionReviewSession(reviews, state.maintenance.reviewDecisions);
+  const { human, background } = partitionReviewQueues(pending);
   persistMaintenanceReviewSession();
-  const total = reviews.length;
+  const total = human.length + staged.length;
   const stagedCount = staged.length;
   byId("maintenance-relation-review-count").textContent = currentLanguage === "zh"
-    ? `${formatNumber(pending.length)} 待处理 · ${formatNumber(stagedCount)} 待提交`
-    : `${formatNumber(pending.length)} remaining · ${formatNumber(stagedCount)} staged`;
+    ? `${formatNumber(human.length)} 需人工 · ${formatNumber(background.length)} 自动／等待 · ${formatNumber(stagedCount)} 待提交`
+    : `${formatNumber(human.length)} human · ${formatNumber(background.length)} automatic / waiting · ${formatNumber(stagedCount)} staged`;
 
   const progress = byId("maintenance-review-progress");
   progress.hidden = total === 0;
@@ -2856,7 +2942,7 @@ function renderRelationReviews() {
     const copy = element("div", "maintenance-review-progress-copy");
     copy.append(
       element("strong", "", t("Review progress")),
-      element("span", "muted", `${t("Remaining")} ${formatNumber(pending.length)} · ${t("Pending commit")} ${formatNumber(stagedCount)}`),
+      element("span", "muted", `${t("Remaining")} ${formatNumber(human.length)} · ${t("Pending commit")} ${formatNumber(stagedCount)}`),
     );
     const legend = element("div", "maintenance-review-progress-legend");
     const counts = reviewDecisionCounts(state.maintenance.reviewDecisions);
@@ -2873,8 +2959,8 @@ function renderRelationReviews() {
   }
 
   byId("maintenance-relation-review-cards").replaceChildren(
-    ...(pending.length
-      ? groupReviewTopics(pending).map((group) => {
+    ...(human.length
+      ? groupReviewTopics(human).map((group) => {
           if (group.length === 1) return maintenanceReviewCard(group[0]);
           const details = element("details", "maintenance-review-topic-group");
           const summary = element("summary", "", `${group[0].payload.candidate.title} · ${group.length} ${currentLanguage === "zh" ? "个相关提案，逐项决定" : "related proposals; decide individually"}`);
@@ -2883,8 +2969,22 @@ function renderRelationReviews() {
         })
       : total
         ? []
-        : [element("div", "maintenance-review-empty", t("Review inbox is clear"))]),
+        : [element("div", "maintenance-review-empty", t("No human decisions needed"))]),
   );
+  const automatic = byId("maintenance-review-background");
+  automatic.hidden = background.length === 0;
+  const summary = element("summary", "", `${t("Automatic and waiting proposals")} · ${formatNumber(background.length)}`);
+  const cards = element("div", "maintenance-relation-review-cards");
+  // Keep this secondary list compact; each proposal is independently inspectable.
+  for (const review of background) {
+    const detail = element("details", "maintenance-review-topic-group");
+    detail.append(element("summary", "", `${maintenanceReviewQueueLabel(review)} · ${maintenanceReviewSummary(review)}`));
+    detail.addEventListener("toggle", () => {
+      if (detail.open && detail.children.length === 1) detail.append(maintenanceReviewCard(review));
+    });
+    cards.append(detail);
+  }
+  automatic.replaceChildren(summary, cards);
   byId("maintenance-review-settled").replaceChildren(
     ...staged.map(({ review, decision }) => maintenanceReviewSettledRow(review, decision)),
   );
@@ -2910,6 +3010,17 @@ function maintenanceReviewKindLabel(kind) {
     archive: "Archive",
     reconciliation: "Feedback reconciliation",
   }[kind] || kind;
+}
+
+function maintenanceReviewQueueLabel(review) {
+  return t({
+    human: "Human decisions",
+    automatic: "Awaiting upgraded review or application",
+    waiting_accumulation: "Approved; waiting for accumulation",
+    waiting_budget: "Waiting for review budget",
+    paused: "Automatic processing paused",
+    stale: "Obsolete evidence; awaiting cleanup",
+  }[review.queue?.state] || "Human decisions");
 }
 
 function maintenanceReviewContent(review) {
@@ -3129,6 +3240,14 @@ function maintenanceReviewCard(review) {
     actions.append(suppress);
   }
   card.append(heading, reason);
+  if (review.queue) {
+    const a = review.queue.accumulation;
+    const detail = a ? (currentLanguage === "zh"
+      ? `${a.sourcePages} 页来源、${formatNumber(a.sourceChars)} 字符；自动凝聚门槛为 ${a.minimumPages} 页或 ${formatNumber(a.minimumChars)} 字符。继续等待资料积累。`
+      : `${a.sourcePages} source Pages / ${formatNumber(a.sourceChars)} characters; automatic synthesis requires ${a.minimumPages} Pages or ${formatNumber(a.minimumChars)} characters. No human approval is needed to reach this threshold.`)
+      : t(review.queue.reason);
+    card.append(element("p", "maintenance-review-evidence", `${maintenanceReviewQueueLabel(review)} · ${detail}`));
+  }
   if (candidate.verification) {
     const verification = candidate.verification;
     const evidence = element("div", "maintenance-review-evidence");
@@ -3137,6 +3256,8 @@ function maintenanceReviewCard(review) {
       [currentLanguage === "zh" ? "保留的边界" : "Preserved boundaries", verification.preservedBoundaries],
       [currentLanguage === "zh" ? "需要判断" : "Needs judgment", (verification.concerns || []).join(" · ")],
     ].forEach(([label, value]) => { if (value) evidence.append(element("p", "", `${label}：${value}`)); });
+    if (verification.reviewState) evidence.append(element("p", "", `Review: ${verification.reviewState}`));
+    for (const step of verification.reviewSteps || []) evidence.append(element("p", "muted", `${step.tier} → ${step.stage} · ${step.state} · ${step.actualTokens ?? "usage unknown"} tokens: ${step.reason}${step.requestId ? ` (${step.requestId})` : ""}`));
     card.append(evidence);
   }
   card.append(maintenanceReviewContent(review));
@@ -3163,6 +3284,7 @@ async function loadRelationReviews() {
   const response = await api("/api/maintenance/reviews");
   state.maintenance.relationReviews = response.reviews || [];
   renderRelationReviews();
+  renderAutomationStatus();
 }
 
 function persistMaintenanceReviewSession() {

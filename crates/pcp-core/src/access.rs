@@ -290,9 +290,13 @@ pub struct AccessAuditEvent {
 ///
 /// Query text and Page content are deliberately excluded. Counts and projection
 /// names are sufficient for runtime health analysis without duplicating memory.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperationTelemetry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<RequestAuditMetadata>,
     pub duration_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_count: Option<u64>,
@@ -304,10 +308,25 @@ pub struct OperationTelemetry {
     pub projections: Vec<String>,
 }
 
+/// Runtime-generated correlation; never inferred from timestamps or sessions.
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestAuditMetadata {
+    pub id: String,
+    pub root: bool,
+    pub internal_operations: u64,
+    pub batch_reads: u64,
+    pub single_reads: u64,
+    pub page_visits: u64,
+}
+
 /// Operator audit query. Filters never widen the caller's Audit scopes.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccessLogQuery {
+    /// requests, operations (default), background, or uncorrelated historical/local operations.
+    pub view: Option<String>,
+    pub request_id: Option<String>,
     pub principal_id: Option<String>,
     pub operation: Option<String>,
     pub since: Option<String>,

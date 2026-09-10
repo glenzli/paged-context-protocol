@@ -134,6 +134,8 @@ sh scripts/import-store.sh \
   --enrollment-state /absolute/path/to/pcp-enrollments.json
 ```
 
+Upgraded Infer Runtime reviews are configured under `[maintenance.worker.review_budget]` and are disabled by default. Sol High defaults to 300 calls / 6 million total tokens per rolling 24 hours; Astra Low defaults to 10 calls. Console exposes limits, actual usage, and unsettled reservations; restarting preserves the ledger. The old unbudgeted escalation path is disabled. Budgets gate new calls using actual usage and reservations. Admitted calls finish normally, so the final call may exceed the token threshold. See the [review budget and repair workflow](design/maintenance-review-budget.md).
+
 ### MCP
 
 MCP can open an embedded Store directly:
@@ -161,17 +163,98 @@ Long-running MCP clients should use enrollment instead of persisting a generatio
 
 An ordinary writable tenant should use `contribute`, which adds authenticated `ingest_page` and exact-Revision `submit_feedback` to Read. `repair` is a narrow development-migration surface for history-preserving `repair_page`; it does not grant ordinary Page writes, revisions, lifecycle changes, or Scope administration. Use a separate Principal and credential, opened only during an explicit apply migration. `write` and `admin` remain reserved for maintainers and local administration tools. See [`crates/pcp-runtime/ENROLLMENT.md`](crates/pcp-runtime/ENROLLMENT.md) for access modes and the enrollment contract.
 
-### Local ChatGPT Access
+### Shared ChatGPT and Codex tunnel access
 
-ChatGPT Developer Mode can call the local stdio `pcp-mcp` through OpenAI Secure MCP Tunnel. PCP Runtime, its Store, Unix sockets, and enrollment credential remain off the public internet; the local tunnel client creates an outbound HTTPS connection to OpenAI. This surface uses a separate `chatgpt:pcp` Principal, `chatgpt-pcp.json` enrollment state, and `chatgpt_capture` Page kind rather than reusing the Codex grant or source label.
+Use one PCP connection created in ChatGPT from both ChatGPT and Codex. The path is ChatGPT / Codex → OpenAI Secure MCP Tunnel → local `pcp-chatgpt-mcp` → PCP Runtime → Store. The tunnel connects outbound over HTTPS; no public listener is required on the Mac. Tool requests and returned content still pass through OpenAI. Runtime, Store, and enrollment files remain locally managed.
 
-`scripts/install-macos.sh` installs the entry point at `~/Library/Application Support/PCP/bin/pcp-chatgpt-mcp`. See [`integrations/chatgpt`](integrations/chatgpt/README.md) for enrollment, tunnel configuration, and Developer Mode connection steps. This is a private development path, not a replacement for the public HTTPS MCP deployment required by a public ChatGPT app.
+#### 1. Install and start PCP
+
+From this repository, with a Rust toolchain installed:
+
+```bash
+sh scripts/install-macos.sh
+```
+
+This builds and installs Runtime, Console, `pcp-mcp`, and the `pcp-chatgpt-mcp` launcher. Open [PCP Console](http://127.0.0.1:4318/) and confirm Runtime is connected. Install the tunnel client separately.
+
+#### 2. Enroll the shared PCP identity
+
+For a new installation, select the current Infra Discovery registration manifest named `pcp--idn_....json` for the intended Store. Do not reuse an old socket or select another instance by guesswork; see the [enrollment contract](crates/pcp-runtime/ENROLLMENT.md) for discovery and verification.
+
+List the default macOS Discovery directory below. If Runtime sets `INFRA_PROTOCOL_RUNTIME_DIR`, use its `registrations` directory instead. With multiple results, match JSON `service.instance_id` to the Store identity in Console.
+
+```bash
+ls "$(getconf DARWIN_USER_TEMP_DIR)infra-protocol/registrations/"pcp--*.json
+```
+
+```bash
+pcp_home="$HOME/Library/Application Support/PCP"
+"$pcp_home/bin/pcp-chatgpt-mcp" enroll begin \
+  "/absolute/path/to/current/pcp--idn_....json"
+```
+
+Review and approve `ChatGPT` in Console client access, then run:
+
+```bash
+"$pcp_home/bin/pcp-chatgpt-mcp" enroll status
+```
+
+The state file is `clients/chatgpt-pcp.json`. The `chatgpt:pcp` Principal requests `contribute` on the user Scope and read-only access to other current Scopes. Reuse an existing working ChatGPT enrollment and tunnel. Codex shares this identity; the historical `chatgpt_capture` / `captureSurface: chatgpt` labels identify the connection, not which application called it.
+
+#### 3. Configure and test the tunnel
+
+Follow [OpenAI Secure MCP Tunnel setup](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) to create a tunnel in Platform, obtain its ID and runtime API key, and install the official `tunnel-client`. Associate the intended ChatGPT workspace and grant the operator tunnel usage; permission to create a tunnel alone does not establish workspace access.
+
+With `tunnel-client` on PATH, replace `YOUR_TUNNEL_ID` below and enter the key privately in the local macOS zsh terminal:
+
+```bash
+read -r -s 'CONTROL_PLANE_API_KEY?Tunnel runtime API key: '
+export CONTROL_PLANE_API_KEY
+
+tunnel-client init \
+  --sample sample_mcp_stdio_local \
+  --profile pcp-chatgpt \
+  --tunnel-id YOUR_TUNNEL_ID \
+  --mcp-command "\"$HOME/Library/Application Support/PCP/bin/pcp-chatgpt-mcp\""
+tunnel-client doctor --profile pcp-chatgpt --explain
+tunnel-client run --profile pcp-chatgpt
+```
+
+Keep this process running. Enable Developer Mode in ChatGPT, create a connection named `PCP` from Plugins, and select **Tunnel** with the same ID. Review discovered tools and write-action permissions. Account and workspace policy affect availability; see the [current connection instructions](https://developers.openai.com/plugins/deploy/connect-chatgpt).
+
+#### 4. Run at login
+
+After a successful foreground test, run this in a second terminal:
+
+```bash
+python3 integrations/chatgpt/install-service.py
+```
+
+Defaults are `~/Applications/tunnel-client/tunnel-client` and `~/.config/tunnel-client/pcp-chatgpt.yaml`. Override them with `--binary /absolute/path/to/tunnel-client` and `--profile /absolute/path/to/profile.yaml`. Without the environment variable, the installer prompts for the key without echoing it. The saved key has mode `0600`; the LaunchAgent references its path.
+
+Wait for readiness and a completed control-plane poll, then stop the old foreground process. Keep only one poller running for the tunnel. The service starts at login and restarts after exit; it cannot serve local PCP while the Mac is asleep, offline, or powered off.
+
+```bash
+launchctl print "gui/$(id -u)/com.glenzli.pcp-chatgpt-tunnel"
+# Load an updated pcp-mcp binary into the tunnel child process:
+launchctl kickstart -k "gui/$(id -u)/com.glenzli.pcp-chatgpt-tunnel"
+```
+
+Inspect the local [tunnel status UI](http://127.0.0.1:4319/ui). See the [full integration guide](integrations/chatgpt/README.md) for private file locations, logs, key rotation, and shutdown.
+
+#### 5. Verify the shared entry point
+
+Enable the same PCP connection in a new ChatGPT conversation and a new Codex task. Do not install a local PCP Codex plugin. Retrieve a known topic and inspect its sources, then call `pcp_whoami` (included in the default compact toolset): both should report `chatgpt:pcp`, the same user Scope, and matching grants. Old tasks may retain their previously loaded tool context.
+
+If discovery fails, check Runtime in Console, enrollment, tunnel readiness and polling, then workspace association. Passing `doctor` does not prove a running service or a successful conversation call. Refresh connection metadata after changing tools. Host action controls govern confirmation for capture and feedback; check them after updates or reconnecting.
 
 ### Maintenance, Console, and Observation
 
 Background maintenance and manual Console runs use the same persistent review queue. A worker produces candidates; Runtime and Store retain control of budgets, authorization, current-Revision checks, and commits. Ordinary Relations can opt into independent full-source verification before automatic application; uncertain relations and Archive proposals require review. Store-wide maintenance can periodically revisit old Pages and synthesize Topics across authorized Scopes; accumulated short Pages can qualify without meeting the long-Page summary threshold. Topic auto-application is a separate deployment opt-in and requires independent full-text verification of new information and preserved qualifications. Exact source revisions, neighboring topics, and recorded rejection reasons help avoid repeat proposals. Invalid candidates receive one correction attempt before isolation; a pending Topic limit pauses new proposals. Scheduling, model escalation, and failure backoff are documented in [`crates/pcp-runtime/README.md`](crates/pcp-runtime/README.md).
 
 Console should connect through a dedicated `audit` endpoint. It provides read-only Store inspection, query previews, enrollment management, maintenance review, and authorized archive/restore. Runtime's infrastructure observer returns aggregate, redacted operational data only; see [`crates/pcp-runtime/OBSERVER.md`](crates/pcp-runtime/OBSERVER.md).
+
+The Console access timeline counts completed Runtime API requests by default. Runtime-generated request IDs correlate internal operations, whose details load in pages only when expanded. Background maintenance has an explicit origin; older records remain in the uncorrelated view without timestamp-based grouping. Cross-scope request aggregates require audit access to every contributing scope. Semantic search re-enumerates authorized current revisions on each query and skips body reads for revisions already cached in the same embedding space.
 
 ```bash
 cargo build --release -p pcp-console
@@ -181,20 +264,15 @@ PCP_CONSOLE_BIND=127.0.0.1:4318 \
   target/release/pcp-console
 ```
 
-## Codex Plugin
+## Why there is no separate Codex plugin
 
-[`plugins/pcp`](plugins/pcp) is the source bundle for the Codex plugin. It combines `pcp-mcp`, the [`use-pcp`](plugins/pcp/skills/use-pcp/SKILL.md) Skill, tool approval policy, and icon behind one entry point. It does not bundle Runtime or a Store, and it does not create access grants for the user. The public marketplace snapshot includes a compiled macOS arm64 `pcp-mcp`; other platforms may select a compatible build through `PCP_MCP_BINARY` or use the PCP system installation. `pcp-runtime` and `pcp-console` remain independent local services and must first be installed from a PCP release or from the source repository with `scripts/install-macos.sh`. Then create and approve a `contribute` enrollment for `codex:pcp` as documented by the [enrollment contract](crates/pcp-runtime/ENROLLMENT.md). The plugin opens that enrollment from `~/Library/Application Support/PCP/clients/codex-pcp.json` by default.
+PCP maintains one ChatGPT connection and reuses it in Codex. Both already access the same Store, and the persistent tunnel is already needed for ChatGPT. A separate Codex package adds installation, versioning, enrollment, and guidance to maintain, while exposing duplicate tools in the same task. Sharing the connection removes that ambiguity; client attribution alone does not justify a second entry point.
 
-Install the public release from Glenzli Marketplace:
+Both applications now depend on the same connector and tunnel path. If it is unavailable, both temporarily lose PCP access. Normal use requires no additional service because the tunnel already runs continuously. The shared identity retains its existing Scope grants; application names do not confer extra permissions.
 
-```bash
-codex plugin marketplace add glenzli/marketplace --ref main
-codex plugin add pcp@glenzli-marketplace
-```
+This repository no longer distributes a standalone Codex plugin, dedicated Skill, or marketplace snapshot. It continues to maintain `pcp-mcp`, Runtime, Console, and the local tunnel launcher. Generic stdio MCP remains available for development and troubleshooting. MCP instructions, tool descriptions, and documentation carry the policy: retrieve when context matters, read exact sources, and retain a high threshold for formal writes. With activity enabled, read when starting or resuming substantive topics and update goals, milestones, next steps, blockers, pauses, and completion as they change; skip unchanged writes and per-message logs.
 
-The plugin uses one approved `codex:pcp` Principal. `user:self` has `contribute` access, while `read_all_scopes` provides read-only access to the other Scopes in the current Store. It exposes bounded retrieval, exact-Revision reads, explicit feedback, and high-threshold capture; every `pcp_capture` and `pcp_submit_feedback` call requires confirmation. Capture is limited to explicit retention requests or confirmed preferences, constraints, decisions, findings, and outcomes that are reusable across tasks. It excludes routine progress, raw conversations, logs, speculation, secrets, and facts that are inexpensive to recover from the repository. Start a new Codex task after installation or update so the new Skill and MCP tools enter the task context.
-
-The release boundary is explicit: the PCP repository owns the Rust, plugin, and Skill sources; `cargo build --release -p pcp-runtime -p pcp-console -p pcp-mcp` produces the local services and MCP artifacts; system installation owns Runtime, Console, Store, LaunchAgent, and enrollment state; the public marketplace contains only the validated plugin snapshot, Skill, launcher, icon, license, and `pcp-mcp` dist for supported platforms. It does not hide Runtime lifecycle inside the Codex plugin process.
+To migrate, verify the shared connection, uninstall the local PCP plugin in Codex, and start a new task. Existing Store data, memories, ChatGPT enrollment, and the tunnel require no migration or recreation. An unused old Codex enrollment may be revoked separately in Console. Private tunnel access is not publication to a public plugin directory.
 
 ## Documentation
 

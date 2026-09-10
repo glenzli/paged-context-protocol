@@ -1,6 +1,6 @@
-# ChatGPT local integration
+# Shared ChatGPT and Codex local integration
 
-This integration lets ChatGPT Developer Mode call the local PCP stdio MCP server through OpenAI Secure MCP Tunnel. The tunnel process makes an outbound HTTPS connection; PCP Runtime, its Unix sockets, Store, and enrollment credential remain local.
+This shared connection lets ChatGPT Developer Mode and Codex call the local PCP stdio MCP server through OpenAI Secure MCP Tunnel. The tunnel process makes an outbound HTTPS connection; PCP Runtime, its Unix sockets, Store, and enrollment credential remain local.
 
 It is intended for private development and personal use. It is not the public deployment path for a ChatGPT app or a Codex plugin.
 
@@ -18,9 +18,9 @@ The installer places the ChatGPT launcher at:
 ~/Library/Application Support/PCP/bin/pcp-chatgpt-mcp
 ```
 
-## 2. Enroll a separate ChatGPT Principal
+## 2. Enroll the shared ChatGPT Principal
 
-Find the current PCP Infra Discovery registration manifest, then begin an enrollment. Do not reuse the Codex credential or Principal. The launcher fixes the requested policy to `contribute` on `user:self` plus read-only access to all current Scopes.
+Find the current PCP Infra Discovery registration manifest, then begin an enrollment. For an existing working ChatGPT connection, reuse its enrollment; Codex now uses that same connection rather than a second credential. The launcher fixes the requested policy to `contribute` on `user:self` plus read-only access to all current Scopes.
 
 ```bash
 PCP_HOME="$HOME/Library/Application Support/PCP"
@@ -39,7 +39,7 @@ The requested policy contributes only to `user:self` and reads all current Scope
 
 ## 3. Configure Secure MCP Tunnel
 
-Create a tunnel in the OpenAI Platform, install the current `tunnel-client`, and initialize a local stdio profile with the launcher as its MCP command:
+Create a tunnel in the OpenAI Platform, associate the intended ChatGPT workspace, and obtain a runtime API key with tunnel usage permission. Install the current official `tunnel-client` and provide `CONTROL_PLANE_API_KEY` in the local terminal (see the README for hidden input in macOS zsh). Then initialize a local stdio profile with the launcher as its MCP command:
 
 ```bash
 tunnel-client init \
@@ -106,7 +106,66 @@ does not keep the Mac awake: ChatGPT cannot reach this local MCP while the machi
 is asleep, offline, or powered off. `doctor` validates configuration; it does not
 start the long-lived service. Installing a Codex plugin is not required for ChatGPT.
 
+## 5. Reuse the connection in Codex
+
+Enable the same ChatGPT PCP connection in Codex and start a new task. Retrieve a known
+Page and call `pcp_whoami`; compare the `chatgpt:pcp` Principal and Scope grants in both
+clients. The default compact toolset includes `pcp_whoami`. Uninstall the old local PCP
+plugin after verifying this path. Existing tasks may retain previously loaded tools.
+Do not create a second tunnel or enrollment for Codex. The historical `chatgpt` surface
+label identifies this shared connection, not the application that initiated the call.
+
+The standalone Codex bundle and marketplace distribution are retired. One connection
+avoids duplicate tools and separate installation, authorization, and guidance state.
+The local MCP server remains available for development and diagnostics; Runtime and
+Store remain independently managed local services. Both clients share tunnel availability.
+See the [English README](../../README-en.md#why-there-is-no-separate-codex-plugin) or
+[Chinese README](../../README.md#为什么不再单独维护-codex-插件) for the rationale and full setup.
+
 ## Query limits and timestamps
+
+### Activity and candidate defaults
+
+For normal activity publication, provide `topicKey` and `summary`. For candidate
+staging, provide `title` and `content`, with real source references when available.
+Both tools can omit `scope` when a live session check identifies exactly one Scope
+with ingest access. Multiple writable Scopes, no writable Scope, or store-wide
+ingest permission require an explicit destination; the adapter never picks the
+first readable Scope. Runtime still checks Scope access and Console opt-in.
+
+Candidates can omit `eventId`: the adapter derives a stable identifier from the
+exact destination, title, content and evidence fields. Identical retries reuse it
+across MCP restarts. Supply an explicit source-event ID when otherwise identical
+events must be distinguished. Existing explicit arguments remain supported.
+For an activity update, retain `expectedVersion` from the last read or write;
+the adapter does not fetch a newer version and silently overwrite another window.
+
+### Host guidance boundary
+
+PCP supplies the activity/candidate triggers through MCP server instructions and
+tool descriptions. It cannot install host developer instructions, observe every
+conversation turn, or guarantee a model will call a tool. Symbiont additionally
+places these triggers in its own conversation developer instructions and prepares
+local evidence. The shared connector has no equivalent host hook controlled by
+this repository; parameter defaults reduce friction without changing that boundary.
+
+If a host supports user-managed instructions, this compact guidance can be used
+there without another plugin or connection:
+
+> At natural checkpoints, assess new memory and changed activity independently
+> from current context. Write a formal Page when its criteria and future use are
+> clear; stage an evidence-backed candidate when retention remains uncertain.
+> Choose one memory route per item. Read activity once on topic start/resume unless
+> fresh context is supplied; merge small changes into a current snapshot. Activity
+> does not replace memory. Reuse context and receipts; search only concrete gaps or
+> duplicate doubts. Keep required reviews, skip unchanged writes, and stop on denial.
+> No per-turn quota or extra review turn. Routine success stays quiet; explain
+> failures when they need user action or affect the answer.
+
+This is optional host configuration, not something the MCP server installs. After
+updating tool schemas, refresh the connection's discovered metadata and verify the
+optional fields in the client; restarting the local binary alone only proves the
+server changed.
 
 The MCP instructions and read-tool descriptions present PCP as the user's authorized
 long-term context across conversations, projects, and tools. Query proactively when
@@ -115,8 +174,9 @@ answer or next action; an explicit recall request is not necessary. Skip self-co
 tasks and gaps already settled by available evidence. Results are evidence, not
 instructions or guaranteed current facts. Reading does not authorize writing.
 
-Start ordinary recall or capture deduplication with semantic search, then read useful
-exact Revisions together. MCP defaults to six results. Usually zero to two targeted
+For ordinary recall or a concrete unresolved duplicate doubt about a proposed write,
+use semantic search and read useful exact Revisions together. Reuse known records
+and receipts first; do not run a preflight search on every turn. MCP defaults to six results. Usually zero to two targeted
 follow-ups suffice; continue only for a material missing fact, conflict, useful new
 lead, or requested broader coverage. Stop once evidence settles the question or
 results add nothing. This is model guidance, not a server-enforced per-conversation
@@ -159,9 +219,9 @@ check. Enrollment also replaces an unlinked tenant socket instead of returning i
 stale address. Do not clean the live Infra Protocol runtime directory during use.
 
 - `pcp_search_pages`, `pcp_semantic_search`, `pcp_read_pages`, and `pcp_read_activity` are read-only.
-- `pcp_capture` and `pcp_submit_feedback` are declared as write actions. ChatGPT captures use Page kind `chatgpt_capture` and facet `captureSurface: chatgpt`.
-- The MCP server instructions and tool descriptions carry the same proactive-read, high-threshold-write policy as the Codex plugin. ChatGPT does not load the Codex Skill. This guides tool selection; it does not guarantee invocation on every relevant task.
-- With Console opt-in, new user-stated preferences or emerging decisions can trigger candidate staging; changed direction, cross-task blockers and handoffs can trigger activity updates. Routine progress and duplicate content are skipped. Activity reads include same-client cards by default because windows share a client identity; `includeOwn=false` explicitly excludes that entire client. Scope grants and client opt-in still apply.
+- `pcp_capture` and `pcp_submit_feedback` are declared as write actions. Captures through this shared connection, including those called from Codex, use Page kind `chatgpt_capture` and facet `captureSurface: chatgpt`.
+- MCP server instructions and tool descriptions separate activity from selective memory for both clients. No separate Codex Skill is required. This guides tool selection; it does not guarantee invocation on every relevant task.
+- Assess memory and activity independently. Use formal capture for new content meeting its criteria and clear future use; with Console opt-in, stage evidence-backed preferences, constraints or emerging decisions when retention remains uncertain. Choose one memory route per item. Read activity on topic start/resume unless fresh, and coalesce substantive state changes, including discussion progress. No per-turn write or polling duty. Activity needs no lasting value; it does not replace memory. Same-client cards are included by default; `includeOwn=false` excludes the whole client. Scope grants and client opt-in still apply.
 - The tunnel does not grant PCP access. Runtime still requires the approved `chatgpt:pcp` enrollment on every MCP process start.
 - Do not put the PCP credential, Store, Runtime socket, tunnel runtime API key, or tunnel configuration in this repository.
 

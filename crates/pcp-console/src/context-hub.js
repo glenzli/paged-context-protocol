@@ -170,7 +170,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     return ({promote:text("收为正式 Page","Promote"),promoted:text("已收为 Page","Promoted"),represented:text("现有记录已涵盖","Already represented"),defer:text("暂缓","Defer"),deferred:text("已暂缓","Deferred"),reject:text("不保留","Reject"),rejected:text("已拒绝","Rejected")})[action] || action;
   }
   function renderActivity() {
-    const box=node("div");box.append(node("p","context-note",text("可选的跨窗口近况，每客户端最多 3 个主题；不进入长期召回。没有更新不代表没有活动，过期不代表任务结束。", "Optional cross-window updates, up to 3 topics/client, excluded from durable recall. Silence is not inactivity; expiry is not completion.")));
+    const box=node("div");box.append(node("p","context-note",text("可选的跨窗口近况，每客户端最多 12 个主题；不进入长期召回。没有更新不代表没有活动，过期不代表任务结束。", "Optional cross-window updates, up to 12 topics/client, excluded from durable recall. Silence is not inactivity; expiry is not completion.")));
     if (!snapshot.activity.length) box.append(node("div","context-empty",text("当前没有共享近况","No current activity cards")));
     for (const item of snapshot.activity) {
       const card=node("article","context-card");card.append(node("h3","",item.topicKey),node("p","",item.summary),node("p","context-meta",`${item.clientId} · ${item.scope} · ${text("更新","Updated")} ${formatTime(item.updatedAt)} · ${text("过期","Expires")} ${formatTime(item.expiresAt)}`));

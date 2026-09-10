@@ -185,9 +185,10 @@ impl SqlitePcpStore {
         let scopes_json = serde_json::to_string(scopes)?;
         let session_id = access.session_id.clone();
         let operation = operation.to_owned();
+        let telemetry = pcp_store::request_audit::observe(scopes, &operation, decision, telemetry);
         let decision = decision.as_str().to_owned();
         let detail = detail.map(bound_detail);
-        let telemetry_json = telemetry.map(serde_json::to_string).transpose()?;
+        let telemetry_json = telemetry.as_ref().map(serde_json::to_string).transpose()?;
         let durable = decision != AccessDecision::Allowed.as_str();
         let record = AccessAuditRecord {
             occurred_at,
@@ -231,6 +232,7 @@ impl SqlitePcpStore {
                     SELECT event_id, occurred_at, principal_json, session_id,
                            operation, scopes_json, decision, detail, telemetry_json
                     FROM pcp_access_log
+                    WHERE COALESCE(json_extract(telemetry_json, '$.request.root'), 0) = 0
                     ORDER BY occurred_at DESC, event_id DESC
                     ",
                 )

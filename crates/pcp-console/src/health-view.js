@@ -1,4 +1,6 @@
-export function createHealthView({ request, showError, formatNumber, t }) {
+import { compactQuantity, exactQuantity } from "./quantity-format.js";
+
+export function createHealthView({ request, showError, formatNumber, t, locale = () => "en-US" }) {
   let loaded = false;
   let busy = false;
   let latest = null;
@@ -12,9 +14,18 @@ export function createHealthView({ request, showError, formatNumber, t }) {
     return node;
   }
 
+  function quantity(value, unit = "") {
+    const node = element("strong", "usage-quantity", compactQuantity(value, locale()) + (unit ? ` ${unit}` : ""));
+    const exact = exactQuantity(value, locale()) + (unit ? ` ${unit}` : "");
+    node.title = exact;
+    node.setAttribute("aria-label", exact);
+    node.tabIndex = 0;
+    return node;
+  }
+
   function metric(label, value, tone = "", note = "") {
     const node = element("div", `metric${tone ? ` tone-${tone}` : ""}`);
-    node.append(element("div", "metric-label", label), element("div", "metric-value", value));
+    node.append(element("div", "metric-label", label), typeof value === "object" ? value : element("div", "metric-value", value));
     if (note) node.append(element("div", "metric-note", note));
     return node;
   }
@@ -51,7 +62,7 @@ export function createHealthView({ request, showError, formatNumber, t }) {
     node.append(heading);
     for (const [name, value, tone] of entries) {
       const row = element("div", `aggregate-row${tone ? ` health-${tone}` : ""}`);
-      row.append(element("span", "", name), element("strong", "", value));
+      row.append(element("span", "", name), typeof value === "object" ? value : element("strong", "", value));
       node.append(row);
     }
     return node;
@@ -171,19 +182,30 @@ export function createHealthView({ request, showError, formatNumber, t }) {
     const reportedCalls = usage.reportedModelCalls || 0;
     const totalTokens = usage.usage?.totalTokens || 0;
     const sources = usage.sources || [];
-    const entries = sources.length
-      ? sources.map((source) => [
-          `${modelUsageLabel(source.source)} · ${source.operation}`,
-          `${formatNumber(source.usage?.totalTokens || 0)} ${t("tokens")} · ${formatNumber(source.reportedModelCalls || 0)}/${formatNumber(source.modelCalls || 0)}`,
-        ])
-      : [[t("No model usage was observed in this window"), "-"]];
+    const workflows = panel(t("By workflow"), "", []);
+    workflows.classList.add("usage-workflows");
+    const columns = element("div", "usage-workflow-row usage-column-labels");
+    columns.append(element("span", "", t("By workflow")), element("span", "", t("Reported tokens")), element("span", "", t("Reported / total calls")));
+    workflows.append(columns);
+    for (const source of sources) {
+      const row = element("div", "usage-workflow-row");
+      const name = element("div", "usage-workflow-name");
+      name.append(element("span", "", modelUsageLabel(source.source)), element("code", "", source.operation));
+      const reported = source.reportedModelCalls || 0;
+      const tokens = reported ? quantity(source.usage?.totalTokens || 0) : element("span", "muted", "—");
+      if (!reported) tokens.title = t("No token usage reported");
+      const coverage = element("span", "usage-coverage", `${formatNumber(reported)} / ${formatNumber(source.modelCalls || 0)}`);
+      row.append(name, tokens, coverage);
+      workflows.append(row);
+    }
+    if (!sources.length) workflows.append(element("div", "empty", t("No model usage was observed in this window")));
     byId("health-model-usage").replaceChildren(
       panel(t("Model usage"), "", [
-        [t("Model calls"), formatNumber(totalCalls)],
-        [t("Reported tokens"), formatNumber(totalTokens)],
+        [t("Model calls"), quantity(totalCalls)],
+        [t("Reported tokens"), reportedCalls ? quantity(totalTokens) : "—"],
         [t("Token reporting"), `${formatNumber(reportedCalls)}/${formatNumber(totalCalls)} · ${percentage(reportedCalls, totalCalls)}`],
       ]),
-      panel(t("By workflow"), "", entries),
+      workflows,
     );
   }
 
@@ -191,7 +213,7 @@ export function createHealthView({ request, showError, formatNumber, t }) {
     latest = data;
     const failureCount = data.activity.failed + data.activity.denied;
     byId("health-metrics").replaceChildren(
-      metric(t("Observed calls"), formatNumber(data.activity.calls), "", t("Authorized client operations in this window")),
+      metric(t("Observed calls"), quantity(data.activity.calls), "", t("Authorized client operations in this window")),
       metric(t("Failed / denied"), `${formatNumber(data.activity.failed)} / ${formatNumber(data.activity.denied)}`, failureCount ? "danger" : "positive", t("Runtime failures and authorization denials")),
       metric(t("p95 latency"), duration(data.activity.p95DurationMs), data.activity.p95DurationMs === null || data.activity.p95DurationMs === undefined ? "" : "info", t("Measured response latency")),
       metric(t("Telemetry coverage"), percentage(data.activity.measuredCalls, data.activity.calls), data.activity.measuredCalls < data.activity.calls ? "warning" : "positive", `${formatNumber(data.activity.measuredCalls)} ${t("measured calls")}`),

@@ -8,7 +8,7 @@ mod retention;
 pub use access::{
     AccessAuditEvent, AccessClientSummary, AccessDecision, AccessLogQuery, AccessLogResult,
     AccessOperationSummary, AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession,
-    OperationTelemetry, ScopeGrant,
+    OperationTelemetry, RequestAuditMetadata, ScopeGrant,
 };
 pub use model::{
     Actor, ActorType, BrowseIndexOrder, Capabilities, GraphEdgeDirection, GraphEdgeKind,

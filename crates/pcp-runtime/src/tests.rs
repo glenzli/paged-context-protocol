@@ -714,6 +714,32 @@ async fn remote_client_uses_the_runtime_bound_access_session() {
         "host:runtime-test"
     );
     assert_eq!(filtered.operations.len(), 1);
+    let requests = remote
+        .query_access_log(pcp_core::AccessLogQuery {
+            view: Some("requests".into()),
+            operation: Some("search_pages".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("request audit across actual RPC transport");
+    assert_eq!(requests.total_events, filtered.total_events);
+    let request = requests.events[0]
+        .telemetry
+        .as_ref()
+        .unwrap()
+        .request
+        .as_ref()
+        .unwrap();
+    assert!(request.root);
+    let children = remote
+        .query_access_log(pcp_core::AccessLogQuery {
+            request_id: Some(request.id.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(children.total_events, request.internal_operations);
+    assert_eq!(children.events[0].operation, "search_pages");
 
     assert!(audit.iter().all(|event| {
         event.principal.principal_id == "host:runtime-test"

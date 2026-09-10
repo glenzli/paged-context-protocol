@@ -49,6 +49,8 @@ pub enum MaintenanceWorkerRequest {
         title: String,
         content: String,
         existing_topics: Vec<ExistingTopicPage>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        review_feedback: Vec<TopicReviewFeedback>,
         #[serde(default)]
         refresh_topic_page_id: Option<String>,
     },
@@ -121,6 +123,10 @@ pub struct TopicReviewFeedback {
     pub title: String,
     pub status: String,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -142,6 +148,33 @@ pub struct MaintenanceVerification {
     pub preserved_boundaries: String,
     #[serde(default)]
     pub concerns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<VerifiedMaintenanceRevision>,
+    #[serde(default)]
+    pub requires_user_input: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_steps: Vec<MaintenanceReviewStep>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VerifiedMaintenanceRevision {
+    pub title: String,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceReviewStep {
+    pub tier: String,
+    pub stage: String,
+    pub state: String,
+    pub reason: String,
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub actual_tokens: Option<u64>,
 }
 
 /// Existing Topic front door offered to the semantic worker as a possible
@@ -469,6 +502,16 @@ pub trait SemanticMaintenanceWorker: Send + Sync {
             model_attempts: 1,
             escalated: false,
         })
+    }
+
+    /// Reuse the recorded baseline when continuing a bounded review. Providers
+    /// without upgraded review keep their existing evaluation behavior.
+    async fn review_existing_with_usage(
+        &self,
+        request: MaintenanceWorkerRequest,
+        _baseline: MaintenanceVerification,
+    ) -> Result<MaintenanceWorkerOutcome> {
+        self.evaluate_with_usage(request).await
     }
 
     /// Gives workers that support it one bounded chance to repair an invalid Pack partition.

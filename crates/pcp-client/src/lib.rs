@@ -22,6 +22,7 @@ use pcp_core::{
     WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::PcpStore;
+pub use pcp_store::request_audit;
 pub use pcp_store::{
     ContentLibraryFilter, ContentLibraryResult, ContentLibraryScope, ContentLibrarySummary,
     ContentPageRole, DurablePageInventoryItem, HealthSnapshot, QueryAuditSummary,
@@ -348,6 +349,12 @@ pub async fn expand_graph(
 /// administrative tools.
 #[async_trait]
 pub trait PcpApi: PcpTenantApi {
+    async fn record_runtime_request_audit(
+        &self,
+        _event: request_audit::CompletedRequest,
+    ) -> Result<()> {
+        anyhow::bail!("runtime request audit requires a local client")
+    }
     /// Runtime-owned, content-free model accounting. This is only implemented
     /// by local Runtime clients; remote tenants cannot submit telemetry.
     async fn record_runtime_usage(&self, _event: pcp_core::RuntimeUsageEvent) -> Result<()> {
@@ -641,6 +648,12 @@ impl PcpTenantApi for EmbeddedPcpClient {
 
 #[async_trait]
 impl PcpApi for EmbeddedPcpClient {
+    async fn record_runtime_request_audit(
+        &self,
+        event: request_audit::CompletedRequest,
+    ) -> Result<()> {
+        self.store.record_runtime_request_audit(event).await
+    }
     async fn record_runtime_usage(&self, event: pcp_core::RuntimeUsageEvent) -> Result<()> {
         self.store.record_runtime_usage(event).await
     }

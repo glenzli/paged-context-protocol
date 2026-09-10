@@ -99,58 +99,33 @@ impl SemanticSearchProvider {
         limit: usize,
     ) -> Result<SemanticSearchResult> {
         let query_vector = self.embed_query(query).await?;
-        let mut model_calls = 1;
+        let mut model_calls = 1usize;
         let query_space = validate_embedding(&query_vector, "query")?.to_owned();
-        let documents = self.collect_documents(client, scopes).await?;
-        let indexed_count = documents.len();
-        if documents.is_empty() {
-            return Ok(SemanticSearchResult {
-                hits: Vec::new(),
-                indexed_count,
-                embedded_count: 0,
-                model_calls,
-            });
-        }
-
-        let missing = {
-            let index = self.index.lock().await;
-            documents
-                .iter()
-                .filter(|document| {
-                    index
-                        .entries
-                        .get(&document.hit.revision_id)
-                        .is_none_or(|entry| entry.embedding_space != query_space)
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        let embedded_count = missing.len();
-        if !missing.is_empty() {
+        let (candidates, mut entries, documents) =
+            self.prepare_documents(client, scopes, &query_space).await?;
+        let embedded_count = documents.len();
+        if !documents.is_empty() {
             let (new_embeddings, document_model_calls) =
-                self.embed_documents(&missing, &query_space).await?;
+                self.embed_documents(&documents, &query_space).await?;
             model_calls = model_calls.saturating_add(document_model_calls);
             let mut index = self.index.lock().await;
-            index.entries.extend(new_embeddings);
+            index.entries.extend(new_embeddings.clone());
             index.schema = CACHE_SCHEMA;
             persist_index(&self.cache_path, &index)?;
+            entries.extend(new_embeddings);
         }
-
-        let index = self.index.lock().await;
-        let mut hits = documents
+        let indexed_count = entries.len();
+        let mut hits = candidates
             .into_iter()
-            .filter_map(|document| {
-                let entry = index.entries.get(&document.hit.revision_id)?;
-                if entry.embedding_space != query_space {
-                    return None;
-                }
+            .filter_map(|hit| {
+                let entry = entries.get(&hit.revision_id)?;
                 cosine_score(&query_vector.values, &entry.values)
                     .ok()
                     .map(|score| SemanticSearchHit {
                         hit: SearchHit {
                             matched_by: "semantic_vector".to_owned(),
                             matched_projection: "embedding".to_owned(),
-                            ..document.hit
+                            ..hit
                         },
                         score,
                     })
@@ -164,6 +139,42 @@ impl SemanticSearchProvider {
             embedded_count,
             model_calls,
         })
+    }
+
+    async fn prepare_documents(
+        &self,
+        client: &dyn PcpTenantApi,
+        scopes: &[String],
+        query_space: &str,
+    ) -> Result<(
+        Vec<SearchHit>,
+        BTreeMap<String, CachedEmbedding>,
+        Vec<SemanticDocument>,
+    )> {
+        let candidates = self.collect_candidates(client, scopes).await?;
+        // Snapshot only authorized current revisions for this embedding space.
+        // Concurrent queries may update the shared cache without changing this
+        // request's vectors or causing a cached document to be embedded empty.
+        let entries = {
+            let index = self.index.lock().await;
+            candidates
+                .iter()
+                .filter_map(|hit| {
+                    let entry = index.entries.get(&hit.revision_id)?;
+                    (entry.embedding_space == query_space
+                        && entry.page_id == hit.page_id
+                        && entry.namespace == hit.namespace)
+                        .then(|| (hit.revision_id.clone(), entry.clone()))
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let missing = candidates
+            .iter()
+            .filter(|hit| !entries.contains_key(&hit.revision_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let documents = self.read_documents(client, &missing).await?;
+        Ok((candidates, entries, documents))
     }
 
     async fn embed_query(&self, query: &str) -> Result<RetrievalEmbeddingVector> {
@@ -265,11 +276,11 @@ impl SemanticSearchProvider {
         Ok((entries, model_calls))
     }
 
-    async fn collect_documents(
+    async fn collect_candidates(
         &self,
         client: &dyn PcpTenantApi,
         scopes: &[String],
-    ) -> Result<Vec<SemanticDocument>> {
+    ) -> Result<Vec<SearchHit>> {
         let mut cursor = None;
         let mut hits = Vec::new();
         while hits.len() < self.max_indexed_pages {
@@ -290,8 +301,16 @@ impl SemanticSearchProvider {
             }
         }
         hits.truncate(self.max_indexed_pages);
-        let max_read_chars = client.capabilities().max_read_chars;
+        Ok(hits)
+    }
+
+    async fn read_documents(
+        &self,
+        client: &dyn PcpTenantApi,
+        hits: &[SearchHit],
+    ) -> Result<Vec<SemanticDocument>> {
         let mut documents = Vec::new();
+        let max_read_chars = client.capabilities().max_read_chars;
         for chunk in hits.chunks(DOCUMENT_BATCH_SIZE) {
             let pages = client
                 .read_pages(ReadPagesRequest {
@@ -403,6 +422,131 @@ fn persist_index(path: &PathBuf, index: &SemanticIndex) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cached_candidates_skip_body_reads_but_recheck_revisions_and_access() {
+        use pcp_client::{EmbeddedPcpClient, PcpApi};
+        use pcp_core::{AccessLogQuery, AccessPrincipal, AccessPrincipalType, AccessSession};
+        let root =
+            std::env::temp_dir().join(format!("pcp-semantic-cache-{}", uuid::Uuid::new_v4()));
+        let store = Arc::new(
+            pcp_sqlite::SqlitePcpStore::open(root.join("store.sqlite3"))
+                .await
+                .unwrap(),
+        );
+        let access = AccessSession::store_wide_full_control(
+            AccessPrincipal {
+                principal_id: "test:semantic".into(),
+                principal_type: AccessPrincipalType::Service,
+                display_name: None,
+            },
+            "test:semantic",
+        );
+        let client = EmbeddedPcpClient::new(store.clone(), access.clone());
+        client
+            .create_scope(pcp_core::CreateScopeRequest {
+                namespace: "cache-test".into(),
+                display_name: "Cache test".into(),
+                description: None,
+                parent_namespace: None,
+            })
+            .await
+            .unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "namespace":"cache-test", "lifecycleStatus":"active", "kind":"document", "mutability":"revisioned",
+            "createdBy":{"actorId":"test", "actorType":"user"},
+            "payload":{"mediaType":"text/plain", "content":"A semantic cache test document."}
+        })).unwrap();
+        let written = client.write_page(request).await.unwrap();
+        let provider = SemanticSearchProvider::new(SemanticSearchConfig {
+            credential_file: root.join("unused-credential.json"),
+            cache_path: root.join("vectors.json"),
+            timeout_seconds: 2,
+            max_document_chars: 1000,
+            max_indexed_pages: 100,
+        })
+        .unwrap();
+        let reads = || async {
+            client
+                .query_access_log(AccessLogQuery {
+                    operation: Some("read_pages".into()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .total_events
+        };
+        let (_, cached, documents) = provider
+            .prepare_documents(&client, &[], "space-a")
+            .await
+            .unwrap();
+        assert!(cached.is_empty());
+        assert_eq!(documents.len(), 1);
+        assert!(!documents[0].text.is_empty());
+        assert_eq!(reads().await, 1);
+        provider.index.lock().await.entries.insert(
+            written.revision_id.clone(),
+            CachedEmbedding {
+                page_id: written.page_id.clone(),
+                namespace: "cache-test".into(),
+                embedding_space: "space-a".into(),
+                values: vec![1.0],
+            },
+        );
+        let (hits, cached, documents) = provider
+            .prepare_documents(&client, &[], "space-a")
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(cached.len(), 1);
+        assert!(documents.is_empty());
+        assert_eq!(reads().await, 1, "warm cache must avoid payload read_pages");
+        // An embedding-space change needs source text again.
+        assert_eq!(
+            provider
+                .prepare_documents(&client, &[], "space-b")
+                .await
+                .unwrap()
+                .2
+                .len(),
+            1
+        );
+        assert_eq!(reads().await, 2);
+        let revised = client
+            .revise_page(
+                serde_json::from_value(serde_json::json!({
+                    "pageId":written.page_id, "expectedRevisionId":written.revision_id,
+                    "lifecycleStatus":"active", "createdBy":{"actorId":"test", "actorType":"user"},
+                    "payload":{"mediaType":"text/plain", "content":"Changed semantic document."}
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (hits, cached, documents) = provider
+            .prepare_documents(&client, &[], "space-a")
+            .await
+            .unwrap();
+        assert!(cached.is_empty());
+        assert_eq!(documents.len(), 1);
+        assert_eq!(hits[0].revision_id, revised.revision_id);
+        assert_eq!(reads().await, 3);
+        let restricted = EmbeddedPcpClient::new(
+            store,
+            AccessSession::new(access.principal, "no-access", Vec::new()),
+        );
+        let result = provider
+            .prepare_documents(&restricted, &[], "space-a")
+            .await;
+        assert!(
+            result.is_err() || result.unwrap().0.is_empty(),
+            "cached IDs must not bypass current access"
+        );
+        assert_eq!(reads().await, 3);
+        drop(client);
+        drop(provider);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn cosine_score_rejects_incompatible_vectors() {

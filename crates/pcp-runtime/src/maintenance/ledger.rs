@@ -145,6 +145,8 @@ pub struct MaintenanceRelationReviewProposal {
     /// is not itself asserted as a Page relation.
     #[serde(default)]
     pub relation_reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<super::MaintenanceVerification>,
     #[serde(default = "default_model_attempts")]
     pub model_attempts: u32,
     #[serde(default)]
@@ -166,6 +168,7 @@ pub struct MaintenanceRelationReviewPage {
 #[serde(rename_all = "snake_case")]
 pub enum MaintenanceRelationReviewStatus {
     Pending,
+    Stale,
     Accepted,
     Rejected,
     Deferred,
@@ -225,6 +228,54 @@ struct MaintenanceLedgerEntry {
 }
 
 impl MaintenanceLedger {
+    pub(crate) async fn decision_lock(path: &Path) -> Result<MaintenanceLedgerLock> {
+        let parent = path.parent().context("missing maintenance state parent")?;
+        tokio::fs::create_dir_all(parent).await?;
+        let path = parent.join("maintenance-review-decisions.json");
+        tokio::task::spawn_blocking(move || MaintenanceLedgerLock::acquire(&path)).await?
+    }
+
+    pub(crate) fn replace_pending_review(
+        &mut self,
+        old: &MaintenanceReviewItem,
+        payload: MaintenanceReviewPayload,
+        reason: String,
+        attempts: u32,
+    ) -> Result<()> {
+        let current = self
+            .review_items
+            .get(&old.candidate_id)
+            .context("review disappeared")?;
+        anyhow::ensure!(
+            current.status == MaintenanceReviewStatus::Pending
+                && current.updated_at == old.updated_at,
+            "review was decided or edited during verification"
+        );
+        let id = payload.candidate_id().to_owned();
+        let mut updated = current.clone();
+        updated.candidate_id = id.clone();
+        updated.payload = payload;
+        updated.reason = reason;
+        updated.model_attempts = updated.model_attempts.saturating_add(attempts);
+        updated.escalated |= match &updated.payload {
+            MaintenanceReviewPayload::Topic(c) => c
+                .verification
+                .as_ref()
+                .is_some_and(|v| !v.review_steps.is_empty()),
+            MaintenanceReviewPayload::Relation(c) => c
+                .verification
+                .as_ref()
+                .is_some_and(|v| !v.review_steps.is_empty()),
+            _ => false,
+        };
+        updated.updated_at = chrono::Utc::now().to_rfc3339();
+        if id != old.candidate_id {
+            self.resolve_review(&old.candidate_id, MaintenanceReviewStatus::Stale)?;
+        }
+        self.review_items.insert(id, updated);
+        Ok(())
+    }
+
     pub(crate) async fn load(path: &Path) -> Result<Self> {
         match tokio::fs::read(path).await {
             Ok(bytes) => serde_json::from_slice(&bytes)
@@ -533,6 +584,7 @@ impl MaintenanceLedger {
                         risk: risk.to_owned(),
                         review_reason: review_reason.to_owned(),
                         relation_reason,
+                        verification: None,
                         model_attempts: 1,
                         escalated: false,
                         snoozed_until: None,
@@ -564,12 +616,57 @@ impl MaintenanceLedger {
                 risk: "manual_review".to_owned(),
                 review_reason: "The selected Pages are not a continuous Pack boundary with a shared protected identifier.".to_owned(),
                 relation_reason,
+                verification: None,
                 model_attempts: model_attempts.max(1),
                 escalated,
                 snoozed_until: None,
                 status: MaintenanceRelationReviewStatus::Pending,
             });
         candidate_id
+    }
+
+    pub(crate) fn update_relation_verification(
+        &mut self,
+        id: &str,
+        assessment: super::MaintenanceVerification,
+        calls: u32,
+    ) -> Result<()> {
+        let proposal = self
+            .relation_reviews
+            .get_mut(id)
+            .context("unknown relation review")?;
+        anyhow::ensure!(
+            proposal.status == MaintenanceRelationReviewStatus::Pending,
+            "relation review already decided"
+        );
+        if matches!(assessment.verdict, super::VerificationVerdict::Approve) {
+            if let Some(revision) = &assessment.revision {
+                proposal.relation_reason = revision.content.clone();
+            }
+        }
+        proposal.model_attempts = proposal.model_attempts.saturating_add(calls);
+        proposal.escalated |= !assessment.review_steps.is_empty();
+        proposal.review_reason = assessment.reason.clone();
+        proposal.verification = Some(assessment);
+        Ok(())
+    }
+
+    pub(crate) fn set_relation_verification(
+        &mut self,
+        id: &str,
+        assessment: Option<super::MaintenanceVerification>,
+    ) -> Result<()> {
+        let proposal = self
+            .relation_reviews
+            .get_mut(id)
+            .context("unknown relation review")?;
+        if proposal.status == MaintenanceRelationReviewStatus::Pending {
+            if let Some(assessment) = assessment {
+                proposal.review_reason = assessment.reason.clone();
+                proposal.verification = Some(assessment);
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn relation_reviews(&self) -> Vec<MaintenanceRelationReviewProposal> {
@@ -612,9 +709,48 @@ impl MaintenanceLedger {
             .values()
             .filter(|item| {
                 item.status == MaintenanceReviewStatus::Pending
-                    && matches!(item.payload, MaintenanceReviewPayload::Topic(_))
+                    && matches!(&item.payload, MaintenanceReviewPayload::Topic(c)
+                        if !c.verification.as_ref().is_some_and(|v| matches!(v.verdict, super::VerificationVerdict::Approve)))
             })
             .count()
+    }
+
+    pub(crate) fn flag_topic_overlap(&mut self, id: &str, other: &str) -> bool {
+        let Some(item) = self.review_items.get_mut(id) else {
+            return false;
+        };
+        let MaintenanceReviewPayload::Topic(candidate) = &mut item.payload else {
+            return false;
+        };
+        let Some(v) = &mut candidate.verification else {
+            return false;
+        };
+        if item.status != MaintenanceReviewStatus::Pending
+            || !v.review_steps.is_empty()
+            || !matches!(v.verdict, super::VerificationVerdict::Approve)
+        {
+            return false;
+        }
+        v.verdict = super::VerificationVerdict::NeedsReview;
+        v.requires_user_input = false;
+        v.review_state = Some("pending_overlap".into());
+        v.reason = format!(
+            "Compare this draft with earlier pending proposal {other}; similar titles route a duplicate check but do not prove identical meaning."
+        );
+        item.reason = v.reason.clone();
+        item.updated_at = chrono::Utc::now().to_rfc3339();
+        true
+    }
+
+    pub(crate) fn topic_evidence_decided(
+        &self,
+        candidate: &super::MaintenanceTopicCandidate,
+    ) -> bool {
+        self.review_items.values().any(|item| {
+            matches!(&item.payload, MaintenanceReviewPayload::Topic(old)
+                if matches!(item.status, MaintenanceReviewStatus::Accepted | MaintenanceReviewStatus::Rejected)
+                    && super::topic_policy::same_evidence(old, candidate))
+        })
     }
 
     pub(crate) fn topic_evidence_reviewed(
@@ -649,7 +785,7 @@ impl MaintenanceLedger {
                         .iter()
                         .filter(|p| ids.contains(p.page_id.as_str()))
                         .count()
-                        < 2
+                        < 1
                 {
                     return None;
                 }
@@ -676,6 +812,54 @@ impl MaintenanceLedger {
                         item.reason.clone()
                     }
                 }),
+                candidate_id: Some(item.candidate_id.clone()),
+                content: (item.status == MaintenanceReviewStatus::Pending)
+                    .then(|| candidate.content.clone()),
+            })
+            .collect()
+    }
+
+    pub(crate) fn pending_topic_feedback(
+        &self,
+        title: &str,
+        revisions: &[String],
+    ) -> Vec<super::TopicReviewFeedback> {
+        let ids = revisions.iter().collect::<BTreeSet<_>>();
+        let mut items = self
+            .review_items
+            .values()
+            .filter_map(|item| {
+                let MaintenanceReviewPayload::Topic(c) = &item.payload else {
+                    return None;
+                };
+                let overlap = c
+                    .pages
+                    .iter()
+                    .filter(|p| ids.contains(&p.revision_id))
+                    .count();
+                // Exact evidence is already deduplicated separately. Exclude the
+                // candidate being resumed, and offer competing evidence as context.
+                (item.status == MaintenanceReviewStatus::Pending
+                    && !(overlap == c.pages.len() && overlap == revisions.len())
+                    && (overlap > 0 || super::topic_policy::related_titles(title, &c.title)))
+                .then_some((item, c, overlap))
+            })
+            .collect::<Vec<_>>();
+        items.sort_by(|a, b| {
+            b.2.cmp(&a.2)
+                .then_with(|| a.0.proposed_at.cmp(&b.0.proposed_at))
+        });
+        items
+            .into_iter()
+            .take(12)
+            .map(|(item, c, _)| super::TopicReviewFeedback {
+                source_revision_ids: c.pages.iter().map(|p| p.revision_id.clone()).collect(),
+                source_page_ids: c.pages.iter().map(|p| p.page_id.clone()).collect(),
+                title: c.title.clone(),
+                status: "pending".into(),
+                reason: item.reason.clone(),
+                candidate_id: Some(item.candidate_id.clone()),
+                content: Some(c.content.clone()),
             })
             .collect()
     }
@@ -1177,7 +1361,7 @@ fn exponential_delay(base: u64, ceiling: u64, exponent: u32) -> u64 {
         .min(ceiling)
 }
 
-struct MaintenanceLedgerLock(std::fs::File);
+pub(crate) struct MaintenanceLedgerLock(std::fs::File);
 
 impl MaintenanceLedgerLock {
     fn acquire(path: &Path) -> Result<Self> {

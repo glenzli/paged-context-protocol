@@ -7,6 +7,8 @@ mod ledger;
 mod operator;
 mod reconciliation;
 mod review;
+mod review_budget;
+mod review_escalation;
 mod topic_policy;
 mod update_discovery;
 mod worker;
@@ -51,6 +53,7 @@ pub use review::{
     MaintenanceReviewItem, MaintenanceReviewOrigin, MaintenanceReviewPayload,
     MaintenanceReviewStatus,
 };
+pub use review_budget::{BudgetSnapshot, ReviewBudgetConfig, ReviewTier, TokenLimitMode};
 pub use worker::{
     CommandSemanticWorker, MaintenanceDetailPage, MaintenanceRelation, MaintenanceRoutingPage,
     MaintenanceSummarySelection, MaintenanceVerification, MaintenanceWorkerOutcome,
@@ -81,16 +84,20 @@ pub fn build_semantic_worker(
             relation_deployment_id,
             escalation_deployment_id,
             escalation_operations,
+            review_budget,
             ..
-        } => Ok(Arc::new(InferRuntimeSemanticWorker::new(
-            credential_file.clone(),
-            Duration::from_secs(*timeout_seconds),
-            summary_deployment_id.clone(),
-            reasoning_deployment_id.clone(),
-            relation_deployment_id.clone(),
-            escalation_deployment_id.clone(),
-            escalation_operations.clone(),
-        )?)),
+        } => Ok(Arc::new(
+            InferRuntimeSemanticWorker::new(
+                credential_file.clone(),
+                Duration::from_secs(*timeout_seconds),
+                summary_deployment_id.clone(),
+                reasoning_deployment_id.clone(),
+                relation_deployment_id.clone(),
+                escalation_deployment_id.clone(),
+                escalation_operations.clone(),
+            )?
+            .with_review_budget(review_budget.clone()),
+        )),
     }
 }
 

@@ -101,6 +101,7 @@ pub(super) struct MaintenanceSettings {
     pub min_new_pages: usize,
     pub quiet_period_seconds: u64,
     pub max_wait_seconds: u64,
+    pub review_budget: Option<pcp_runtime::ReviewBudgetConfig>,
 }
 
 impl ManagedRuntime {
@@ -269,6 +270,9 @@ fn runtime_paths_missing(
 
 impl MaintenanceSettings {
     fn validate(&self) -> Result<()> {
+        if let Some(budget) = &self.review_budget {
+            budget.validate()?;
+        }
         anyhow::ensure!(self.min_new_pages > 0, "minimum new Pages must be positive");
         anyhow::ensure!(
             self.quiet_period_seconds > 0,
@@ -280,6 +284,24 @@ impl MaintenanceSettings {
         );
         Ok(())
     }
+}
+
+fn remove_toml_key(text: &str, section: &str, key: &str) -> String {
+    let mut inside = false;
+    text.lines()
+        .filter(|line| {
+            let line = line.trim();
+            if line.starts_with('[') {
+                inside = line == format!("[{section}]");
+            }
+            !(inside
+                && line
+                    .split_once('=')
+                    .is_some_and(|(name, _)| name.trim() == key))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }
 
 fn rewrite_maintenance_settings(path: &Path, settings: &MaintenanceSettings) -> Result<()> {
@@ -314,6 +336,29 @@ fn rewrite_maintenance_settings(path: &Path, settings: &MaintenanceSettings) -> 
         "max_wait_seconds",
         &settings.max_wait_seconds.to_string(),
     )?;
+    let mut rewritten = rewritten;
+    if let Some(budget) = &settings.review_budget {
+        // The state path is server-owned: settings cannot reset history by
+        // selecting another ledger. Preserve all existing operational keys.
+        let values = serde_json::to_value(budget)?;
+        for (key, value) in values.as_object().context("invalid review budget")? {
+            if key == "state_path" {
+                continue;
+            }
+            let value = if value.is_null() {
+                "0".to_owned()
+            } else {
+                value.to_string()
+            };
+            // An empty optional Astra ceiling removes the TOML key.
+            if key == "astra_max_tokens" && value == "0" {
+                rewritten = remove_toml_key(&rewritten, "maintenance.worker.review_budget", key);
+            } else {
+                rewritten =
+                    rewrite_toml_key(&rewritten, "maintenance.worker.review_budget", key, &value)?;
+            }
+        }
+    }
     let temporary = path.with_extension("toml.tmp");
     fs::write(&temporary, rewritten).with_context(|| {
         format!(
@@ -544,7 +589,7 @@ impl ManagedPaths {
 
 fn default_runtime_config(data: &Path, run: &Path) -> String {
     format!(
-        "# PCP owns this local Runtime configuration.\n# Add tenant-specific static endpoints only when a client cannot use enrollment.\n\nstore_path = \"{}\"\n\n[[endpoints]]\nsocket_path = \"{}\"\nclient_id = \"operator:local\"\nclient_type = \"service\"\nclient_name = \"PCP Console\"\naccess_mode = \"admin\"\nstore_wide = true\nallowed_scopes = []\nallow_cross_scope_derivation = true\n\n# Runtime owns maintenance cadence and state. Maintenance remains disabled until\n# PCP has an independently authorized semantic provider.\n#\n# [maintenance]\n# enabled = true\n# mode = \"observe\"\n# state_path = \"{}\"\n# store_wide = true\n# allowed_scopes = []\n# allow_cross_scope_derivation = true\n# interval_seconds = 21600\n# max_interval_seconds = 86400\n# initial_delay_seconds = 300\n# max_jobs_per_cycle = 3\n# principal_id = \"service:pcp-maintainer\"\n# principal_name = \"PCP runtime maintainer\"\n#\n# [maintenance.periodic_review]\n# enabled = true\n# interval_seconds = 86400\n#\n# [maintenance.topic]\n# enabled = true\n# minimum_pages = 4\n# minimum_total_chars = 1200\n# max_source_pages = 8\n# target_scope = \"user:{{identity_id}}\"\n# auto_apply = true\n# max_pending_reviews = 24\n#\n# [maintenance.worker]\n# provider = \"infer_runtime\"\n# credential_file = \"/absolute/path/to/pcp-runtime.token\"\n# timeout_seconds = 120\n# summary_deployment_id = \"codex_gpt_5_6_luna\"\n# reasoning_deployment_id = \"codex_gpt_5_6_luna\"\n# escalation_deployment_id = \"codex_gpt_5_6_sol\"\n# actor_id = \"model:infer-runtime-maintenance\"\n# actor_type = \"model\"\n#\n# [maintenance.relation]\n# auto_apply_verified = false\n# enabled = true\n# candidate_window = 24\n# routing_chars_per_page = 800\n# retry_after_seconds = 86400\n#\n# Intent matching performs a bounded Router review over semantic candidates.\n# It is separate from the local semantic index because it carries a different\n# execution policy and may use a reasoning-capable provider.\n#\n# [intent_match]\n# credential_file = \"/absolute/path/to/pcp-runtime.token\"\n# timeout_seconds = 180\n# max_catalog_pages = 250\n",
+        "# PCP owns this local Runtime configuration.\n# Add tenant-specific static endpoints only when a client cannot use enrollment.\n\nstore_path = \"{}\"\n\n[[endpoints]]\nsocket_path = \"{}\"\nclient_id = \"operator:local\"\nclient_type = \"service\"\nclient_name = \"PCP Console\"\naccess_mode = \"admin\"\nstore_wide = true\nallowed_scopes = []\nallow_cross_scope_derivation = true\n\n# Runtime owns maintenance cadence and state. Maintenance remains disabled until\n# PCP has an independently authorized semantic provider.\n#\n# [maintenance]\n# enabled = true\n# mode = \"observe\"\n# state_path = \"{}\"\n# store_wide = true\n# allowed_scopes = []\n# allow_cross_scope_derivation = true\n# interval_seconds = 21600\n# max_interval_seconds = 86400\n# initial_delay_seconds = 300\n# max_jobs_per_cycle = 3\n# principal_id = \"service:pcp-maintainer\"\n# principal_name = \"PCP runtime maintainer\"\n#\n# [maintenance.periodic_review]\n# enabled = true\n# interval_seconds = 86400\n#\n# [maintenance.topic]\n# enabled = true\n# minimum_pages = 4\n# minimum_total_chars = 1200\n# max_source_pages = 8\n# target_scope = \"user:{{identity_id}}\"\n# auto_apply = true\n# max_pending_reviews = 24\n#\n# [maintenance.worker]\n# provider = \"infer_runtime\"\n# credential_file = \"/absolute/path/to/pcp-runtime.token\"\n# timeout_seconds = 120\n# summary_deployment_id = \"codex_gpt_5_6_luna\"\n# reasoning_deployment_id = \"codex_gpt_5_6_luna\"\n# actor_id = \"model:infer-runtime-maintenance\"\n# actor_type = \"model\"\n#\n# [maintenance.relation]\n# auto_apply_verified = false\n# enabled = true\n# candidate_window = 24\n# routing_chars_per_page = 800\n# retry_after_seconds = 86400\n#\n# Intent matching performs a bounded Router review over semantic candidates.\n# It is separate from the local semantic index because it carries a different\n# execution policy and may use a reasoning-capable provider.\n#\n# [intent_match]\n# credential_file = \"/absolute/path/to/pcp-runtime.token\"\n# timeout_seconds = 180\n# max_catalog_pages = 250\n",
         data.join("context.sqlite3").display(),
         run.join("pcp-console.sock").display(),
         data.join("maintenance-state.json").display(),
@@ -723,6 +768,7 @@ allowed_scopes = ["symbiont-d"]
             min_new_pages: 8,
             quiet_period_seconds: 600,
             max_wait_seconds: 3600,
+            review_budget: None,
         };
         let rewritten =
             rewrite_toml_key(source, "maintenance", "enabled", "true").expect("rewrite enabled");
@@ -740,5 +786,45 @@ allowed_scopes = ["symbiont-d"]
         assert!(rewritten.contains("enabled = true"));
         assert!(rewritten.contains("mode = \"apply\""));
         assert!(rewritten.contains("[maintenance.write_trigger]\nmin_new_pages = 8"));
+    }
+    #[test]
+    fn budget_settings_keep_ledger_identity_and_consumption_across_rewrites() {
+        let root = std::env::temp_dir().join(format!("pcp-budget-settings-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("runtime.toml");
+        let ledger = root.join("unchanged-ledger.json");
+        fs::write(&ledger, "recorded consumption").unwrap();
+        let source = format!(
+            "{}\n[maintenance]\nenabled = false\nmode = \"observe\"\nstate_path = \"{}\"\n[maintenance.worker]\nprovider = \"infer_runtime\"\ncredential_file = \"/tmp/unused.token\"\nactor_id = \"model:test\"\n[maintenance.worker.review_budget]\nstate_path = \"{}\"\nastra_max_tokens = 900\n",
+            default_runtime_config(&root, &root),
+            root.join("maintenance.json").display(),
+            ledger.display()
+        );
+        fs::write(&path, source).unwrap();
+        let mut budget = pcp_runtime::ReviewBudgetConfig::default();
+        budget.state_path = root.join("replacement.json");
+        budget.sol_max_calls = 2;
+        budget.astra_max_tokens = None;
+        let settings = MaintenanceSettings {
+            enabled: false,
+            mode: MaintenanceMode::Observe,
+            min_new_pages: 8,
+            quiet_period_seconds: 600,
+            max_wait_seconds: 3600,
+            review_budget: Some(budget),
+        };
+        rewrite_maintenance_settings(&path, &settings).unwrap();
+        rewrite_maintenance_settings(&path, &settings).unwrap();
+        let config = RuntimeConfig::load(&path).unwrap();
+        let pcp_runtime::MaintenanceWorkerConfig::InferRuntime { review_budget, .. } =
+            config.maintenance.unwrap().worker
+        else {
+            panic!()
+        };
+        assert_eq!(review_budget.state_path, ledger);
+        assert_eq!(review_budget.sol_max_calls, 2);
+        assert_eq!(review_budget.astra_max_tokens, None);
+        assert_eq!(fs::read_to_string(&ledger).unwrap(), "recorded consumption");
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -282,20 +282,48 @@ async fn activity_has_bounded_slots_versions_expiry_and_query_bound_snapshot_tok
     a.context_hub(ContextHubRequest::PublishActivity(update))
         .await
         .unwrap();
-    for key in ["two", "three", "four"] {
+    for index in 0..12 {
+        let key = format!("extra-{index}");
         a.context_hub(ContextHubRequest::PublishActivity(activity(
-            key,
+            &key,
             &"中".repeat(180),
         )))
         .await
         .unwrap();
+    }
+    {
+        let db = LockedState::open(&r.hub.path, r.store.identity_id())
+            .await
+            .unwrap();
+        assert_eq!(db.state.activity.len(), 12);
+        assert!(!db.state.activity.iter().any(|c| c.topic_key == "one"));
+    }
+    let existing = a
+        .context_hub(ContextHubRequest::ReadActivity(ActivityQuery {
+            query: Some("extra-11".into()),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    let mut update_at_capacity = activity("extra-11", "updated at capacity");
+    update_at_capacity.expected_version = existing["items"][0]["version"].as_u64();
+    a.context_hub(ContextHubRequest::PublishActivity(update_at_capacity))
+        .await
+        .unwrap();
+    {
+        let db = LockedState::open(&r.hub.path, r.store.identity_id())
+            .await
+            .unwrap();
+        assert_eq!(db.state.activity.len(), 12);
+        assert!(db.state.activity.iter().any(|c| c.topic_key == "extra-0"));
     }
     let q = ActivityQuery::default();
     let snapshot = b
         .context_hub(ContextHubRequest::ReadActivity(q.clone()))
         .await
         .unwrap();
-    assert_eq!(snapshot["items"].as_array().unwrap().len(), 3);
+    assert_eq!(snapshot["items"].as_array().unwrap().len(), 5);
+    assert_eq!(snapshot["truncated"], true);
     assert_eq!(snapshot["replace"], true);
     let mut incremental = q;
     incremental.cursor = snapshot["cursor"].as_str().map(String::from);

@@ -255,6 +255,8 @@ struct MaintenanceSettingsRequest {
     min_new_pages: usize,
     quiet_period_seconds: u64,
     max_wait_seconds: u64,
+    #[serde(default)]
+    review_budget: Option<pcp_runtime::ReviewBudgetConfig>,
 }
 
 #[derive(Deserialize)]
@@ -362,6 +364,7 @@ fn router(state: AppState) -> Router {
         .route("/page-editor.js", get(page_editor_js))
         .route("/page-list.js", get(page_list_js))
         .route("/time-format.js", get(time_format_js))
+        .route("/quantity-format.js", get(quantity_format_js))
         .route(
             "/maintenance-reconciliation.js",
             get(maintenance_reconciliation_js),
@@ -645,6 +648,13 @@ async fn page_list_js() -> Response {
     static_asset(
         "text/javascript; charset=utf-8",
         include_str!("page-list.js"),
+    )
+}
+
+async fn quantity_format_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("quantity-format.js"),
     )
 }
 
@@ -1285,6 +1295,17 @@ async fn maintenance_status(State(state): State<AppState>) -> Result<Json<Value>
         })));
     };
     let automation = RuntimeMaintainer::automation_status(&maintenance).await?;
+    let review_budget = match &maintenance.worker {
+        pcp_runtime::MaintenanceWorkerConfig::InferRuntime { review_budget, .. } => {
+            let mut settings = serde_json::to_value(review_budget)?;
+            settings.as_object_mut().unwrap().remove("state_path");
+            match review_budget.snapshot() {
+                Ok(snapshot) => json!({"config":settings,"status":snapshot}),
+                Err(error) => json!({"config":settings,"error":format!("{error:#}")}),
+            }
+        }
+        _ => Value::Null,
+    };
     Ok(Json(json!({
         "available": true,
         "configurable": state.runtime.is_some(),
@@ -1313,6 +1334,7 @@ async fn maintenance_status(State(state): State<AppState>) -> Result<Json<Value>
             "maxWaitSeconds": maintenance.write_trigger.max_wait_seconds,
         },
         "automation": automation,
+        "reviewBudget": review_budget,
         "packing": {
             "enabled": maintenance.packing.enabled,
             "maxPages": maintenance.packing.max_pages,
@@ -1340,6 +1362,7 @@ async fn update_maintenance_settings(
             min_new_pages: request.min_new_pages,
             quiet_period_seconds: request.quiet_period_seconds,
             max_wait_seconds: request.max_wait_seconds,
+            review_budget: request.review_budget,
         })
         .await?;
     Ok(Json(json!({
@@ -1427,7 +1450,7 @@ async fn maintenance_converge(
     require_console_mutation(&headers)?;
     let mut operator = maintenance_operator_for_console(&state).await?;
     let report = operator.converge_once().await?;
-    let reviews = operator.pending_reviews();
+    let reviews = operator.routed_reviews().await?;
     Ok(Json(json!({
         "report": report,
         "reviews": reviews,
@@ -1437,7 +1460,7 @@ async fn maintenance_converge(
 
 async fn maintenance_reviews(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let operator = maintenance_operator_for_console(&state).await?;
-    Ok(Json(json!({"reviews": operator.pending_reviews()})))
+    Ok(Json(json!({"reviews": operator.routed_reviews().await?})))
 }
 
 async fn accept_maintenance_review(

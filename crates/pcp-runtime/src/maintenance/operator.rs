@@ -24,6 +24,7 @@ pub struct MaintenanceOperator {
     identity_id: String,
     maintainer: RuntimeMaintainer,
     repair_client: Arc<dyn PcpApi>,
+    automatic_config: super::MaintenanceConfig,
 }
 
 impl MaintenanceOperator {
@@ -33,6 +34,7 @@ impl MaintenanceOperator {
             .maintenance
             .take()
             .context("PCP runtime config has no maintenance section")?;
+        let automatic_config = maintenance.clone();
         maintenance.enabled = true;
         maintenance.mode = MaintenanceMode::Apply;
         maintenance.packing.enabled = true;
@@ -66,6 +68,7 @@ impl MaintenanceOperator {
             identity_id,
             maintainer,
             repair_client,
+            automatic_config,
         })
     }
 
@@ -193,6 +196,10 @@ impl MaintenanceOperator {
 
     pub fn pending_reviews(&self) -> Vec<MaintenanceReviewItem> {
         self.maintainer.pending_reviews()
+    }
+
+    pub async fn routed_reviews(&self) -> Result<Vec<MaintenanceReviewItem>> {
+        self.maintainer.routed_reviews(&self.automatic_config).await
     }
 
     pub fn review_item(&self, candidate_id: &str) -> Option<MaintenanceReviewItem> {

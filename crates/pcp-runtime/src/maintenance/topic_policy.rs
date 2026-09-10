@@ -4,6 +4,26 @@ use super::MaintenanceTopicCandidate;
 use pcp_store::DurablePageInventoryItem;
 use std::collections::BTreeSet;
 
+/// Routing only: similar titles must be compared by the semantic reviewer,
+/// never used as authority to merge or discard different source evidence.
+pub(super) fn related_titles(a: &str, b: &str) -> bool {
+    let terms = |text: &str| {
+        let chars = text
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<Vec<_>>();
+        chars
+            .windows(3)
+            .map(|w| w.iter().collect::<String>())
+            .collect::<BTreeSet<_>>()
+    };
+    let a = terms(a);
+    let b = terms(b);
+    let shared = a.intersection(&b).count();
+    shared >= 4 && shared * 2 >= a.union(&b).count()
+}
+
 pub(super) fn same_evidence(a: &MaintenanceTopicCandidate, b: &MaintenanceTopicCandidate) -> bool {
     a.namespace == b.namespace
         && a.pages

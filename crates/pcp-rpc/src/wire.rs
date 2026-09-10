@@ -157,6 +157,59 @@ pub(crate) enum RpcOperation {
     },
 }
 
+impl RpcOperation {
+    /// Inspect only the variant; never serialize request content for audit labels.
+    pub(crate) fn audit_name(&self) -> &'static str {
+        match self {
+            Self::Describe => "describe",
+            Self::ContextHub(..) => "context_hub",
+            Self::IntegrityCheck => "integrity_check",
+            Self::CreateScope(..) => "create_scope",
+            Self::ListScopes { .. } => "list_scopes",
+            Self::SearchPages(..) => "search_pages",
+            Self::ExpandGraph(..) => "expand_graph",
+            Self::SemanticSearch(..) => "semantic_search",
+            Self::MatchIntent { .. } => "match_intent",
+            Self::BrowseIndex { .. } => "browse_index",
+            Self::BrowseContentPages { .. } => "browse_content_pages",
+            Self::BrowseRetrievalPages { .. } => "browse_retrieval_pages",
+            Self::ContentLibrarySummary { .. } => "content_library_summary",
+            Self::ReadPages(..) => "read_pages",
+            Self::CurrentRevisionId { .. } => "current_revision_id",
+            Self::PageCount { .. } => "page_count",
+            Self::ContentCharCount { .. } => "content_char_count",
+            Self::PlanRevisionRetention(..) => "plan_revision_retention",
+            Self::CollectRevisionRetention(..) => "collect_revision_retention",
+            Self::PutRevisionRetentionLease(..) => "put_revision_retention_lease",
+            Self::ActiveRevisionRetentionLeases { .. } => "active_revision_retention_leases",
+            Self::IngestPage(..) => "ingest_page",
+            Self::SubmitFeedback(..) => "submit_feedback",
+            Self::WritePage(..) => "write_page",
+            Self::RevisePage(..) => "revise_page",
+            Self::RepairPage(..) => "repair_page",
+            Self::DeletePage(..) => "delete_page",
+            Self::ArchivePage(..) => "archive_page",
+            Self::RestoreArchivedPage(..) => "restore_archived_page",
+            Self::PackPages(..) => "pack_pages",
+            Self::UnpackPage(..) => "unpack_page",
+            Self::LinkPages(..) => "link_pages",
+            Self::WriteSummary(..) => "write_summary",
+            Self::ExtractTopic(..) => "extract_topic",
+            Self::NextSummaryCandidate { .. } => "next_summary_candidate",
+            Self::MarkSummaryAssessed { .. } => "mark_summary_assessed",
+            Self::AssessPageValidity(..) => "assess_page_validity",
+            Self::PendingFeedback { .. } => "pending_feedback",
+            Self::ApplyReconciliation(..) => "apply_reconciliation",
+            Self::TombstoneDerivationCascade { .. } => "tombstone_derivation_cascade",
+            Self::DurablePageInventory { .. } => "durable_page_inventory",
+            Self::QueryAccessLog(..) => "query_access_log",
+            Self::AccessLog { .. } => "access_log",
+            Self::HealthSnapshot { .. } => "health_snapshot",
+            Self::QueryAuditSummary { .. } => "query_audit_summary",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RpcResponse {
