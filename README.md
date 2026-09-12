@@ -37,6 +37,8 @@ PCP 不规定 Router、提示词格式、Chain-of-Thought、上下文窗口规�
 
 新客户端可以通过 [Infra Discovery](https://github.com/glenzli/infra-protocol) 发现 Runtime，申请 Principal、访问模式和 Scope，并在用户批准后取得当前 generation 的身份绑定端点。已批准的 registration 可在 Runtime 重启后重新发现并打开新会话。
 
+候选提交后，已启用的后台维护会按同一 Scope 整理相关证据，生成保留时间演变、分歧和来源的记忆草案。一组候选可形成多条记忆，也可对照已有 Page 提议更新或标记已涵盖；在 Console 启用候选自动审核、维护写入模式与共享高级审核额度后，草案稳定约 5 分钟即由 Sol 按输出审核，通过的部分自动写入，未解决的证据继续保留；修订草案需独立核验，Console 可暂停自动审核、查看依据并撤回自动写入。新内容合并等待约 2 分钟，每轮最多整理一个有界窗口，无新证据不重复调用模型。未处理候选持续保留；仅已处理的临时记录到期清理。设计与恢复边界见 [候选演变](design/candidate-evolution.md)。
+
 ![PCP Console 使用合成演示数据展示本地 Store 概览](assets/console-overview.png)
 
 *PCP Console 的本地 Store 概览。截图使用合成数据，不包含真实 Page、Scope 或客户端身份。*
@@ -49,7 +51,7 @@ PCP 不规定 Router、提示词格式、Chain-of-Thought、上下文窗口规�
 - Summary、Topic、Validity、Relation、Provenance、archive/restore、无损 sealed-Page packing 和访问审计。
 - Runtime 注入 Identity 与 Actor 的 `ingest_page`，包括可选 `sourceSpan`、`basedOnRevisionIds` 和最小 SourceRef。
 - 租户 `submit_feedback`、逐目标反馈协调、Validity/`supersedes` 原子提交，以及 Luna→Sol→人工的有界升级路径。
-- Runtime-local Context Inbox：经 Console 显式启用的候选暂存与短期活动卡；候选只有经人工晋升后才成为正式 Page。
+- Runtime-local Context Inbox：经 Console 显式启用的候选暂存与短期活动卡；候选经人工审阅或已启用的 Sol 共享额度审核通过后成为正式 Page。
 - embedded/RPC client、授权注册、CLI、MCP、Console、维护协调器和只读设施观测。
 - 确定性 Revision 保留规划、有限租约和受保护的显式回收。
 

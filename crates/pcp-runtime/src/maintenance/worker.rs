@@ -14,6 +14,12 @@ const MAX_WORKER_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MaintenanceWorkerRequest {
+    ReviewCandidateSynthesis {
+        input: Box<crate::context_hub::automatic_review::CandidateReviewInput>,
+    },
+    OrganizeCandidates {
+        input: Box<crate::context_hub::synthesis::OrganizationInput>,
+    },
     SummarizePage {
         page: Box<MaintenanceDetailPage>,
     },
@@ -289,6 +295,18 @@ impl RelationCandidatePage {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MaintenanceWorkerResponse {
+    CandidateSynthesisReview {
+        decisions: Vec<crate::context_hub::automatic_review::OutputAssessment>,
+        #[serde(default)]
+        steps: Vec<MaintenanceReviewStep>,
+        #[serde(default)]
+        state: String,
+        #[serde(default)]
+        reason: String,
+    },
+    CandidateSyntheses {
+        groups: Vec<crate::context_hub::synthesis::ProposedSynthesis>,
+    },
     WriteSummary {
         content: String,
     },
@@ -487,6 +505,10 @@ impl From<ReadPage> for MaintenanceDetailPage {
 
 #[async_trait]
 pub trait SemanticMaintenanceWorker: Send + Sync {
+    /// Only a worker with the shared upgraded-review budget may authorize writes.
+    fn automatic_candidate_review_enabled(&self) -> bool {
+        false
+    }
     async fn evaluate(
         &self,
         request: MaintenanceWorkerRequest,

@@ -565,6 +565,7 @@ pub struct RuntimeMaintainer {
     pub(super) ledger: MaintenanceLedger,
     usage_source: &'static str,
     write_wakeup: Option<watch::Receiver<u64>>,
+    context_hub: Option<Arc<crate::context_hub::ContextHub>>,
 }
 
 async fn wait_for_scheduler_wakeup(
@@ -613,6 +614,7 @@ impl RuntimeMaintainer {
             ledger,
             usage_source,
             write_wakeup: None,
+            context_hub: None,
         };
         maintainer.refresh_feedback_reviews().await?;
         Ok(maintainer)
@@ -637,6 +639,7 @@ impl RuntimeMaintainer {
             ledger: MaintenanceLedger::default(),
             usage_source: "manual_maintenance",
             write_wakeup: None,
+            context_hub: None,
         })
     }
 
@@ -653,7 +656,17 @@ impl RuntimeMaintainer {
             ledger: MaintenanceLedger::default(),
             usage_source: "test_maintenance",
             write_wakeup: None,
+            context_hub: None,
         }
+    }
+
+    pub fn with_context_hub(mut self, hub: Arc<crate::context_hub::ContextHub>) -> Self {
+        hub.enable_organization();
+        hub.enable_automatic_review(
+            self.config.applies_changes() && self.worker.automatic_candidate_review_enabled(),
+        );
+        self.context_hub = Some(hub);
+        self
     }
 
     pub fn with_write_wakeup(mut self, write_wakeup: watch::Receiver<u64>) -> Self {
@@ -756,6 +769,11 @@ impl RuntimeMaintainer {
                 "automatic" | "waiting_budget" | "stale"
             )
         });
+        let normal_delay = if self.context_hub.is_some() {
+            normal_delay.min(60)
+        } else {
+            normal_delay
+        };
         Ok(if pending {
             normal_delay.min(30)
         } else {
@@ -898,6 +916,77 @@ impl RuntimeMaintainer {
         }
     }
 
+    async fn advance_candidate_review(
+        &mut self,
+        report: &mut MaintenanceCycleReport,
+    ) -> Result<()> {
+        if !self.config.applies_changes() || !self.worker.automatic_candidate_review_enabled() {
+            return Ok(());
+        }
+        let Some(hub) = self.context_hub.clone() else {
+            return Ok(());
+        };
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        if hub
+            .resume_automatic_write(self.client.access(), &inventory)
+            .await?
+        {
+            report.jobs_advanced += 1;
+            return Ok(());
+        }
+        let Some(input) = hub
+            .prepare_automatic_review(self.client.as_ref(), &inventory)
+            .await?
+        else {
+            return Ok(());
+        };
+        report.jobs_advanced += 1;
+        match self
+            .evaluate_worker(MaintenanceWorkerRequest::ReviewCandidateSynthesis {
+                input: Box::new(input.clone()),
+            })
+            .await
+        {
+            Ok(outcome) => {
+                report.worker_calls += outcome.model_attempts;
+                report.escalated_decisions += u32::from(outcome.escalated);
+                if let MaintenanceWorkerResponse::CandidateSynthesisReview {
+                    decisions,
+                    steps,
+                    state,
+                    reason,
+                } = outcome.response
+                {
+                    hub.finish_automatic_review(&input, decisions, steps, &state, &reason)
+                        .await?;
+                    let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+                    hub.resume_automatic_write(self.client.access(), &inventory)
+                        .await?;
+                } else {
+                    hub.finish_automatic_review(
+                        &input,
+                        vec![],
+                        vec![],
+                        "needs_review",
+                        "Unsupported review result; retained without writing",
+                    )
+                    .await?;
+                }
+            }
+            Err(error) => {
+                hub.finish_automatic_review(
+                    &input,
+                    vec![],
+                    vec![],
+                    "waiting_budget",
+                    &format!("{error:#}"),
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn run_scheduled_cycle_inner(&mut self) -> Result<MaintenanceCycleReport> {
         self.refresh_feedback_reviews().await?;
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
@@ -909,10 +998,81 @@ impl RuntimeMaintainer {
         };
         self.ledger.update_scheduled_cycle(aggregate.clone());
         self.ledger.save(&self.config.state_path).await?;
+        // Persist alternating admission priority so a restart or a one-job cycle
+        // cannot permanently favor candidate reviews or existing maintenance.
+        let candidate_first = self.ledger.candidate_review_first;
+        self.ledger.candidate_review_first = !candidate_first;
+        self.ledger.save(&self.config.state_path).await?;
+        if !candidate_first && aggregate.jobs_advanced < self.config.max_jobs_per_cycle {
+            self.refresh_maintenance_reviews().await?;
+            if self
+                .resume_budget_review(&inventory, &mut aggregate)
+                .await?
+            {
+                aggregate.jobs_advanced += 1;
+            }
+        }
+        if aggregate.jobs_advanced < self.config.max_jobs_per_cycle {
+            self.advance_candidate_review(&mut aggregate).await?;
+        }
+        if let Some(hub) = self
+            .context_hub
+            .clone()
+            .filter(|_| aggregate.jobs_advanced < self.config.max_jobs_per_cycle)
+        {
+            let preparation = hub
+                .prepare_organization(self.client.as_ref(), &inventory)
+                .await;
+            match preparation {
+                Ok(Some(input)) => {
+                    aggregate.jobs_advanced += 1;
+                    let outcome = self
+                        .evaluate_worker(MaintenanceWorkerRequest::OrganizeCandidates {
+                            input: Box::new(input.worker_view()),
+                        })
+                        .await;
+                    let provider_failed = outcome.is_err();
+                    let result = match outcome {
+                        Ok(outcome) => {
+                            aggregate.worker_calls += outcome.model_attempts;
+                            match outcome.response {
+                                MaintenanceWorkerResponse::CandidateSyntheses { groups } => {
+                                    match input.canonical_groups(groups) {
+                                        Ok(groups) => hub.finish_organization(&input, groups).await,
+                                        Err(error) => Err(error),
+                                    }
+                                }
+                                _ => Err(anyhow::anyhow!(
+                                    "Candidate organizer returned no usable evidence groups"
+                                )),
+                            }
+                        }
+                        Err(error) => {
+                            aggregate.worker_calls += 1;
+                            Err(error)
+                        }
+                    };
+                    if let Err(error) = result {
+                        if provider_failed {
+                            hub.organization_failed(&format!("{error:#}")).await?;
+                        } else {
+                            hub.organization_rejected(&input, &format!("{error:#}"))
+                                .await?;
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    hub.organization_failed(&format!("{error:#}")).await?;
+                }
+            }
+        }
         // Scheduled cycles save their aggregate ledger externally, so the inner
         // cycle's persist_ledger flag is false. Drain reviews explicitly here
         // before the new-write / periodic-discovery gate.
-        if self.refresh_maintenance_reviews().await? {
+        if aggregate.jobs_advanced < self.config.max_jobs_per_cycle
+            && self.refresh_maintenance_reviews().await?
+        {
             aggregate.jobs_advanced += 1;
         }
         while aggregate.jobs_advanced < self.config.max_jobs_per_cycle {
@@ -6290,6 +6450,8 @@ fn levenshtein_distance(left: &str, right: &str) -> usize {
 
 fn worker_operation(request: &MaintenanceWorkerRequest) -> &'static str {
     match request {
+        MaintenanceWorkerRequest::ReviewCandidateSynthesis { .. } => "review_candidate_synthesis",
+        MaintenanceWorkerRequest::OrganizeCandidates { .. } => "organize_candidates",
         MaintenanceWorkerRequest::SummarizePage { .. } => "summarize_page",
         MaintenanceWorkerRequest::SummarizePages { .. } => "summarize_pages",
         MaintenanceWorkerRequest::SelectPacking { .. } => "select_packing",
@@ -6306,6 +6468,8 @@ fn worker_operation(request: &MaintenanceWorkerRequest) -> &'static str {
 
 fn worker_scopes(request: &MaintenanceWorkerRequest, access: &AccessSession) -> Vec<String> {
     let mut scopes = match request {
+        MaintenanceWorkerRequest::ReviewCandidateSynthesis { input } => vec![input.scope.clone()],
+        MaintenanceWorkerRequest::OrganizeCandidates { input } => vec![input.scope.clone()],
         MaintenanceWorkerRequest::ReviewUpdate { target, evidence } => {
             vec![target.namespace.clone(), evidence.namespace.clone()]
         }
@@ -6344,6 +6508,8 @@ fn worker_scopes(request: &MaintenanceWorkerRequest, access: &AccessSession) -> 
 
 fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
     match response {
+        MaintenanceWorkerResponse::CandidateSynthesisReview { .. } => "candidate_synthesis_review",
+        MaintenanceWorkerResponse::CandidateSyntheses { .. } => "candidate_syntheses",
         MaintenanceWorkerResponse::WriteSummary { .. } => "write_summary",
         MaintenanceWorkerResponse::Summaries { .. } => "summaries",
         MaintenanceWorkerResponse::Candidate { .. } => "candidate",

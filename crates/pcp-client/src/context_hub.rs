@@ -117,7 +117,50 @@ pub enum ContextHubRequest {
     Inspect,
     SetPolicy(ClientContextPolicy),
     Review(CandidateReview),
-    RemoveActivity { card_id: String, version: u64 },
+    /// Queue bounded organization; no memory is approved by this operation.
+    OrganizeCandidates,
+    ReviewSynthesis(SynthesisReview),
+    StopSynthesis(SynthesisStop),
+    SetAutomaticReview {
+        enabled: bool,
+    },
+    UndoAutomaticOutput {
+        synthesis_id: String,
+        version: u64,
+        output_index: usize,
+    },
+    RemoveActivity {
+        card_id: String,
+        version: u64,
+    },
+}
+
+/// An operator-reviewed output, with its own evidence subset.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SynthesisOutput {
+    pub candidate_ids: Vec<String>,
+    pub title: String,
+    pub content: String,
+    /// create, update, or represented
+    pub action: String,
+    #[serde(default)]
+    pub target_revision_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SynthesisReview {
+    pub synthesis_id: String,
+    pub version: u64,
+    pub outputs: Vec<SynthesisOutput>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SynthesisStop {
+    pub synthesis_id: String,
+    pub version: u64,
 }
 
 /// Implemented by Runtime. The bound session, never model arguments, identifies

@@ -20,6 +20,11 @@ pub(crate) async fn mutate(
         &request,
         ContextHubRequest::SetPolicy(_)
             | ContextHubRequest::Review(_)
+            | ContextHubRequest::OrganizeCandidates
+            | ContextHubRequest::ReviewSynthesis(_)
+            | ContextHubRequest::StopSynthesis(_)
+            | ContextHubRequest::SetAutomaticReview { .. }
+            | ContextHubRequest::UndoAutomaticOutput { .. }
             | ContextHubRequest::RemoveActivity { .. }
     ) {
         return Err(anyhow::anyhow!("unsupported Console context operation").into());

@@ -29,6 +29,8 @@ pub struct Candidate {
     pub review_key: Option<String>,
     pub promotion_request: Option<pcp_client::context_hub::CandidateReview>,
     pub result: Option<serde_json::Value>,
+    #[serde(default)]
+    pub organized_version: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -53,6 +55,13 @@ pub struct HubState {
     pub candidates: Vec<Candidate>,
     pub activity: Vec<ActivityCard>,
     pub sequence: u64,
+    #[serde(default)]
+    pub syntheses: Vec<super::synthesis::Synthesis>,
+    #[serde(default)]
+    pub organization: super::synthesis::OrganizationState,
+    #[serde(default)]
+    pub synthesis_contexts:
+        std::collections::BTreeMap<String, Vec<crate::maintenance::MaintenanceDetailPage>>,
 }
 
 pub struct LockedState {
@@ -162,15 +171,60 @@ impl LockedState {
     }
 
     pub fn prune(&mut self, now: &str) -> bool {
-        let before = (self.state.activity.len(), self.state.candidates.len());
+        let before = (
+            self.state.activity.len(),
+            self.state.candidates.len(),
+            self.state.syntheses.len(),
+            self.state.synthesis_contexts.len(),
+        );
         self.state
             .activity
             .retain(|card| card.expires_at.as_str() > now);
         // In-flight promotion must retain its durable retry identity.
-        self.state
-            .candidates
-            .retain(|item| item.expires_at.as_str() > now || item.status == "promoting");
-        before != (self.state.activity.len(), self.state.candidates.len())
+        self.state.candidates.retain(|item| {
+            item.expires_at.as_str() > now
+                || matches!(item.status.as_str(), "pending" | "deferred" | "promoting")
+        });
+        self.state.syntheses.retain(|s| {
+            // Formal Pages carry their own source/review evidence. A terminal
+            // automatic receipt must not live forever merely because one of its
+            // original candidates still has an unresolved question.
+            if s.status == "promoted"
+                && s.automatic_review
+                    .as_ref()
+                    .and_then(|a| a.reviewed_at.as_deref())
+                    .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                    .is_some_and(|at| {
+                        super::timestamp(
+                            at.with_timezone(&chrono::Utc) + chrono::Duration::days(30),
+                        )
+                        .as_str()
+                            <= now
+                    })
+            {
+                return false;
+            }
+            s.status == "promoting"
+                || s.candidates.iter().any(|r| {
+                    self.state
+                        .candidates
+                        .iter()
+                        .any(|c| c.candidate_id == r.candidate_id)
+                })
+        });
+        self.state.synthesis_contexts.retain(|id, _| {
+            self.state
+                .syntheses
+                .iter()
+                .any(|s| s.context_id.as_ref() == Some(id))
+        });
+        before
+            != (
+                self.state.activity.len(),
+                self.state.candidates.len(),
+                self.state.syntheses.len(),
+                self.state.synthesis_contexts.len(),
+            )
     }
 }
 

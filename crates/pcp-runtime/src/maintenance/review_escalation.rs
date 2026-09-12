@@ -13,8 +13,8 @@ use infer_runtime_client::ResponsesResult;
 use serde_json::{Value, json};
 
 #[derive(Debug)]
-struct ReviewCallFailure {
-    attempt: ReviewAttempt,
+pub(super) struct ReviewCallFailure {
+    pub(super) attempt: ReviewAttempt,
     message: String,
 }
 impl std::fmt::Display for ReviewCallFailure {
@@ -261,7 +261,7 @@ where
 }
 
 impl InferRuntimeSemanticWorker {
-    async fn budgeted_call(
+    pub(super) async fn budgeted_call(
         &self,
         request: &MaintenanceWorkerRequest,
         evidence: &str,
@@ -312,7 +312,14 @@ impl InferRuntimeSemanticWorker {
             tier,
             stage,
             (bytes as u64).saturating_add(self.review_budget.max_output_tokens as u64),
-            "Uncertain maintenance decision or existing Topic refresh",
+            if matches!(
+                request,
+                MaintenanceWorkerRequest::ReviewCandidateSynthesis { .. }
+            ) {
+                "Candidate memory review before formal write"
+            } else {
+                "Uncertain maintenance decision or existing Topic refresh"
+            },
         )?;
         match admission {
             Admission::Waiting(reason) => anyhow::bail!("{reason}"),

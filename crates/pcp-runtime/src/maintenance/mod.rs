@@ -1,4 +1,5 @@
 mod audit;
+mod candidate_review;
 mod config;
 mod coordinator;
 mod discovery;
@@ -55,11 +56,11 @@ pub use review::{
 };
 pub use review_budget::{BudgetSnapshot, ReviewBudgetConfig, ReviewTier, TokenLimitMode};
 pub use worker::{
-    CommandSemanticWorker, MaintenanceDetailPage, MaintenanceRelation, MaintenanceRoutingPage,
-    MaintenanceSummarySelection, MaintenanceVerification, MaintenanceWorkerOutcome,
-    MaintenanceWorkerRequest, MaintenanceWorkerResponse, PackingCandidateGroup,
-    RelationCandidatePage, RetentionMilestone, SemanticMaintenanceWorker, TopicReviewFeedback,
-    VerificationVerdict,
+    CommandSemanticWorker, MaintenanceDetailPage, MaintenanceRelation, MaintenanceReviewStep,
+    MaintenanceRoutingPage, MaintenanceSummarySelection, MaintenanceVerification,
+    MaintenanceWorkerOutcome, MaintenanceWorkerRequest, MaintenanceWorkerResponse,
+    PackingCandidateGroup, RelationCandidatePage, RetentionMilestone, SemanticMaintenanceWorker,
+    TopicReviewFeedback, VerificationVerdict, VerifiedMaintenanceRevision,
 };
 
 pub fn build_semantic_worker(

@@ -1,6 +1,10 @@
 //! Opt-in candidate inbox and bounded activity snapshots, separate from Page recall.
+pub(crate) mod automatic_review;
+mod automatic_review_undo;
 mod persistence;
 mod review;
+pub(crate) mod synthesis;
+mod synthesis_review;
 #[cfg(test)]
 mod tests;
 
@@ -24,11 +28,18 @@ const MAX_ACTIVITY_TOPICS_PER_CLIENT: usize = 12;
 pub struct ContextHub {
     store: Arc<dyn PcpStore>,
     path: PathBuf,
+    organization_available: std::sync::atomic::AtomicBool,
+    automatic_review_available: std::sync::atomic::AtomicBool,
 }
 
 impl ContextHub {
     pub fn new(store: Arc<dyn PcpStore>, path: PathBuf) -> Self {
-        Self { store, path }
+        Self {
+            store,
+            path,
+            organization_available: std::sync::atomic::AtomicBool::new(false),
+            automatic_review_available: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     pub fn state_path(store_path: &Path) -> PathBuf {
@@ -110,7 +121,7 @@ impl ContextHub {
         }
         ensure!(
             db.state.candidates.len() < 500,
-            "candidate inbox capacity reached; wait for expiry, do not retry repeatedly"
+            "candidate inbox capacity reached; review existing candidates, do not retry repeatedly"
         );
         ensure!(
             db.state
@@ -134,6 +145,7 @@ impl ContextHub {
             review_key: None,
             promotion_request: None,
             result: None,
+            organized_version: 0,
         });
         db.save()?;
         Ok(json!({"candidateId":id, "status":"pending", "created":true, "version":1}))
@@ -312,10 +324,17 @@ impl ContextHubService for ContextHub {
             }
             ContextHubRequest::Inspect => {
                 require_operator(access)?;
-                db.save()?; // also removes expired operational content without model work
+                db.state.organization.available = self
+                    .organization_available
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                db.state.organization.automatic_review_available = self
+                    .automatic_review_available
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                synthesis::invalidate_stale(&mut db.state);
                 let suggestions = review::similar_candidates(&db.state.candidates);
+                db.save()?; // Prune resolved receipts and persist stale proposal state.
                 Ok(
-                    json!({"policies":db.state.policies,"candidates":db.state.candidates,"activity":db.state.activity,"similarCandidates":suggestions}),
+                    json!({"policies":db.state.policies,"candidates":db.state.candidates,"activity":db.state.activity,"similarCandidates":suggestions,"syntheses":db.state.syntheses,"synthesisContexts":db.state.synthesis_contexts,"organization":db.state.organization}),
                 )
             }
             ContextHubRequest::SetPolicy(policy) => {
@@ -336,6 +355,47 @@ impl ContextHubService for ContextHub {
                 db.state.policies.push(policy);
                 db.save()?;
                 Ok(json!({"saved":true}))
+            }
+            ContextHubRequest::OrganizeCandidates => {
+                require_operator(access)?;
+                ensure!(
+                    self.organization_available
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    "Candidate organization requires enabled Runtime maintenance"
+                );
+                for candidate in &mut db.state.candidates {
+                    if matches!(candidate.status.as_str(), "pending" | "deferred") {
+                        candidate.organized_version = 0;
+                        candidate.snoozed_until = None;
+                    }
+                }
+                db.state.organization.next_attempt_at = None;
+                db.state.organization.queued = true;
+                db.save()?;
+                Ok(json!({"status":"queued"}))
+            }
+            ContextHubRequest::StopSynthesis(request) => {
+                require_operator(access)?;
+                self.stop_synthesis(&mut db, request)
+            }
+            ContextHubRequest::SetAutomaticReview { enabled } => {
+                require_operator(access)?;
+                db.state.organization.automatic_review_enabled = Some(enabled);
+                db.save()?;
+                Ok(json!({"enabled":enabled}))
+            }
+            ContextHubRequest::UndoAutomaticOutput {
+                synthesis_id,
+                version,
+                output_index,
+            } => {
+                require_operator(access)?;
+                self.undo_automatic_output(access, &mut db, &synthesis_id, version, output_index)
+                    .await
+            }
+            ContextHubRequest::ReviewSynthesis(request) => {
+                require_operator(access)?;
+                self.review_synthesis(access, &mut db, request, false).await
             }
             ContextHubRequest::Review(request) => {
                 require_operator(access)?;

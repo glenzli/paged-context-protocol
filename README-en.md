@@ -37,6 +37,8 @@ This repository contains the specification and the project-maintained Rust imple
 
 New clients can discover Runtime through [Infra Discovery](https://github.com/glenzli/infra-protocol), request a Principal, access mode, and Scopes, then receive an identity-bound endpoint for the current generation after approval. An approved registration can rediscover Runtime and open a new session after a restart.
 
+With background maintenance enabled, related same-Scope candidates are organized into memory drafts that preserve chronology, disagreement and sources. One group may produce multiple memories or propose an update to an existing Page; with candidate automatic review enabled in Console, maintenance apply mode and the shared review budget enabled, drafts settle for about five minutes before Sol assesses each output. Approved outputs are written automatically while unresolved evidence remains. Repaired drafts receive independent verification; Console can pause automatic review, inspect evidence and withdraw automatic writes. New evidence coalesces for about two minutes, with at most one bounded organization job per cycle and no repeated model calls for unchanged evidence. Unresolved candidates are retained; only resolved operational receipts expire. See [candidate evolution](design/candidate-evolution.md) for review and recovery boundaries.
+
 ![PCP Console showing a local Store overview with synthetic demo data](assets/console-overview.png)
 
 *Local Store overview in PCP Console. The screenshot uses synthetic data and contains no real Page, Scope, or client identity.*
@@ -49,7 +51,7 @@ New clients can discover Runtime through [Infra Discovery](https://github.com/gl
 - Summary, Topic, Validity, Relation, Provenance, archive/restore, lossless sealed-Page packing, and access audit.
 - Runtime-injected Identity and Actor for `ingest_page`, with optional `sourceSpan`, `basedOnRevisionIds`, and a minimal SourceRef.
 - Tenant `submit_feedback`, per-target reconciliation, atomic Validity/`supersedes` commits, and a bounded Luna-to-Sol-to-human escalation path.
-- A Runtime-local Context Inbox with explicitly enabled candidate staging and short-lived activity cards; only human promotion turns a candidate into a formal Page.
+- A Runtime-local Context Inbox with explicitly enabled candidate staging and short-lived activity cards; formal promotion requires operator approval or the enabled shared-budget Sol review.
 - Embedded and RPC clients, approved enrollment, CLI, MCP, Console, a maintenance coordinator, and read-only infrastructure observation.
 - Deterministic Revision-retention planning, finite leases, and protected explicit collection.
 

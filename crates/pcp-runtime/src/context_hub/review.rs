@@ -173,9 +173,47 @@ impl ContextHub {
             item.review_key = Some(key.clone());
             item.result = Some(result.clone());
             item.promotion_request = None;
+            if request.action != CandidateAction::Defer {
+                item.expires_at = timestamp(Utc::now() + Duration::days(30));
+            }
             item.snoozed_until = (request.action == CandidateAction::Defer)
                 .then(|| timestamp(Utc::now() + Duration::days(7)));
         }
+        if request.action == CandidateAction::Defer {
+            for c in &mut db.state.candidates {
+                if request
+                    .candidates
+                    .iter()
+                    .any(|r| r.candidate_id == c.candidate_id)
+                {
+                    c.organized_version = c.version;
+                }
+            }
+            for s in &mut db.state.syntheses {
+                if s.status == "pending"
+                    && s.candidates.iter().any(|r| {
+                        request
+                            .candidates
+                            .iter()
+                            .any(|selected| selected.candidate_id == r.candidate_id)
+                    })
+                {
+                    for reference in &mut s.candidates {
+                        if let Some(c) = db
+                            .state
+                            .candidates
+                            .iter()
+                            .find(|c| c.candidate_id == reference.candidate_id)
+                        {
+                            reference.version = c.version;
+                        }
+                    }
+                    s.version += 1;
+                    s.maturity = "accumulating".into();
+                }
+            }
+        }
+        super::synthesis::invalidate_stale(&mut db.state);
         db.save()?;
         Ok(result)
     }

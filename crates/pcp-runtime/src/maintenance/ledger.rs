@@ -27,6 +27,8 @@ const ERROR_RETRY_MAX_SECONDS: u64 = 30 * 60;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MaintenanceLedger {
     #[serde(default)]
+    pub(super) candidate_review_first: bool,
+    #[serde(default)]
     entries: BTreeMap<String, MaintenanceLedgerEntry>,
     #[serde(default)]
     write_trigger: WriteTriggerLedger,

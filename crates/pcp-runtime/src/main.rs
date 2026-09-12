@@ -334,7 +334,9 @@ async fn run_broker(config_path: PathBuf) -> Result<()> {
         let client =
             EmbeddedPcpClient::shared(Arc::clone(&store), maintenance.access_session(&identity_id));
         let worker = build_semantic_worker(&maintenance.worker)?;
-        let mut maintainer = RuntimeMaintainer::load(client, worker, maintenance).await?;
+        let mut maintainer = RuntimeMaintainer::load(client, worker, maintenance)
+            .await?
+            .with_context_hub(context_hub.clone());
         if let Some(write_wake) = maintenance_write_wake {
             maintainer = maintainer.with_write_wakeup(write_wake);
         }

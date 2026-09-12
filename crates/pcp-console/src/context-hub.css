@@ -23,3 +23,19 @@
 .context-note { color:var(--muted); font-size:13px; }
 .context-select { display:flex; align-items:center; gap:10px; }
 @media(max-width:640px) { .context-card { padding:14px; } .context-heading { align-items:flex-start; } }
+
+.context-organization { background:var(--surface-subtle); padding:12px 16px; border-radius:var(--card-radius); }
+.context-synthesis { border-inline-start:3px solid var(--accent); }
+.context-maturity { font-size:13px; color:var(--accent); }
+.context-timeline { margin:16px 0; }
+.context-timeline section { border-inline-start:2px solid var(--line); padding-inline-start:16px; margin:16px 0; }
+.context-memory-output { border-top:1px solid var(--line); margin-top:16px; padding-top:12px; }
+.context-memory-output h4 { margin:8px 0; }
+.context-editor input, .context-editor select { max-width:100%; box-sizing:border-box; }
+.context-editor .context-evidence-option { display:flex; align-items:center; gap:8px; margin:8px 0; }
+.context-actions { flex-wrap:wrap; }
+
+.context-waiting, .context-completed { margin: 1rem 0; }
+.context-waiting > summary, .context-completed > summary { cursor: pointer; padding: .6rem 0; font-weight: 600; }
+.context-auto-review { color: var(--muted); font-weight: 600; }
+.context-review-audit { margin-bottom: .8rem; }

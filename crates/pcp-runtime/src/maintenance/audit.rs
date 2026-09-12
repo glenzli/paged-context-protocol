@@ -255,6 +255,8 @@ fn event(
 
 fn operation_name(request: &MaintenanceWorkerRequest) -> &'static str {
     match request {
+        MaintenanceWorkerRequest::ReviewCandidateSynthesis { .. } => "review_candidate_synthesis",
+        MaintenanceWorkerRequest::OrganizeCandidates { .. } => "organize_candidates",
         MaintenanceWorkerRequest::SummarizePage { .. } => "summarize_page",
         MaintenanceWorkerRequest::SummarizePages { .. } => "summarize_pages",
         MaintenanceWorkerRequest::SelectPacking { .. } => "select_packing",
@@ -271,6 +273,8 @@ fn operation_name(request: &MaintenanceWorkerRequest) -> &'static str {
 
 fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
     match response {
+        MaintenanceWorkerResponse::CandidateSynthesisReview { .. } => "candidate_synthesis_review",
+        MaintenanceWorkerResponse::CandidateSyntheses { .. } => "candidate_syntheses",
         MaintenanceWorkerResponse::WriteSummary { .. } => "write_summary",
         MaintenanceWorkerResponse::Summaries { .. } => "summaries",
         MaintenanceWorkerResponse::Candidate { .. } => "candidate",
