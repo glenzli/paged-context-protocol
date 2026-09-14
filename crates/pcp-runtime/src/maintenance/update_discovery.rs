@@ -100,12 +100,20 @@ impl RuntimeMaintainer {
         let expected_assessment_revision_id = self
             .reconciliation_assessment_head(&target.revision_id)
             .await?;
-        let outcome = self
-            .evaluate_worker(MaintenanceWorkerRequest::ReviewUpdate {
-                target: Box::new(target_page.clone()),
-                evidence: Box::new(evidence_page.clone()),
-            })
-            .await?;
+        let Some(outcome) = self
+            .evaluate_isolated_worker(
+                MaintenanceWorkerRequest::ReviewUpdate {
+                    target: Box::new(target_page.clone()),
+                    evidence: Box::new(evidence_page.clone()),
+                },
+                &key,
+                vec![target.revision_id.clone(), evidence.revision_id.clone()],
+                report,
+            )
+            .await
+        else {
+            return Ok(true);
+        };
         report.worker_calls += outcome.model_attempts;
         report.escalated_decisions += u32::from(outcome.escalated);
         let (disposition, rationale, scope, replacement_revision_id) = match outcome.response {

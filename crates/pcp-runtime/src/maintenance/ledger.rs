@@ -914,6 +914,45 @@ impl MaintenanceLedger {
         }
     }
 
+    pub(crate) fn retry_delay(&self, key: &str) -> u64 {
+        self.entries
+            .get(key)
+            .map(|e| {
+                e.retry_after_unix_ms
+                    .saturating_sub(now_unix_ms())
+                    .div_ceil(1000)
+            })
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn due_job_regions(
+        &self,
+        inventory: &[DurablePageInventoryItem],
+    ) -> BTreeSet<String> {
+        self.job_issues
+            .iter()
+            .filter(|(key, _)| self.eligible(key))
+            .flat_map(|(_, issue)| {
+                inventory
+                    .iter()
+                    .filter(|page| issue.source_revision_ids.contains(&page.revision_id))
+            })
+            .map(maintenance_region_key)
+            .collect()
+    }
+
+    pub(crate) fn job_retry_delay(&self, inventory: &[DurablePageInventoryItem]) -> Option<u64> {
+        self.job_issues
+            .iter()
+            .filter(|(_, issue)| {
+                inventory
+                    .iter()
+                    .any(|page| issue.source_revision_ids.contains(&page.revision_id))
+            })
+            .map(|(key, _)| self.retry_delay(key).max(30))
+            .min()
+    }
+
     pub(crate) fn clear_job_issue(&mut self, key: &str) {
         self.job_issues.remove(key);
     }
@@ -1079,7 +1118,7 @@ impl MaintenanceLedger {
 
     pub(crate) fn fail_scheduled_cycle(&mut self, error: impl std::fmt::Display) {
         self.scheduler.last_completed_at_unix_ms = Some(now_unix_ms());
-        self.scheduler.last_error = Some(error.to_string());
+        self.scheduler.last_error = Some(format!("{error:#}"));
     }
 
     pub(crate) fn schedule_after_success(
@@ -1088,8 +1127,20 @@ impl MaintenanceLedger {
         report: &MaintenanceCycleReport,
     ) -> u64 {
         self.scheduler.consecutive_failures = 0;
-        let delay = if !report.periodic_review && report.jobs_advanced >= config.max_jobs_per_cycle
+        let no_model_progress = report.worker_calls == 0 && report.content_changes() == 0;
+        let delay = if !report.periodic_review
+            && report.jobs_advanced >= config.max_jobs_per_cycle
+            && no_model_progress
         {
+            // Cached decisions and skipped windows consume a bounded scan budget,
+            // but are not evidence for a tight model-work continuation loop.
+            self.scheduler.idle_cycles = self.scheduler.idle_cycles.saturating_add(1);
+            exponential_delay(
+                ACTIVE_RETRY_SECONDS,
+                config.interval_seconds.max(1),
+                self.scheduler.idle_cycles,
+            )
+        } else if !report.periodic_review && report.jobs_advanced >= config.max_jobs_per_cycle {
             self.scheduler.idle_cycles = 0;
             ACTIVE_RETRY_SECONDS
         } else if !self.write_trigger.dirty_regions.is_empty() {
@@ -1271,6 +1322,27 @@ impl MaintenanceLedger {
             self.write_trigger.observed_revisions = current;
             return BTreeSet::new();
         }
+        // Migrate legacy per-page triggers without resetting their oldest
+        // deadline. Scope aggregation changes scheduling only, not data ACLs.
+        for page in inventory.iter().filter(|p| p.source_span.is_none()) {
+            let legacy = format!("page:{}:{}", page.namespace, page.page_id);
+            if let Some(old) = self.write_trigger.dirty_regions.remove(&legacy) {
+                self.write_trigger
+                    .dirty_regions
+                    .entry(maintenance_region_key(page))
+                    .and_modify(|current| {
+                        current.first_dirty_at_unix_ms = current
+                            .first_dirty_at_unix_ms
+                            .min(old.first_dirty_at_unix_ms);
+                        current.last_dirty_at_unix_ms =
+                            current.last_dirty_at_unix_ms.max(old.last_dirty_at_unix_ms);
+                        current
+                            .new_page_ids
+                            .extend(old.new_page_ids.iter().cloned());
+                    })
+                    .or_insert(old);
+            }
+        }
         for page in inventory.iter().filter(|page| {
             self.write_trigger.observed_revisions.get(&page.page_id) != Some(&page.revision_id)
         }) {
@@ -1352,9 +1424,9 @@ impl MaintenanceLedger {
             inventory,
             &expected.keys().cloned().collect::<BTreeSet<_>>(),
         );
-        self.write_trigger
-            .dirty_regions
-            .retain(|region, _| expected.get(region) != current.get(region));
+        self.write_trigger.dirty_regions.retain(|region, _| {
+            expected.get(region).is_none() || expected.get(region) != current.get(region)
+        });
     }
 }
 
@@ -1394,7 +1466,7 @@ impl Drop for MaintenanceLedgerLock {
 pub(crate) fn maintenance_region_key(page: &DurablePageInventoryItem) -> String {
     match page.source_span.as_ref() {
         Some(source) => format!("stream:{}:{}", page.namespace, source.stream_id),
-        None => format!("page:{}:{}", page.namespace, page.page_id),
+        None => format!("scope:{}", page.namespace),
     }
 }
 
@@ -1546,6 +1618,145 @@ mod tests {
             superseded: false,
             packing_protected: false,
         }
+    }
+
+    #[test]
+    fn ordinary_pages_accumulate_per_scope_and_migrate_old_deadlines() {
+        let mut ledger = MaintenanceLedger::default();
+        let trigger = WriteTriggeredMaintenanceConfig {
+            min_new_pages: 8,
+            quiet_period_seconds: 10,
+            max_wait_seconds: 3600,
+        };
+        let mut inventory = vec![page("0", "rev_0")];
+        inventory[0].source_span = None;
+        ledger.observe_writes(&inventory, &trigger);
+        for i in 1..=8 {
+            let mut p = page(&i.to_string(), &format!("rev_{i}"));
+            p.source_span = None;
+            inventory.push(p);
+        }
+        ledger.observe_writes(&inventory, &trigger);
+        assert_eq!(ledger.write_trigger.dirty_regions.len(), 1);
+        let key = maintenance_region_key(&inventory[0]);
+        assert_eq!(
+            ledger.write_trigger.dirty_regions[&key].new_page_ids.len(),
+            8
+        );
+        assert!(ledger.ready_regions_at(&trigger, now_unix_ms()).is_empty());
+        assert_eq!(
+            ledger.ready_regions_at(&trigger, now_unix_ms() + 11_000),
+            BTreeSet::from([key.clone()])
+        );
+        let old_time = now_unix_ms() - 3_600_000;
+        ledger.write_trigger.dirty_regions.insert(
+            "page:conversation:test:0".into(),
+            DirtyRegion {
+                first_dirty_at_unix_ms: old_time,
+                last_dirty_at_unix_ms: old_time,
+                new_page_ids: BTreeSet::from(["0".into()]),
+            },
+        );
+        ledger.observe_writes(&inventory, &trigger);
+        assert_eq!(ledger.write_trigger.dirty_regions.len(), 1);
+        assert_eq!(
+            ledger.write_trigger.dirty_regions[&key].first_dirty_at_unix_ms,
+            old_time
+        );
+        assert!(ledger.ready_regions(&trigger).contains(&key));
+        let persisted: MaintenanceLedger =
+            serde_json::from_slice(&serde_json::to_vec(&ledger).unwrap()).unwrap();
+        assert_eq!(
+            persisted.write_trigger.dirty_regions[&key]
+                .new_page_ids
+                .len(),
+            9
+        );
+    }
+
+    #[test]
+    fn acknowledgement_preserves_unscanned_and_concurrently_changed_scopes() {
+        let mut ledger = MaintenanceLedger::default();
+        let trigger = WriteTriggeredMaintenanceConfig {
+            min_new_pages: 1,
+            quiet_period_seconds: 0,
+            max_wait_seconds: 0,
+        };
+        let mut first = page("1", "rev_1");
+        first.source_span = None;
+        ledger.observe_writes(&[first.clone()], &trigger);
+        let mut second = page("2", "rev_2");
+        second.source_span = None;
+        second.namespace = "conversation:other".into();
+        first.revision_id = "rev_1b".into();
+        let mut inventory = vec![first.clone(), second.clone()];
+        ledger.observe_writes(&inventory, &trigger);
+        let selected = BTreeSet::from([maintenance_region_key(&first)]);
+        let expected = MaintenanceLedger::region_snapshot(&inventory, &selected);
+        inventory[0].revision_id = "rev_1c".into();
+        ledger.acknowledge_unchanged_regions(&expected, &inventory);
+        assert_eq!(ledger.write_trigger.dirty_regions.len(), 2);
+        inventory[0] = first;
+        ledger.acknowledge_unchanged_regions(&expected, &inventory);
+        assert_eq!(
+            ledger.ready_regions(&trigger),
+            BTreeSet::from([maintenance_region_key(&second)])
+        );
+    }
+
+    #[test]
+    fn failed_cycle_preserves_the_error_chain() {
+        let mut ledger = MaintenanceLedger::default();
+        let error =
+            anyhow::anyhow!("provider unavailable").context("run PCP Topic maintenance job");
+        ledger.fail_scheduled_cycle(&error);
+        assert_eq!(
+            ledger.scheduler.last_error.as_deref(),
+            Some("run PCP Topic maintenance job: provider unavailable")
+        );
+    }
+
+    #[test]
+    fn scan_only_full_batches_back_off_and_real_work_resets_the_delay() {
+        let mut c = scheduler_config();
+        c.interval_seconds = 600;
+        let mut ledger = MaintenanceLedger::default();
+        let mut report = MaintenanceCycleReport {
+            jobs_advanced: c.max_jobs_per_cycle,
+            ..Default::default()
+        };
+        assert_eq!(ledger.schedule_after_success(&c, &report), 60);
+        assert_eq!(ledger.schedule_after_success(&c, &report), 120);
+        assert_eq!(ledger.schedule_after_success(&c, &report), 240);
+        report.worker_calls = 1;
+        assert_eq!(
+            ledger.schedule_after_success(&c, &report),
+            ACTIVE_RETRY_SECONDS
+        );
+        assert_eq!(ledger.scheduler.idle_cycles, 0);
+    }
+
+    #[test]
+    fn isolated_jobs_wake_without_new_writes_after_their_cooldown() {
+        let mut ledger = MaintenanceLedger::default();
+        let inventory = vec![page("1", "rev_1")];
+        ledger.isolate_job(
+            "job".into(),
+            "topic",
+            vec!["rev_1".into()],
+            "unavailable".into(),
+            1,
+            300,
+        );
+        assert!(ledger.due_job_regions(&inventory).is_empty());
+        assert!((299..=300).contains(&ledger.job_retry_delay(&inventory).unwrap()));
+        ledger.entries.get_mut("job").unwrap().retry_after_unix_ms = 0;
+        assert_eq!(
+            ledger.due_job_regions(&inventory),
+            BTreeSet::from([maintenance_region_key(&inventory[0])])
+        );
+        ledger.clear_job_issue("job");
+        assert_eq!(ledger.job_retry_delay(&inventory), None);
     }
 
     #[test]

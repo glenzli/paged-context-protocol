@@ -681,6 +681,39 @@ impl RuntimeMaintainer {
         self.evaluate_review_worker(request, None).await
     }
 
+    // Isolate only failures at the model boundary. Store reads, authorization,
+    // verification and writes retain their normal error propagation.
+    pub(super) async fn evaluate_isolated_worker(
+        &mut self,
+        request: MaintenanceWorkerRequest,
+        key: &str,
+        revisions: Vec<String>,
+        report: &mut MaintenanceCycleReport,
+    ) -> Option<MaintenanceWorkerOutcome> {
+        let operation = worker_operation(&request).to_owned();
+        match self.evaluate_worker(request).await {
+            Ok(outcome) => {
+                self.ledger.clear_job_issue(key);
+                Some(outcome)
+            }
+            Err(error) => {
+                self.ledger.isolate_job(
+                    key.to_owned(),
+                    &operation,
+                    revisions,
+                    format!("Waiting for maintenance worker: {error:#}"),
+                    1,
+                    300,
+                );
+                // A failed call is still an attempt, never an idle scan.
+                report.worker_calls += 1;
+                report.isolated_jobs += 1;
+                report.deferred += 1;
+                None
+            }
+        }
+    }
+
     async fn evaluate_review_worker(
         &self,
         request: MaintenanceWorkerRequest,
@@ -761,24 +794,27 @@ impl RuntimeMaintainer {
     // Pending review is work in its own right, independent of new Page writes.
     pub(super) async fn review_wake_delay(&self, normal_delay: u64) -> Result<u64> {
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
-        let pending = self.pending_reviews().iter().any(|item| {
-            matches!(
-                super::review::review_queue(item, &self.config, &inventory)
-                    .state
-                    .as_str(),
-                "automatic" | "waiting_budget" | "stale"
-            )
-        });
+        let review_delay = self
+            .pending_reviews()
+            .iter()
+            .filter_map(|item| {
+                let state = super::review::review_queue(item, &self.config, &inventory).state;
+                matches!(state.as_str(), "automatic" | "waiting_budget" | "stale").then(|| {
+                    self.ledger
+                        .retry_delay(&format!("review_resume:{}", item.candidate_id))
+                        .max(30)
+                })
+            })
+            .min();
         let normal_delay = if self.context_hub.is_some() {
             normal_delay.min(60)
         } else {
             normal_delay
         };
-        Ok(if pending {
-            normal_delay.min(30)
-        } else {
-            normal_delay
-        })
+        Ok(review_delay
+            .into_iter()
+            .chain(self.ledger.job_retry_delay(&inventory))
+            .fold(normal_delay, u64::min))
     }
 
     pub async fn run_forever(mut self) -> Result<()> {
@@ -1084,7 +1120,8 @@ impl RuntimeMaintainer {
             self.ledger.update_scheduled_cycle(aggregate.clone());
             self.ledger.save(&self.config.state_path).await?;
         }
-        let regions = self.ledger.ready_regions(&self.config.write_trigger);
+        let mut regions = self.ledger.ready_regions(&self.config.write_trigger);
+        regions.extend(self.ledger.due_job_regions(&inventory));
         let periodic_review = self.ledger.periodic_review_due(&self.config);
         if regions.is_empty() && !periodic_review {
             return Ok(aggregate);
@@ -2692,7 +2729,34 @@ impl RuntimeMaintainer {
                 feedback: Box::new(feedback.clone()),
                 targets: targets.clone(),
             })
-            .await?;
+            .await;
+        let outcome = match outcome {
+            Ok(outcome) => {
+                for revision in &signal.challenged_revision_ids {
+                    self.ledger.clear_job_issue(&feedback_reconciliation_key(
+                        &signal.feedback_revision_id,
+                        revision,
+                    ));
+                }
+                outcome
+            }
+            Err(error) => {
+                for revision in &signal.challenged_revision_ids {
+                    self.ledger.isolate_job(
+                        feedback_reconciliation_key(&signal.feedback_revision_id, revision),
+                        "maintenance_reconcile",
+                        vec![revision.clone()],
+                        format!("Waiting for maintenance worker: {error:#}"),
+                        1,
+                        300,
+                    );
+                }
+                report.worker_calls += 1;
+                report.isolated_jobs += 1;
+                report.deferred += 1;
+                return Ok(true);
+            }
+        };
         report.worker_calls = report.worker_calls.saturating_add(outcome.model_attempts);
         report.escalated_decisions = report
             .escalated_decisions
@@ -2911,11 +2975,19 @@ impl RuntimeMaintainer {
             .await?;
         let page = pages.pop().context("Summary candidate disappeared")?;
         let source_text = page.content.clone().unwrap_or_default();
-        let outcome = self
-            .evaluate_worker(MaintenanceWorkerRequest::SummarizePage {
-                page: Box::new(page),
-            })
-            .await?;
+        let Some(outcome) = self
+            .evaluate_isolated_worker(
+                MaintenanceWorkerRequest::SummarizePage {
+                    page: Box::new(page),
+                },
+                &summary_key(&page_id),
+                vec![page_id.clone()],
+                report,
+            )
+            .await
+        else {
+            return Ok(true);
+        };
         report.worker_calls = report.worker_calls.saturating_add(outcome.model_attempts);
         report.escalated_decisions = report
             .escalated_decisions
@@ -3057,20 +3129,28 @@ impl RuntimeMaintainer {
             return Ok(true);
         }
 
-        let outcome = self
-            .evaluate_worker(MaintenanceWorkerRequest::SelectRelation {
-                pages: candidates
-                    .iter()
-                    .map(|page| {
-                        RelationCandidatePage::from_inventory(
-                            page,
-                            self.config.relation.routing_chars_per_page,
-                        )
-                    })
-                    .collect(),
-                excluded_page_pairs: excluded_page_pairs.clone(),
-            })
-            .await?;
+        let Some(outcome) = self
+            .evaluate_isolated_worker(
+                MaintenanceWorkerRequest::SelectRelation {
+                    pages: candidates
+                        .iter()
+                        .map(|page| {
+                            RelationCandidatePage::from_inventory(
+                                page,
+                                self.config.relation.routing_chars_per_page,
+                            )
+                        })
+                        .collect(),
+                    excluded_page_pairs: excluded_page_pairs.clone(),
+                },
+                &window_key,
+                candidates.iter().map(|p| p.revision_id.clone()).collect(),
+                report,
+            )
+            .await
+        else {
+            return Ok(true);
+        };
         report.worker_calls = report.worker_calls.saturating_add(outcome.model_attempts);
         report.escalated_decisions = report
             .escalated_decisions
@@ -3456,7 +3536,28 @@ impl RuntimeMaintainer {
                 },
                 baseline,
             )
-            .await?;
+            .await;
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                report.worker_calls += 1;
+                report.deferred += 1;
+                return Ok(super::MaintenanceVerification {
+                    verdict: super::VerificationVerdict::NeedsReview,
+                    reason: format!("Waiting for maintenance worker: {error:#}")
+                        .chars()
+                        .take(1200)
+                        .collect(),
+                    added_information: String::new(),
+                    preserved_boundaries: String::new(),
+                    concerns: Vec::new(),
+                    revision: None,
+                    requires_user_input: false,
+                    review_state: Some("waiting_provider".into()),
+                    review_steps: Vec::new(),
+                });
+            }
+        };
         report.worker_calls += outcome.model_attempts;
         report.escalated_decisions += u32::from(outcome.escalated);
         let MaintenanceWorkerResponse::VerifyMaintenance { mut assessment } = outcome.response
@@ -3666,17 +3767,11 @@ impl RuntimeMaintainer {
             fresh.save(&self.config.state_path).await?;
             self.ledger = fresh;
         }
-        if candidate
-            .verification
-            .as_ref()
-            .is_some_and(|v| v.review_state.as_deref() == Some("waiting_budget"))
-        {
-            self.ledger.record(
-                format!("review_resume:{}", candidate.candidate_id),
-                "waiting_budget",
-                300,
-            );
-        }
+        self.ledger.record(
+            format!("review_resume:{}", candidate.candidate_id),
+            "review_attempted",
+            300,
+        );
         if approved
             && self.config.applies_changes()
             && self.config.topic.auto_apply
@@ -3758,7 +3853,6 @@ impl RuntimeMaintainer {
             )
             .await?
         };
-        let waiting_budget = assessment.review_state.as_deref() == Some("waiting_budget");
         let approved = matches!(assessment.verdict, super::VerificationVerdict::Approve);
         let no_change = matches!(assessment.verdict, super::VerificationVerdict::NoChange);
         let current = proposal.pages.iter().all(|p| {
@@ -3797,13 +3891,11 @@ impl RuntimeMaintainer {
             fresh.save(&self.config.state_path).await?;
             self.ledger = fresh;
         }
-        if waiting_budget {
-            self.ledger.record(
-                format!("review_resume:{}", proposal.candidate_id),
-                "waiting_budget",
-                300,
-            );
-        }
+        self.ledger.record(
+            format!("review_resume:{}", proposal.candidate_id),
+            "review_attempted",
+            300,
+        );
         if current
             && approved
             && self.config.applies_changes()
@@ -3877,7 +3969,12 @@ impl RuntimeMaintainer {
         let mut attempts = 0;
         let mut escalated = false;
         for repair in 0..2 {
-            let outcome = self.evaluate_worker(request.clone()).await?;
+            let Some(outcome) = self
+                .evaluate_isolated_worker(request.clone(), &key, revisions.clone(), report)
+                .await
+            else {
+                return Ok(true);
+            };
             attempts += outcome.model_attempts;
             escalated |= outcome.escalated;
             report.worker_calls += outcome.model_attempts;
@@ -4112,14 +4209,22 @@ impl RuntimeMaintainer {
         let page = pages
             .pop()
             .context("archive maintenance candidate disappeared")?;
-        let outcome = self
-            .evaluate_worker(MaintenanceWorkerRequest::AssessArchive {
-                page: ArchiveCandidatePage {
-                    page,
-                    candidate_signals: scan_page.candidate_signals.clone(),
+        let Some(outcome) = self
+            .evaluate_isolated_worker(
+                MaintenanceWorkerRequest::AssessArchive {
+                    page: ArchiveCandidatePage {
+                        page,
+                        candidate_signals: scan_page.candidate_signals.clone(),
+                    },
                 },
-            })
-            .await?;
+                &key,
+                vec![scan_page.revision_id.clone()],
+                report,
+            )
+            .await
+        else {
+            return Ok(true);
+        };
         report.worker_calls = report.worker_calls.saturating_add(outcome.model_attempts);
         report.escalated_decisions = report
             .escalated_decisions
@@ -4245,12 +4350,20 @@ impl RuntimeMaintainer {
         }
 
         let excluded_candidate_sets = self.ledger.active_packing_sets();
-        let outcome = self
-            .evaluate_worker(MaintenanceWorkerRequest::SelectPacking {
-                pages: routing_pages,
-                excluded_candidate_sets: excluded_candidate_sets.clone(),
-            })
-            .await?;
+        let Some(outcome) = self
+            .evaluate_isolated_worker(
+                MaintenanceWorkerRequest::SelectPacking {
+                    pages: routing_pages,
+                    excluded_candidate_sets: excluded_candidate_sets.clone(),
+                },
+                &selection_key,
+                routing_by_id.values().cloned().collect(),
+                report,
+            )
+            .await
+        else {
+            return Ok(true);
+        };
         report.worker_calls = report.worker_calls.saturating_add(outcome.model_attempts);
         report.escalated_decisions = report
             .escalated_decisions
@@ -4417,13 +4530,21 @@ impl RuntimeMaintainer {
                 )
             })
             .collect::<HashMap<_, _>>();
-        let outcome = self
-            .evaluate_worker(MaintenanceWorkerRequest::SelectRetentionMilestones {
-                pages: routing_pages,
-                max_revisions: self.config.retention.max_revisions_per_cycle,
-                lease_days: self.config.retention.lease_days,
-            })
-            .await?;
+        let Some(outcome) = self
+            .evaluate_isolated_worker(
+                MaintenanceWorkerRequest::SelectRetentionMilestones {
+                    pages: routing_pages,
+                    max_revisions: self.config.retention.max_revisions_per_cycle,
+                    lease_days: self.config.retention.lease_days,
+                },
+                &key,
+                offered.keys().cloned().collect(),
+                report,
+            )
+            .await
+        else {
+            return Ok(true);
+        };
         report.worker_calls = report.worker_calls.saturating_add(outcome.model_attempts);
         report.escalated_decisions = report
             .escalated_decisions

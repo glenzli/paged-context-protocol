@@ -705,3 +705,158 @@ async fn scheduled_review_runs_without_new_writes_or_periodic_scan() {
     assert_eq!(report.worker_calls, 1);
     f.close().await;
 }
+
+struct UnavailableTopicWorker(Mutex<Vec<&'static str>>);
+#[async_trait]
+impl SemanticMaintenanceWorker for UnavailableTopicWorker {
+    async fn evaluate(
+        &self,
+        request: MaintenanceWorkerRequest,
+    ) -> Result<MaintenanceWorkerResponse> {
+        match request {
+            MaintenanceWorkerRequest::ExtractTopic { .. } => {
+                self.0.lock().unwrap().push("topic");
+                Err(anyhow::anyhow!("upstream connection unavailable")
+                    .context("Infer request failed"))
+            }
+            MaintenanceWorkerRequest::SelectRelation { .. } => {
+                self.0.lock().unwrap().push("relation");
+                Ok(MaintenanceWorkerResponse::NoCandidate)
+            }
+            _ => Ok(MaintenanceWorkerResponse::Defer),
+        }
+    }
+}
+
+#[tokio::test]
+async fn topic_provider_failure_is_persisted_and_does_not_block_relation_or_repeat() {
+    let f = Fixture::open("topic-provider-isolation").await;
+    let pages = sources(&f).await;
+    let worker = Arc::new(UnavailableTopicWorker(Mutex::new(vec![])));
+    let mut c = config(&f);
+    c.relation.enabled = true;
+    c.max_jobs_per_cycle = 3;
+    c.periodic_review.enabled = true;
+    let mut m = RuntimeMaintainer::for_test(f.client.clone(), worker.clone(), c.clone());
+    m.ledger.advance_semantic_turn(1); // Topic runs before Relation in this cycle.
+    let report = m.run_scheduled_cycle().await.unwrap();
+    assert_eq!(report.isolated_jobs, 1);
+    assert_eq!(*worker.0.lock().unwrap(), vec!["topic", "relation"]);
+    let status = RuntimeMaintainer::automation_status(&c).await.unwrap();
+    assert!(status.last_error.is_none());
+    assert_eq!(status.job_issues.len(), 1);
+    assert!(
+        status.job_issues[0]
+            .reason
+            .contains("Infer request failed: upstream connection unavailable")
+    );
+    assert!(m.ledger.due_job_regions(&pages).is_empty());
+    m.run_scheduled_cycle().await.unwrap();
+    assert_eq!(*worker.0.lock().unwrap(), vec!["topic", "relation"]);
+    f.close().await;
+}
+
+struct CachedPendingWorker(Mutex<u32>);
+#[async_trait]
+impl SemanticMaintenanceWorker for CachedPendingWorker {
+    async fn evaluate(&self, _: MaintenanceWorkerRequest) -> Result<MaintenanceWorkerResponse> {
+        Ok(MaintenanceWorkerResponse::NoCandidate)
+    }
+    async fn review_existing_with_usage(
+        &self,
+        _: MaintenanceWorkerRequest,
+        baseline: MaintenanceVerification,
+    ) -> Result<crate::maintenance::MaintenanceWorkerOutcome> {
+        *self.0.lock().unwrap() += 1;
+        Ok(crate::maintenance::MaintenanceWorkerOutcome {
+            response: MaintenanceWorkerResponse::VerifyMaintenance {
+                assessment: baseline,
+            },
+            usage: None,
+            model_attempts: 0,
+            escalated: false,
+        })
+    }
+}
+
+#[tokio::test]
+async fn unchanged_cached_review_cannot_consume_every_scheduled_cycle() {
+    let f = Fixture::open("cached-review-convergence").await;
+    let pages = sources(&f).await;
+    let worker = Arc::new(CachedPendingWorker(Mutex::new(0)));
+    let mut c = config(&f);
+    enable_review(&mut c);
+    c.periodic_review.enabled = false;
+    let mut m = RuntimeMaintainer::for_test(f.client.clone(), worker.clone(), c.clone());
+    let mut candidate = m
+        .topic_from_response(&pages, &pages, &[], proposal(&pages))
+        .unwrap();
+    let mut v = approved();
+    v.verdict = VerificationVerdict::NeedsReview;
+    v.requires_user_input = true;
+    candidate.verification = Some(v);
+    m.ledger.enqueue_review(
+        MaintenanceReviewPayload::Topic(candidate),
+        MaintenanceReviewOrigin::Automatic,
+        "Cached uncertainty".into(),
+        1,
+        false,
+    );
+    m.ledger.save(&c.state_path).await.unwrap();
+    let first = m.run_scheduled_cycle().await.unwrap();
+    assert_eq!(first.jobs_advanced, 1);
+    assert_eq!(first.worker_calls, 0);
+    let delay = m.review_wake_delay(21600).await.unwrap();
+    assert!((299..=300).contains(&delay));
+    let second = m.run_scheduled_cycle().await.unwrap();
+    assert_eq!(second.jobs_advanced, 0);
+    assert_eq!(second.worker_calls, 0);
+    assert_eq!(*worker.0.lock().unwrap(), 1);
+    f.close().await;
+}
+
+struct UnavailableVerificationWorker(MaintenanceWorkerResponse);
+#[async_trait]
+impl SemanticMaintenanceWorker for UnavailableVerificationWorker {
+    async fn evaluate(
+        &self,
+        request: MaintenanceWorkerRequest,
+    ) -> Result<MaintenanceWorkerResponse> {
+        match request {
+            MaintenanceWorkerRequest::ExtractTopic { .. } => Ok(self.0.clone()),
+            MaintenanceWorkerRequest::VerifyMaintenance { .. } => {
+                anyhow::bail!("verification provider unavailable")
+            }
+            _ => Ok(MaintenanceWorkerResponse::NoCandidate),
+        }
+    }
+}
+
+#[tokio::test]
+async fn unavailable_verification_retains_pending_proposal_without_approving_or_writing() {
+    let f = Fixture::open("verification-provider-isolation").await;
+    let pages = sources(&f).await;
+    let worker = Arc::new(UnavailableVerificationWorker(proposal(&pages)));
+    let c = config(&f);
+    let mut m = RuntimeMaintainer::for_test(f.client.clone(), worker, c);
+    let report = m.run_convergence_once(1).await.unwrap();
+    assert_eq!(report.topics_written, 0);
+    assert_eq!(report.worker_calls, 2);
+    let pending = m.pending_reviews();
+    assert_eq!(pending.len(), 1);
+    let MaintenanceReviewPayload::Topic(candidate) = &pending[0].payload else {
+        panic!("topic expected")
+    };
+    let assessment = candidate.verification.as_ref().unwrap();
+    assert!(matches!(
+        assessment.verdict,
+        VerificationVerdict::NeedsReview
+    ));
+    assert_eq!(assessment.review_state.as_deref(), Some("waiting_provider"));
+    assert!(
+        assessment
+            .reason
+            .contains("verification provider unavailable")
+    );
+    f.close().await;
+}
