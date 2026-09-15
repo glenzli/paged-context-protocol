@@ -40,6 +40,10 @@ pub(crate) struct MaintenanceLedger {
     scheduler: SchedulerLedger,
     #[serde(default)]
     job_issues: BTreeMap<String, MaintenanceJobIssue>,
+    #[serde(default)]
+    job_issue_history: Vec<MaintenanceJobIssue>,
+    #[serde(default)]
+    archived_job_issue_count: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -50,6 +54,12 @@ pub struct MaintenanceJobIssue {
     pub reason: String,
     pub attempts: u32,
     pub retry_at: String,
+    #[serde(default)]
+    pub deferred_checks: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -98,6 +108,10 @@ pub struct MaintenanceAutomationStatus {
     pub dirty_regions: Vec<MaintenanceDirtyRegionStatus>,
     #[serde(default)]
     pub job_issues: Vec<MaintenanceJobIssue>,
+    #[serde(default)]
+    pub job_issue_history: Vec<MaintenanceJobIssue>,
+    #[serde(default)]
+    pub archived_job_issue_count: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -421,6 +435,9 @@ impl MaintenanceLedger {
     }
 
     pub(crate) fn record(&mut self, key: String, outcome: &str, retry_after_seconds: u64) {
+        if outcome != "isolated_job" {
+            self.archive_job_issue(&key, outcome);
+        }
         let now = now_unix_ms();
         self.entries.insert(
             key,
@@ -889,6 +906,10 @@ impl MaintenanceLedger {
         attempts: u32,
         retry_seconds: u64,
     ) {
+        let attempts = self
+            .job_issues
+            .get(&key)
+            .map_or(attempts, |issue| issue.attempts.saturating_add(attempts));
         self.record(key.clone(), "isolated_job", retry_seconds.max(60));
         self.job_issues.insert(
             key,
@@ -900,6 +921,9 @@ impl MaintenanceLedger {
                 retry_at: timestamp_string(
                     now_unix_ms().saturating_add(retry_seconds.max(60) * 1000),
                 ),
+                deferred_checks: 0,
+                closed_at: None,
+                disposition: None,
             },
         );
         // Diagnostics are bounded; source Revision keys make new evidence independently eligible.
@@ -910,7 +934,7 @@ impl MaintenanceLedger {
                 .min_by_key(|(_, v)| &v.retry_at)
                 .map(|(k, _)| k.clone())
                 .unwrap();
-            self.job_issues.remove(&key);
+            self.archive_job_issue(&key, "older_diagnostic");
         }
     }
 
@@ -954,7 +978,116 @@ impl MaintenanceLedger {
     }
 
     pub(crate) fn clear_job_issue(&mut self, key: &str) {
-        self.job_issues.remove(key);
+        self.archive_job_issue(key, "recovered");
+    }
+
+    fn archive_job_issue(&mut self, key: &str, disposition: &str) {
+        if let Some(mut issue) = self.job_issues.remove(key) {
+            issue.closed_at = Some(timestamp_string(now_unix_ms()));
+            issue.disposition = Some(disposition.to_owned());
+            self.archived_job_issue_count = self.archived_job_issue_count.saturating_add(1);
+            self.job_issue_history.push(issue);
+            // Keep recent diagnostics, independently of durable review/proposal history.
+            if self.job_issue_history.len() > 128 {
+                self.job_issue_history
+                    .drain(..self.job_issue_history.len() - 128);
+            }
+        }
+    }
+
+    pub(crate) fn reconcile_job_issues(&mut self, inventory: &[DurablePageInventoryItem]) {
+        let current = inventory
+            .iter()
+            .filter(|p| !p.superseded)
+            .map(|p| p.revision_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let obsolete = self
+            .job_issues
+            .iter()
+            .filter(|(_, issue)| {
+                issue
+                    .source_revision_ids
+                    .iter()
+                    .any(|id| !current.contains(id.as_str()))
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in obsolete {
+            self.archive_job_issue(&key, "sources_changed");
+        }
+        let completed = self
+            .job_issues
+            .keys()
+            .filter_map(|key| {
+                self.entries
+                    .get(key)
+                    .filter(|entry| entry.outcome != "isolated_job")
+                    .map(|entry| (key.clone(), entry.outcome.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (key, outcome) in completed {
+            self.archive_job_issue(&key, &outcome);
+        }
+        let reviewed = self
+            .job_issues
+            .iter()
+            .filter(|(_, issue)| {
+                issue.operation == "verify_relation"
+                    && issue.source_revision_ids.len() == 2
+                    && self.relation_reviews.values().any(|proposal| {
+                        proposal
+                            .pages
+                            .iter()
+                            .all(|p| issue.source_revision_ids.contains(&p.revision_id))
+                    })
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in reviewed {
+            self.archive_job_issue(&key, "tracked_by_review");
+        }
+    }
+
+    /// A due diagnostic can refer to a window the planner no longer selects.
+    /// Recheck it with backoff rather than repeatedly waking an idle scheduler.
+    /// This is not a model attempt or a successful resolution.
+    pub(crate) fn defer_unselected_job_issues(&mut self) {
+        let now = now_unix_ms();
+        let due = self
+            .job_issues
+            .keys()
+            .filter(|key| self.eligible(key))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in due {
+            let issue = self.job_issues.get_mut(&key).unwrap();
+            issue.deferred_checks = issue.deferred_checks.saturating_add(1);
+            let seconds = (300u64
+                .saturating_mul(1 << issue.deferred_checks.saturating_sub(1).min(7)))
+            .min(6 * 60 * 60);
+            let retry_at = now.saturating_add(seconds * 1000);
+            issue.retry_at = timestamp_string(retry_at);
+            self.entries.insert(
+                key,
+                MaintenanceLedgerEntry {
+                    outcome: "isolated_job".into(),
+                    updated_at_unix_ms: now,
+                    retry_after_unix_ms: retry_at,
+                },
+            );
+        }
+    }
+
+    pub(crate) fn defer_cached_review(&mut self, key: String) {
+        let seconds = self
+            .entries
+            .get(&key)
+            .filter(|e| e.outcome == "review_cached")
+            .map_or(300, |e| {
+                ((e.retry_after_unix_ms.saturating_sub(e.updated_at_unix_ms) / 1000) * 2)
+                    .clamp(300, 1800)
+            });
+        self.record(key, "review_cached", seconds);
     }
 
     pub(crate) fn enqueue_review(
@@ -1302,6 +1435,8 @@ impl MaintenanceLedger {
                 .saturating_add(self.relation_reviews().len()),
             dirty_regions,
             job_issues: self.job_issues.values().cloned().collect(),
+            job_issue_history: self.job_issue_history.iter().rev().cloned().collect(),
+            archived_job_issue_count: self.archived_job_issue_count,
         }
     }
 
@@ -1734,6 +1869,108 @@ mod tests {
             ACTIVE_RETRY_SECONDS
         );
         assert_eq!(ledger.scheduler.idle_cycles, 0);
+    }
+
+    #[test]
+    fn legacy_issues_survive_then_retire_without_losing_diagnostics() {
+        let mut ledger: MaintenanceLedger = serde_json::from_value(serde_json::json!({
+            "jobIssues": { "old": {
+                "operation": "extract_topic", "sourceRevisionIds": ["rev_1"],
+                "reason": "provider unavailable", "attempts": 2, "retryAt": "2026-01-01T00:00:00Z"
+            }}
+        }))
+        .unwrap();
+        let inventory = vec![page("1", "rev_1")];
+        ledger.reconcile_job_issues(&inventory);
+        assert_eq!(ledger.job_issues.len(), 1);
+        ledger.defer_unselected_job_issues();
+        assert!((299..=300).contains(&ledger.job_retry_delay(&inventory).unwrap()));
+        assert_eq!(ledger.job_issues["old"].attempts, 2);
+        ledger.reconcile_job_issues(&[page("1", "rev_new")]);
+        assert!(ledger.job_issues.is_empty());
+        assert_eq!(ledger.job_retry_delay(&inventory), None);
+        assert_eq!(ledger.job_issue_history[0].reason, "provider unavailable");
+        assert_eq!(
+            ledger.job_issue_history[0].disposition.as_deref(),
+            Some("sources_changed")
+        );
+        let restored: MaintenanceLedger =
+            serde_json::from_slice(&serde_json::to_vec(&ledger).unwrap()).unwrap();
+        assert!(restored.job_issues.is_empty());
+        assert_eq!(restored.archived_job_issue_count, 1);
+    }
+
+    #[test]
+    fn due_unselected_windows_back_off_without_counting_model_attempts() {
+        let mut ledger = MaintenanceLedger::default();
+        let inventory = vec![page("1", "rev_1")];
+        ledger.isolate_job(
+            "old_window".into(),
+            "select_relation",
+            vec!["rev_1".into()],
+            "busy".into(),
+            1,
+            300,
+        );
+        for expected in [300, 600, 1200, 2400, 4800, 9600, 19200, 21600, 21600] {
+            ledger
+                .entries
+                .get_mut("old_window")
+                .unwrap()
+                .retry_after_unix_ms = 0;
+            ledger.defer_unselected_job_issues();
+            let delay = ledger.job_retry_delay(&inventory).unwrap();
+            assert!((expected - 1..=expected).contains(&delay));
+            assert_eq!(ledger.job_issues["old_window"].attempts, 1);
+            assert!(ledger.due_job_regions(&inventory).is_empty());
+        }
+        ledger.record("old_window".into(), "all_pairs_excluded", 3600);
+        assert!(ledger.job_issues.is_empty());
+        assert_eq!(
+            ledger.job_issue_history[0].disposition.as_deref(),
+            Some("all_pairs_excluded")
+        );
+    }
+
+    #[test]
+    fn issue_retries_accumulate_and_recent_history_is_bounded_separately() {
+        let mut ledger = MaintenanceLedger::default();
+        for _ in 0..2 {
+            ledger.isolate_job(
+                "job".into(),
+                "topic",
+                vec!["rev_1".into()],
+                "busy".into(),
+                1,
+                300,
+            );
+        }
+        assert_eq!(ledger.job_issues["job"].attempts, 2);
+        for _ in 0..130 {
+            ledger.clear_job_issue("job");
+            ledger.isolate_job(
+                "job".into(),
+                "topic",
+                vec!["rev_1".into()],
+                "busy".into(),
+                1,
+                300,
+            );
+        }
+        assert_eq!(ledger.job_issue_history.len(), 128);
+        assert_eq!(ledger.archived_job_issue_count, 130);
+        assert_eq!(ledger.job_issues.len(), 1);
+    }
+
+    #[test]
+    fn cached_review_backoff_survives_serialization_and_is_bounded() {
+        let mut ledger = MaintenanceLedger::default();
+        for expected in [300, 600, 1200, 1800, 1800] {
+            ledger.defer_cached_review("review_resume:cached".into());
+            ledger = serde_json::from_slice(&serde_json::to_vec(&ledger).unwrap()).unwrap();
+            let delay = ledger.retry_delay("review_resume:cached");
+            assert!((expected - 1..=expected).contains(&delay));
+        }
     }
 
     #[test]

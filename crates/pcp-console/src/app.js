@@ -2741,10 +2741,7 @@ function renderAutomationStatus() {
     issueList = element("div", "maintenance-review-evidence"); issueList.id = "maintenance-job-issues";
     byId("maintenance-automation-detail").after(issueList);
   }
-  issueList.replaceChildren(...(automation.jobIssues || []).map((issue) => element("p", "", currentLanguage === "zh"
-    ? `已隔离 ${issue.operation}：${issue.reason} · ${issue.attempts} 次尝试 · ${formatTime(issue.retryAt)} 后可重试 · ${issue.sourceRevisionIds.join(", ")}`
-    : `Isolated ${issue.operation}: ${issue.reason} · ${issue.attempts} attempts · eligible after ${formatTime(issue.retryAt)} · ${issue.sourceRevisionIds.join(", ")}`)));
-  issueList.hidden = !(automation.jobIssues || []).length;
+  renderMaintenanceJobIssues(issueList, automation);
   const completed = automation.lastCompletedAt;
   const started = automation.lastStartedAt;
   const nextWake = automation.nextWakeAt;
@@ -2769,6 +2766,91 @@ function renderAutomationStatus() {
   error.textContent = "";
   renderMaintenanceControllerAvailability();
   renderMaintenanceConvergenceState();
+}
+
+function groupMaintenanceJobIssues(issues) {
+  const groups = new Map();
+  for (const issue of issues) {
+    const reason = String(issue.reason || "").toLowerCase();
+    const kind = /no_candidate/.test(reason) ? "capacity"
+      : /overloaded|429|rate.limit/.test(reason) ? "busy"
+      : /timed? ?out|timeout|deadline/.test(reason) ? "timeout"
+      : /protocol/.test(reason) ? "protocol"
+      : /unavailable|502|503|connection|offline/.test(reason) ? "unavailable"
+      : "other";
+    if (!groups.has(kind)) groups.set(kind, []);
+    groups.get(kind).push(issue);
+  }
+  return [...groups].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+}
+
+function renderMaintenanceJobIssues(container, automation) {
+  const active = automation.jobIssues || [];
+  const history = automation.jobIssueHistory || [];
+  const signature = JSON.stringify([currentLanguage, active, history, automation.archivedJobIssueCount]);
+  // Polling must not collapse an operator's open details or steal keyboard focus.
+  if (container.dataset.signature === signature) return;
+  const open = new Set([...container.querySelectorAll("details[open]")].map((node) => node.dataset.issueKey));
+  const focused = container.contains(document.activeElement) ? document.activeElement?.dataset.issueKey : null;
+  const zh = currentLanguage === "zh";
+  const labels = zh
+    ? { busy: "上游繁忙", capacity: "无可用部署", timeout: "调用超时", protocol: "上游响应异常", unavailable: "服务暂不可达", other: "其他原因" }
+    : { busy: "Upstream busy", capacity: "No available deployment", timeout: "Request timeout", protocol: "Upstream protocol error", unavailable: "Service unavailable", other: "Other causes" };
+  const disclosure = (key, title) => {
+    const node = element("details", "");
+    node.dataset.issueKey = key;
+    node.open = open.has(key);
+    const summary = element("summary", "", title);
+    summary.dataset.issueKey = key;
+    summary.style.cursor = "pointer";
+    summary.style.paddingBlock = "6px";
+    node.append(summary);
+    return node;
+  };
+  const section = (issues, key, title) => {
+    const node = disclosure(key, title);
+    for (const [kind, records] of groupMaintenanceJobIssues(issues)) {
+      const group = disclosure(`${key}:${kind}`, `${labels[kind]} · ${records.length}`);
+      for (const issue of records) {
+        const ids = issue.sourceRevisionIds || [];
+        const itemKey = `${key}:${issue.operation}:${[...ids].sort().join(",")}:${issue.closedAt || ""}`;
+        const item = disclosure(itemKey, zh
+          ? `${issue.operation} · ${ids.length} 个来源 · ${issue.attempts} 次调用尝试`
+          : `${issue.operation} · ${ids.length} sources · ${issue.attempts} call attempts`);
+        item.append(element("p", "", issue.reason || ""));
+        item.append(element("p", "", issue.closedAt
+          ? `${zh ? "归档时间" : "Archived"}: ${formatTime(issue.closedAt)} · ${issue.disposition || ""}`
+          : `${zh ? "下次重试检查" : "Next retry check"}: ${formatTime(issue.retryAt)}${issue.deferredChecks ? (zh ? " · 暂未选中，已延长检查间隔" : " · Not selected yet; checks backed off") : ""}`));
+        const sources = element("p", "", ids.join(", "));
+        sources.style.overflowWrap = "anywhere";
+        item.append(sources);
+        group.append(item);
+      }
+      node.append(group);
+    }
+    return node;
+  };
+  const nodes = [];
+  if (active.length) {
+    const counts = groupMaintenanceJobIssues(active).map(([kind, issues]) => `${labels[kind]} ${issues.length}`).join(" · ");
+    nodes.push(section(active, "active", zh
+      ? `等待重试 ${active.length} 项 · ${counts}`
+      : `${active.length} awaiting retry · ${counts}`));
+  }
+  if (history.length) {
+    const total = automation.archivedJobIssueCount || history.length;
+    const historyNode = section(history, "history", zh
+      ? `历史诊断 · 最近 ${history.length} 项／累计 ${total} 项`
+      : `Diagnostic history · latest ${history.length} of ${total}`);
+    historyNode.append(element("p", "", zh
+      ? "历史诊断不触发重试，保留最近 128 项；待审阅内容和审阅历史另行保留。归档不一定表示上游已恢复。"
+      : "Historical diagnostics do not trigger retries. The latest 128 are retained separately from pending reviews and review history. Archival does not necessarily mean upstream recovery."));
+    nodes.push(historyNode);
+  }
+  container.replaceChildren(...nodes);
+  container.hidden = !nodes.length;
+  container.dataset.signature = signature;
+  if (focused) [...container.querySelectorAll("summary")].find((node) => node.dataset.issueKey === focused)?.focus();
 }
 
 function populateMaintenanceSettings() {

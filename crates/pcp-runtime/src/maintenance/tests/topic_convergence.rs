@@ -774,7 +774,7 @@ impl SemanticMaintenanceWorker for CachedPendingWorker {
             },
             usage: None,
             model_attempts: 0,
-            escalated: false,
+            escalated: true,
         })
     }
 }
@@ -795,7 +795,7 @@ async fn unchanged_cached_review_cannot_consume_every_scheduled_cycle() {
     v.verdict = VerificationVerdict::NeedsReview;
     v.requires_user_input = true;
     candidate.verification = Some(v);
-    m.ledger.enqueue_review(
+    let review_id = m.ledger.enqueue_review(
         MaintenanceReviewPayload::Topic(candidate),
         MaintenanceReviewOrigin::Automatic,
         "Cached uncertainty".into(),
@@ -803,15 +803,74 @@ async fn unchanged_cached_review_cannot_consume_every_scheduled_cycle() {
         false,
     );
     m.ledger.save(&c.state_path).await.unwrap();
+    let before = m.ledger.review_item(&review_id).unwrap();
     let first = m.run_scheduled_cycle().await.unwrap();
-    assert_eq!(first.jobs_advanced, 1);
+    assert_eq!(first.jobs_advanced, 0);
     assert_eq!(first.worker_calls, 0);
+    assert_eq!(first.escalated_decisions, 0);
+    let after = m.ledger.review_item(&review_id).unwrap();
+    assert_eq!(before.updated_at, after.updated_at);
+    assert_eq!(before.model_attempts, after.model_attempts);
     let delay = m.review_wake_delay(21600).await.unwrap();
     assert!((299..=300).contains(&delay));
+    m.ledger = MaintenanceLedger::load(&c.state_path).await.unwrap();
     let second = m.run_scheduled_cycle().await.unwrap();
     assert_eq!(second.jobs_advanced, 0);
     assert_eq!(second.worker_calls, 0);
     assert_eq!(*worker.0.lock().unwrap(), 1);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn cached_topic_does_not_hide_relation_and_both_cooldowns_survive_reload() {
+    let f = Fixture::open("cached-review-fairness").await;
+    let pages = sources(&f).await;
+    let worker = Arc::new(CachedPendingWorker(Mutex::new(0)));
+    let mut c = config(&f);
+    enable_review(&mut c);
+    c.relation.enabled = true;
+    c.relation.auto_apply_verified = true;
+    let mut m = RuntimeMaintainer::for_test(f.client.clone(), worker.clone(), c.clone());
+    let mut candidate = m
+        .topic_from_response(&pages, &pages, &[], proposal(&pages))
+        .unwrap();
+    let mut assessment = approved();
+    assessment.verdict = VerificationVerdict::NeedsReview;
+    assessment.requires_user_input = true;
+    candidate.verification = Some(assessment.clone());
+    let topic_id = m.ledger.enqueue_review(
+        MaintenanceReviewPayload::Topic(candidate),
+        MaintenanceReviewOrigin::Automatic,
+        "Cached topic".into(),
+        1,
+        false,
+    );
+    let relation_pages = [0, 1].map(|i| super::super::ledger::MaintenanceRelationReviewPage {
+        page_id: pages[i].page_id.clone(),
+        revision_id: pages[i].revision_id.clone(),
+        preview: pages[i].snippet.clone(),
+    });
+    let relation_id = m.ledger.propose_relation_review(
+        pages[0].namespace.clone(),
+        relation_pages,
+        "Source relationship".into(),
+        1,
+        false,
+    );
+    m.ledger
+        .update_relation_verification(&relation_id, assessment, 0)
+        .unwrap();
+    m.ledger.save(&c.state_path).await.unwrap();
+    let mut report = MaintenanceCycleReport::default();
+    assert!(!m.resume_budget_review(&pages, &mut report).await.unwrap());
+    assert_eq!(*worker.0.lock().unwrap(), 2);
+    assert_eq!(report.worker_calls, 0);
+    m.ledger = MaintenanceLedger::load(&c.state_path).await.unwrap();
+    for id in [topic_id, relation_id] {
+        assert!((299..=300).contains(&m.ledger.retry_delay(&format!("review_resume:{id}"))));
+    }
+    assert!(!m.resume_budget_review(&pages, &mut report).await.unwrap());
+    assert_eq!(*worker.0.lock().unwrap(), 2);
     f.close().await;
 }
 

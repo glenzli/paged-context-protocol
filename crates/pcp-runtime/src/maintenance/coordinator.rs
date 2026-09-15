@@ -985,7 +985,8 @@ impl RuntimeMaintainer {
         {
             Ok(outcome) => {
                 report.worker_calls += outcome.model_attempts;
-                report.escalated_decisions += u32::from(outcome.escalated);
+                report.escalated_decisions +=
+                    u32::from(outcome.escalated && outcome.model_attempts > 0);
                 if let MaintenanceWorkerResponse::CandidateSynthesisReview {
                     decisions,
                     steps,
@@ -1121,6 +1122,7 @@ impl RuntimeMaintainer {
             self.ledger.save(&self.config.state_path).await?;
         }
         let mut regions = self.ledger.ready_regions(&self.config.write_trigger);
+        self.ledger.reconcile_job_issues(&inventory);
         regions.extend(self.ledger.due_job_regions(&inventory));
         let periodic_review = self.ledger.periodic_review_due(&self.config);
         if regions.is_empty() && !periodic_review {
@@ -1153,6 +1155,8 @@ impl RuntimeMaintainer {
         let refreshed = self.client.durable_page_inventory(Vec::new()).await?;
         self.ledger
             .observe_writes(&refreshed, &self.config.write_trigger);
+        self.ledger.reconcile_job_issues(&refreshed);
+        self.ledger.defer_unselected_job_issues();
         if aggregate.jobs_advanced < self.config.max_jobs_per_cycle {
             self.ledger
                 .acknowledge_unchanged_regions(&expected, &refreshed);
@@ -3559,7 +3563,7 @@ impl RuntimeMaintainer {
             }
         };
         report.worker_calls += outcome.model_attempts;
-        report.escalated_decisions += u32::from(outcome.escalated);
+        report.escalated_decisions += u32::from(outcome.escalated && outcome.model_attempts > 0);
         let MaintenanceWorkerResponse::VerifyMaintenance { mut assessment } = outcome.response
         else {
             anyhow::bail!("verification worker returned an unexpected response");
@@ -3671,6 +3675,27 @@ impl RuntimeMaintainer {
         inventory: &[pcp_store::DurablePageInventoryItem],
         report: &mut MaintenanceCycleReport,
     ) -> Result<bool> {
+        // Cached results do not consume the job budget or hide another runnable
+        // review. Bound cheap checks as well, even with a large pending inbox.
+        let checks = self
+            .ledger
+            .review_items()
+            .len()
+            .saturating_add(self.ledger.relation_reviews().len())
+            .min(24);
+        for _ in 0..checks {
+            if self.resume_next_budget_review(inventory, report).await? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    async fn resume_next_budget_review(
+        &mut self,
+        inventory: &[pcp_store::DurablePageInventoryItem],
+        report: &mut MaintenanceCycleReport,
+    ) -> Result<bool> {
         let Some(item) = self
             .ledger
             .review_items()
@@ -3745,6 +3770,21 @@ impl RuntimeMaintainer {
         let approved = matches!(assessment.verdict, super::VerificationVerdict::Approve);
         let reason = assessment.reason.clone();
         candidate.verification = Some(assessment);
+        let apply_approved = approved
+            && self.config.applies_changes()
+            && self.config.topic.auto_apply
+            && super::discovery::accumulated(&selected, &self.config.topic);
+        if !apply_approved
+            && !no_change
+            && report.worker_calls == before
+            && serde_json::to_value(MaintenanceReviewPayload::Topic(candidate.clone()))?
+                == serde_json::to_value(&item.payload)?
+        {
+            self.ledger
+                .defer_cached_review(format!("review_resume:{}", item.candidate_id));
+            self.ledger.save(&self.config.state_path).await?;
+            return Ok(false);
+        }
         {
             let _decision = MaintenanceLedger::decision_lock(&self.config.state_path).await?;
             let mut fresh = MaintenanceLedger::load(&self.config.state_path).await?;
@@ -3764,19 +3804,15 @@ impl RuntimeMaintainer {
             if no_change {
                 fresh.resolve_review(&candidate.candidate_id, MaintenanceReviewStatus::Rejected)?;
             }
+            fresh.record(
+                format!("review_resume:{}", candidate.candidate_id),
+                "review_attempted",
+                300,
+            );
             fresh.save(&self.config.state_path).await?;
             self.ledger = fresh;
         }
-        self.ledger.record(
-            format!("review_resume:{}", candidate.candidate_id),
-            "review_attempted",
-            300,
-        );
-        if approved
-            && self.config.applies_changes()
-            && self.config.topic.auto_apply
-            && super::discovery::accumulated(&selected, &self.config.topic)
-        {
+        if apply_approved {
             self.apply_topic_candidate(ApplyMaintenanceTopicRequest {
                 candidate_id: candidate.candidate_id.clone(),
                 title: candidate.title,
@@ -3860,6 +3896,22 @@ impl RuntimeMaintainer {
                 .iter()
                 .any(|i| i.page_id == p.page_id && i.revision_id == p.revision_id)
         });
+        let apply_approved = current
+            && approved
+            && self.config.applies_changes()
+            && self.config.relation.auto_apply_verified;
+        if current
+            && !apply_approved
+            && !no_change
+            && report.worker_calls == before
+            && serde_json::to_value(Some(&assessment))?
+                == serde_json::to_value(&proposal.verification)?
+        {
+            self.ledger
+                .defer_cached_review(format!("review_resume:{}", proposal.candidate_id));
+            self.ledger.save(&self.config.state_path).await?;
+            return Ok(false);
+        }
         {
             let _decision = MaintenanceLedger::decision_lock(&self.config.state_path).await?;
             let mut fresh = MaintenanceLedger::load(&self.config.state_path).await?;
@@ -3888,19 +3940,15 @@ impl RuntimeMaintainer {
                     MaintenanceRelationReviewStatus::Rejected,
                 )?;
             }
+            fresh.record(
+                format!("review_resume:{}", proposal.candidate_id),
+                "review_attempted",
+                300,
+            );
             fresh.save(&self.config.state_path).await?;
             self.ledger = fresh;
         }
-        self.ledger.record(
-            format!("review_resume:{}", proposal.candidate_id),
-            "review_attempted",
-            300,
-        );
-        if current
-            && approved
-            && self.config.applies_changes()
-            && self.config.relation.auto_apply_verified
-        {
+        if apply_approved {
             self.approve_relation_review(&proposal.candidate_id).await?;
             report.relations_committed += 1;
         }
@@ -3978,7 +4026,8 @@ impl RuntimeMaintainer {
             attempts += outcome.model_attempts;
             escalated |= outcome.escalated;
             report.worker_calls += outcome.model_attempts;
-            report.escalated_decisions += u32::from(outcome.escalated);
+            report.escalated_decisions +=
+                u32::from(outcome.escalated && outcome.model_attempts > 0);
             match outcome.response {
                 MaintenanceWorkerResponse::Defer => {
                     self.ledger.record(
