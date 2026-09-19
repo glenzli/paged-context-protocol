@@ -143,7 +143,11 @@ an idempotent replay says `existing_feedback` and does not claim its current rev
 `entries`. Read the content block; do not require `structuredContent` for retrieval. Parameter names
 remain compatible, with optional `format` added and `sources`/`history` views added. If a host
 requires raw API objects, use the typed client API rather than parsing model-facing MCP output.
-MCP server initialize reports presentation version `0.2.0`; this is not the PCP protocol version.
+MCP initialize `serverInfo.version` follows the workspace software version from `Cargo.toml`
+(since software 0.3.0); it is not the PCP or MCP protocol version. `pcp_describe.buildInfo`
+identifies the MCP binary, while `providerBuildInfo` reads the current backend build live and
+is absent for older providers. Neither field changes the tool-call contract. See
+[build and version management](../design/BUILD_VERSION.md).
 
 Keep universal server instructions short: some hosts repeat them before every tool. Put parameter
 semantics beside the relevant tool and detailed write examples in an on-demand Skill/reference.

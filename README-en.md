@@ -185,6 +185,11 @@ For a new installation, select the current Infra Discovery registration manifest
 
 List the default macOS Discovery directory below. If Runtime sets `INFRA_PROTOCOL_RUNTIME_DIR`, use its `registrations` directory instead. With multiple results, match JSON `service.instance_id` to the Store identity in Console.
 
+Runtime checks its own registration read-only every 60 seconds. It does not rewrite a healthy
+manifest. If the file alone disappears, Runtime atomically restores the same generation and offers
+only while the owner-only directories and original publisher-lock identity remain valid. It does
+not overwrite lock or manifest conflicts; restart the owning Runtime through Console instead.
+
 ```bash
 ls "$(getconf DARWIN_USER_TEMP_DIR)infra-protocol/registrations/"pcp--*.json
 ```

@@ -246,6 +246,7 @@ mod tests {
                 deployment: "codex_gpt_5_6_sol".into(),
                 effort: "high".into(),
                 submitted_at_ms: 1,
+                lease_expires_at_ms: None,
                 reserved_tokens: 1000,
                 actual_tokens: Some(900),
                 response_id: Some(stage.into()),

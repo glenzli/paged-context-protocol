@@ -269,6 +269,16 @@ fn unexpected(operation: &str) -> anyhow::Error {
 
 #[async_trait]
 impl PcpTenantApi for RemotePcpClient {
+    async fn provider_build_info(&self) -> Result<Option<pcp_core::BuildInfo>> {
+        match self.request(RpcOperation::Describe).await? {
+            RpcValue::Descriptor(descriptor) => {
+                self.validate_reconnected_descriptor(&descriptor)?;
+                Ok(descriptor.build_info)
+            }
+            _ => Err(unexpected("provider_build_info")),
+        }
+    }
+
     async fn access_snapshot(&self) -> Result<AccessSession> {
         match self.request(RpcOperation::Describe).await? {
             RpcValue::Descriptor(descriptor) => {

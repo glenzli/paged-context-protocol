@@ -19,9 +19,16 @@ mod enrollment;
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = env::args().skip(1);
-    if args.next().as_deref() == Some("enroll") {
-        enrollment::run_command(args.next().as_deref()).await?;
-        return Ok(());
+    match args.next().as_deref() {
+        Some("--version" | "-V") => {
+            println!("pcp-mcp {}", pcp_core::BuildInfo::current().label());
+            return Ok(());
+        }
+        Some("enroll") => {
+            enrollment::run_command(args.next().as_deref()).await?;
+            return Ok(());
+        }
+        _ => {}
     }
     let client: Arc<dyn PcpApi> = if let Some(state_path) = env::var_os("PCP_ENROLLMENT_FILE") {
         let expected_principal = env::var("PCP_CLIENT_ID")

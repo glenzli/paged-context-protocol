@@ -40,6 +40,7 @@ fn descriptor(session: &str) -> PcpDescriptor {
         ),
         server_pid: 1,
         server_started_at_unix_ms: 1,
+        build_info: None,
     }
 }
 
@@ -224,4 +225,39 @@ async fn unavailable_runtime_is_bounded_and_whoami_does_not_return_cached_succes
     drop(old);
     assert!(client.access_snapshot().await.is_err());
     assert_eq!(connector.calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn build_diagnostics_follow_the_live_runtime_after_upgrade_without_blocking_reconnect() {
+    let mut before = descriptor("old");
+    let mut old_build = pcp_core::BuildInfo::current();
+    old_build.source_digest = "a".repeat(64);
+    before.build_info = Some(old_build.clone());
+    let old = endpoint(before, false, false);
+    let mut after = descriptor("new");
+    let mut new_build = old_build.clone();
+    new_build.source_digest = "b".repeat(64);
+    after.build_info = Some(new_build.clone());
+    let new = endpoint(after, false, false);
+    let client = RemotePcpClient::connect(&old.path)
+        .await
+        .unwrap()
+        .with_session_connector(connector(new.path.clone()));
+    assert_eq!(client.provider_build_info().await.unwrap(), Some(old_build));
+    drop(old);
+    assert_eq!(client.provider_build_info().await.unwrap(), Some(new_build));
+    assert_eq!(client.integrity_check().await.unwrap(), "ok");
+    drop(new);
+    assert!(
+        client.provider_build_info().await.is_err(),
+        "never report cached build as live"
+    );
+}
+
+#[test]
+fn legacy_descriptors_do_not_invent_a_provider_build() {
+    let mut value = serde_json::to_value(descriptor("legacy")).unwrap();
+    value.as_object_mut().unwrap().remove("buildInfo");
+    let decoded: PcpDescriptor = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded.build_info, None);
 }

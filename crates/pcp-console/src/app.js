@@ -592,6 +592,12 @@ const ZH_MESSAGES = {
   "Runtime activity and stored-memory shape from metadata. These signals do not judge whether content is true or relevant.": "基于元数据展示运行时活动和已存记忆形态。这些信号不判断内容是否真实或相关。",
   "Runtime behavior": "运行时行为",
   "Runtime PID": "运行时 PID",
+  "Runtime build": "运行时构建",
+  "Console build": "Console 构建",
+  "Uncommitted changes": "含未提交修改",
+  "Clean source": "源码已提交",
+  "Git state unknown": "Git 状态未知",
+  "Build not reported": "未报告构建信息",
   "Runtime started": "运行时启动时间",
   "Restart the PCP Runtime managed by this Console": "重启由此 Console 管理的 PCP Runtime",
   "Sample findings": "样本发现",
@@ -1583,6 +1589,13 @@ function orderedScopes(scopes) {
   return output;
 }
 
+function buildLabel(build) {
+  if (!build) return t("Build not reported");
+  const state = build.dirty === true ? t("Uncommitted changes")
+    : build.dirty === false ? t("Clean source") : t("Git state unknown");
+  return `${build.version} · ${build.gitRevision?.slice(0, 12) || "?"} · ${state} · ${build.sourceDigest?.slice(0, 12) || "?"}`;
+}
+
 function renderOverview(data) {
   state.overview = data;
   queryView.setScopes(data.scopes || []);
@@ -1634,6 +1647,8 @@ function renderOverview(data) {
 
   const storeWide = (data.storePermissions || []).length > 0;
   const endpointRows = [
+    [t("Runtime build"), buildLabel(data.runtime.buildInfo)],
+    [t("Console build"), buildLabel(data.consoleBuildInfo)],
     [t("Principal"), data.principal.principalId],
     [t("Principal type"), data.principal.principalType],
     [t("Identity"), data.identityId],

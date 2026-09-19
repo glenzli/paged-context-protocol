@@ -10,9 +10,13 @@ use std::{
     io::Write,
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 const WINDOW_MS: u64 = 86_400_000;
+const RECOVERY_GRACE_MS: u64 = 60_000;
+// Old ledgers did not persist the request deadline. Use a conservative horizon.
+const LEGACY_LEASE_MS: u64 = WINDOW_MS;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -112,6 +116,8 @@ pub struct ReviewAttempt {
     pub deployment: String,
     pub effort: String,
     pub submitted_at_ms: u64,
+    #[serde(default)]
+    pub lease_expires_at_ms: Option<u64>,
     pub reserved_tokens: u64,
     pub actual_tokens: Option<u64>,
     pub response_id: Option<String>,
@@ -208,13 +214,18 @@ impl BudgetStore {
         stage: &str,
         tokens: u64,
         reason: &str,
+        timeout: Duration,
     ) -> Result<Admission> {
         let key = hash(&format!("{evidence}:{tier:?}:{stage}"));
         self.transaction(|ledger, now| {
             if let Some(old) = ledger.attempts.get(&key) {
                 return Ok(Admission::Existing(old.clone()));
             }
-            let active = ledger.attempts.values().filter(|a| unresolved(a)).count();
+            let active = ledger
+                .attempts
+                .values()
+                .filter(|a| occupies_slot(a))
+                .count();
             if active >= self.config.max_in_flight as usize {
                 return Ok(Admission::Waiting(
                     "Another upgraded review has an unsettled reservation".into(),
@@ -239,6 +250,12 @@ impl BudgetStore {
                 },
                 effort: tier.effort().into(),
                 submitted_at_ms: now,
+                lease_expires_at_ms: Some(
+                    now.saturating_add(
+                        (timeout.as_millis().min(u64::MAX as u128) as u64)
+                            .saturating_add(RECOVERY_GRACE_MS),
+                    ),
+                ),
                 reserved_tokens: tokens,
                 actual_tokens: None,
                 response_id: None,
@@ -258,8 +275,32 @@ impl BudgetStore {
                 "response identity changed"
             );
             a.response_id = Some(id.into());
-            a.state = "in_progress".into();
+            // A late submission receipt must not resurrect a released lease or
+            // replace a terminal result; it can still be reconciled for usage.
+            if a.state == "reserved" {
+                a.state = "in_progress".into();
+            }
             Ok(())
+        })
+    }
+    /// Called only after remote reconciliation found no live request. Preserve
+    /// unknown spend and exact evidence identity: releasing concurrency does not
+    /// grant permission to submit this same request again.
+    pub fn release_expired(&self, observed: &ReviewAttempt) -> Result<bool> {
+        self.transaction(|ledger, now| {
+            let attempt = ledger.attempts.get_mut(&observed.key).context("missing reservation")?;
+            if !occupies_slot(attempt)
+                || attempt.response_id != observed.response_id
+                || attempt.submitted_at_ms != observed.submitted_at_ms
+                || now < attempt.lease_expires_at_ms.unwrap_or_else(|| {
+                    attempt.submitted_at_ms.saturating_add(LEGACY_LEASE_MS)
+                })
+            {
+                return Ok(false);
+            }
+            attempt.state = "orphaned".into();
+            attempt.reason = "Review deadline and recovery grace elapsed without a recoverable response; concurrency released, usage reservation retained. Same evidence requires human review.".into();
+            Ok(true)
         })
     }
     pub fn settle(
@@ -311,7 +352,7 @@ impl BudgetStore {
                 enabled: self.config.enabled,
                 token_limit_mode: self.config.token_limit_mode,
                 window_seconds: WINDOW_MS / 1000,
-                in_flight: l.attempts.values().filter(|a| unresolved(a)).count() as u32,
+                in_flight: l.attempts.values().filter(|a| occupies_slot(a)).count() as u32,
                 sol: self.tier_status(l, now, ReviewTier::Sol),
                 astra: self.tier_status(l, now, ReviewTier::Astra),
                 attempts,
@@ -356,6 +397,9 @@ impl BudgetStore {
 }
 fn unresolved(a: &ReviewAttempt) -> bool {
     a.actual_tokens.is_none()
+}
+fn occupies_slot(a: &ReviewAttempt) -> bool {
+    unresolved(a) && !matches!(a.state.as_str(), "orphaned" | "usage_unknown")
 }
 pub(crate) fn hash(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
@@ -426,8 +470,16 @@ mod tests {
         (dir, store)
     }
     fn reserve(s: &BudgetStore, id: &str) -> Admission {
-        s.reserve(id, "proposal", ReviewTier::Sol, "review", 80, "test")
-            .unwrap()
+        s.reserve(
+            id,
+            "proposal",
+            ReviewTier::Sol,
+            "review",
+            80,
+            "test",
+            Duration::from_secs(300),
+        )
+        .unwrap()
     }
     #[test]
     fn defaults_and_legacy_hard_config_use_admission() {
@@ -521,7 +573,10 @@ mod tests {
         })
         .unwrap();
         let reopened = BudgetStore::new(s.config.clone());
-        assert_eq!(reopened.snapshot().unwrap().in_flight, 1);
+        // Terminal work releases concurrency even when usage is still unknown.
+        assert_eq!(reopened.snapshot().unwrap().in_flight, 0);
+        assert_eq!(reopened.snapshot().unwrap().sol.reserved_tokens, 80);
+        // The original spend reservation still protects the configured budget.
         assert!(matches!(reserve(&reopened, "new"), Admission::Waiting(_)));
         reopened
             .settle(&a.key, Some(99), None, "cancelled")
@@ -546,8 +601,16 @@ mod tests {
         std::fs::write(dir.path().join("budget.json"), b"broken").unwrap();
         assert!(s.snapshot().is_err());
         assert!(
-            s.reserve("new", "p", ReviewTier::Sol, "review", 1, "test")
-                .is_err()
+            s.reserve(
+                "new",
+                "p",
+                ReviewTier::Sol,
+                "review",
+                1,
+                "test",
+                Duration::from_secs(300)
+            )
+            .is_err()
         );
     }
     #[test]
@@ -568,6 +631,119 @@ mod tests {
         assert!(s.snapshot().unwrap().attempts[0].result.is_none());
         assert!(s.attempt(&a.key).unwrap().unwrap().result.is_some());
     }
+    #[test]
+    fn expired_legacy_reservation_releases_only_concurrency_and_never_replays() {
+        let (_dir, mut s) = store();
+        s.config.sol_max_calls = 3;
+        s.config.sol_max_tokens = 300;
+        let Admission::Reserved(a) = reserve(&s, "lost") else {
+            panic!()
+        };
+        s.transaction(|ledger, now| {
+            let old = ledger.attempts.get_mut(&a.key).unwrap();
+            old.submitted_at_ms = now - LEGACY_LEASE_MS - 1;
+            old.lease_expires_at_ms = None;
+            Ok(())
+        })
+        .unwrap();
+        // Exercise the pre-upgrade wire shape, not just an explicit null field.
+        let mut json: Value =
+            serde_json::from_slice(&std::fs::read(&s.config.state_path).unwrap()).unwrap();
+        json["attempts"][&a.key]
+            .as_object_mut()
+            .unwrap()
+            .remove("leaseExpiresAtMs");
+        std::fs::write(&s.config.state_path, serde_json::to_vec(&json).unwrap()).unwrap();
+        let s = BudgetStore::new(s.config.clone());
+        let old = s.attempt(&a.key).unwrap().unwrap();
+        assert!(s.release_expired(&old).unwrap());
+        let snapshot = s.snapshot().unwrap();
+        assert_eq!(snapshot.in_flight, 0);
+        assert_eq!(snapshot.sol.reserved_tokens, 80);
+        assert_eq!(snapshot.sol.actual_tokens, 0);
+        assert_eq!(snapshot.sol.used_calls, 1);
+        let Admission::Existing(old) = reserve(&s, "lost") else {
+            panic!("must not repeat unknown request")
+        };
+        assert_eq!(old.state, "orphaned");
+        assert_eq!(old.actual_tokens, None);
+        assert!(matches!(
+            reserve(&s, "different-evidence"),
+            Admission::Reserved(_)
+        ));
+    }
+
+    #[test]
+    fn fresh_lease_and_concurrent_response_receipt_cannot_be_released() {
+        let (_dir, s) = store();
+        let Admission::Reserved(a) = reserve(&s, "active") else {
+            panic!()
+        };
+        assert_eq!(a.lease_expires_at_ms, Some(a.submitted_at_ms + 360_000));
+        assert!(!s.release_expired(&a).unwrap());
+        s.transaction(|ledger, _| {
+            ledger.attempts.get_mut(&a.key).unwrap().lease_expires_at_ms = Some(0);
+            Ok(())
+        })
+        .unwrap();
+        s.submitted(&a.key, "remote-request").unwrap();
+        // A failed lookup observed before the ID was saved must not release it.
+        assert!(!s.release_expired(&a).unwrap());
+        assert_eq!(s.snapshot().unwrap().in_flight, 1);
+        let with_id = s.attempt(&a.key).unwrap().unwrap();
+        s.settle(&a.key, Some(20), None, "completed").unwrap();
+        assert!(!s.release_expired(&with_id).unwrap());
+        assert_eq!(s.attempt(&a.key).unwrap().unwrap().state, "completed");
+    }
+
+    #[test]
+    fn late_receipt_and_usage_reconcile_without_resurrecting_an_orphan() {
+        let (_dir, s) = store();
+        let Admission::Reserved(a) = reserve(&s, "late") else {
+            panic!()
+        };
+        s.transaction(|ledger, _| {
+            ledger.attempts.get_mut(&a.key).unwrap().lease_expires_at_ms = Some(0);
+            Ok(())
+        })
+        .unwrap();
+        assert!(s.release_expired(&a).unwrap());
+        s.submitted(&a.key, "late-receipt").unwrap();
+        assert_eq!(s.snapshot().unwrap().in_flight, 0);
+        assert_eq!(s.attempt(&a.key).unwrap().unwrap().state, "orphaned");
+        let result = Some(serde_json::json!({"status":"completed"}));
+        s.settle(&a.key, Some(30), result.clone(), "completed")
+            .unwrap();
+        s.settle(&a.key, Some(99), None, "failed").unwrap();
+        let snapshot = s.snapshot().unwrap();
+        assert_eq!(snapshot.sol.reserved_tokens, 0);
+        assert_eq!(snapshot.sol.actual_tokens, 30);
+        assert_eq!(s.attempt(&a.key).unwrap().unwrap().result, result);
+        assert!(matches!(reserve(&s, "late"), Admission::Existing(_)));
+    }
+
+    #[test]
+    fn terminal_unknown_usage_does_not_block_other_work_when_budget_allows_it() {
+        let (_dir, mut s) = store();
+        s.config.sol_max_calls = 3;
+        s.config.sol_max_tokens = 300;
+        let Admission::Reserved(a) = reserve(&s, "terminal") else {
+            panic!()
+        };
+        s.submitted(&a.key, "terminal-response").unwrap();
+        s.settle(
+            &a.key,
+            None,
+            Some(serde_json::json!({"status":"failed"})),
+            "failed",
+        )
+        .unwrap();
+        let s = BudgetStore::new(s.config.clone());
+        assert_eq!(s.snapshot().unwrap().in_flight, 0);
+        assert_eq!(s.snapshot().unwrap().sol.reserved_tokens, 80);
+        assert!(matches!(reserve(&s, "next"), Admission::Reserved(_)));
+    }
+
     #[test]
     fn explicit_pre_submission_rejection_releases_slot_without_erasing_identity() {
         let (_dir, s) = store();

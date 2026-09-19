@@ -20,6 +20,10 @@ use pcp_store::PcpStore;
 async fn main() -> Result<()> {
     let mut arguments = env::args().skip(1);
     let config_path = match arguments.next().as_deref() {
+        Some("--version" | "-V") => {
+            println!("pcp-runtime {}", pcp_core::BuildInfo::current().label());
+            return Ok(());
+        }
         Some("maintenance") => return run_maintenance_command(arguments).await,
         Some("--config") => Some(PathBuf::from(
             arguments

@@ -56,11 +56,15 @@ enabled, Runtime still publishes the same PCP service registration with only the
 enrollment offer.
 
 The manifest is a candidate declaration, not a liveness signal. Runtime publishes
-it once after the endpoint is ready and does not periodically rewrite it. One
-stable PCP identity has one exclusive publisher. On shutdown, Runtime leaves the
-stable manifest in place and removes only its generation-specific socket. A later
-Runtime atomically replaces the manifest with a new generation. `launchd` may
-supervise Runtime but is not a discovery mechanism.
+it after the endpoint is ready, then checks it read-only every 60 seconds without
+rewriting healthy content. If the manifest alone disappears, Runtime restores the
+exact same generation and offers only while the owner-only directory chain and
+the original publisher-lock identity remain valid. It fails closed rather than
+overwriting a lock or manifest conflict. One stable PCP identity has one exclusive
+publisher. On shutdown, Runtime leaves the stable manifest in place and removes
+only its generation-specific socket. A later Runtime atomically replaces the
+manifest with a new generation. `launchd` may supervise Runtime but is not a
+discovery mechanism.
 
 ## Binding And Trust Boundary
 

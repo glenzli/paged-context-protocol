@@ -32,6 +32,8 @@ pub(crate) struct PcpDescriptor {
     pub server_pid: u32,
     #[serde(default)]
     pub server_started_at_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_info: Option<pcp_core::BuildInfo>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -158,11 +160,25 @@ pub(crate) enum RpcOperation {
 }
 
 impl RpcOperation {
-    /// Inspect only the variant; never serialize request content for audit labels.
+    /// Inspect only operation/kind tags; never serialize content for audit labels.
     pub(crate) fn audit_name(&self) -> &'static str {
+        use pcp_client::context_hub::ContextHubRequest;
         match self {
             Self::Describe => "describe",
-            Self::ContextHub(..) => "context_hub",
+            Self::ContextHub(request) => match request {
+                ContextHubRequest::SubmitCandidate(..) => "submit_candidate",
+                ContextHubRequest::PublishActivity(..) => "publish_activity",
+                ContextHubRequest::ReadActivity(..) => "read_activity",
+                ContextHubRequest::Inspect => "inspect_context_inbox",
+                ContextHubRequest::SetPolicy(..) => "set_context_policy",
+                ContextHubRequest::Review(..) => "review_candidates",
+                ContextHubRequest::OrganizeCandidates => "organize_candidates",
+                ContextHubRequest::ReviewSynthesis(..) => "review_candidate_synthesis",
+                ContextHubRequest::StopSynthesis(..) => "stop_candidate_synthesis",
+                ContextHubRequest::SetAutomaticReview { .. } => "set_automatic_candidate_review",
+                ContextHubRequest::UndoAutomaticOutput { .. } => "undo_automatic_candidate_output",
+                ContextHubRequest::RemoveActivity { .. } => "remove_activity",
+            },
             Self::IntegrityCheck => "integrity_check",
             Self::CreateScope(..) => "create_scope",
             Self::ListScopes { .. } => "list_scopes",
@@ -182,6 +198,14 @@ impl RpcOperation {
             Self::CollectRevisionRetention(..) => "collect_revision_retention",
             Self::PutRevisionRetentionLease(..) => "put_revision_retention_lease",
             Self::ActiveRevisionRetentionLeases { .. } => "active_revision_retention_leases",
+            Self::IngestPage(request)
+                if matches!(
+                    request.kind.as_str(),
+                    "codex_capture" | "chatgpt_capture" | "agent_capture"
+                ) =>
+            {
+                "capture"
+            }
             Self::IngestPage(..) => "ingest_page",
             Self::SubmitFeedback(..) => "submit_feedback",
             Self::WritePage(..) => "write_page",
@@ -324,6 +348,58 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn context_audit_distinguishes_intake_from_activity_without_changing_wire_or_logging_content() {
+        for (request, expected) in [
+            (
+                serde_json::json!({"operation":"submit_candidate","params":{
+                    "scope":"user:test", "eventId":"private-event", "title":"private-title", "content":"private-content"
+                }}),
+                "submit_candidate",
+            ),
+            (
+                serde_json::json!({"operation":"publish_activity","params":{
+                    "scope":"user:test", "topicKey":"private-topic", "summary":"private-summary"
+                }}),
+                "publish_activity",
+            ),
+            (
+                serde_json::json!({"operation":"read_activity","params":{"query":"private-query"}}),
+                "read_activity",
+            ),
+            (
+                serde_json::json!({"operation":"inspect"}),
+                "inspect_context_inbox",
+            ),
+        ] {
+            let wire = serde_json::json!({"type":"context_hub", "params":request});
+            let operation: RpcOperation = serde_json::from_value(wire).unwrap();
+            assert_eq!(operation.audit_name(), expected);
+            assert!(!operation.audit_name().contains("private"));
+            let encoded = serde_json::to_value(operation).unwrap();
+            assert_eq!(
+                encoded["type"], "context_hub",
+                "keep existing RPC dispatch compatibility"
+            );
+            assert_eq!(encoded["params"]["operation"], request["operation"]);
+        }
+        for (kind, expected) in [
+            ("chatgpt_capture", "capture"),
+            ("conversation_event", "ingest_page"),
+        ] {
+            let operation: RpcOperation = serde_json::from_value(serde_json::json!({
+                "type":"ingest_page", "params":{"namespace":"user:test", "kind":kind,
+                    "payload":{"mediaType":"text/plain", "content":"private-content"}}
+            }))
+            .unwrap();
+            assert_eq!(operation.audit_name(), expected);
+            assert_eq!(
+                serde_json::to_value(operation).unwrap()["type"],
+                "ingest_page"
+            );
+        }
+    }
 
     #[test]
     fn pack_pages_has_a_stable_operation_name_and_exact_input_shape() {

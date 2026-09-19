@@ -52,11 +52,27 @@ async fn recent_context(client: &dyn PcpTenantApi, cursor: Option<String>) -> an
 
 ## Candidate lifecycle
 
+Memory checks are tied to new preferences, constraints, settled decisions, corrections and
+reusable findings. Assess these before leaving the discussion phase, then either capture clear
+durable value or stage plausible but uncertain future value. An assessment with no new useful
+information needs no tool call. Combine small changes about one subject; preserve corrections
+and attribution rather than recording every rephrasing. Reuse known receipts and source Revisions;
+do not search before every write or submit the same item to both memory routes. Activity only
+tracks temporary progress. A challenge to stored memory follows the feedback/review contract.
+
 `SubmitCandidate` accepts `scope`, stable client-local `eventId`, `title` (120 Unicode characters),
 `content` (2,000), up to eight `sourceRefs` (4 KiB serialized), and sixteen exact
 `basedOnRevisionIds`. It returns `{candidateId, status, created, version}`. Retrying identical
 arguments with the same event ID returns the existing receipt; changed content with that ID fails.
 An unknown write outcome should be retried with the same ID, not a new candidate.
+
+MCP `pcp_capture` also derives a stable `externalEventId` when omitted. Its key includes the
+resolved Scope, capture surface, content, category, rationale, observation time and evidence.
+Identical requests recover the same Page/Revision after a restart; changed evidence remains a new
+event. Supply an explicit source-event ID to distinguish otherwise identical events. This is exact
+retry protection, not semantic deduplication, and it does not recover an unknown write made by an
+older adapter that omitted the ID. Preserve original arguments when retrying; no transport replay
+or offline queue is introduced.
 
 Candidates remain outside search, graph construction, packing and summaries. Runtime provides
 conservative same-Scope similarity hints (exact body or title bigram overlap); these are not
@@ -111,6 +127,15 @@ There is no model call for storage, TTL, similarity hints or activity reads. Con
 the current cards; it does not synthesize them into a new authoritative user profile.
 
 ## Operational state
+
+New outer RPC audit events distinguish `capture`, `submit_candidate`, `publish_activity`,
+`read_activity`, and individual inbox administration operations. `capture` denotes the three MCP
+capture Page kinds; generic source ingestion remains `ingest_page`. Audit labels come from fixed
+operation/kind tags, not titles, queries or content. Existing historical `context_hub` and
+`ingest_page` rows are unchanged. The Console's requests view already groups and filters these
+labels; use it instead of counting internal reads or background work as model calls. A shared
+connection identifies a Principal, not the originating application, model or conversation.
+These counts cannot establish missed memory opportunities in conversations PCP never saw.
 
 The file next to the SQLite Store, `<store stem>.context.json`, holds only these bounded records
 and client policies. It is Store-identity-bound, mode 0600, locked across processes and atomically

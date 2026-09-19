@@ -153,6 +153,11 @@ pub trait PcpTenantApi: Send + Sync {
     fn capabilities(&self) -> Capabilities;
     fn access(&self) -> &AccessSession;
 
+    /// Current provider build, if reported. Remote implementations must read it live.
+    async fn provider_build_info(&self) -> Result<Option<pcp_core::BuildInfo>> {
+        Ok(None)
+    }
+
     /// Read the current server-attested session. Remote clients must verify liveness.
     async fn access_snapshot(&self) -> Result<AccessSession> {
         Ok(self.access().clone())
@@ -530,6 +535,10 @@ impl PcpTenantApi for EmbeddedPcpClient {
 
     fn identity_id(&self) -> &str {
         self.store.identity_id()
+    }
+
+    async fn provider_build_info(&self) -> Result<Option<pcp_core::BuildInfo>> {
+        Ok(Some(pcp_core::BuildInfo::current()))
     }
 
     fn capabilities(&self) -> Capabilities {

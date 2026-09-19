@@ -193,6 +193,8 @@ fn validate_private_directory(path: &Path) -> Result<()> {
 }
 
 pub struct PublicationAuthority {
+    path: PathBuf,
+    identity: (u64, u64),
     _file: File,
 }
 
@@ -210,7 +212,9 @@ impl PublicationAuthority {
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
         let metadata = file.metadata()?;
         anyhow::ensure!(
-            metadata.is_file() && metadata.uid() == current_uid(),
+            metadata.is_file()
+                && metadata.uid() == current_uid()
+                && metadata.permissions().mode() & 0o777 == 0o600,
             "PCP publication authority is not a current-user regular file: {}",
             path.display()
         );
@@ -223,7 +227,27 @@ impl PublicationAuthority {
                 config.instance_id
             );
         }
-        Ok(Self { _file: file })
+        Ok(Self {
+            path,
+            identity: (metadata.dev(), metadata.ino()),
+            _file: file,
+        })
+    }
+
+    fn ensure_current(&self) -> Result<()> {
+        let metadata = fs::symlink_metadata(&self.path).with_context(|| {
+            format!("inspect PCP publication authority {}", self.path.display())
+        })?;
+        anyhow::ensure!(
+            metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && metadata.uid() == current_uid()
+                && metadata.permissions().mode() & 0o777 == 0o600
+                && (metadata.dev(), metadata.ino()) == self.identity,
+            "PCP publication authority changed at {}; restart the owning Runtime",
+            self.path.display()
+        );
+        Ok(())
     }
 }
 
@@ -248,16 +272,73 @@ impl RegistrationFile {
     }
 
     pub fn publish(&self, manifest: &DiscoveryRegistration) -> Result<()> {
-        let mut bytes =
-            serde_json::to_vec(manifest).context("encode Infra Discovery registration")?;
-        bytes.push(b'\n');
-        anyhow::ensure!(
-            bytes.len() <= MAX_MANIFEST_BYTES,
-            "Infra Discovery registration exceeds {MAX_MANIFEST_BYTES} bytes"
-        );
+        let bytes = encoded_manifest(manifest)?;
+        self.write_temporary(&bytes)?;
+        fs::rename(&self.temporary_path, &self.path).with_context(|| {
+            format!(
+                "publish Infra Discovery registration {}",
+                self.path.display()
+            )
+        })?;
+        self.validate_and_sync(&bytes)
+    }
+
+    pub fn ensure_published(
+        &self,
+        authority: &PublicationAuthority,
+        manifest: &DiscoveryRegistration,
+    ) -> Result<bool> {
+        let registration_dir = self
+            .path
+            .parent()
+            .context("Infra Discovery registration has no parent directory")?;
+        let runtime_root = registration_dir
+            .parent()
+            .context("Infra Discovery registration directory has no runtime root")?;
+        validate_private_directory(runtime_root)?;
+        validate_private_directory(registration_dir)?;
+        authority.ensure_current()?;
+        let expected = encoded_manifest(manifest)?;
+        match fs::symlink_metadata(&self.path) {
+            Ok(_) => {
+                self.validate_exact(&expected)?;
+                Ok(false)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.write_temporary(&expected)?;
+                if let Err(error) = authority.ensure_current() {
+                    let _ = fs::remove_file(&self.temporary_path);
+                    return Err(error);
+                }
+                let linked = match fs::hard_link(&self.temporary_path, &self.path) {
+                    Ok(()) => true,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+                    Err(error) => {
+                        let _ = fs::remove_file(&self.temporary_path);
+                        return Err(error).with_context(|| {
+                            format!(
+                                "restore Infra Discovery registration {}",
+                                self.path.display()
+                            )
+                        });
+                    }
+                };
+                let _ = fs::remove_file(&self.temporary_path);
+                self.validate_and_sync(&expected)?;
+                Ok(linked)
+            }
+            Err(error) => Err(error).with_context(|| {
+                format!(
+                    "inspect Infra Discovery registration {}",
+                    self.path.display()
+                )
+            }),
+        }
+    }
+
+    fn write_temporary(&self, bytes: &[u8]) -> Result<()> {
         let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .write(true)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
@@ -274,13 +355,24 @@ impl RegistrationFile {
         file.sync_all()
             .context("sync Infra Discovery registration")?;
         drop(file);
-        fs::rename(&self.temporary_path, &self.path).with_context(|| {
-            format!(
-                "publish Infra Discovery registration {}",
-                self.path.display()
-            )
-        })?;
+        Ok(())
+    }
+
+    fn validate_exact(&self, expected: &[u8]) -> Result<()> {
         validate_private_manifest(&self.path)?;
+        let current = fs::read(&self.path).with_context(|| {
+            format!("read Infra Discovery registration {}", self.path.display())
+        })?;
+        anyhow::ensure!(
+            current == expected,
+            "Infra Discovery registration changed at {}; restart the owning Runtime",
+            self.path.display()
+        );
+        Ok(())
+    }
+
+    fn validate_and_sync(&self, expected: &[u8]) -> Result<()> {
+        self.validate_exact(expected)?;
         if let Some(parent) = self.path.parent() {
             File::open(parent)
                 .and_then(|directory| directory.sync_all())
@@ -288,6 +380,16 @@ impl RegistrationFile {
         }
         Ok(())
     }
+}
+
+fn encoded_manifest(manifest: &DiscoveryRegistration) -> Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec(manifest).context("encode Infra Discovery registration")?;
+    bytes.push(b'\n');
+    anyhow::ensure!(
+        bytes.len() <= MAX_MANIFEST_BYTES,
+        "Infra Discovery registration exceeds {MAX_MANIFEST_BYTES} bytes"
+    );
+    Ok(bytes)
 }
 
 impl Drop for RegistrationFile {
@@ -344,7 +446,44 @@ pub(crate) fn current_uid() -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_file_token;
+    use std::{fs, os::unix::fs::MetadataExt};
+
+    use uuid::Uuid;
+
+    use super::{
+        ObserverConfig, PublicationAuthority, RegistrationFile, prepare_runtime_layout,
+        validate_file_token,
+    };
+    use crate::observer::contract::{
+        DISCOVERY_REGISTRATION_SCHEMA, DISCOVERY_SCHEMA_VERSION, DiscoveryOffer,
+        DiscoveryRegistration, DiscoveryService, LOCAL_UNIX_SOCKET_BINDING,
+        PCP_OBSERVER_PROTOCOL_ID, PCP_OBSERVER_PROTOCOL_VERSION,
+    };
+
+    fn manifest(generation: &str) -> DiscoveryRegistration {
+        DiscoveryRegistration {
+            schema: DISCOVERY_REGISTRATION_SCHEMA.to_owned(),
+            schema_version: DISCOVERY_SCHEMA_VERSION.to_owned(),
+            service: DiscoveryService {
+                kind: "pcp".to_owned(),
+                instance_id: "pcp-test".to_owned(),
+                generation: generation.to_owned(),
+            },
+            offers: vec![DiscoveryOffer {
+                protocol: PCP_OBSERVER_PROTOCOL_ID.to_owned(),
+                protocol_versions: vec![PCP_OBSERVER_PROTOCOL_VERSION.to_owned()],
+                binding: LOCAL_UNIX_SOCKET_BINDING.to_owned(),
+                endpoint: "sockets/PCPTEST000000001.sock".to_owned(),
+            }],
+        }
+    }
+
+    fn test_root(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "pcp-registration-{name}-{}",
+            Uuid::new_v4().simple()
+        ))
+    }
 
     #[test]
     fn discovery_file_tokens_match_the_schema_pattern() {
@@ -356,5 +495,79 @@ mod tests {
         }
         assert!(validate_file_token(&"a".repeat(96), "test token").is_ok());
         assert!(validate_file_token(&"a".repeat(97), "test token").is_err());
+    }
+
+    #[test]
+    fn missing_registration_is_restored_without_rewriting_healthy_content() {
+        let root = test_root("restore");
+        let config = ObserverConfig::for_test(root.join("infra-protocol"), "pcp-test");
+        prepare_runtime_layout(&config).unwrap();
+        let authority = PublicationAuthority::acquire(&config).unwrap();
+        let registration = RegistrationFile::new(config.manifest_path(), "proc_test");
+        let expected = manifest("proc_test");
+        registration.publish(&expected).unwrap();
+        let original = fs::metadata(&registration.path).unwrap();
+
+        assert!(
+            !registration
+                .ensure_published(&authority, &expected)
+                .unwrap()
+        );
+        let unchanged = fs::metadata(&registration.path).unwrap();
+        assert_eq!(original.ino(), unchanged.ino());
+        assert_eq!(original.modified().unwrap(), unchanged.modified().unwrap());
+
+        fs::remove_file(&registration.path).unwrap();
+        assert!(
+            registration
+                .ensure_published(&authority, &expected)
+                .unwrap()
+        );
+        assert!(
+            !registration
+                .ensure_published(&authority, &expected)
+                .unwrap()
+        );
+        drop(registration);
+        drop(authority);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repair_preserves_conflicts_and_rejects_replaced_authority() {
+        let root = test_root("conflict");
+        let config = ObserverConfig::for_test(root.join("infra-protocol"), "pcp-test");
+        prepare_runtime_layout(&config).unwrap();
+        let authority = PublicationAuthority::acquire(&config).unwrap();
+        let registration = RegistrationFile::new(config.manifest_path(), "proc_test");
+        let expected = manifest("proc_test");
+        registration.publish(&expected).unwrap();
+
+        fs::write(&registration.path, b"{}\n").unwrap();
+        assert!(
+            registration
+                .ensure_published(&authority, &expected)
+                .is_err()
+        );
+        assert_eq!(fs::read(&registration.path).unwrap(), b"{}\n");
+
+        fs::remove_file(config.authority_path()).unwrap();
+        let successor = PublicationAuthority::acquire(&config).unwrap();
+        fs::remove_file(&registration.path).unwrap();
+        assert!(
+            registration
+                .ensure_published(&authority, &expected)
+                .is_err()
+        );
+        assert!(!registration.path.exists());
+        assert!(
+            registration
+                .ensure_published(&successor, &expected)
+                .unwrap()
+        );
+        drop(registration);
+        drop(successor);
+        drop(authority);
+        fs::remove_dir_all(root).unwrap();
     }
 }

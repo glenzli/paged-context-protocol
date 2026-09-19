@@ -1,9 +1,12 @@
 mod access;
+mod build_info;
 mod model;
 mod query;
 mod reconciliation;
 mod request;
 mod retention;
+
+pub use build_info::{BuildInfo, SOFTWARE_VERSION};
 
 pub use access::{
     AccessAuditEvent, AccessClientSummary, AccessDecision, AccessLogQuery, AccessLogResult,

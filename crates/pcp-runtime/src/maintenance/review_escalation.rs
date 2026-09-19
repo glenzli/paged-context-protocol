@@ -273,8 +273,11 @@ impl InferRuntimeSemanticWorker {
         // Reconcile known remote identities before checking the shared slot.
         for attempt in store.unsettled()? {
             if let Some(id) = &attempt.response_id {
-                if let Ok(Ok(response)) =
-                    tokio::time::timeout(self.timeout, self.client.get_response(id)).await
+                if let Ok(Ok(response)) = tokio::time::timeout(
+                    self.timeout.min(std::time::Duration::from_secs(5)),
+                    self.client.get_response(id),
+                )
+                .await
                 {
                     if matches!(
                         response.status.as_str(),
@@ -282,8 +285,12 @@ impl InferRuntimeSemanticWorker {
                     ) {
                         self.settle_review_response(&attempt, &response)?;
                     }
+                    // A reachable queued/running response is still real work,
+                    // regardless of the age of our local lease.
+                    continue;
                 }
             }
+            store.release_expired(&attempt)?;
         }
         let deployment = match tier {
             ReviewTier::Sol => &self.review_budget.sol_deployment_id,
@@ -320,10 +327,15 @@ impl InferRuntimeSemanticWorker {
             } else {
                 "Uncertain maintenance decision or existing Topic refresh"
             },
+            self.timeout,
         )?;
         match admission {
             Admission::Waiting(reason) => anyhow::bail!("{reason}"),
             Admission::Existing(attempt) => {
+                anyhow::ensure!(
+                    attempt.state != "orphaned",
+                    "Previous review outcome is unknown after its deadline; usage retained, human review required"
+                );
                 anyhow::ensure!(
                     attempt.request_hash == request_hash,
                     "This evidence was already reviewed with different proposal content; explicit human review required"
@@ -587,6 +599,7 @@ mod tests {
             deployment: "test".into(),
             effort: tier.effort().into(),
             submitted_at_ms: 0,
+            lease_expires_at_ms: None,
             reserved_tokens: 20,
             actual_tokens: Some(15),
             response_id: Some("response".into()),

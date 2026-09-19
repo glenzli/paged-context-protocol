@@ -283,6 +283,10 @@ struct RepackRestoredPackRequest {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if matches!(env::args().nth(1).as_deref(), Some("--version" | "-V")) {
+        println!("pcp-console {}", pcp_core::BuildInfo::current().label());
+        return Ok(());
+    }
     let runtime = match managed::ManagedOptions::parse(env::args_os().skip(1))? {
         Some(options) => Some(managed::ManagedRuntime::start(options).await?),
         None => None,
@@ -732,7 +736,8 @@ async fn health(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
 }
 
 async fn runtime_status(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let reachable = state.client.page_count(Vec::new()).await.is_ok();
+    let build = state.client.provider_build_info().await;
+    let reachable = build.is_ok();
     let managed = match &state.runtime {
         Some(runtime) => {
             let status = runtime.status().await;
@@ -745,7 +750,11 @@ async fn runtime_status(State(state): State<AppState>) -> Result<Json<Value>, Ap
         }
         None => json!({"managed": false, "ownsProcess": false}),
     };
-    Ok(Json(json!({"reachable": reachable, "lifecycle": managed})))
+    Ok(Json(json!({
+        "reachable": reachable, "lifecycle": managed,
+        "buildInfo": build.ok().flatten(),
+        "consoleBuildInfo": pcp_core::BuildInfo::current(),
+    })))
 }
 
 async fn restart_runtime(
@@ -766,10 +775,11 @@ async fn restart_runtime(
 }
 
 async fn overview(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let (integrity, scopes, content_library) = tokio::try_join!(
+    let (integrity, scopes, content_library, runtime_build) = tokio::try_join!(
         state.client.integrity_check(),
         state.client.list_scopes(Vec::new(), None, 10_000, None),
         state.client.content_library_summary(Vec::new()),
+        state.client.provider_build_info(),
     )?;
     let content_by_scope = content_library
         .scopes
@@ -808,7 +818,9 @@ async fn overview(State(state): State<AppState>) -> Result<Json<Value>, ApiError
         "grants": state.client.access().grants,
         "storePermissions": state.client.access().store_permissions,
         "capabilities": state.client.capabilities(),
+        "consoleBuildInfo": pcp_core::BuildInfo::current(),
         "runtime": {
+            "buildInfo": runtime_build,
             "pid": state.client.server_pid(),
             "startedAtUnixMs": state.client.server_started_at_unix_ms(),
         },

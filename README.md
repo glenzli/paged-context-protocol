@@ -185,6 +185,10 @@ sh scripts/install-macos.sh
 
 默认 macOS Discovery 目录可按下面列出；若 Runtime 配置了 `INFRA_PROTOCOL_RUNTIME_DIR`，改用该目录下的 `registrations`。多个结果时核对 JSON 中的 `service.instance_id` 与 Console 的 Store identity。
 
+Runtime 每 60 秒只读检查一次自己的 registration。健康清单不会重写；文件单独丢失时，仅在
+owner-only 目录与原 publisher lock 身份仍有效时原子恢复同一 generation 和 offers。锁或清单
+内容冲突时不会覆盖，应通过拥有该 Runtime 的 Console 执行受管重启。
+
 ```bash
 ls "$(getconf DARWIN_USER_TEMP_DIR)infra-protocol/registrations/"pcp--*.json
 ```

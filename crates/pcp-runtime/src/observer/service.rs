@@ -36,6 +36,7 @@ use crate::infra_socket::BoundInfraSocket;
 
 const SERVICE_KIND: &str = "pcp";
 const INTEGRITY_INTERVAL: Duration = Duration::from_secs(10 * 60);
+const DISCOVERY_INTEGRITY_INTERVAL: Duration = Duration::from_secs(60);
 const ENROLLMENT_HEALTH_INTERVAL: Duration = Duration::from_secs(1);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -94,13 +95,16 @@ impl ObserverService {
             config.console_url.clone(),
         ));
         let registration = RegistrationFile::new(config.manifest_path(), &generation);
-        registration.publish(&discovery_registration(&config, &generation, &endpoint))?;
+        let manifest = discovery_registration(&config, &generation, &endpoint);
+        registration.publish(&manifest)?;
 
         let (shutdown, shutdown_rx) = watch::channel(false);
         let task = tokio::spawn(run_observer(
             listener,
             socket_file,
             authority,
+            registration,
+            manifest,
             source,
             enrollment_handler,
             shutdown_rx,
@@ -175,7 +179,9 @@ impl Drop for ObserverService {
 async fn run_observer(
     listener: UnixListener,
     _socket: SocketFile,
-    _authority: PublicationAuthority,
+    authority: PublicationAuthority,
+    registration: RegistrationFile,
+    manifest: DiscoveryRegistration,
     source: Arc<SnapshotSource>,
     enrollment: Option<EnrollmentHandler>,
     mut shutdown: watch::Receiver<bool>,
@@ -183,6 +189,9 @@ async fn run_observer(
     let mut connections = JoinSet::new();
     let mut integrity_task = tokio::spawn(refresh_integrity(Arc::clone(&source), shutdown.clone()));
     let mut integrity_finished = false;
+    let mut discovery_check = tokio::time::interval(DISCOVERY_INTEGRITY_INTERVAL);
+    discovery_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut discovery_error = None;
 
     loop {
         tokio::select! {
@@ -196,6 +205,27 @@ async fn run_observer(
                 let source = Arc::clone(&source);
                 let enrollment = enrollment.clone();
                 connections.spawn(async move { handle_connection(stream, source, enrollment).await });
+            }
+            _ = discovery_check.tick() => {
+                match registration.ensure_published(&authority, &manifest) {
+                    Ok(repaired) => {
+                        if repaired {
+                            eprintln!("restored missing PCP Infra Discovery registration");
+                        }
+                        if discovery_error.take().is_some() {
+                            eprintln!("PCP Infra Discovery publication is healthy again");
+                        }
+                    }
+                    Err(error) => {
+                        let message = format!("{error:#}");
+                        if discovery_error.as_ref() != Some(&message) {
+                            eprintln!(
+                                "PCP Infra Discovery publication unavailable; Runtime remains active: {message}"
+                            );
+                        }
+                        discovery_error = Some(message);
+                    }
+                }
             }
             Some(result) = connections.join_next(), if !connections.is_empty() => {
                 match result {

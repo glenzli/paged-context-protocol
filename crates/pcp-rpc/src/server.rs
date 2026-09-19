@@ -303,6 +303,7 @@ async fn dispatch(
             access: client.access().clone(),
             server_pid: std::process::id(),
             server_started_at_unix_ms: *SERVER_STARTED_AT_UNIX_MS,
+            build_info: Some(pcp_core::BuildInfo::current()),
         }),
         RpcOperation::IntegrityCheck => RpcValue::Integrity(client.integrity_check().await?),
         RpcOperation::CreateScope(request) => {

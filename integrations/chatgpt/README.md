@@ -54,11 +54,11 @@ tunnel-client run --profile pcp-chatgpt
 
 Keep the tunnel process running. In ChatGPT Developer Mode, create an app using **Tunnel** and select the same tunnel ID. Review the discovered tools and their action controls before enabling writes.
 
-The launcher selects the compact `context` toolset: five core retrieval/write tools plus three
+The launcher selects the compact `context` toolset: five core retrieval/write tools, three
+read-only discovery tools (`pcp_describe`, `pcp_whoami`, `pcp_list_scopes`), plus three
 candidate/activity tools when Runtime advertises that optional facility. Set
-`PCP_MCP_TOOLSET=standard` only for compatibility with workflows that require diagnostics, Scope
-listing, graph expansion, index browsing, or intent reranking. Maintenance tools are not part of
-the ChatGPT surface.
+`PCP_MCP_TOOLSET=standard` only for workflows that require graph expansion, index browsing,
+or intent reranking. Maintenance tools are not part of the shared ChatGPT/Codex surface.
 
 ## 4. Run in the background on macOS
 
@@ -140,6 +140,12 @@ events must be distinguished. Existing explicit arguments remain supported.
 For an activity update, retain `expectedVersion` from the last read or write;
 the adapter does not fetch a newer version and silently overwrite another window.
 
+Formal `pcp_capture` now has the same automatic retry protection: omitting `externalEventId`
+derives an ID from the exact resolved capture request. Keep all arguments identical after a lost
+response. A new source, observation time, content or explicit event ID remains a distinct event.
+This prevents exact duplicate writes across restarts; it does not merge similar wording or create
+an offline queue. It cannot retroactively deduplicate an older no-ID capture with an unknown result.
+
 ### Host guidance boundary
 
 PCP supplies the activity/candidate triggers through MCP server instructions and
@@ -152,20 +158,24 @@ this repository; parameter defaults reduce friction without changing that bounda
 If a host supports user-managed instructions, this compact guidance can be used
 there without another plugin or connection:
 
-> At natural checkpoints, assess new memory and changed activity independently
-> from current context. Write a formal Page when its criteria and future use are
-> clear; stage an evidence-backed candidate when retention remains uncertain.
-> Choose one memory route per item. Read activity once on topic start/resume unless
-> fresh context is supplied; merge small changes into a current snapshot. Activity
-> does not replace memory. Reuse context and receipts; search only concrete gaps or
-> duplicate doubts. Keep required reviews, skip unchanged writes, and stop on denial.
-> No per-turn quota or extra review turn. Routine success stays quiet; explain
-> failures when they need user action or affect the answer.
+> On topic start/resume, recall only missing context that could change the answer.
+> At a new preference, constraint, decision, correction or reusable finding, assess
+> memory before leaving the phase: capture clear durable value, or stage uncertain
+> future value with opt-in. Combine same-subject changes; reuse receipts and skip
+> rewording. Choose one memory route per item. Disputed stored memory uses feedback.
+> Activity is temporary progress. No per-turn calls, polling or quotas. Stop on
+> denial; keep routine success quiet. PCP may be offline: continue work, retry later
+> if needed, preserving original write arguments after unknown outcomes.
 
 This is optional host configuration, not something the MCP server installs. After
 updating tool schemas, refresh the connection's discovered metadata and verify the
 optional fields in the client; restarting the local binary alone only proves the
 server changed.
+
+The [memory-trigger replay set](../memory-trigger-eval/README.md) covers positive triggers,
+no-op cases, same-subject consolidation, corrections, permissions and offline recovery. It tests
+routing with visible tool descriptions; host discovery and spontaneous recall still require
+separate observation. No hooks, second connection or host turn observer is installed.
 
 The MCP instructions and read-tool descriptions present PCP as the user's authorized
 long-term context across conversations, projects, and tools. Query proactively when
@@ -226,3 +236,15 @@ stale address. Do not clean the live Infra Protocol runtime directory during use
 - Do not put the PCP credential, Store, Runtime socket, tunnel runtime API key, or tunnel configuration in this repository.
 
 Official setup references: [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) and [connect and test in ChatGPT](https://developers.openai.com/plugins/deploy/connect-chatgpt).
+
+### Checking the deployed version
+
+Use `pcp_describe` for `buildInfo` (the serving MCP binary) and `providerBuildInfo`
+(the live Runtime). Console Overview also shows Runtime and Console builds under Endpoint;
+`/api/runtime` exposes both. The installed `pcp-mcp --version` checks the file on disk,
+which may differ from a still-running tunnel child until it is restarted.
+
+The Codex/ChatGPT plugin package version is separate release metadata. A displayed `1.0.0`
+does not identify the local MCP process. Do not edit generated plugin caches to simulate an
+upgrade; keep the shared tunnel/enrollment and verify its serving process after deployment.
+See [version management](../../design/BUILD_VERSION.md) for release and build boundaries.
