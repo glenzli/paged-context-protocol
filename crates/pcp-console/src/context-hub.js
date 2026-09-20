@@ -1,3 +1,4 @@
+import { maintenanceFailureKind, maintenanceFailureLabel } from "./maintenance-diagnostics.js";
 import { technicalDetails, scopeLabel } from "./console-presentation.js";
 // Bounded operational UI. Draft decisions are reversible until explicit submission.
 export function pendingCandidate(item) { return ["pending", "deferred"].includes(item.status); }
@@ -299,6 +300,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     const summary = node("summary", "", text("后台整理与自动写入", "Background organization and writes"));
     summary.append(node("span", "context-note", state.queued ? text(" · 已排队", " · Queued") : state.error ? (state.retryWhenChanged ? text(" · 等待新依据", " · Awaiting new evidence") : text(" · 等待重试", " · Awaiting retry")) : !state.available ? text(" · 整理未启用", " · Organization off") : text(" · 整理已启用", " · Organization enabled")));
     summary.append(node("span", "context-note", state.automaticReviewEnabled ? text(" · 自动写入已启用", " · Automatic writes enabled") : text(" · 自动写入已暂停", " · Automatic writes paused")));
+    if (state.error) summary.append(node("span", "context-note", ` · ${maintenanceFailureLabel(maintenanceFailureKind(state.error, state.failureKind), language())}`));
     box.append(summary);
     const status = !state.available ? text("后台整理尚未启用；需要开启 Runtime 自动维护。", "Background organization needs enabled Runtime maintenance.")
       : state.queued ? text("已排队，将在下一次后台检查时整理。", "Queued for the next background check.")
@@ -306,6 +308,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
       : state.error ? text("整理暂未完成，原始候选已保留，后台会延后重试。", "Organization could not complete. Originals are retained; background work will retry later.")
       : text("新内容会在约 2 分钟的合并等待后整理；没有新证据时不重复调用模型。", "New evidence is organized after about two minutes of coalescing. Unchanged evidence does not trigger repeated model calls.");
     box.append(node("p", "context-note", status));
+    if (state.error && state.nextAttemptAt) box.append(node("p", "context-meta", `${text("下次重试检查", "Next retry check")}: ${formatTime(state.nextAttemptAt)}`));
     if (state.lastCompletedAt) box.append(node("p", "context-meta", `${text("上次整理", "Last organized")} ${formatTime(state.lastCompletedAt)}`));
     if (state.error) { const details = node("details"); details.append(node("summary", "", text("查看原因", "Details")), node("p", "context-error", state.error)); box.append(details); }
     const queue = button(text("重新整理候选", "Organize candidates"), async () => {

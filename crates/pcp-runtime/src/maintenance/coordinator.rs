@@ -733,7 +733,14 @@ impl RuntimeMaintainer {
         let duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         let (usage, failure_kind) = match &outcome {
             Ok(outcome) => (outcome.usage.clone(), None),
-            Err(_) => (None, Some("worker_failed".to_owned())),
+            Err(error) => (
+                None,
+                Some(
+                    super::failure::FailureKind::from_error(error)
+                        .code()
+                        .to_owned(),
+                ),
+            ),
         };
         let operation = match &outcome {
             Ok(outcome) if outcome.escalated => format!("{operation}_escalated"),
@@ -771,7 +778,14 @@ impl RuntimeMaintainer {
         let duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         let (usage, failure_kind) = match &outcome {
             Ok(outcome) => (outcome.usage.clone(), None),
-            Err(_) => (None, Some("worker_failed".to_owned())),
+            Err(error) => (
+                None,
+                Some(
+                    super::failure::FailureKind::from_error(error)
+                        .code()
+                        .to_owned(),
+                ),
+            ),
         };
         let event = RuntimeUsageEvent {
             event_id: format!("ru_{}", Uuid::new_v4().simple()),

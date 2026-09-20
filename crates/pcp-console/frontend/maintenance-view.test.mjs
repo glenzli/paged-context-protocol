@@ -1,3 +1,4 @@
+import { maintenanceFailureKind, maintenanceFailureLabel } from "../src/maintenance-diagnostics.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -19,7 +20,7 @@ function diagnosticView() {
     }
     focus() { document.activeElement = this; }
   }
-  const context = { document, currentLanguage: "zh", element: (tag, cls, text) => new Node(tag, text), formatTime: (value) => value };
+  const context = { maintenanceFailureKind, maintenanceFailureLabel, document, currentLanguage: "zh", element: (tag, cls, text) => new Node(tag, text), formatTime: (value) => value };
   const start = APP_JS.indexOf("function groupMaintenanceJobIssues(");
   const end = APP_JS.indexOf("function populateMaintenanceSettings(", start);
   assert.ok(start >= 0 && end > start);

@@ -775,3 +775,150 @@ async fn invalid_model_results_do_not_repeat_without_new_evidence_or_operator_re
     maintainer.run_scheduled_cycle().await.unwrap();
     assert_eq!(worker.0.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn bounded_organization_drains_fresh_evidence_without_repacking_settled_drafts() {
+    let r = Rig::new().await;
+    let first = inputs(&r, 18).await;
+    assert_eq!(first.candidates.len(), 8);
+    let mut db = LockedState::open(&r.hub.path, r.store.identity_id())
+        .await
+        .unwrap();
+    for c in &mut db.state.candidates {
+        c.created_at = "2020-01-01T00:00:00.000Z".into();
+    }
+    db.save().unwrap();
+    drop(db);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut batch = Some(first);
+    let mut sizes = Vec::new();
+    while let Some(input) = batch {
+        sizes.push(input.candidates.len());
+        assert!(
+            sizes.len() <= 3,
+            "unchanged drafts must not churn indefinitely"
+        );
+        for c in &input.candidates {
+            assert!(seen.insert(c.candidate_id.clone()));
+        }
+        r.hub
+            .finish_organization(&input, vec![proposed(&input)])
+            .await
+            .unwrap();
+        batch = r
+            .hub
+            .prepare_organization(r.admin.as_ref(), &[])
+            .await
+            .unwrap();
+    }
+    assert_eq!(sizes, vec![8, 8, 2]);
+    assert_eq!(seen.len(), 18);
+    let db = LockedState::open(&r.hub.path, r.store.identity_id())
+        .await
+        .unwrap();
+    assert_eq!(db.state.candidates.len(), 18);
+    assert_eq!(
+        db.state
+            .syntheses
+            .iter()
+            .filter(|s| s.status == "pending")
+            .count(),
+        3
+    );
+    assert_eq!(
+        r.admin.page_count(vec![]).await.unwrap(),
+        0,
+        "organization cannot publish memories"
+    );
+}
+
+#[tokio::test]
+async fn smaller_replacement_requeues_remaining_legacy_draft_evidence() {
+    let r = Rig::new().await;
+    let mut legacy = inputs(&r, 12).await;
+    let mut db = LockedState::open(&r.hub.path, r.store.identity_id())
+        .await
+        .unwrap();
+    for c in &mut db.state.candidates {
+        c.created_at = "2020-01-01T00:00:00.000Z".into();
+    }
+    legacy.candidates = db.state.candidates.clone();
+    db.save().unwrap();
+    drop(db);
+    r.hub
+        .finish_organization(&legacy, vec![proposed(&legacy)])
+        .await
+        .unwrap();
+    let mut replacement = legacy.clone();
+    replacement.candidates.truncate(8);
+    r.hub
+        .finish_organization(&replacement, vec![proposed(&replacement)])
+        .await
+        .unwrap();
+    let remaining = r
+        .hub
+        .prepare_organization(r.admin.as_ref(), &[])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(remaining.candidates.len(), 4);
+    assert!(remaining.candidates.iter().all(|c| {
+        !replacement
+            .candidates
+            .iter()
+            .any(|old| old.candidate_id == c.candidate_id)
+    }));
+    r.hub
+        .finish_organization(&remaining, vec![proposed(&remaining)])
+        .await
+        .unwrap();
+    assert!(
+        r.hub
+            .prepare_organization(r.admin.as_ref(), &[])
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn organization_bounds_characters_without_truncating_candidate_evidence() {
+    let r = Rig::new().await;
+    r.hub.enable_organization();
+    r.enable("writer").await;
+    let content = "完整证据。".repeat(400);
+    for i in 0..5 {
+        let mut item = candidate(&format!("long-{i}"));
+        item.content = content.clone();
+        r.client("writer", &["a"])
+            .context_hub(ContextHubRequest::SubmitCandidate(item))
+            .await
+            .unwrap();
+    }
+    r.admin
+        .context_hub(ContextHubRequest::OrganizeCandidates)
+        .await
+        .unwrap();
+    let input = r
+        .hub
+        .prepare_organization(r.admin.as_ref(), &[])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(input.candidates.len(), 4);
+    assert!(input.candidates.iter().all(|c| c.input.content == content));
+    r.hub
+        .organization_failed("Infer Runtime maintenance response wait timed out after 130s")
+        .await
+        .unwrap();
+    let db = LockedState::open(&r.hub.path, r.store.identity_id())
+        .await
+        .unwrap();
+    assert_eq!(
+        db.state.organization.failure_kind.as_deref(),
+        Some("response_timeout")
+    );
+    assert!(db.state.organization.next_attempt_at.is_some());
+    assert_eq!(db.state.candidates.len(), 5);
+    assert_eq!(db.state.candidates[0].organized_version, 0);
+}

@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashSet};
 
+const ORGANIZATION_CANDIDATES: usize = 8;
+const ORGANIZATION_EVIDENCE_CHARS: usize = 8000;
+const ORGANIZATION_REFERENCE_PAGES: usize = 3;
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrganizationState {
@@ -28,6 +32,8 @@ pub struct OrganizationState {
     pub next_attempt_at: Option<String>,
     pub last_completed_at: Option<String>,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<String>,
     #[serde(default)]
     pub retry_when_changed: bool,
 }
@@ -218,25 +224,72 @@ impl ContextHub {
             .collect::<Vec<_>>();
         peers.sort_by_key(|c| {
             (
+                c.organized_version == c.version
+                    && !changed_context.contains(c.candidate_id.as_str()),
                 std::cmp::Reverse(similarity(
                     &terms,
                     &format!("{} {}", c.input.title, c.input.content),
                 )),
-                c.organized_version == c.version,
                 c.created_at.clone(),
             )
         });
         let mut candidates = vec![seed];
         let mut evidence_chars = candidates[0].input.content.chars().count();
-        // Prefer fresh evidence when relevance ties, but retain related older evidence
-        // so a new event can extend a previous interpretation.
-        for peer in peers.into_iter().take(19) {
-            let chars = peer.input.content.chars().count();
-            if evidence_chars + chars > 16000 {
+        // Keep each admitted candidate whole. An oversized seed still progresses
+        // alone; candidates outside this bounded batch remain eligible.
+        for peer in peers {
+            if candidates.len() >= ORGANIZATION_CANDIDATES {
                 break;
             }
+            if candidates
+                .iter()
+                .any(|c| c.candidate_id == peer.candidate_id)
+            {
+                continue;
+            }
+            let bundle = if peer.organized_version == peer.version
+                && !changed_context.contains(peer.candidate_id.as_str())
+            {
+                // An unchanged prior draft is optional context, admitted whole.
+                // Never split a settled draft just to fill the next batch.
+                let Some(prior) = db.state.syntheses.iter().find(|s| {
+                    s.status == "pending"
+                        && s.candidates
+                            .iter()
+                            .any(|c| c.candidate_id == peer.candidate_id)
+                }) else {
+                    continue;
+                };
+                db.state
+                    .candidates
+                    .iter()
+                    .filter(|c| {
+                        active(c)
+                            && c.input.scope == scope
+                            && prior
+                                .candidates
+                                .iter()
+                                .any(|old| old.candidate_id == c.candidate_id)
+                            && !candidates
+                                .iter()
+                                .any(|selected| selected.candidate_id == c.candidate_id)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                vec![peer]
+            };
+            let chars = bundle
+                .iter()
+                .map(|c| c.input.content.chars().count())
+                .sum::<usize>();
+            if candidates.len() + bundle.len() > ORGANIZATION_CANDIDATES
+                || evidence_chars + chars > ORGANIZATION_EVIDENCE_CHARS
+            {
+                continue;
+            }
             evidence_chars += chars;
-            candidates.push(peer);
+            candidates.extend(bundle);
         }
         candidates.sort_by_key(|c| c.created_at.clone());
         let ids = candidates
@@ -250,7 +303,7 @@ impl ContextHub {
             .filter(|s| {
                 s.status == "pending" && s.candidates.iter().any(|c| ids.contains(&c.candidate_id))
             })
-            .take(4)
+            .take(2)
             .map(|s| ProposedSynthesis {
                 candidate_ids: s
                     .candidates
@@ -258,8 +311,8 @@ impl ContextHub {
                     .map(|c| c.candidate_id.clone())
                     .collect(),
                 title: s.title.clone(),
-                narrative: s.narrative.chars().take(2000).collect(),
-                reason: s.reason.chars().take(800).collect(),
+                narrative: s.narrative.chars().take(1200).collect(),
+                reason: s.reason.chars().take(480).collect(),
                 unresolved: s
                     .unresolved
                     .iter()
@@ -270,9 +323,10 @@ impl ContextHub {
                 outputs: s
                     .outputs
                     .iter()
+                    .take(2)
                     .map(|o| {
                         let mut prior = o.clone();
-                        prior.content = prior.content.chars().take(1000).collect();
+                        prior.content = prior.content.chars().take(800).collect();
                         prior
                     })
                     .collect(),
@@ -284,6 +338,7 @@ impl ContextHub {
         db.state.organization.last_attempt_at = Some(now);
         db.state.organization.next_attempt_at = Some(timestamp(Utc::now() + Duration::minutes(30)));
         db.state.organization.error = None;
+        db.state.organization.failure_kind = None;
         db.state.organization.retry_when_changed = false;
         db.save()?;
         drop(db);
@@ -323,7 +378,7 @@ impl ContextHub {
         });
         let revisions = related
             .into_iter()
-            .take(6)
+            .take(ORGANIZATION_REFERENCE_PAGES)
             .map(|p| p.revision_id.clone())
             .collect::<Vec<_>>();
         let revisions_for_updates = revisions.clone();
@@ -342,7 +397,7 @@ impl ContextHub {
                         Projection::Sources,
                         Projection::Facets,
                     ],
-                    max_chars: 12000,
+                    max_chars: 6000,
                 })
                 .await?
                 .into_iter()
@@ -407,6 +462,7 @@ impl ContextHub {
             .iter()
             .map(|c| c.candidate_id.as_str())
             .collect::<BTreeSet<_>>();
+        let mut displaced = BTreeSet::new();
         for old in &mut db.state.syntheses {
             if old.status == "pending"
                 && old
@@ -414,7 +470,20 @@ impl ContextHub {
                     .iter()
                     .any(|c| ids.contains(c.candidate_id.as_str()))
             {
+                displaced.extend(
+                    old.candidates
+                        .iter()
+                        .filter(|c| !ids.contains(c.candidate_id.as_str()))
+                        .map(|c| c.candidate_id.clone()),
+                );
                 old.status = "superseded".into();
+            }
+        }
+        // A smaller batch can replace part of a legacy large draft. Requeue its
+        // remaining evidence atomically so it cannot be stranded without a draft.
+        for candidate in &mut db.state.candidates {
+            if active(candidate) && displaced.contains(&candidate.candidate_id) {
+                candidate.organized_version = 0;
             }
         }
         let now = timestamp(Utc::now());
@@ -484,6 +553,7 @@ impl ContextHub {
         db.state.organization.last_completed_at = Some(now);
         db.state.organization.next_attempt_at = None;
         db.state.organization.error = None;
+        db.state.organization.failure_kind = None;
         db.state.organization.retry_when_changed = false;
         db.save()
     }
@@ -502,6 +572,11 @@ impl ContextHub {
             }
         }
         db.state.organization.error = Some(error.chars().take(600).collect());
+        db.state.organization.failure_kind = Some(
+            crate::maintenance::failure::FailureKind::InvalidOutput
+                .code()
+                .to_owned(),
+        );
         db.state.organization.retry_when_changed = true;
         db.state.organization.next_attempt_at = None;
         db.save()
@@ -510,6 +585,11 @@ impl ContextHub {
     pub(crate) async fn organization_failed(&self, error: &str) -> Result<()> {
         let mut db = LockedState::open(&self.path, self.store.identity_id()).await?;
         db.state.organization.error = Some(error.chars().take(600).collect());
+        db.state.organization.failure_kind = Some(
+            crate::maintenance::failure::FailureKind::from_message(error)
+                .code()
+                .to_owned(),
+        );
         db.state.organization.retry_when_changed = false;
         db.state.organization.next_attempt_at = Some(timestamp(Utc::now() + Duration::minutes(30)));
         db.save()

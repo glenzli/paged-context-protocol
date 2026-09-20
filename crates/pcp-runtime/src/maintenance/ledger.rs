@@ -52,6 +52,8 @@ pub struct MaintenanceJobIssue {
     pub operation: String,
     pub source_revision_ids: Vec<String>,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<String>,
     pub attempts: u32,
     pub retry_at: String,
     #[serde(default)]
@@ -916,6 +918,11 @@ impl MaintenanceLedger {
             MaintenanceJobIssue {
                 operation: operation.to_owned(),
                 source_revision_ids: revisions,
+                failure_kind: Some(
+                    super::failure::FailureKind::from_message(&reason)
+                        .code()
+                        .to_owned(),
+                ),
                 reason: reason.chars().take(1200).collect(),
                 attempts,
                 retry_at: timestamp_string(

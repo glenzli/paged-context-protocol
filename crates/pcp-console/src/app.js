@@ -1,3 +1,4 @@
+import { maintenanceFailureKind, maintenanceFailureLabel } from "/maintenance-diagnostics.js";
 import { kindLabel, technicalDetails, scopeLabel, refreshScopeLabels } from "/console-presentation.js";
 import { createConsoleNavigation } from "/console-navigation.js";
 import { createAccessView } from "/access-view.js";
@@ -2884,13 +2885,7 @@ function renderAutomationStatus() {
 function groupMaintenanceJobIssues(issues) {
   const groups = new Map();
   for (const issue of issues) {
-    const reason = String(issue.reason || "").toLowerCase();
-    const kind = /no_candidate/.test(reason) ? "capacity"
-      : /overloaded|429|rate.limit/.test(reason) ? "busy"
-      : /timed? ?out|timeout|deadline/.test(reason) ? "timeout"
-      : /protocol/.test(reason) ? "protocol"
-      : /unavailable|502|503|connection|offline/.test(reason) ? "unavailable"
-      : "other";
+    const kind = maintenanceFailureKind(issue.reason, issue.failureKind);
     if (!groups.has(kind)) groups.set(kind, []);
     groups.get(kind).push(issue);
   }
@@ -2906,9 +2901,7 @@ function renderMaintenanceJobIssues(container, automation) {
   const open = new Set([...container.querySelectorAll("details[open]")].map((node) => node.dataset.issueKey));
   const focused = container.contains(document.activeElement) ? document.activeElement?.dataset.issueKey : null;
   const zh = currentLanguage === "zh";
-  const labels = zh
-    ? { busy: "上游繁忙", capacity: "无可用部署", timeout: "调用超时", protocol: "上游响应异常", unavailable: "服务暂不可达", other: "其他原因" }
-    : { busy: "Upstream busy", capacity: "No available deployment", timeout: "Request timeout", protocol: "Upstream protocol error", unavailable: "Service unavailable", other: "Other causes" };
+  const label = (kind) => maintenanceFailureLabel(kind, currentLanguage);
   const disclosure = (key, title) => {
     const node = element("details", "");
     node.dataset.issueKey = key;
@@ -2923,7 +2916,7 @@ function renderMaintenanceJobIssues(container, automation) {
   const section = (issues, key, title) => {
     const node = disclosure(key, title);
     for (const [kind, records] of groupMaintenanceJobIssues(issues)) {
-      const group = disclosure(`${key}:${kind}`, `${labels[kind]} · ${records.length}`);
+      const group = disclosure(`${key}:${kind}`, `${label(kind)} · ${records.length}`);
       for (const issue of records) {
         const ids = issue.sourceRevisionIds || [];
         const itemKey = `${key}:${issue.operation}:${[...ids].sort().join(",")}:${issue.closedAt || ""}`;
@@ -2945,7 +2938,7 @@ function renderMaintenanceJobIssues(container, automation) {
   };
   const nodes = [];
   if (active.length) {
-    const counts = groupMaintenanceJobIssues(active).map(([kind, issues]) => `${labels[kind]} ${issues.length}`).join(" · ");
+    const counts = groupMaintenanceJobIssues(active).map(([kind, issues]) => `${label(kind)} ${issues.length}`).join(" · ");
     nodes.push(section(active, "active", zh
       ? `等待重试 ${active.length} 项 · ${counts}`
       : `${active.length} awaiting retry · ${counts}`));

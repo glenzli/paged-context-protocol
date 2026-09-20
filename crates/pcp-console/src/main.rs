@@ -369,6 +369,15 @@ fn router(state: AppState) -> Router {
         .route("/page-list.js", get(page_list_js))
         .route("/time-format.js", get(time_format_js))
         .route(
+            "/maintenance-diagnostics.js",
+            get(|| async {
+                static_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("maintenance-diagnostics.js"),
+                )
+            }),
+        )
+        .route(
             "/console-presentation.js",
             get(|| async {
                 static_asset(

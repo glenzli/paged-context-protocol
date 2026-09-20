@@ -3,6 +3,7 @@ mod candidate_review;
 mod config;
 mod coordinator;
 mod discovery;
+pub(crate) mod failure;
 mod infer_worker;
 mod ledger;
 mod operator;

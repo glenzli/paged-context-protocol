@@ -134,6 +134,17 @@ test("candidate lanes keep deferred evidence and terminal records out of the cur
   assert.equal(f.calls.length,0);
 });
 
+test("organization shows the failure category and retry time while preserving raw details",async()=>{
+  const f=hubFixture();
+  const error="Infer Runtime maintenance response wait timed out after 130s; execution outcome unknown";
+  Object.assign(f.snapshot.organization,{error,failureKind:"response_timeout",nextAttemptAt:"2026-09-21T02:27:50Z"});
+  await f.view.load();
+  assert.match(f.root.textContent,/等待响应超时，结果未确认/);
+  assert.match(f.root.textContent,/下次重试检查: 2026-09-21T02:27:50Z/);
+  assert.ok(f.root.textContent.includes(error));
+  assert.equal(f.calls.length,0,"viewing diagnostics does not submit a retry");
+});
+
 test("permission edits survive refresh and locale rerenders until explicitly saved",async()=>{
   const f=hubFixture();await f.view.load();await f.find("BUTTON","客户端权限").fire("click");
   const submit=f.root.all().find(n=>n.tagName==="LABEL"&&n.textContent==="提交候选").firstChild;
