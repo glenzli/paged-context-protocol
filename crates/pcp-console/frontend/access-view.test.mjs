@@ -33,7 +33,7 @@ test("audit view uses full server counts and server cursor; client selection res
   assert.equal(calls[2].searchParams.get("principalId"), "client:a");
   assert.equal(calls[2].searchParams.has("cursor"), false);
   assert.equal(byId("access-loaded").textContent, "1 / 1234 requests");
-  assert.equal(byId("access-selected").textContent, "client:a");
+  assert.equal(byId("access-selected").textContent, "Client A");
 });
 
 test("a stale audit response cannot overwrite a newer filter or clear its loading state", async () => {

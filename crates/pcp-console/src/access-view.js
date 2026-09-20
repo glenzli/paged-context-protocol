@@ -1,5 +1,6 @@
+import { operationLabel, technicalDetails, scopeLabel } from "./console-presentation.js";
 // The audit view owns its filters, request generation, pagination and rendering.
-export function createAccessView({ api, byId, element, t, formatTime, formatNumber, showError }) {
+export function createAccessView({ api, byId, element, t, formatTime, formatNumber, showError, scopeName = value => value }) {
   let loaded = false, generation = 0, cursor = null, events = [], current = null;
   let principalId = "", since = "";
   function filters() {
@@ -43,21 +44,21 @@ export function createAccessView({ api, byId, element, t, formatTime, formatNumb
       const button = element("button", "access-client"); button.type = "button";
       button.setAttribute("aria-pressed", String(principalId === id));
       button.append(element("strong", "", client.principal.displayName || id));
-      if (client.principal.displayName && client.principal.displayName !== id) button.append(element("span", "mono muted", id));
+      button.title = id;
       button.append(element("span", "", `${formatNumber(client.eventCount)} ${unit()}`),
         element("span", "muted", `${t("Last access")}: ${formatTime(client.lastAccessAt)}`));
       button.onclick = () => selectClient(id); return button;
     }));
-    byId("access-selected").textContent = principalId || t("All clients");
+    byId("access-selected").textContent = current.clients.find(client => client.principal.principalId === principalId)?.principal.displayName || principalId || t("All clients");
     byId("access-summary").replaceChildren(...current.operations.map(item => {
-      const button = element("button", "compact-button secondary-button", `${item.operation} · ${formatNumber(item.eventCount)}`);
+      const button = element("button", "compact-button secondary-button", `${operationLabel(item.operation, t)} · ${formatNumber(item.eventCount)}`);
       button.type = "button"; button.onclick = () => { byId("access-operation").value = item.operation; void load().catch(showError); }; return button;
     }));
     const rows = events.flatMap(event => {
       const row = document.createElement("tr");
       const client = element("td", "");
       client.append(element("div", "", event.principal.displayName || event.principal.principalId));
-      if (event.principal.displayName) client.append(element("div", "mono muted", event.principal.principalId));
+
       const details = element("details", "access-event-details");
       const expandedRow = element("tr", "access-expanded-row"); expandedRow.hidden = true;
       const panel = element("td", "access-expanded-panel"); panel.colSpan = 6;
@@ -65,7 +66,11 @@ export function createAccessView({ api, byId, element, t, formatTime, formatNumb
       const summary = element("summary", "", event.telemetry?.request?.root ? `${event.telemetry.durationMs} ms · ${event.telemetry.request.batchReads + event.telemetry.request.singleReads} ${t("reads")}` : t("Details"));
       panel.id = `access-detail-${event.eventId}`; summary.setAttribute("aria-controls", panel.id);
       details.append(summary);
-      panel.append(element("div", "mono muted", `${t("Session")}: ${event.sessionId}`));
+      panel.append(technicalDetails(element, t("Identifiers and implementation"), [
+        [t("Client"), event.principal.principalId], [t("Session"), event.sessionId],
+        [t("Operation identifier"), event.operation], [t("Scope identifier"), event.scopes.join(", ")],
+        [t("Occurred"), event.occurredAt],
+      ]));
       if (event.detail) panel.append(element("p", "", event.detail));
       let expand = () => {};
       if (event.telemetry) {
@@ -76,8 +81,8 @@ export function createAccessView({ api, byId, element, t, formatTime, formatNumb
       }
       details.addEventListener("toggle", () => { expandedRow.hidden = !details.open; if (details.open) expand(); });
       const detailCell = element("td", ""); detailCell.append(details);
-      row.append(element("td", "", `${formatTime(event.occurredAt)}.${event.occurredAt.match(/\.(\d{3})/)?.[1] || "000"}`), client, element("td", "mono", event.operation),
-        element("td", "mono", event.scopes.join(", ")), element("td", event.decision === "allowed" ? "decision-allowed" : "decision-denied", event.decision), detailCell);
+      row.append(element("td", "", formatTime(event.occurredAt)), client, element("td", "", operationLabel(event.operation, t)),
+        scopeLabel(element, event.scopes, scopeName, "td"), element("td", event.decision === "allowed" ? "decision-allowed" : "decision-denied", t(({allowed:"Allowed",denied:"Denied",failed:"Failed"})[event.decision] || event.decision)), detailCell);
       return [row, expandedRow];
     });
     if (!rows.length) { const row = document.createElement("tr"), cell = element("td", "empty", t("No matching access events")); cell.colSpan = 6; row.append(cell); rows.push(row); }

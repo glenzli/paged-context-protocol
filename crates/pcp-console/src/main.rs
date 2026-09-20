@@ -368,6 +368,24 @@ fn router(state: AppState) -> Router {
         .route("/page-editor.js", get(page_editor_js))
         .route("/page-list.js", get(page_list_js))
         .route("/time-format.js", get(time_format_js))
+        .route(
+            "/console-presentation.js",
+            get(|| async {
+                static_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("console-presentation.js"),
+                )
+            }),
+        )
+        .route(
+            "/console-navigation.js",
+            get(|| async {
+                static_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("console-navigation.js"),
+                )
+            }),
+        )
         .route("/quantity-format.js", get(quantity_format_js))
         .route(
             "/maintenance-reconciliation.js",

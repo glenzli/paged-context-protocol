@@ -1,9 +1,10 @@
+import { kindLabel, technicalDetails, scopeLabel } from "./console-presentation.js";
 import { createTopologyMap, relationFamily } from "./page-graph.js";
 import { createPageEditor } from "./page-editor.js";
 import { icon } from "./ui-icons.js";
 import { pagePayloadPreviewText, renderPageContent, renderPagePreview } from "./page-content.js?v=20260822.1";
 
-export function createPageInspector({ request, mutate, confirmAction, onMutation = async () => {}, showError, formatTime, t = (value) => value }) {
+export function createPageInspector({ request, mutate, confirmAction, onMutation = async () => {}, showError, formatTime, t = (value) => value, scopeName = value => value }) {
   const dialog = document.getElementById("page-dialog");
   const backButton = document.getElementById("dialog-back");
   const title = document.getElementById("dialog-title");
@@ -121,7 +122,8 @@ export function createPageInspector({ request, mutate, confirmAction, onMutation
   function pageLabel(page) {
     const facetTitle = page.revision.facets?.title;
     if (facetTitle) return facetTitle;
-    const firstLine = page.summary?.content?.split("\n").find((line) => line.trim());
+    const preview = page.summary?.content || pagePayloadPreviewText(page.revision.payload?.content, page.revision.payload?.mediaType);
+    const firstLine = preview?.split("\n").find((line) => line.trim());
     return firstLine?.replace(/^#+\s*/, "").slice(0, 120) || page.page.pageId;
   }
 
@@ -144,27 +146,19 @@ export function createPageInspector({ request, mutate, confirmAction, onMutation
     ))?.toPageId;
     const facts = element("dl", "details-grid compact-details");
     const rows = [
-      ["Scope", page.page.namespace],
-      ["Kind", page.page.kind],
-      ["Mutability", page.page.mutability],
-      ["Status", page.page.lifecycleStatus],
-      ["Revision", page.revision.revisionId],
+      ["Scope", scopeLabel(element, [page.page.namespace], scopeName, "dd")],
+      ["Kind", kindLabel(page.page.kind, t)],
+      ["Status", t(({active:"Active",archived:"Archived"})[page.page.lifecycleStatus] || page.page.lifecycleStatus)],
       ["Stored", formatTime(page.page.createdAt)],
       ["Updated", formatTime(page.page.updatedAt)],
       ...(page.revision.observedAt ? [["Observed", formatTime(page.revision.observedAt)]] : []),
-      ["Created by", actorLabel(page.revision.createdBy)],
-      ...(page.revision.sourceSpan ? [[
-        "Source stream",
-        `${page.revision.sourceSpan.streamId} · ${page.revision.sourceSpan.start}–${page.revision.sourceSpan.end}`,
-      ]] : []),
-      ...(page.summary ? [["Summary page", page.summary.summaryPageId]] : []),
-      ...(summaryTarget ? [["Summarizes", summaryTarget]] : []),
+
       ["Explicit relations", page.relations.length],
       ["History", page.history.length],
     ];
     facts.append(...rows.flatMap(([label, value]) => [
       element("dt", "", t(label)),
-      element("dd", label === "Scope" || label === "Created by" ? "mono" : "", value),
+      typeof value === "object" ? value : element("dd", "", value),
     ]));
 
     const sections = [];
@@ -194,7 +188,22 @@ export function createPageInspector({ request, mutate, confirmAction, onMutation
       ),
     ));
     sections.push(detailSection(t("Page"), facts));
-    if (page.validity) sections.push(detailSection(t("Validity"), jsonBlock(page.validity, t("No validity assessment"))));
+    sections.push(technicalDetails(element, t("Page identifiers"), [
+      [t("Page"), page.page.pageId], [t("Revision"), page.revision.revisionId],
+      [t("Scope identifier"), page.page.namespace], [t("Kind"), page.page.kind],
+      [t("Mutability"), page.page.mutability], [t("Created by"), actorLabel(page.revision.createdBy)],
+      [t("Source stream"), page.revision.sourceSpan ? `${page.revision.sourceSpan.streamId} · ${page.revision.sourceSpan.start}–${page.revision.sourceSpan.end}` : null],
+      [t("Summary page"), page.summary?.summaryPageId], [t("Summarizes"), summaryTarget],
+    ]));
+    if (page.validity) {
+      const validity = element("section", "page-validity");
+      const standing = ({qualified:"Qualified",disputed:"Disputed",superseded:"Superseded",retracted:"Retracted"})[page.validity.standing];
+      if (standing) validity.append(element("strong", "", `${t("Validity")} · ${t(standing)}`));
+      if (page.validity.rationale) validity.append(element("p", "", page.validity.rationale));
+      const detail = element("details", "technical-details");
+      detail.append(element("summary", "", t("Details")), jsonBlock(page.validity, t("No validity assessment")));
+      validity.append(detail);sections.push(validity);
+    }
     summaryPane.replaceChildren(...sections);
   }
 
@@ -479,8 +488,8 @@ export function createPageInspector({ request, mutate, confirmAction, onMutation
         detailCache.set(pageId, page);
       }
       if (currentPageId !== pageId || generation !== inspectGeneration) return;
-      title.textContent = page.page.pageId;
-      subtitle.textContent = `${page.page.namespace} · ${page.page.kind} · ${page.page.mutability} · ${page.revision.revisionId}`;
+      title.textContent = pageLabel(page);
+      subtitle.replaceChildren(scopeLabel(element, [page.page.namespace], scopeName), ` · ${kindLabel(page.page.kind, t)} · ${t("Updated")} ${formatTime(page.page.updatedAt)}`);
       renderSummary(page);
       editor.attach(page);
       if (!dialog.open) dialog.showModal();

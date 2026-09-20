@@ -47,15 +47,17 @@ test("rescan places a recognizable repeat arrow inside the search lens", () => {
   assert.notDeepEqual(paths, iconDefinition("scan"));
 });
 
-test("maintenance feature entry controls are icon-only and retain accessible labels", () => {
+test("maintenance entry controls retain icons and accessible labels, with text on primary entries", () => {
   for (const id of ["maintenance-start", "maintenance-manual-start", "maintenance-start-new", "archive-start", "archive-start-new"]) {
     const match = INDEX_HTML.match(new RegExp(`<button\\s+id="${id}"([^>]*)>([\\s\\S]*?)</button>`));
     assert.ok(match, `missing entry control: ${id}`);
-    assert.match(match[1], /maintenance-entry-icon-button/);
+    const labeled = ["maintenance-start", "maintenance-manual-start"].includes(id);
+    assert.match(match[1], labeled ? /semantic-button/ : /maintenance-entry-icon-button/);
     assert.match(match[1], /data-icon="[^"]+"/);
     assert.match(match[1], /aria-label="[^"]+"/);
     assert.match(match[1], /data-i18n-aria-label="[^"]+"/);
-    assert.equal(match[2].trim(), "", `${id} should not render a text label`);
+    if (labeled) assert.match(match[2], /<span data-i18n="[^"]+">[^<]+<\/span>/);
+    else assert.equal(match[2].trim(), "", `${id} remains compact`);
   }
 });
 
@@ -81,10 +83,12 @@ test("maintenance action controls override the compact button width and remain s
   assert.match(rule[1], /min-height:\s*42px/);
 });
 
-test("the Context Pack query submit control is an accessible icon-only search action", () => {
+test("the Context Pack query submit exposes its action and busy label", () => {
   const match = INDEX_HTML.match(/<button\s+id="context-query-submit"([^>]*)>([\s\S]*?)<\/button>/);
   assert.ok(match);
-  assert.match(match[1], /query-submit-icon-button/);
+  assert.match(match[1], /query-submit-button/);
+  const query = readFileSync(new URL("../src/query_view.js", import.meta.url), "utf8");
+  assert.match(query, /submit.replaceChildren\(searchIcon\(\), element\("span", "", submitLabel\)\)/);
   assert.match(match[1], /data-icon="search"/);
   assert.match(match[1], /aria-label="Build context pack"/);
   assert.equal(match[2].trim(), "");

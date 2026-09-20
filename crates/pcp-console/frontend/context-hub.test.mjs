@@ -89,3 +89,70 @@ test("per-memory actions follow receipt order even when only a later draft was a
   assert.equal(rows[1].assessment.verdict,"needs_input");
   assert.equal(completedCandidateIds([{...candidate("b"),version:2}],[{...group,status:"promoted",results:[]}]).size,0);
 });
+
+import { createContextHub, candidateQueue } from "../src/context-hub.js";
+
+// Small DOM adapter: exercise the real view's events and async refresh without a server.
+function hubFixture() {
+  class Node {
+    constructor(tag) { this.tagName=tag.toUpperCase();this.children=[];this.dataset={};this.attributes={};this.listeners={};this._text=""; }
+    set textContent(value){this._text=String(value);this.children=[];}
+    get textContent(){return this._text+this.children.map(c=>c.textContent).join("");}
+    append(...children){this.children.push(...children);}
+    prepend(...children){this.children.unshift(...children);}
+    replaceChildren(...children){this.children=children;this._text="";}
+    setAttribute(key,value){this.attributes[key]=value;}
+    addEventListener(key,handler){this.listeners[key]=handler;}
+    async fire(key){await this.listeners[key]?.({preventDefault(){}});}
+    get firstChild(){return this.children[0];}
+    get lastChild(){return this.children.at(-1);}
+    contains(target){return this===target||this.children.some(c=>c.contains(target));}
+    focus(){document.activeElement=this;}
+    scrollIntoView(){}
+    querySelectorAll(selector){
+      const match=n=>selector==="[data-focus-key]"?Boolean(n.dataset.focusKey):selector.startsWith("details")?n.tagName==="DETAILS"&&n.dataset.disclosure&&(!selector.includes("[open]")||n.open):selector.startsWith("#")?n.id===selector.slice(1):false;
+      return this.children.flatMap(n=>[...(match(n)?[n]:[]),...n.querySelectorAll(selector)]);
+    }
+    querySelector(selector){return this.querySelectorAll(selector)[0];}
+    all(){return [this,...this.children.flatMap(n=>n.all())];}
+  }
+  globalThis.document={createElement:tag=>new Node(tag),activeElement:null};
+  const root=new Node("section"), calls=[];
+  let snapshot={candidates:[candidate("a"),{...candidate("b"),status:"deferred"},{...candidate("c"),status:"rejected"}],syntheses:[],policies:[{clientId:"client",submitCandidates:false}],activity:[],organization:{available:true}};
+  const view=createContextHub({root,request:async path=>path==="/api/context-hub"?structuredClone(snapshot):{result:{registrations:[]}},mutate:async(...args)=>{calls.push(args);},confirmAction:async()=>false,icon:()=>new Node("svg"),language:()=>"zh",openPage(){},formatTime:value=>value||"-"});
+  const find=(tag,text)=>root.all().find(n=>n.tagName===tag&&n.textContent===text);
+  return {root,view,calls,find,get snapshot(){return snapshot;}};
+}
+
+test("candidate lanes keep deferred evidence and terminal records out of the current queue",async()=>{
+  assert.equal(candidateQueue({...candidate("a"),status:"promoting"}),"current");
+  const f=hubFixture();await f.view.load();
+  const current=f.root.all().find(n=>n.className==="context-current");
+  assert.equal(current.children.length,1);
+  assert.equal(f.root.querySelectorAll("details[data-disclosure]").find(n=>n.dataset.disclosure==="waiting").children.length,2);
+  assert.equal(f.root.querySelectorAll("details[data-disclosure]").find(n=>n.dataset.disclosure==="completed").children.length,2);
+  assert.equal(f.calls.length,0);
+});
+
+test("permission edits survive refresh and locale rerenders until explicitly saved",async()=>{
+  const f=hubFixture();await f.view.load();await f.find("BUTTON","客户端权限").fire("click");
+  const submit=f.root.all().find(n=>n.tagName==="LABEL"&&n.textContent==="提交候选").firstChild;
+  submit.checked=true;await submit.fire("change");
+  assert.equal(f.view.hasUnsavedChanges(),true);
+  await f.view.load();f.view.render();
+  const refreshed=f.root.all().find(n=>n.tagName==="LABEL"&&n.textContent==="提交候选").firstChild;
+  assert.equal(refreshed.checked,true);assert.equal(f.calls.length,0);
+  await f.find("BUTTON","保存权限").fire("click");
+  assert.equal(f.calls[0][1].params.submitCandidates,true);
+  assert.equal(f.view.hasUnsavedChanges(),false);
+});
+
+test("candidate refresh retains edits only while their evidence version is current",async()=>{
+  const f=hubFixture();await f.view.load();await f.find("BUTTON","接受并编辑").fire("click");
+  let input=f.root.all().find(n=>n.tagName==="LABEL"&&n.textContent==="标题").lastChild;
+  input.value="My draft";await input.fire("input");await f.view.load();
+  input=f.root.all().find(n=>n.tagName==="LABEL"&&n.textContent==="标题").lastChild;
+  assert.equal(input.value,"My draft");assert.equal(f.view.hasUnsavedChanges(),true);
+  f.snapshot.candidates[0].version++;await f.view.load();
+  assert.equal(f.view.hasUnsavedChanges(),false);assert.match(f.root.textContent,/依据已变化/);assert.equal(f.calls.length,0);
+});

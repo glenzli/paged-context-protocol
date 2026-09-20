@@ -1,6 +1,7 @@
+import { operationLabel, technicalDetails, scopeLabel } from "./console-presentation.js";
 import { compactQuantity, exactQuantity } from "./quantity-format.js";
 
-export function createHealthView({ request, showError, formatNumber, t, locale = () => "en-US" }) {
+export function createHealthView({ request, showError, formatNumber, t, scopeName = value => value, locale = () => "en-US" }) {
   let loaded = false;
   let busy = false;
   let latest = null;
@@ -125,13 +126,19 @@ export function createHealthView({ request, showError, formatNumber, t, locale =
     byId("health-timeline").replaceChildren(chart);
   }
 
+  function operationCell(operation) {
+    const cell = element("td", "");
+    cell.append(technicalDetails(element, operationLabel(operation, t), [[t("Operation identifier"), operation]]));
+    return cell;
+  }
+
   function renderOperations(data) {
     const rows = [...(data.operations || [])]
       .sort((left, right) => right.calls - left.calls || left.operation.localeCompare(right.operation))
       .map((operation) => {
         const row = document.createElement("tr");
         row.append(
-          element("td", "mono", operation.operation),
+          operationCell(operation.operation),
           element("td", "", operation.measuredCalls === operation.calls
             ? formatNumber(operation.calls)
             : `${formatNumber(operation.calls)} · ${formatNumber(operation.measuredCalls)} ${t("measured")}`),
@@ -156,7 +163,7 @@ export function createHealthView({ request, showError, formatNumber, t, locale =
     const rows = (data.scopes || []).map((scope) => {
       const row = document.createElement("tr");
       row.append(
-        element("td", "mono", scope.namespace),
+        scopeLabel(element, [scope.namespace], scopeName, "td"),
         element("td", "", formatNumber(scope.currentPages)),
         element("td", "", formatNumber(scope.pages)),
         element("td", "", formatNumber(scope.revisions)),
@@ -170,7 +177,7 @@ export function createHealthView({ request, showError, formatNumber, t, locale =
   }
 
   function modelUsageLabel(source) {
-    if (source === "query") return t("Intent matching");
+    if (source === "query") return t("Query");
     if (source === "manual_maintenance") return t("Manual maintenance");
     if (source === "automatic_maintenance") return t("Automatic maintenance");
     return source;
@@ -190,7 +197,7 @@ export function createHealthView({ request, showError, formatNumber, t, locale =
     for (const source of sources) {
       const row = element("div", "usage-workflow-row");
       const name = element("div", "usage-workflow-name");
-      name.append(element("span", "", modelUsageLabel(source.source)), element("code", "", source.operation));
+      name.append(technicalDetails(element, operationLabel(source.operation, t), [[t("Operation identifier"), source.operation]]), element("span", "muted", modelUsageLabel(source.source)));
       const reported = source.reportedModelCalls || 0;
       const tokens = reported ? quantity(source.usage?.totalTokens || 0) : element("span", "muted", "—");
       if (!reported) tokens.title = t("No token usage reported");

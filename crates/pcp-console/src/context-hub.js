@@ -1,3 +1,4 @@
+import { technicalDetails, scopeLabel } from "./console-presentation.js";
 // Bounded operational UI. Draft decisions are reversible until explicit submission.
 export function pendingCandidate(item) { return ["pending", "deferred"].includes(item.status); }
 export function reviewDraft(items, action, {title, content, targetRevisionId} = {}) {
@@ -8,6 +9,11 @@ export function reviewDraft(items, action, {title, content, targetRevisionId} = 
   if (action === "represented" && !targetRevisionId?.trim()) throw new Error("Exact existing Revision is required");
   if (!["promote", "represented", "defer", "reject"].includes(action)) throw new Error("Invalid review decision");
   return { candidates:items.map((item) => ({candidateId:item.candidateId, version:item.version})), action, title, content, targetRevisionId };
+}
+export function candidateQueue(item) {
+  if (!pendingCandidate(item) && item.status !== "promoting") return "completed";
+  if (item.status === "deferred" || item.result?.status === "partially_represented") return "waiting";
+  return "current";
 }
 export function candidateReviewQueue(synthesis) {
   if (["promoted", "interrupted"].includes(synthesis.status)) return "completed";
@@ -81,18 +87,21 @@ export function reconcileDrafts(drafts, items, syntheses = []) {
   return before - drafts.size;
 }
 
-export function createContextHub({root, request, mutate, confirmAction, icon, language, openPage, formatTime, onCommitted = async () => {}}) {
+export function createContextHub({root, request, mutate, confirmAction, icon, language, openPage, formatTime, scopeName = value => value, onCommitted = async () => {}}) {
   let snapshot = null, clients = [], tab = "candidates", busy = false, error = "", progress = "", loading = false;
-  const drafts = new Map(), selected = new Set();
+  const drafts = new Map(), selected = new Set(), policyDrafts = new Map();
+  let newClientId = "";
   let editor = null;
   const text = (zh,en) => language() === "zh" ? zh : en;
   const node = (tag, className = "", value = "") => { const n = document.createElement(tag); n.className = className; n.textContent = value; return n; };
+  const clientName = id => clients.find(item => item.client.principal.principalId === id)?.client.principal.displayName || id;
   const operation = (op, params) => mutate("/api/context-hub", {operation:op, params});
   function button(label, action, glyph, primary = false) {
-    const b = node("button", `${glyph ? "icon-button" : ""}${primary ? " primary" : ""}`, glyph ? "" : label);
+    const b = node("button", `context-button${primary ? " primary-button" : ""}`);
     b.type = "button"; b.disabled = busy || loading;
     b.setAttribute("aria-label", label); b.title = label;
     if (glyph) b.append(icon(glyph));
+    b.append(node("span", "", label));
     b.addEventListener("click", () => Promise.resolve().then(action).catch(fail));
     return b;
   }
@@ -102,12 +111,18 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     loading = true; render();
     try {
       snapshot = await request("/api/context-hub");
-      const stale = reconcileDrafts(drafts, snapshot.candidates, snapshot.syntheses || []);
+      let stale = reconcileDrafts(drafts, snapshot.candidates, snapshot.syntheses || []);
+      if (editor) {
+        const refs = editor.synthesis?.candidates || editor.items.map(item => ({candidateId:item.candidateId, version:item.version}));
+        const evidenceChanged = refs.some(ref => !snapshot.candidates.some(item => item.candidateId === ref.candidateId && item.version === ref.version && pendingCandidate(item)));
+        const synthesisChanged = editor.synthesis && !(snapshot.syntheses || []).some(item => item.synthesisId === editor.synthesis.synthesisId && item.version === editor.synthesis.version && item.status === "pending");
+        if (evidenceChanged || synthesisChanged) { editor = null; stale++; }
+      }
       const completed = completedCandidateIds(snapshot.candidates, snapshot.syntheses || []);
       const ids = new Set(snapshot.candidates.filter(c => pendingCandidate(c) && !completed.has(c.candidateId)).map((c) => c.candidateId));
       for (const id of selected) if (!ids.has(id)) selected.delete(id);
       try { clients = (await request("/api/enrollment")).result.registrations || []; } catch (_) { clients = []; }
-      error = stale ? text(`${stale} 项暂存决定因候选已变化或过期而失效，请重新审阅。`, `${stale} staged decisions expired or changed; review them again.`) : "";
+      error = stale ? text(`${stale} 项草稿因依据已变化或过期而失效，请重新审阅。`, `${stale} drafts expired or changed; review them again.`) : "";
     } catch(e) { error = e.message || String(e); }
     finally { loading = false; render(); }
   }
@@ -169,7 +184,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
       ? [["targetRevisionId",text("现有 Page 的精确 Revision ID","Exact existing Revision ID"),false]]
       : [["title",text("标题","Title"),false],["content",text("正式内容（请消除重复、保留不同观点）","Reviewed content (remove duplication, preserve differing claims)"),true]]) {
       const labelNode = node("label", "", label), input = node(multi ? "textarea" : "input");
-      input.value = editor[field]; input.disabled = busy; input.addEventListener("input", () => { editor[field] = input.value; });
+      input.value = editor[field]; input.disabled = busy || loading; input.addEventListener("input", () => { editor[field] = input.value; });
       labelNode.append(input); wrap.append(labelNode);
     }
     const actions = node("div", "context-actions");
@@ -180,7 +195,9 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
   function renderCandidates() {
     const box = node("div");
     box.append(node("p", "context-note", text("后台会把相关候选整理为连续的记忆草案，保留演变、分歧和来源。成熟草案可由 Sol 审核写入；你也可以编辑或手动审阅。未解决的候选继续积累，不要求逐条处理。", "Background organization connects related evidence while preserving its evolution, disagreements and sources. Sol can review and write mature drafts; you can also edit or review them manually. Unresolved candidates continue accumulating without requiring individual action.")));
-    box.append(renderOrganization());
+    const flow = node("div", "context-flow");
+    box.append(flow, renderOrganization());
+    const current = node("div", "context-current");
     const actions = node("div", "context-actions");
     const combine = button(text(`合并审阅所选 (${selected.size})`,`Review selected together (${selected.size})`), () => {
       const items = snapshot.candidates.filter((c) => selected.has(c.candidateId));
@@ -188,10 +205,12 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     }, "pack");
     combine.disabled = busy || loading || !selected.size;
     actions.append(combine);
+    if (selected.size) actions.append(button(text("清除选择", "Clear selection"), () => { selected.clear(); render(); }));
     box.append(actions);
     if (editor) box.append(renderEditor());
     const consumed = completedCandidateIds(snapshot.candidates, snapshot.syntheses || []);
     const waiting = node("details", "context-waiting"), completed = node("details", "context-completed");
+    waiting.dataset.disclosure = "waiting"; completed.dataset.disclosure = "completed";
     waiting.append(node("summary", "", text("继续积累 / 暂缓事项", "Accumulating / deferred items")));
     completed.append(node("summary", "", text("已完成的审阅记录", "Completed review history")));
     for (const [key,draft] of drafts) {
@@ -209,7 +228,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
       if (!["promoted", "interrupted"].includes(synthesis.status) && synthesis.candidates.some(ref => consumed.has(ref.candidateId))) continue;
       if (synthesis.status === "pending" && synthesis.candidates.some(ref => !snapshot.candidates.some(c => c.candidateId === ref.candidateId && c.version === ref.version && pendingCandidate(c)))) continue;
       const lane = candidateReviewQueue(synthesis);
-      (lane === "completed" ? completed : lane === "waiting" ? waiting : box).append(renderSynthesis(synthesis));
+      (lane === "completed" ? completed : lane === "waiting" ? waiting : current).append(renderSynthesis(synthesis));
       synthesis.candidates.forEach(ref => { if (!["promoted", "interrupted"].includes(synthesis.status) || !pendingCandidate(snapshot.candidates.find(c => c.candidateId === ref.candidateId) || {})) consumed.add(ref.candidateId); });
     }
     if (!snapshot.candidates.length) box.append(node("div", "context-empty", text("没有待留存候选", "No candidate memories")));
@@ -220,18 +239,26 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
       if (!pendingCandidate(item) && item.status !== "promoting") {
         card.append(node("strong", "", `${item.input.title} · ${actionLabel(item.status)}`));
         if (item.result?.pageId) card.append(button(text("打开 Page","Open Page"), () => openPage(item.result.pageId), "open"));
-        box.append(card); continue;
+        completed.append(card); continue;
       }
       const heading = node("div", "context-select");
-      const check = node("input"); check.type="checkbox"; check.checked=selected.has(item.candidateId); check.disabled=busy || item.status === "promoting";
-      check.setAttribute("aria-label", text("选择候选","Select candidate"));
+      const check = node("input"); check.type="checkbox"; check.checked=selected.has(item.candidateId); check.disabled=busy || loading || item.status === "promoting";
+      check.setAttribute("aria-label", `${text("选择候选","Select candidate")} · ${item.input.title}`);
+      check.dataset.focusKey = item.candidateId;
       check.addEventListener("change", () => {check.checked ? selected.add(item.candidateId) : selected.delete(item.candidateId);render();});
       heading.append(check,title); card.append(heading);
-      card.append(node("p", "context-meta", `${item.clientId} · ${item.input.scope} · ${formatTime(item.createdAt)}`), node("p", "", item.input.content));
+      const meta = node("p", "context-meta");
+      meta.append(node("span", "", `${clientName(item.clientId)} · `), scopeLabel(node, [item.input.scope], scopeName), node("span", "", ` · ${formatTime(item.createdAt)}`));
+      card.append(meta, node("p", "", item.input.content));
       if (item.snoozedUntil) card.append(node("p", "context-note", `${text("暂缓至","Deferred until")} ${formatTime(item.snoozedUntil)}`));
       const similar = snapshot.similarCandidates?.[item.candidateId] || [];
       if (similar.length) card.append(node("p", "context-note", text(`另有 ${similar.length} 条相似候选，可选择后合并审阅`, `${similar.length} similar candidates; select to review together`)));
-      const details = node("details"); details.append(node("summary", "", text("来源与标识","Sources and identifiers")), node("p", "context-meta", JSON.stringify({candidateId:item.candidateId,eventId:item.input.eventId,sourceRefs:item.input.sourceRefs,basedOnRevisionIds:item.input.basedOnRevisionIds})));
+      const details = technicalDetails(node, text("来源与标识","Sources and identifiers"), [
+        [text("客户端", "Client"), item.clientId], [text("范围标识", "Scope identifier"), item.input.scope],
+        [text("候选标识", "Candidate ID"), item.candidateId], [text("来源事件", "Source event"), item.input.eventId],
+        [text("来源引用", "Source references"), item.input.sourceRefs?.length ? JSON.stringify(item.input.sourceRefs, null, 2) : null],
+        [text("依据版本", "Evidence revisions"), item.input.basedOnRevisionIds?.join("\n")],
+      ]);
       card.append(details);
       const actions = node("div", "context-actions");
       if (item.status === "promoting") {
@@ -244,16 +271,35 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
           button(text("暂缓","Defer"), () => stage([item],"defer"), "defer"),
           button(text("不保留","Reject"), () => stage([item],"reject"), "archive"));
       }
-      card.append(actions);(item.result?.status === "partially_represented" ? waiting : box).append(card);
+      card.append(actions);(candidateQueue(item) === "waiting" ? waiting : current).append(card);
     }
+    for (const [label, count, target, detail] of [
+      [text("当前条目", "Current items"), current.children.length, current, text("可编辑或跟进进展", "Edit or follow progress")],
+      [text("积累 / 暂缓", "Accumulating / deferred"), waiting.children.length - 1, waiting, text("保留证据，稍后再看", "Evidence retained for later")],
+      [text("已完成记录", "Completed records"), completed.children.length - 1, completed, text("查看结果与写入依据", "Inspect outcomes and evidence")],
+    ]) {
+      const step = button(`${label} · ${count}`, () => {
+        if (target.tagName === "DETAILS") target.open = true;
+        target.tabIndex = -1; target.focus({preventScroll:true}); target.scrollIntoView({behavior:"smooth",block:"start"});
+      });
+      step.className = "context-flow-step"; step.disabled = count === 0;
+      step.append(node("small", "", detail)); flow.append(step);
+    }
+    if (!current.children.length && snapshot.candidates.length) current.append(node("p", "context-empty", text("当前没有需要跟进的条目；候选会继续在后台积累。", "No current items to follow up; evidence can continue accumulating in the background.")));
+    box.append(current);
     if (waiting.children.length > 1) { waiting.firstChild.textContent += ` · ${waiting.children.length - 1}`; box.append(waiting); }
     if (completed.children.length > 1) { completed.firstChild.textContent += ` · ${completed.children.length - 1}`; box.append(completed); }
     const footer=node("div","context-toolbar");
     footer.append(node("span","", busy ? `${text("正在提交","Submitting")} ${progress}` : `${drafts.size} ${text("项决定待提交","decisions unsubmitted")}`),button(text("提交审阅","Submit review"),apply,"apply",true));
-    footer.lastChild.disabled=busy || !drafts.size;box.append(footer);return box;
+    footer.lastChild.disabled=busy || loading || !drafts.size;footer.hidden=!drafts.size && !busy;box.append(footer);return box;
   }
   function renderOrganization() {
-    const box = node("div", "context-organization"), state = snapshot.organization || {};
+    const box = node("details", "context-organization"), state = snapshot.organization || {};
+    box.dataset.disclosure = "organization";
+    const summary = node("summary", "", text("后台整理与自动写入", "Background organization and writes"));
+    summary.append(node("span", "context-note", state.queued ? text(" · 已排队", " · Queued") : state.error ? (state.retryWhenChanged ? text(" · 等待新依据", " · Awaiting new evidence") : text(" · 等待重试", " · Awaiting retry")) : !state.available ? text(" · 整理未启用", " · Organization off") : text(" · 整理已启用", " · Organization enabled")));
+    summary.append(node("span", "context-note", state.automaticReviewEnabled ? text(" · 自动写入已启用", " · Automatic writes enabled") : text(" · 自动写入已暂停", " · Automatic writes paused")));
+    box.append(summary);
     const status = !state.available ? text("后台整理尚未启用；需要开启 Runtime 自动维护。", "Background organization needs enabled Runtime maintenance.")
       : state.queued ? text("已排队，将在下一次后台检查时整理。", "Queued for the next background check.")
       : state.error && state.retryWhenChanged ? text("上轮整理未通过校验，原始候选已保留。新增依据或手动重新整理后再尝试，避免重复消耗。", "The previous draft failed validation. Originals remain; new evidence or an explicit retry can resume organization without repeated model calls.")
@@ -283,7 +329,11 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     if (automatic) {
       card.append(node("p", "context-auto-review", automaticReviewLabel(automatic.state, language() !== "zh")));
       const audit = node("details", "context-review-audit"); audit.append(node("summary", "", text("高级审核记录", "Upgraded review record")));
-      if (automatic.reason) audit.append(node("p", "context-note", automatic.reason));
+      if (automatic.reason) {
+        const conclusion = node("section", "context-conclusion");
+        conclusion.append(node("strong", "", text("审核结论与原因", "Review outcome and reason")), node("p", "", automatic.reason));
+        card.append(conclusion);
+      }
       for (const step of automatic.steps || []) audit.append(node("p", "context-meta", `${step.tier} · ${step.stage} · ${step.state}${step.requestId ? ` · ${step.requestId}` : ""}${step.actualTokens != null ? ` · ${step.actualTokens} tokens` : ""}${step.reason ? ` · ${step.reason}` : ""}`));
       if (automatic.input?.pages?.length) {
         const compared = node("details"); compared.append(node("summary", "", text(`审核时对照的已有记忆 · ${automatic.input.pages.length}`, `Memories compared during review · ${automatic.input.pages.length}`)));
@@ -364,7 +414,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     editor.outputs.forEach((output, index) => {
       const part = node("section", "context-memory-output");
       for (const [field,label,multiline] of [["title",text("标题", "Title"),false],["content",text("正式内容", "Memory content"),true]]) {
-        const labelNode = node("label", "", label), input = node(multiline ? "textarea" : "input"); input.value = output[field]; input.disabled = busy; input.addEventListener("input", () => {output[field] = input.value;}); labelNode.append(input); part.append(labelNode);
+        const labelNode = node("label", "", label), input = node(multiline ? "textarea" : "input"); input.value = output[field]; input.disabled = busy || loading; input.addEventListener("input", () => {output[field] = input.value;}); labelNode.append(input); part.append(labelNode);
       }
       const actionLabel = node("label", "", text("如何写入", "Memory action")), select = node("select");
       for (const action of ["create", "update", "represented"]) { const option = node("option", "", memoryActionLabel(action)); option.value = action; option.selected = action === output.action; option.disabled = action === "update" && !synthesis.updateableRevisionIds?.length; select.append(option); }
@@ -402,7 +452,10 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     const box=node("div");box.append(node("p","context-note",text("可选的跨窗口近况，每客户端最多 12 个主题；不进入长期召回。没有更新不代表没有活动，过期不代表任务结束。", "Optional cross-window updates, up to 12 topics/client, excluded from durable recall. Silence is not inactivity; expiry is not completion.")));
     if (!snapshot.activity.length) box.append(node("div","context-empty",text("当前没有共享近况","No current activity cards")));
     for (const item of snapshot.activity) {
-      const card=node("article","context-card");card.append(node("h3","",item.topicKey),node("p","",item.summary),node("p","context-meta",`${item.clientId} · ${item.scope} · ${text("更新","Updated")} ${formatTime(item.updatedAt)} · ${text("过期","Expires")} ${formatTime(item.expiresAt)}`));
+      const card=node("article","context-card"), meta=node("p","context-meta");
+      meta.append(node("span","",`${clientName(item.clientId)} · `),scopeLabel(node,[item.scope],scopeName),node("span","",` · ${text("更新","Updated")} ${formatTime(item.updatedAt)} · ${text("过期","Expires")} ${formatTime(item.expiresAt)}`));
+      card.append(node("h3","",item.topicKey),node("p","",item.summary),meta);
+      card.append(technicalDetails(node,text("来源与标识", "Sources and identifiers"),[[text("客户端", "Client"),item.clientId],[text("范围标识", "Scope identifier"),item.scope]]));
       const actions=node("div","context-actions");actions.append(button(text("移除近况","Remove activity"),async()=>{
         if (!await confirmAction({title:text("移除这条近况？","Remove this activity card?"),description:text("不会删除任何正式 Page。","No durable Page is deleted."),confirmLabel:text("移除","Remove")})) return;
         busy=true;render();try { await operation("remove_activity",{card_id:item.cardId,version:item.version}); } finally {busy=false;} await load();
@@ -414,21 +467,28 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     const identities=new Map(clients.map((c)=>[c.client.principal.principalId,c.client.principal.displayName]));
     snapshot.policies.forEach((p)=>{if(!identities.has(p.clientId))identities.set(p.clientId,p.clientId);});
     // Configured non-enrollment clients can be entered explicitly by the operator.
-    const form=node("form","context-card context-policy"), input=node("input");input.placeholder=text("客户端 Principal ID","Client Principal ID");input.setAttribute("aria-label",input.placeholder);input.disabled=busy;
+    const form=node("form","context-card context-policy"), input=node("input");input.placeholder=text("客户端 Principal ID","Client Principal ID");input.setAttribute("aria-label",input.placeholder);input.disabled=busy || loading;input.value=newClientId;input.addEventListener("input",()=>{newClientId=input.value;});
     const add=button(text("添加客户端","Add client"),()=>{},"access");add.type="submit";form.append(input,add);
     form.addEventListener("submit",(event)=>{event.preventDefault();if(!input.value.trim()||busy)return;savePolicy({clientId:input.value.trim()}).catch(fail);});box.append(form);
     for(const [id,name] of identities){
-      const p={clientId:id,submitCandidates:false,publishActivity:false,readActivity:false,...snapshot.policies.find((p)=>p.clientId===id)};
+      const p=policyDrafts.get(id) || {clientId:id,submitCandidates:false,publishActivity:false,readActivity:false,...snapshot.policies.find((p)=>p.clientId===id)};
       const card=node("section","context-card");card.append(node("h3","",name||id),node("p","context-meta",id));
       const options=node("div","context-policy");
       for(const [key,label] of [["submitCandidates",text("提交候选","Submit candidates")],["publishActivity",text("发布近况","Publish activity")],["readActivity",text("读取近况","Read activity")]]){
-        const labelNode=node("label","",label),check=node("input");check.type="checkbox";check.checked=p[key];check.disabled=busy;check.addEventListener("change",()=>{p[key]=check.checked;});labelNode.prepend(check);options.append(labelNode);
+        const labelNode=node("label","",label),check=node("input");check.type="checkbox";check.checked=p[key];check.disabled=busy || loading;check.addEventListener("change",()=>{p[key]=check.checked;policyDrafts.set(id,p);save.disabled=false;note.hidden=false;});labelNode.prepend(check);options.append(labelNode);
       }
-      options.append(button(text("保存权限","Save permissions"),()=>savePolicy(p),"accept"));card.append(options);box.append(card);
+      const save=button(text("保存权限","Save permissions"),()=>savePolicy(p),"accept");
+      save.disabled=busy || loading || !policyDrafts.has(id);
+      const note=node("span","context-note",text("有未保存的修改", "Unsaved changes"));note.hidden=!policyDrafts.has(id);
+      options.append(save,note);
+      if(policyDrafts.has(id)) options.append(button(text("撤销修改", "Discard changes"),()=>{policyDrafts.delete(id);render();}));
+      card.append(options);box.append(card);
     }return box;
   }
-  async function savePolicy(policy){busy=true;render();try{await operation("set_policy",policy);}finally{busy=false;}await load();}
+  async function savePolicy(policy){busy=true;render();try{await operation("set_policy",policy);policyDrafts.delete(policy.clientId);if(newClientId.trim()===policy.clientId)newClientId="";}finally{busy=false;}await load();}
   function render(){
+    const openDisclosures = new Set([...root.querySelectorAll("details[data-disclosure][open]")].map(item => item.dataset.disclosure));
+    const focusedKey = root.contains(document.activeElement) ? document.activeElement?.dataset.focusKey : null;
     root.replaceChildren();root.setAttribute("aria-busy",String(busy||loading));
     const heading=node("div","context-heading");heading.append(node("h2","",text("暂存与近况","Context inbox")),button(text("刷新","Refresh"),load,"refresh"));root.append(heading);
     if(error){const alert=node("p","context-error",error);alert.setAttribute("role","alert");root.append(alert);}
@@ -436,9 +496,18 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     if(!snapshot)return;
     const tabs=node("div","context-subtabs");tabs.setAttribute("role","tablist");
     for(const [key,label] of [["candidates",text("候选记忆","Candidates")],["activity",text("当前近况","Activity")],["policies",text("客户端权限","Client permissions")]]){
-      const b=button(label,()=>{tab=key;render();});b.setAttribute("role","tab");b.setAttribute("aria-selected",String(tab===key));tabs.append(b);
+      const b=button(label,()=>{tab=key;render();root.querySelector(`#context-tab-${key}`)?.focus();});
+      b.id=`context-tab-${key}`;b.setAttribute("role","tab");b.setAttribute("aria-selected",String(tab===key));b.setAttribute("aria-controls", "context-panel");b.tabIndex=tab===key?0:-1;
+      b.addEventListener("keydown",event=>{
+        if(!["ArrowLeft","ArrowRight","Home","End"].includes(event.key))return;
+        event.preventDefault();const keys=["candidates","activity","policies"], i=keys.indexOf(key);
+        tab=keys[event.key==="Home"?0:event.key==="End"?2:(i+(event.key==="ArrowRight"?1:2))%3];render();root.querySelector(`#context-tab-${tab}`)?.focus();
+      });tabs.append(b);
     }root.append(tabs);
-    root.append(tab==="candidates"?renderCandidates():tab==="activity"?renderActivity():renderPolicies());
+    const panel=tab==="candidates"?renderCandidates():tab==="activity"?renderActivity():renderPolicies();
+    panel.id="context-panel";panel.setAttribute("role","tabpanel");panel.setAttribute("aria-labelledby",`context-tab-${tab}`);root.append(panel);
+    for(const detail of root.querySelectorAll("details[data-disclosure]")) detail.open=openDisclosures.has(detail.dataset.disclosure);
+    if(focusedKey) for(const input of root.querySelectorAll("[data-focus-key]")) if(input.dataset.focusKey===focusedKey) input.focus({preventScroll:true});
   }
-  return {load,render};
+  return {load,render,hasUnsavedChanges:()=>Boolean(busy || drafts.size || editor || policyDrafts.size || newClientId.trim())};
 }

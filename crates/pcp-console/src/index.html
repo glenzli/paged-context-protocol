@@ -21,7 +21,7 @@
     <div class="topbar-end">
       <div class="headline" aria-live="polite">
         <span><b id="headline-pages">-</b> <span data-i18n="retrievable pages">retrievable pages</span></span>
-        <span><b id="headline-content">-</b> <span data-i18n="content">content</span></span>
+        <span><b id="headline-content">-</b></span>
       </div>
       <div class="topbar-actions" role="toolbar" data-i18n-aria-label="Console controls" aria-label="Console controls">
         <button id="enrollment-open" class="topbar-icon-button" type="button" hidden data-icon="access" aria-label="Client access" title="Client access" data-i18n-aria-label="Client access" data-i18n-title="Client access">
@@ -34,7 +34,7 @@
     </div>
   </header>
 
-  <nav class="tabs" aria-label="Console views" data-i18n-aria-label="Console views">
+  <nav class="tabs" role="tablist" aria-label="Console views" data-i18n-aria-label="Console views">
     <button class="tab active" type="button" data-view="overview" data-i18n="Overview">Overview</button>
     <button class="tab" type="button" data-view="pages" data-i18n="Pages">Pages</button>
     <button class="tab" type="button" data-view="query" data-i18n="Query">Query</button>
@@ -47,6 +47,12 @@
   <main>
     <section id="view-context-hub" class="view"></section>
     <section id="view-overview" class="view active">
+      <div class="view-heading"><div class="view-heading-copy"><h2 data-i18n="Your memory workspace">Your memory workspace</h2><p class="view-description" data-i18n="Capture evidence, refine durable memories, recall them when needed.">Capture evidence, refine durable memories, recall them when needed.</p></div></div>
+      <div class="overview-workflow" aria-label="Memory workflow" data-i18n-aria-label="Memory workflow">
+        <button type="button" class="workflow-link" data-open-view="context-hub"><span class="workflow-number">1</span><strong data-i18n="Capture and review">Capture and review</strong><span data-i18n="Inspect new candidates and automatic writes. Unresolved evidence can keep accumulating.">Inspect new candidates and automatic writes. Unresolved evidence can keep accumulating.</span><em data-i18n="Open context inbox">Open context inbox</em></button>
+        <button type="button" class="workflow-link" data-open-view="maintenance"><span class="workflow-number">2</span><strong data-i18n="Refine existing memories">Refine existing memories</strong><span data-i18n="Follow background work and review decisions that need your judgment.">Follow background work and review decisions that need your judgment.</span><em data-i18n="Open maintenance">Open maintenance</em></button>
+        <button type="button" class="workflow-link" data-open-view="query"><span class="workflow-number">3</span><strong data-i18n="Recall and verify">Recall and verify</strong><span data-i18n="Try a query and inspect the context that a model would receive.">Try a query and inspect the context that a model would receive.</span><em data-i18n="Try a query">Try a query</em></button>
+      </div>
       <div id="metrics" class="metrics"></div>
       <div class="section-heading">
         <h2 data-i18n="Scopes">Scopes</h2>
@@ -57,6 +63,7 @@
           <tbody id="scope-rows"></tbody>
         </table>
       </div>
+      <details class="console-details"><summary data-i18n="Connection and capabilities">Connection and capabilities</summary>
       <div class="overview-secondary-grid">
         <section>
           <div class="section-heading">
@@ -71,11 +78,12 @@
           <dl id="capability-details" class="details-grid"></dl>
         </section>
       </div>
+      </details>
     </section>
 
     <section id="view-pages" class="view">
       <div class="view-heading">
-        <div><h2 data-i18n="Pages">Pages</h2><span id="pages-status" class="muted" aria-live="polite" data-i18n="Not loaded">Not loaded</span></div>
+        <div class="view-heading-copy"><h2 data-i18n="Pages">Pages</h2><span id="pages-status" class="muted" aria-live="polite" data-i18n="Not loaded">Not loaded</span><p class="view-description" data-i18n="Browse remembered content. Open a memory to see its sources, revisions and related Pages.">Browse remembered content. Open a memory to see its sources, revisions and related Pages.</p></div>
       </div>
       <form id="page-search" class="page-search-bar">
         <div class="page-query-control">
@@ -131,7 +139,7 @@
 
     <section id="view-query" class="view">
       <div class="view-heading">
-        <div class="view-heading-copy"><div><h2 data-i18n="Query">Query</h2><span id="query-status" class="muted" aria-live="polite" data-i18n="No query yet">No query yet</span></div><p class="view-description" data-i18n="Search all authorized context, then review the deterministic context pack.">Search all authorized context, then review the deterministic context pack.</p></div>
+        <div class="view-heading-copy"><div><h2 data-i18n="Query">Query</h2><span id="query-status" class="muted" aria-live="polite" data-i18n="No query yet">No query yet</span></div><p class="view-description" data-i18n="Queries return the memory content available to a model. Review the content and its inclusion reasons below.">Queries return the memory content available to a model. Review the content and its inclusion reasons below.</p></div>
       </div>
       <form id="context-query-form" class="context-query-form">
         <label class="context-query-intent"><span data-i18n="Query intent">Query intent</span><textarea id="context-query-text" rows="3" required placeholder="Describe what you need to recall" data-i18n-placeholder="Describe what you need to recall"></textarea></label>
@@ -140,7 +148,7 @@
           <label id="context-query-effort-control" class="context-query-select" hidden><span data-i18n="Retrieval effort">Retrieval effort</span><select id="context-query-effort"><option value="low" data-i18n="Low">Low</option><option value="medium" selected data-i18n="Medium">Medium</option><option value="high" data-i18n="High">High</option></select></label>
           <label class="context-query-select"><span data-i18n="Scope">Scope</span><select id="context-query-scope"><option value="" data-i18n="All authorized scopes">All authorized scopes</option></select></label>
           <label class="context-query-select"><span data-i18n="Top results">Top results</span><select id="context-query-top-k"><option value="6" selected>6</option><option value="12">12</option><option value="20">20</option></select></label>
-          <button id="context-query-submit" class="primary-button compact-icon-button query-submit-icon-button" type="submit" data-icon="search" aria-label="Build context pack" title="Build context pack" data-i18n-aria-label="Build context pack" data-i18n-title="Build context pack"></button>
+          <button id="context-query-submit" class="primary-button semantic-button query-submit-button" type="submit" data-icon="search" aria-label="Build context pack" title="Build context pack" data-i18n-aria-label="Build context pack" data-i18n-title="Build context pack"></button>
         </div>
         <p id="context-query-method-note" class="control-note"></p>
         <div id="context-query-error" class="context-query-error" role="alert" hidden>
@@ -192,17 +200,33 @@
         </div>
         <button id="maintenance-scene-alert-retry" class="warning-button semantic-button" type="button" data-icon="retry"><span data-i18n="Retry maintenance">Retry maintenance</span></button>
       </section>
+      <section id="maintenance-idle" class="maintenance-empty-state">
+        <div>
+          <div class="maintenance-convergence-title"><h3 data-i18n="Converge memory maintenance">Converge memory maintenance</h3><span id="maintenance-convergence-state" class="status-pill" aria-live="polite"></span></div>
+          <p data-i18n="Run now progressively processes one bounded job per response. You can review accumulated decisions immediately while the remaining work continues.">Run now progressively processes one bounded job per response. You can review accumulated decisions immediately while the remaining work continues.</p>
+        </div>
+        <div class="maintenance-start-actions">
+          <button id="maintenance-start" class="primary-button semantic-button" type="button" disabled data-icon="run" aria-label="Run now" title="Run now" data-i18n-aria-label="Run now" data-i18n-title="Run now"><span data-i18n="Run now">Run now</span></button>
+          <button id="maintenance-manual-start" class="secondary-button semantic-button" type="button" disabled data-icon="manual" aria-label="Manual staged review" title="Manual staged review" data-i18n-aria-label="Manual staged review" data-i18n-title="Manual staged review"><span data-i18n="Manual staged review">Manual staged review</span></button>
+        </div>
+        <p id="maintenance-entry-reason" class="control-note" hidden></p>
+      </section>
+
       <section id="maintenance-automation-status" class="maintenance-automation-status" hidden>
         <div class="section-heading section-heading-copy">
           <div><div class="maintenance-automation-title"><h3 data-i18n="Automatic maintenance">Automatic maintenance</h3><span id="maintenance-automation-state" class="status-pill"></span></div><p data-i18n="Background maintenance and Run now use the same controller and persistent review inbox.">Background maintenance and Run now use the same controller and persistent review inbox.</p></div>
         </div>
         <div id="maintenance-automation-metrics" class="metrics maintenance-automation-metrics"></div>
+        <button id="maintenance-review-jump" class="secondary-button" type="button" hidden></button>
+        <details class="console-details maintenance-diagnostics"><summary data-i18n="Cycle details and schedule">Cycle details and schedule</summary>
         <div id="maintenance-automation-chart" class="maintenance-automation-chart" aria-label="Maintenance workload chart"></div>
         <section id="maintenance-automation-progress" class="maintenance-automation-progress" hidden>
           <h4 id="maintenance-automation-progress-title"></h4>
           <div id="maintenance-automation-progress-metrics" class="metrics maintenance-automation-metrics"></div>
         </section>
-        <p id="maintenance-automation-detail" class="muted"></p>
+        <dl id="maintenance-automation-detail" class="details-grid"></dl>
+        </details>
+        <div id="maintenance-job-issues" class="maintenance-review-evidence"></div>
         <p id="maintenance-automation-error" class="maintenance-issue" hidden></p>
       </section>
       <section id="maintenance-relation-review" class="maintenance-relation-review" hidden>
@@ -221,16 +245,6 @@
             <button id="maintenance-review-commit" class="primary-button semantic-button" type="button" data-icon="apply"><span data-i18n="Finish review and apply">Finish review and apply</span></button>
           </div>
         </footer>
-      </section>
-      <section id="maintenance-idle" class="maintenance-empty-state">
-        <div>
-          <div class="maintenance-convergence-title"><h3 data-i18n="Converge memory maintenance">Converge memory maintenance</h3><span id="maintenance-convergence-state" class="status-pill" aria-live="polite"></span></div>
-          <p data-i18n="Run now progressively processes one bounded job per response. You can review accumulated decisions immediately while the remaining work continues.">Run now progressively processes one bounded job per response. You can review accumulated decisions immediately while the remaining work continues.</p>
-        </div>
-        <div class="maintenance-start-actions">
-          <button id="maintenance-start" class="primary-button compact-icon-button maintenance-entry-icon-button" type="button" disabled data-icon="run" aria-label="Run now" title="Run now" data-i18n-aria-label="Run now" data-i18n-title="Run now"></button>
-          <button id="maintenance-manual-start" class="secondary-button compact-icon-button maintenance-entry-icon-button" type="button" disabled data-icon="manual" aria-label="Manual staged review" title="Manual staged review" data-i18n-aria-label="Manual staged review" data-i18n-title="Manual staged review"></button>
-        </div>
       </section>
 
       <section id="maintenance-workflow" hidden>
@@ -383,7 +397,7 @@
       <div class="view-heading">
         <div class="view-heading-copy">
           <div><h2 data-i18n="Runtime activity">Runtime activity</h2><span id="health-status" class="muted" aria-live="polite" data-i18n="Not loaded">Not loaded</span></div>
-          <p class="view-description" data-i18n="Observed client activity, latency, and telemetry coverage.">Observed client activity, latency, and telemetry coverage.</p>
+          <p class="view-description" data-i18n="See how memories are used, then inspect model usage and technical diagnostics.">See how memories are used, then inspect model usage and technical diagnostics.</p>
         </div>
         <label class="window-control"><span data-i18n="Window">Window</span>
           <select id="health-window" aria-label="Health analysis window" data-i18n-aria-label="Health analysis window">
@@ -397,16 +411,16 @@
       <div id="health-metrics" class="metrics"></div>
       <div id="health-signals" class="health-signals" hidden></div>
 
+      <div class="section-heading"><h2 data-i18n="Client activity and recall">Client activity and recall</h2></div>
+      <div id="health-flows" class="aggregate-grid"></div>
+
       <div class="section-heading"><h2 data-i18n="Model usage">Model usage</h2></div>
       <div id="health-model-usage" class="aggregate-grid"></div>
-
-      <div class="section-heading"><h2 data-i18n="Request activity">Request activity</h2></div>
-      <div id="health-flows" class="aggregate-grid"></div>
 
       <div class="section-heading"><h2 data-i18n="Activity trend">Activity trend</h2></div>
       <div id="health-timeline" class="timeline-panel"></div>
 
-      <div class="section-heading"><h2 data-i18n="Operations">Operations</h2></div>
+      <details class="console-details"><summary data-i18n="Operation diagnostics">Operation diagnostics</summary>
       <div class="table-wrap">
         <table>
           <thead><tr><th data-i18n="Operation">Operation</th><th data-i18n="Calls">Calls</th><th data-i18n="Failures">Failures</th><th data-i18n="Output">Output</th><th>p50</th><th>p95</th></tr></thead>
@@ -414,13 +428,16 @@
         </table>
       </div>
 
-      <div class="section-heading"><h2 data-i18n="Scopes">Scopes</h2></div>
+      </details>
+      <details class="console-details"><summary data-i18n="Scope and storage counts">Scope and storage counts</summary>
       <div class="table-wrap">
         <table>
           <thead><tr><th data-i18n="Scope">Scope</th><th data-i18n="Current">Current</th><th data-i18n="Pages">Pages</th><th data-i18n="Revisions">Revisions</th><th data-i18n="Calls">Calls</th><th data-i18n="Searches">Searches</th><th data-i18n="Writes">Writes</th></tr></thead>
           <tbody id="health-scope-rows"></tbody>
         </table>
       </div>
+
+      </details>
 
       <section class="store-signals">
         <div class="section-heading section-heading-copy">

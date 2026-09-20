@@ -23,3 +23,10 @@ test("missing and unparseable timestamps are not invented", () => {
   for (const value of [null, undefined, ""]) assert.equal(formatTimestamp(value), "-");
   assert.equal(formatTimestamp("unknown"), "unknown");
 });
+
+test("Runtime Unix milliseconds render as instants, including the epoch", () => {
+  const options = {timeZone:"Asia/Shanghai", hour12:false};
+  for (const value of [0, 1789893190575]) {
+    assert.equal(formatTimestamp(value, "zh-CN", options), new Date(value).toLocaleString("zh-CN", options));
+  }
+});

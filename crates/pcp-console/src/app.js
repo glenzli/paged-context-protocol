@@ -1,3 +1,5 @@
+import { kindLabel, technicalDetails, scopeLabel, refreshScopeLabels } from "/console-presentation.js";
+import { createConsoleNavigation } from "/console-navigation.js";
 import { createAccessView } from "/access-view.js";
 import { createPageInspector } from "/page-inspector.js?v=20260823.1";
 import { pageListPreview, pageCount, pageJump, PAGE_ROLE_LABELS, pageRoleBadge, appendPageFilters, pageBrowseOrder, pageTimeFields } from "/page-list.js";
@@ -334,6 +336,95 @@ const ZH_MESSAGES = {
   "Close": "关闭",
   "Connected": "已连接",
   "Confirm action": "确认操作",
+  "Your memory workspace": "记忆工作台",
+  "Capture evidence, refine durable memories, recall them when needed.": "接收新线索，整理长期记忆，在需要时召回。",
+  "Memory workflow": "记忆流程",
+  "Capture and review": "接收与审阅",
+  "Inspect new candidates and automatic writes. Unresolved evidence can keep accumulating.": "查看新候选与自动写入结果；尚未成熟的线索可以继续积累。",
+  "Open context inbox": "查看候选记忆 →",
+  "Refine existing memories": "整理已有记忆",
+  "Follow background work and review decisions that need your judgment.": "了解后台进展，处理需要你判断的审阅事项。",
+  "Open maintenance": "查看维护进展 →",
+  "Recall and verify": "召回与验证",
+  "Try a query and inspect the context that a model would receive.": "试一次查询，检查模型实际会得到的上下文。",
+  "Try a query": "开始查询 →",
+  "Connection and capabilities": "连接与能力详情",
+  "Cycle details and schedule": "本轮明细与调度时间",
+  "Restart Runtime?": "重启 Runtime？",
+  "Active PCP calls may be interrupted. Stored memories are retained.": "正在进行的 PCP 调用可能中断，已保存的记忆会保留。",
+  "Retrievable memories": "可召回记忆",
+  "Stored content": "正文规模",
+  "Memory scopes": "记忆范围",
+  "Store integrity": "存储完整性",
+  "Healthy": "正常",
+  "Needs inspection": "需要检查",
+  "Available for default recall": "参与默认检索的页面",
+  "Text retained in retrievable Pages": "可检索页面保留的正文",
+  "Authorized memory collections": "当前可访问的记忆集合",
+  "Storage integrity check passed": "存储完整性检查通过",
+  "Identifiers and implementation": "标识与实现详情",
+  "Page identifiers": "页面标识",
+  "Source details": "来源详情",
+  "Client": "客户端",
+  "Operation identifier": "操作标识",
+  "Scope identifier": "范围标识",
+  "Review execution details": "审核执行详情",
+  "Read memories": "读取记忆",
+  "Open memory": "打开记忆",
+  "Browse memories": "浏览记忆",
+  "Search memories": "搜索记忆",
+  "Inspect service": "查看服务状态",
+  "Health check": "健康检查",
+  "Write memory": "写入记忆",
+  "Create memory": "新增记忆",
+  "Update memory": "更新记忆",
+  "Capture evidence": "留存线索",
+  "Submit candidate": "提交候选",
+  "Submit candidates": "提交候选",
+  "Organize candidates": "整理候选",
+  "Review memory drafts": "审核记忆草案",
+  "Extract topics": "提炼主题",
+  "Review archive proposals": "审核归档建议",
+  "Review memory updates": "审核记忆更新",
+  "Verify memory relations": "核实记忆关联",
+  "Find related memories": "查找记忆关联",
+  "Summarize content": "生成内容摘要",
+  "Pack source content": "整理原始内容",
+  "Reconcile feedback": "处理反馈与纠正",
+  "Review summaries": "审核摘要",
+  "Review topics": "审核主题",
+  "Publish activity": "发布近况",
+  "Read activity": "读取近况",
+  "Archive memory": "归档记忆",
+  "Reviewed memory": "经审阅的记忆",
+  "Conversation memory": "对话留存",
+  "Topic summary": "主题摘要",
+  "Document": "文档",
+  "Conversation": "对话",
+  "Source pack": "原始内容包",
+  "Allowed": "已允许",
+  "Denied": "已拒绝",
+  "Active": "当前有效",
+  "Client activity and recall": "客户端调用与召回",
+  "See how memories are used, then inspect model usage and technical diagnostics.": "先了解客户端如何使用记忆，再查看模型用量与技术诊断。",
+  "Operation diagnostics": "操作诊断",
+  "Scope and storage counts": "范围与存储统计",
+  "Browse remembered content. Open a memory to see its sources, revisions and related Pages.": "浏览已经记住的内容；打开页面可查看来源、修订和相关记忆。",
+  "Queries return the memory content available to a model. Review the content and its inclusion reasons below.": "查看模型能够获得的记忆内容，以及每条内容被选入的原因。",
+  "Review memory drafts in depth": "深入审核记忆草案",
+  "Verify maintenance proposals": "复核维护提案",
+  "Verify maintenance proposals in depth": "深入复核维护提案",
+  "Characters": "字符",
+  "Browse memory index": "浏览记忆索引",
+  "Import content": "导入内容",
+  "Context inbox operations": "处理暂存与近况",
+  "Inspect context inbox": "查看暂存与近况",
+  "Check storage integrity": "检查存储完整性",
+  "List memory scopes": "查看记忆范围",
+  "Read access records": "查看访问记录",
+  "Count memories": "统计记忆数量",
+  "Inspect memory statistics": "查看记忆统计",
+  "Inspect query statistics": "查看查询统计",
   "Connecting": "正在连接",
   "Connections": "关联",
   "Console controls": "控制台操作",
@@ -1279,6 +1370,9 @@ function renderMaintenanceControllerAvailability() {
     disabled: state.archive.busy || Boolean(archiveReason),
     reason: archiveReason,
   });
+  const entryReason = byId("maintenance-entry-reason");
+  entryReason.hidden = !convergenceReason && !manualReason;
+  entryReason.textContent = convergenceReason || manualReason || "";
   const availability = byId("maintenance-archive-availability");
   availability.className = `status-pill${archiveReason ? " status-warning" : archiveSessionActive() ? " status-info" : archiveSessionComplete() ? " status-positive" : ""}`;
   availability.textContent = archiveReason
@@ -1312,9 +1406,7 @@ function formatNumber(value) {
 }
 
 function formatSize(chars) {
-  if (chars < 1000) return `${chars} chars`;
-  if (chars < 1_000_000) return `${(chars / 1000).toFixed(1)}k chars`;
-  return `${(chars / 1_000_000).toFixed(2)}M chars`;
+  return `${compactQuantity(chars, currentLocale())} ${t("Characters")}`;
 }
 
 function formatCandidateGroups(value) {
@@ -1490,7 +1582,7 @@ function showError(error) {
 }
 
 const pageInspector = createPageInspector({
-  request: api, mutate: governanceMutation, confirmAction, showError, formatTime, t,
+  request: api, mutate: governanceMutation, confirmAction, showError, formatTime, t, scopeName,
   onMutation: async () => {
     resetPages();
     state.pages.previewFallbacks.clear();
@@ -1506,13 +1598,14 @@ const queryView = createQueryView({
   showError,
   t,
   formatNumber,
+  scopeName,
   searchIcon: () => icon("search"),
   openPageIcon: () => icon("open"),
   openPage: (pageId) => pageInspector.open(pageId),
 });
-const healthView = createHealthView({ request: api, showError, formatNumber, t, locale: currentLocale });
+const healthView = createHealthView({ request: api, showError, formatNumber, t, scopeName, locale: currentLocale });
 const contextHub = createContextHub({ root: byId("view-context-hub"), request: api, mutate: maintenanceMutation,
-  confirmAction, icon, formatTime, onCommitted: loadOverview,
+  confirmAction, icon, formatTime, scopeName, onCommitted: loadOverview,
   language: () => currentLanguage, openPage: (id) => pageInspector.open(id) });
 const retentionView = createRetentionView({
   request: api,
@@ -1598,6 +1691,7 @@ function buildLabel(build) {
 
 function renderOverview(data) {
   state.overview = data;
+  refreshScopeLabels(document, scopeName);
   queryView.setScopes(data.scopes || []);
   const connected = data.integrity === "ok";
   byId("connection").textContent = connected ? t("Connected") : t("Degraded");
@@ -1607,10 +1701,10 @@ function renderOverview(data) {
   byId("headline-content").textContent = formatSize(data.contentChars);
 
   byId("metrics").replaceChildren(
-    metric(t("Integrity"), data.integrity, connected ? "positive" : "danger"),
-    protocolMetric(data.capabilities.protocolVersion),
-    metric(t("Runtime PID"), data.runtime.pid || "-"),
-    metric(t("Runtime started"), formatTime(data.runtime.startedAtUnixMs)),
+    metric(t("Retrievable memories"), formatNumber(data.pageCount), "", t("Available for default recall")),
+    metric(t("Memory scopes"), formatNumber(data.scopes.length), "", t("Authorized memory collections")),
+    metric(t("Stored content"), formatSize(data.contentChars), "", t("Text retained in retrievable Pages")),
+    metric(t("Store integrity"), t(connected ? "Healthy" : "Needs inspection"), connected ? "positive" : "danger", connected ? t("Storage integrity check passed") : data.integrity),
   );
 
   byId("scope-rows").replaceChildren(...orderedScopes([...data.scopes]).map(({ scope, depth }) => {
@@ -1628,7 +1722,7 @@ function renderOverview(data) {
     scopeCell.style.setProperty("--scope-depth", depth);
     scopeCell.append(
       element("strong", "", scope.displayName || scope.namespace),
-      element("span", "mono muted", scope.namespace),
+      technicalDetails(element, t("Scope identifier"), [[t("Scope"), scope.namespace]]),
     );
     if (scope.description) {
       const description = element("span", "scope-description", scope.description);
@@ -1647,6 +1741,9 @@ function renderOverview(data) {
 
   const storeWide = (data.storePermissions || []).length > 0;
   const endpointRows = [
+    [t("Protocol"), data.capabilities.protocolVersion],
+    [t("Runtime PID"), data.runtime.pid],
+    [t("Runtime started"), formatTime(data.runtime.startedAtUnixMs)],
     [t("Runtime build"), buildLabel(data.runtime.buildInfo)],
     [t("Console build"), buildLabel(data.consoleBuildInfo)],
     [t("Principal"), data.principal.principalId],
@@ -1833,16 +1930,20 @@ function pageRelationSignal(hit) {
 function pageResultMeta(hit) {
   const meta = element("div", "page-result-meta");
   const entries = [
-    [t("Kind"), hit.kind],
-    [t("Source"), pageSourceLabel(hit)],
+    [t("Kind"), kindLabel(hit.kind, t)],
+    [t("Scope"), scopeLabel(element, [hit.namespace], scopeName)],
     ...pageTimeFields(hit).map(([label, value]) => [t(label), formatTime(value)]),
   ];
   meta.append(...entries.map(([label, value]) => {
     const item = element("span", "page-meta-item");
-    item.append(element("span", "page-meta-label", label), document.createTextNode(value));
+    item.append(element("span", "page-meta-label", label), typeof value === "object" ? value : document.createTextNode(value));
     return item;
   }));
   meta.append(pageRelationSignal(hit));
+  meta.append(technicalDetails(element, t("Source details"), [
+    [t("Page"), hit.pageId], [t("Kind"), hit.kind], [t("Source"), pageSourceLabel(hit)],
+    [t("Revision"), hit.revisionId],
+  ]));
   meta.append(...pageStructureTags(hit).map(([paths, label]) => {
     const tag = element("span", "page-structure-tag");
     tag.title = label;
@@ -2760,20 +2861,17 @@ function renderAutomationStatus() {
   const completed = automation.lastCompletedAt;
   const started = automation.lastStartedAt;
   const nextWake = automation.nextWakeAt;
-  byId("maintenance-automation-detail").textContent = started || completed || nextWake
-    ? [
-        started ? `${currentLanguage === "zh" ? "最近开始" : "Last started"}: ${formatTime(started)}` : "",
-        completed ? `${t("Last completed")}: ${formatTime(completed)}` : "",
-        status.storeWide ? (currentLanguage === "zh" ? "覆盖全部 Scope" : "All Scopes") : "",
-        automation.lastAnalysisAt ? `${currentLanguage === "zh" ? "最近模型分析" : "Last model analysis"}: ${formatTime(automation.lastAnalysisAt)}` : "",
-        automation.lastContentChangeAt ? `${currentLanguage === "zh" ? "最近内容写入" : "Last content change"}: ${formatTime(automation.lastContentChangeAt)}` : "",
-        automation.nextPeriodicReviewAt ? `${currentLanguage === "zh" ? "下次旧页复查" : "Next periodic review"}: ${formatTime(automation.nextPeriodicReviewAt)}` : "",
-        nextWake ? `${t("Next automatic check")}: ${formatTime(nextWake)}` : "",
-        automation.idleCycles ? `${t("Idle backoff")}: ${formatNumber(automation.idleCycles)}` : "",
-        automation.consecutiveFailures ? `${t("Consecutive failures")}: ${formatNumber(automation.consecutiveFailures)}` : "",
-        t("Write activity wakes Runtime early."),
-      ].filter(Boolean).join(" · ")
-    : t("Awaiting the first Runtime heartbeat.");
+  const schedule = [
+    [currentLanguage === "zh" ? "最近开始" : "Last started", started],
+    [t("Last completed"), completed],
+    [currentLanguage === "zh" ? "最近模型分析" : "Last model analysis", automation.lastAnalysisAt],
+    [currentLanguage === "zh" ? "最近内容写入" : "Last content change", automation.lastContentChangeAt],
+    [currentLanguage === "zh" ? "下次旧页复查" : "Next periodic review", automation.nextPeriodicReviewAt],
+    [t("Next automatic check"), nextWake],
+  ].filter(([, value]) => value);
+  byId("maintenance-automation-detail").replaceChildren(...schedule.flatMap(([label, value]) => [
+    element("dt", "", label), element("dd", "", formatTime(value)),
+  ]));
   const error = byId("maintenance-automation-error");
   // Operation failures are owned by the scene-level alert above the workflow.
   // Keeping the old footer hidden avoids two competing error locations.
@@ -3026,6 +3124,11 @@ function renderRelationReviews() {
   persistMaintenanceReviewSession();
   const total = human.length + staged.length;
   const stagedCount = staged.length;
+  const jump = byId("maintenance-review-jump");
+  jump.hidden = human.length + staged.length === 0;
+  jump.textContent = currentLanguage === "zh"
+    ? `前往审阅 · ${human.length} 需人工 · ${staged.length} 待提交 ↓`
+    : `Go to review · ${human.length} need input · ${staged.length} staged ↓`;
   byId("maintenance-relation-review-count").textContent = currentLanguage === "zh"
     ? `${formatNumber(human.length)} 需人工 · ${formatNumber(background.length)} 自动／等待 · ${formatNumber(stagedCount)} 待提交`
     : `${formatNumber(human.length)} human · ${formatNumber(background.length)} automatic / waiting · ${formatNumber(stagedCount)} staged`;
@@ -3353,8 +3456,10 @@ function maintenanceReviewCard(review) {
       [currentLanguage === "zh" ? "保留的边界" : "Preserved boundaries", verification.preservedBoundaries],
       [currentLanguage === "zh" ? "需要判断" : "Needs judgment", (verification.concerns || []).join(" · ")],
     ].forEach(([label, value]) => { if (value) evidence.append(element("p", "", `${label}：${value}`)); });
-    if (verification.reviewState) evidence.append(element("p", "", `Review: ${verification.reviewState}`));
-    for (const step of verification.reviewSteps || []) evidence.append(element("p", "muted", `${step.tier} → ${step.stage} · ${step.state} · ${step.actualTokens ?? "usage unknown"} tokens: ${step.reason}${step.requestId ? ` (${step.requestId})` : ""}`));
+    if (verification.reviewState || verification.reviewSteps?.length) evidence.append(technicalDetails(element, t("Review execution details"), [
+      [t("Status"), verification.reviewState],
+      ...(verification.reviewSteps || []).map(step => [`${step.tier} / ${step.stage}`, `${step.state} · ${step.actualTokens ?? "usage unknown"} tokens · ${step.reason || ""}${step.requestId ? ` (${step.requestId})` : ""}`]),
+    ]));
     card.append(evidence);
   }
   card.append(maintenanceReviewContent(review));
@@ -5289,11 +5394,10 @@ async function runMaintenancePrimaryAction() {
   return advanceMaintenancePhase();
 }
 
-async function activateView(name, { reload = false } = {}) {
+async function activateView(name, { reload = false, history = true, focus = false } = {}) {
+  name = navigation.select(name, { history, focus });
   state.activeView = name;
   scheduleMaintenanceStatusPoll();
-  document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === name));
-  document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === `view-${name}`));
   if (name === "pages" && (reload || !state.pages.loaded)) await loadPages();
   if (name === "query") await queryView.load({ reload });
   if (name === "maintenance") await loadMaintenance({ reload });
@@ -5313,21 +5417,19 @@ async function openScope(namespace) {
 }
 
 async function refresh() {
+  const name = state.activeView;
   try {
-    await loadRuntimeControl();
-    await loadOverview();
-    if (state.activeView === "pages") {
-      resetPages();
-      await loadPages();
-    }
-    if (state.activeView === "query") await queryView.load({ reload: true });
-    if (state.activeView === "maintenance") await loadMaintenance({ reload: true });
-    if (state.activeView === "context-hub") await contextHub.load();
-    if (state.activeView === "health") {
-      await healthView.load({ reload: true });
-      await retentionView.refreshIfOpen();
-    }
-    if (state.activeView === "access") await loadAccess();
+    await Promise.all([loadRuntimeControl(), loadOverview(), (async () => {
+      if (name === "pages") { resetPages(); await loadPages(); }
+      if (name === "query") await queryView.load({ reload: true });
+      if (name === "maintenance") await loadMaintenance({ reload: true });
+      if (name === "context-hub") await contextHub.load();
+      if (name === "health") {
+        await healthView.load({ reload: true });
+        await retentionView.refreshIfOpen();
+      }
+      if (name === "access") await loadAccess();
+    })()]);
   } catch (error) { showError(error); }
 }
 
@@ -5361,6 +5463,7 @@ async function loadRuntimeControl() {
 }
 
 async function restartRuntime() {
+  if (!await confirmAction({ title: t("Restart Runtime?"), description: t("Active PCP calls may be interrupted. Stored memories are retained."), confirmLabel: t("Restart Runtime") })) return;
   const control = byId("runtime-restart");
   control.disabled = true;
   control.classList.add("is-loading");
@@ -5390,8 +5493,23 @@ async function refreshFromControl() {
   }
 }
 
-document.querySelectorAll(".tab").forEach((tab) => {
-  tab.addEventListener("click", () => activateView(tab.dataset.view).catch(showError));
+const navigation = createConsoleNavigation({
+  tabs: [...document.querySelectorAll(".tabs .tab")], views: [...document.querySelectorAll("main > .view")],
+  host: window, onNavigate: activateView, onError: showError,
+});
+state.activeView = navigation.select(navigation.locationView(), { history: false });
+document.querySelectorAll("[data-open-view]").forEach(button => {
+  button.addEventListener("click", () => activateView(button.dataset.openView).catch(showError));
+});
+byId("maintenance-review-jump").addEventListener("click", () => {
+  const section = byId("maintenance-relation-review");
+  section.tabIndex = -1; section.focus({ preventScroll: true });
+  section.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+window.addEventListener("beforeunload", event => {
+  if (contextHub.hasUnsavedChanges() || state.maintenance.reviewCommitBusy) {
+    event.preventDefault(); event.returnValue = "";
+  }
 });
 document.querySelectorAll("[data-maintenance-workspace]").forEach((tab) => {
   tab.addEventListener("click", () => setMaintenanceWorkspaceTab(tab.dataset.maintenanceWorkspace));
@@ -5506,7 +5624,7 @@ byId("archive-rescan").addEventListener("click", () => scanArchiveCandidates().c
 byId("archive-finish").addEventListener("click", () => finishArchiveSession().catch(showError));
 byId("archive-start-new").addEventListener("click", () => startArchiveSession().catch(showError));
 byId("maintenance-settings-form").addEventListener("submit", (event) => saveMaintenanceSettings(event).catch(showError));
-const accessView = createAccessView({ api, byId, element, t, formatTime, formatNumber, showError });
+const accessView = createAccessView({ api, byId, element, t, formatTime, formatNumber, showError, scopeName });
 byId("health-window").addEventListener("change", () => healthView.load({ reload: true }).catch(showError));
 setMaintenanceWorkspaceTab(state.maintenance.workspaceTab);
 refresh();

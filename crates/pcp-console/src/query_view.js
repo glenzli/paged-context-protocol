@@ -1,3 +1,5 @@
+import { scopeLabel } from "./console-presentation.js";
+
 export function buildQueryRequest({ method, query, scope, topK, intentEffort }) {
   const payload = { query, scopes: scope ? [scope] : [], resultLimit: Number(topK) };
   if (method === "match_intent") payload.intentEffort = intentEffort;
@@ -18,7 +20,7 @@ export function contextValidityLabel(standing) {
   }[standing] || standing;
 }
 
-export function createQueryView({ request, byId, element, showError, t, formatNumber, openPage, openPageIcon, searchIcon }) {
+export function createQueryView({ request, byId, element, showError, t, formatNumber, openPage, openPageIcon, searchIcon, scopeName = value => value }) {
   let method = "semantic_search";
   let busy = false;
   let busyStartedAt = null;
@@ -42,7 +44,7 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
     const submit = byId("context-query-submit");
     const submitLabel = t(querySubmitLabel(method, busy));
     submit.disabled = busy;
-    submit.replaceChildren(searchIcon());
+    submit.replaceChildren(searchIcon(), element("span", "", submitLabel));
     submit.title = submitLabel;
     submit.setAttribute("aria-label", submitLabel);
     submit.classList.toggle("is-loading", busy);
@@ -196,7 +198,7 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
       const identity = element("div", "context-pack-entry-identity");
       identity.append(
         element("strong", "", `#${formatNumber(entry.rank)} · ${entryRole(entry)} · ${detailLabel(entry.detail)}`),
-        element("span", "muted", entry.namespace),
+        scopeLabel(element, [entry.namespace], scopeName, "span", "muted"),
       );
       const actions = element("div", "context-pack-entry-actions");
       const open = element("button", "icon-button context-pack-reference-button");
