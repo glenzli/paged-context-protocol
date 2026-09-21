@@ -1089,7 +1089,14 @@ impl RuntimeMaintainer {
                             match outcome.response {
                                 MaintenanceWorkerResponse::CandidateSyntheses { groups } => {
                                     match input.canonical_groups(groups) {
-                                        Ok(groups) => hub.finish_organization(&input, groups).await,
+                                        Ok(groups) => {
+                                            hub.finish_organization_with_receipts(
+                                                &input,
+                                                groups,
+                                                outcome.execution_receipts,
+                                            )
+                                            .await
+                                        }
                                         Err(error) => Err(error),
                                     }
                                 }

@@ -251,6 +251,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
       const meta = node("p", "context-meta");
       meta.append(node("span", "", `${clientName(item.clientId)} · `), scopeLabel(node, [item.input.scope], scopeName), node("span", "", ` · ${formatTime(item.createdAt)}`));
       card.append(meta, node("p", "", item.input.content));
+      if (item.experience) card.append(experienceEvidence(item.experience));
       if (item.snoozedUntil) card.append(node("p", "context-note", `${text("暂缓至","Deferred until")} ${formatTime(item.snoozedUntil)}`));
       const similar = snapshot.similarCandidates?.[item.candidateId] || [];
       if (similar.length) card.append(node("p", "context-note", text(`另有 ${similar.length} 条相似候选，可选择后合并审阅`, `${similar.length} similar candidates; select to review together`)));
@@ -294,6 +295,26 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     footer.append(node("span","", busy ? `${text("正在提交","Submitting")} ${progress}` : `${drafts.size} ${text("项决定待提交","decisions unsubmitted")}`),button(text("提交审阅","Submit review"),apply,"apply",true));
     footer.lastChild.disabled=busy || loading || !drafts.size;footer.hidden=!drafts.size && !busy;box.append(footer);return box;
   }
+  function experienceEvidence(experience) {
+    const box = node("details");
+    box.append(node("summary", "", text("经验依据：观察、解释与未决点", "Experience: observations, interpretation and open questions")));
+    for (const [zh, en, value] of [
+      ["适用条件", "Conditions", experience.conditions], ["尝试", "Attempt", experience.attempt],
+      ["观察结果", "Observation", experience.observation], ["当前解释（待验证）", "Interpretation (provisional)", experience.interpretation],
+      ["未决点", "Open questions", experience.unresolved?.join("\n")],
+    ]) if (value) { const p=node("p"); p.append(node("strong", "", `${text(zh,en)}: `),node("span", "", value));box.append(p); }
+    if (experience.receipts?.length) {
+      box.append(node("p", "context-note", text("回执由提交端提供；执行完成、验证通过和任务成功分别记录。", "Receipts are producer reports; execution, validation and task outcomes are distinct.")));
+      const stages={inference:text("模型执行","Inference"),validation:text("验证","Validation"),publication:text("发布","Publication"),task:text("任务","Task")};
+      const outcomes={succeeded:text("已完成","Succeeded"),failed:text("失败","Failed"),unknown:text("未确认","Unknown")};
+      for (const receipt of experience.receipts) {
+        box.append(node("p", "context-meta", `${stages[receipt.stage]||receipt.stage} · ${outcomes[receipt.outcome]||receipt.outcome} · ${receipt.summary}`));
+        box.append(technicalDetails(node,text("回执来源","Receipt source"),[[text("来源","Source"),receipt.source?.locator],[text("版本","Version"),receipt.version],[text("内容校验值","Content digest"),receipt.source?.contentDigest]]));
+      }
+    }
+    return box;
+  }
+
   function renderOrganization() {
     const box = node("details", "context-organization"), state = snapshot.organization || {};
     box.dataset.disclosure = "organization";
@@ -360,8 +381,10 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
       const source = node("section"); source.append(node("h4", "", item.input.title), node("p", "context-meta", `${formatTime(item.createdAt)} · ${item.clientId}`), node("p", "", item.input.content));
       const provenance = node("details"); provenance.append(node("summary", "", text("来源", "Sources")), node("p", "context-meta", JSON.stringify({sourceRefs:item.input.sourceRefs, basedOnRevisionIds:item.input.basedOnRevisionIds})));
       source.append(provenance); timeline.append(source);
+      if (item.experience) source.append(experienceEvidence(item.experience));
     }
     card.append(timeline, node("h4", "", text("整理后的演变", "Interpreted evolution")), node("p", "", synthesis.narrative), node("p", "context-note", synthesis.reason));
+    if (synthesis.executionReceipts?.length) card.append(technicalDetails(node,text("整理执行回执", "Organization execution receipts"),synthesis.executionReceipts.map(r=>[r.source?.providerId||"Infer Runtime",`${r.summary}\n${r.source?.locator||""}`])));
     if (synthesis.unresolved.length) {
       card.append(node("h4", "", text("仍未解决", "Unresolved")));
       const list = node("ul"); synthesis.unresolved.forEach(question => list.append(node("li", "", question))); card.append(list);

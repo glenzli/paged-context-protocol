@@ -1,6 +1,7 @@
 //! Opt-in candidate inbox and bounded activity snapshots, separate from Page recall.
 pub(crate) mod automatic_review;
 mod automatic_review_undo;
+mod experience;
 mod persistence;
 mod review;
 pub(crate) mod synthesis;
@@ -98,13 +99,17 @@ impl ContextHub {
         &self,
         access: &AccessSession,
         db: &mut LockedState,
-        input: CandidateInput,
+        mut input: CandidateInput,
+        experience: Option<pcp_client::experience::Experience>,
         now: &str,
     ) -> Result<Value> {
         permission(access, &input.scope, AccessPermission::Ingest)?;
         text_limit("eventId", &input.event_id, 160)?;
         text_limit("title", &input.title, 120)?;
         text_limit("content", &input.content, 2000)?;
+        if let Some(profile) = &experience {
+            experience::normalize(&mut input, profile)?;
+        }
         self.validate_basis(access, &input).await?;
         let id = format!(
             "cand_{}",
@@ -112,7 +117,9 @@ impl ContextHub {
         );
         if let Some(existing) = db.state.candidates.iter().find(|c| c.candidate_id == id) {
             ensure!(
-                serde_json::to_value(&existing.input)? == serde_json::to_value(&input)?,
+                serde_json::to_value(&existing.input)? == serde_json::to_value(&input)?
+                    && serde_json::to_value(&existing.experience)?
+                        == serde_json::to_value(&experience)?,
                 "eventId was already used for different candidate content"
             );
             return Ok(
@@ -137,6 +144,7 @@ impl ContextHub {
             candidate_id: id.clone(),
             client_id: access.principal.principal_id.clone(),
             input,
+            experience,
             created_at: now.into(),
             expires_at: timestamp(Utc::now() + Duration::days(30)),
             version: 1,
@@ -302,7 +310,21 @@ impl ContextHubService for ContextHub {
                     policy.submit_candidates,
                     "Candidate submission is disabled for this client; enable it in Console"
                 );
-                self.submit(access, &mut db, input, &now).await
+                self.submit(access, &mut db, input, None, &now).await
+            }
+            ContextHubRequest::SubmitExperience(input) => {
+                ensure!(
+                    policy.submit_candidates,
+                    "Candidate submission is disabled for this client; enable it in Console"
+                );
+                self.submit(
+                    access,
+                    &mut db,
+                    input.candidate,
+                    Some(input.experience),
+                    &now,
+                )
+                .await
             }
             ContextHubRequest::PublishActivity(input) => {
                 ensure!(

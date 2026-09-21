@@ -137,6 +137,7 @@ where
                     outcome.model_attempts =
                         outcome.model_attempts.saturating_add(extra.model_attempts);
                     outcome.escalated = true;
+                    outcome.execution_receipts.extend(extra.execution_receipts);
                     outcome.response = extra.response;
                 }
                 Err(error) => {
@@ -357,6 +358,14 @@ impl InferRuntimeSemanticWorker {
                         usage: None,
                         model_attempts: 0,
                         escalated: true,
+                        execution_receipts: pcp_client::experience::receipts::infer_execution(
+                            &response.id,
+                            &response.model,
+                            &response.status,
+                        )
+                        .ok()
+                        .into_iter()
+                        .collect(),
                     },
                     attempt,
                 ))
@@ -587,6 +596,7 @@ mod tests {
             }),
             model_attempts: 1,
             escalated: false,
+            execution_receipts: Vec::new(),
         }
     }
     fn attempt(tier: ReviewTier, stage: String) -> ReviewAttempt {

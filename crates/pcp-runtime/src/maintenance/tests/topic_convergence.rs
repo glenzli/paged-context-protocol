@@ -466,6 +466,7 @@ impl SemanticMaintenanceWorker for ResumeOnlyWorker {
             usage: None,
             model_attempts: 1,
             escalated: true,
+            execution_receipts: Vec::new(),
         })
     }
 }
@@ -775,6 +776,7 @@ impl SemanticMaintenanceWorker for CachedPendingWorker {
             usage: None,
             model_attempts: 0,
             escalated: true,
+            execution_receipts: Vec::new(),
         })
     }
 }

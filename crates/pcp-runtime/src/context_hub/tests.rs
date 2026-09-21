@@ -754,6 +754,7 @@ async fn only_formal_promotion_notifies_the_page_maintenance_observer() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
+mod experience;
 mod synthesis;
 
 mod automatic_review;

@@ -62,6 +62,8 @@ pub struct Synthesis {
     pub created_at: String,
     pub review_request: Option<SynthesisReview>,
     pub results: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub execution_receipts: Vec<pcp_client::experience::ExecutionReceipt>,
     #[serde(default)]
     pub automatic_review: Option<super::automatic_review::AutomaticReview>,
 }
@@ -224,6 +226,7 @@ impl ContextHub {
             .collect::<Vec<_>>();
         peers.sort_by_key(|c| {
             (
+                !super::experience::same_topic(&seed, c),
                 c.organized_version == c.version
                     && !changed_context.contains(c.candidate_id.as_str()),
                 std::cmp::Reverse(similarity(
@@ -234,7 +237,7 @@ impl ContextHub {
             )
         });
         let mut candidates = vec![seed];
-        let mut evidence_chars = candidates[0].input.content.chars().count();
+        let mut evidence_chars = super::experience::evidence_chars(&candidates[0]);
         // Keep each admitted candidate whole. An oversized seed still progresses
         // alone; candidates outside this bounded batch remain eligible.
         for peer in peers {
@@ -281,7 +284,7 @@ impl ContextHub {
             };
             let chars = bundle
                 .iter()
-                .map(|c| c.input.content.chars().count())
+                .map(super::experience::evidence_chars)
                 .sum::<usize>();
             if candidates.len() + bundle.len() > ORGANIZATION_CANDIDATES
                 || evidence_chars + chars > ORGANIZATION_EVIDENCE_CHARS
@@ -440,10 +443,21 @@ impl ContextHub {
         }))
     }
 
+    #[cfg(test)]
     pub(crate) async fn finish_organization(
         &self,
         input: &OrganizationInput,
         proposals: Vec<ProposedSynthesis>,
+    ) -> Result<()> {
+        self.finish_organization_with_receipts(input, proposals, Vec::new())
+            .await
+    }
+
+    pub(crate) async fn finish_organization_with_receipts(
+        &self,
+        input: &OrganizationInput,
+        proposals: Vec<ProposedSynthesis>,
+        execution_receipts: Vec<pcp_client::experience::ExecutionReceipt>,
     ) -> Result<()> {
         validate_proposals(input, &proposals)?;
         let mut db = LockedState::open(&self.path, self.store.identity_id()).await?;
@@ -521,6 +535,7 @@ impl ContextHub {
                 created_at: now.clone(),
                 review_request: None,
                 results: vec![],
+                execution_receipts: execution_receipts.clone(),
                 automatic_review: None,
             });
         }

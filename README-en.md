@@ -68,6 +68,8 @@ With background maintenance enabled, related same-Scope candidates are organized
 - Local Unix-socket mode `0600` is an OS-user boundary and does not defend against a hostile process running as the same user.
 - Public conformance is defined by [`PROTOCOL-en.md`](PROTOCOL-en.md), not by a specific backend or interface in this repository.
 
+Native hosts may attach experience observations, provisional explanations and execution receipts through the existing candidate review path. The SDK provides Infer/Dev Mesh receipt adapters and a bounded, identity-bound outbox; PCP organization automatically records its Infer execution receipts. Model-facing tools keep ordinary prose without per-turn checks. See [experience memory](design/experience-memory.md) for integration and boundaries.
+
 ## Repository Layout
 
 | Crate | Role |

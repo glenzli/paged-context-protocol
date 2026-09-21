@@ -12,6 +12,7 @@ use pcp_rpc::RemotePcpClient;
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 use serde_json::json;
+mod experience;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -23,6 +24,15 @@ async fn main() -> Result<()> {
     if command == "help" || command == "--help" || command == "-h" {
         print_help();
         return Ok(());
+    }
+    if experience::local_command(&command, &mut arguments)? {
+        return Ok(());
+    }
+    if command == "experience-flush" {
+        anyhow::ensure!(
+            env::var_os("PCP_RUNTIME_SOCKET").is_some(),
+            "experience-flush requires an enrolled Runtime socket; embedded fallback is unavailable"
+        );
     }
 
     let (client, source): (Arc<dyn PcpApi>, String) =
@@ -70,6 +80,10 @@ async fn main() -> Result<()> {
         .map(|scope| scope.namespace)
         .collect::<Vec<_>>();
     match command.as_str() {
+        "experience-flush" => {
+            let outbox = experience::outbox(&mut arguments)?;
+            print_json(&outbox.flush_one(client.as_ref()).await?)?;
+        }
         "describe" => print_json(&json!({
             "identityId": client.identity_id(),
             "capabilities": client.capabilities(),
@@ -451,6 +465,6 @@ fn operator_tool_or_model() -> Option<String> {
 
 fn print_help() {
     println!(
-        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <page-id>\n  export\n  doctor\n  retention-plan [minimum-age-days] [keep-recent-per-page] [sample-limit]\n  retention-collect --confirm [minimum-age-days] [keep-recent-per-page] [sample-limit]\n  revise --confirm <page-id> < revised.md\n  summary-revise --confirm <target-page-id> < summary.md\n  tombstone --confirm <current-revision-id>\n\nSet PCP_RUNTIME_SOCKET to use a running local runtime, or PCP_STORE_PATH for embedded SQLite. PCP_OPERATOR_ACTOR_TYPE, PCP_OPERATOR_ACTOR_ID, and PCP_OPERATOR_TOOL_OR_MODEL can attribute operator writes."
+        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <page-id>\n  export\n  doctor\n  experience-receipt <infer|dev-mesh> [archive-locator] < receipt.json\n  experience-stage <private-outbox> <identity> <principal> < experience.json\n  experience-flush <private-outbox> <identity> <principal>\n  retention-plan [minimum-age-days] [keep-recent-per-page] [sample-limit]\n  retention-collect --confirm [minimum-age-days] [keep-recent-per-page] [sample-limit]\n  revise --confirm <page-id> < revised.md\n  summary-revise --confirm <target-page-id> < summary.md\n  tombstone --confirm <current-revision-id>\n\nSet PCP_RUNTIME_SOCKET to use a running local runtime, or PCP_STORE_PATH for embedded SQLite. PCP_OPERATOR_ACTOR_TYPE, PCP_OPERATOR_ACTOR_ID, and PCP_OPERATOR_TOOL_OR_MODEL can attribute operator writes."
     );
 }

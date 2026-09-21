@@ -112,6 +112,8 @@ pub struct CandidateReview {
 #[serde(tag = "operation", content = "params", rename_all = "snake_case")]
 pub enum ContextHubRequest {
     SubmitCandidate(CandidateInput),
+    /// Native host evidence; uses the same opt-in, quota, review and wakeup path.
+    SubmitExperience(crate::experience::ExperienceCandidate),
     PublishActivity(ActivityInput),
     ReadActivity(ActivityQuery),
     Inspect,

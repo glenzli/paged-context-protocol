@@ -248,6 +248,11 @@ impl ContextHub {
                 }
             }
             let mut facets = json!({"title":output.title,"reviewedSynthesis":snapshot.synthesis_id,"reviewedCandidates":evidence.iter().map(|c| json!({"candidateId":c.candidate_id,"clientId":c.client_id,"submittedAt":c.created_at})).collect::<Vec<_>>()});
+            super::experience::preserve(&mut facets, &evidence);
+            if !snapshot.execution_receipts.is_empty() {
+                facets["organizationExecutions"] =
+                    serde_json::to_value(&snapshot.execution_receipts)?;
+            }
             if automatic {
                 let review = snapshot
                     .automatic_review

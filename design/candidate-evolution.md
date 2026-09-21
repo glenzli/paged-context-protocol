@@ -12,8 +12,8 @@ ContextHub owns candidates, synthesis snapshots, retention, concurrency and revi
 The existing maintenance scheduler owns model execution and usage accounting. With maintenance
 already enabled, it checks candidate readiness at most every 60 seconds, waits 120 seconds after
 new evidence to coalesce submissions, and performs at most one organization job per cycle within
-the existing job budget. A bounded window contains at most 20 candidates (16,000 source characters) plus at most six relevant
-current Pages (12,000 characters). Up to four bounded previous interpretations supply continuity;
+the existing job budget. A bounded window contains at most 8 candidates (8,000 source and experience characters) plus at most three relevant
+current Pages (6,000 characters). Up to two bounded previous interpretations supply continuity;
 exact Page comparison snapshots are shared across groups rather than copied in storage. Scope checks precede model work. No unchanged window is repeatedly evaluated;
 A changed or removed compared Page reopens affected pending groups. New evidence can revisit deferred
 peers, while a deferral alone does not cause repeated inference. Continuous arrivals cannot postpone
@@ -75,3 +75,7 @@ deleting its content, while an update is reversed through a new Revision restori
 and metadata. Later edits cause a conflict rather than being overwritten. Undo has its own persisted
 intent and receipts. Existing Page editing remains available for corrections. Routine successes stay in
 the history, while missing information is described as a specific question.
+
+Native hosts can also submit [experience evidence](experience-memory.md), including structured
+observations, tentative interpretations and bounded execution receipts. The same organizer and review
+path preserve it; there is no separate model-facing checklist or automatic Skill promotion.

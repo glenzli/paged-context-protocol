@@ -1,5 +1,6 @@
 use std::sync::Arc;
 pub mod context_hub;
+pub mod experience;
 pub mod model_context;
 use std::{
     collections::{BTreeSet, HashSet, VecDeque},
@@ -34,6 +35,7 @@ pub use pcp_store::{
 /// This operational facility belongs to one Store identity. It is not a
 /// cross-Store aggregation service and never promotes candidates automatically.
 pub const RUNTIME_CONTEXT_INBOX_FEATURE: &str = "runtime_context_inbox";
+pub const RUNTIME_EXPERIENCE_FEATURE: &str = "runtime_experience_memory_v1";
 /// Accepted by current adapters when connected to an older Runtime deployment.
 pub const LEGACY_RUNTIME_CONTEXT_HUB_FEATURE: &str = "runtime_context_hub";
 
@@ -547,6 +549,9 @@ impl PcpTenantApi for EmbeddedPcpClient {
             capabilities
                 .features
                 .push(RUNTIME_CONTEXT_INBOX_FEATURE.into());
+            capabilities
+                .features
+                .push(RUNTIME_EXPERIENCE_FEATURE.into());
         }
         capabilities
     }

@@ -167,6 +167,7 @@ impl RpcOperation {
             Self::Describe => "describe",
             Self::ContextHub(request) => match request {
                 ContextHubRequest::SubmitCandidate(..) => "submit_candidate",
+                ContextHubRequest::SubmitExperience(..) => "submit_experience",
                 ContextHubRequest::PublishActivity(..) => "publish_activity",
                 ContextHubRequest::ReadActivity(..) => "read_activity",
                 ContextHubRequest::Inspect => "inspect_context_inbox",

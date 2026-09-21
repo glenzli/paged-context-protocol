@@ -363,6 +363,8 @@ pub struct MaintenanceWorkerOutcome {
     pub usage: Option<ModelTokenUsage>,
     pub model_attempts: u32,
     pub escalated: bool,
+    /// Actual provider executions, distinct from the evidence being interpreted.
+    pub execution_receipts: Vec<pcp_client::experience::ExecutionReceipt>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -523,6 +525,7 @@ pub trait SemanticMaintenanceWorker: Send + Sync {
             usage: None,
             model_attempts: 1,
             escalated: false,
+            execution_receipts: Vec::new(),
         })
     }
 
@@ -554,6 +557,7 @@ pub trait SemanticMaintenanceWorker: Send + Sync {
             usage: None,
             model_attempts: 1,
             escalated: false,
+            execution_receipts: Vec::new(),
         })
     }
 }

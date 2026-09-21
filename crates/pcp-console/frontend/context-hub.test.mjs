@@ -134,6 +134,17 @@ test("candidate lanes keep deferred evidence and terminal records out of the cur
   assert.equal(f.calls.length,0);
 });
 
+test("experience view separates observations, provisional explanations and producer receipts",async()=>{
+  const f=hubFixture();
+  f.snapshot.candidates[0].experience={attempt:"Change wait deadline",observation:"The call returned",interpretation:"May reduce timeouts",unresolved:["Long-term rate?"],receipts:[{stage:"inference",outcome:"succeeded",summary:"Execution completed, not task success",source:{providerId:"infer-runtime",locator:"response:1"}}]};
+  await f.view.load();
+  assert.match(f.root.textContent,/观察结果: The call returned/);
+  assert.match(f.root.textContent,/当前解释（待验证）: May reduce timeouts/);
+  assert.match(f.root.textContent,/未决点: Long-term rate\?/);
+  assert.match(f.root.textContent,/执行完成、验证通过和任务成功分别记录/);
+  assert.equal(f.calls.length,0);
+});
+
 test("organization shows the failure category and retry time while preserving raw details",async()=>{
   const f=hubFixture();
   const error="Infer Runtime maintenance response wait timed out after 130s; execution outcome unknown";

@@ -21,6 +21,8 @@ pub struct Candidate {
     pub candidate_id: String,
     pub client_id: String,
     pub input: CandidateInput,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experience: Option<pcp_client::experience::Experience>,
     pub created_at: String,
     pub expires_at: String,
     pub version: u64,

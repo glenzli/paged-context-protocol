@@ -114,13 +114,24 @@ impl ContextHub {
                     item.promotion_request = Some(request.clone());
                 }
                 db.save()?;
-                let written = client.ingest_page(IngestPageRequest {
-                    namespace: scope.clone(), kind: "reviewed_capture".into(), observed_at: None, source_span: None,
-                    payload: Some(PagePayload { media_type: "text/markdown".into(), content: format!("# {title}\n\n{content}") }),
-                    source_refs: sources, based_on_revision_ids: basis,
-                    facets: Some(json!({"title":title, "reviewedCandidates":items.iter().map(|c| json!({"candidateId":c.candidate_id,"clientId":c.client_id,"submittedAt":c.created_at})).collect::<Vec<_>>()})),
-                    external_event_id: Some(format!("pcp-context-review:{key}")),
-                }).await?;
+                let mut facets = json!({"title":title, "reviewedCandidates":items.iter().map(|c| json!({"candidateId":c.candidate_id,"clientId":c.client_id,"submittedAt":c.created_at})).collect::<Vec<_>>()});
+                super::experience::preserve(&mut facets, &items.iter().collect::<Vec<_>>());
+                let written = client
+                    .ingest_page(IngestPageRequest {
+                        namespace: scope.clone(),
+                        kind: "reviewed_capture".into(),
+                        observed_at: None,
+                        source_span: None,
+                        payload: Some(PagePayload {
+                            media_type: "text/markdown".into(),
+                            content: format!("# {title}\n\n{content}"),
+                        }),
+                        source_refs: sources,
+                        based_on_revision_ids: basis,
+                        facets: Some(facets),
+                        external_event_id: Some(format!("pcp-context-review:{key}")),
+                    })
+                    .await?;
                 json!({"status":"promoted","pageId":written.page_id,"revisionId":written.revision_id})
             }
             CandidateAction::Represented => {
