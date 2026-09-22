@@ -979,6 +979,12 @@ html.relation-comparison-open body { position: fixed; top: var(--relation-compar
 #review-budget-settings > label:has(select) { display: grid; gap: 5px; }
 #review-budget-settings input[type="checkbox"] { width: 16px; min-height: 16px; margin: 0; }
 #review-budget-settings p { margin: 0; line-height: 1.5; }
+.review-budget-group { display: grid; gap: 8px; min-width: 0; padding: 9px; border: 1px solid var(--line); border-radius: 8px; }
+.review-budget-group h3 { margin: 0; color: var(--text); font-size: 12px; line-height: 1.4; }
+.review-budget-group-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.review-budget-group-header label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
+.review-budget-group .maintenance-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.review-budget-group-shared .maintenance-settings-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 #review-budget-status { display: grid; gap: 7px; font-size: 12px; overflow-wrap: anywhere; }
 .maintenance-settings-actions { position: sticky; bottom: -1px; display: flex; justify-content: flex-end; padding: 8px 0 2px; background: var(--surface); border-top: 1px solid var(--line); z-index: 1; }
 .preferences-copy { margin: -4px 0 0; line-height: 1.45; }
@@ -1206,6 +1212,7 @@ pre { margin: 0; max-height: 420px; overflow: auto; padding: 11px; border: 1px s
   .maintenance-review-session-actions { position: static; align-items: stretch; flex-direction: column; }
   .maintenance-review-session-actions > div { justify-content: flex-end; }
   .maintenance-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .review-budget-group-shared .maintenance-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .aggregate-grid { grid-template-columns: 1fr; }
   .details-grid { grid-template-columns: 120px minmax(0, 1fr); }
   .graph-lanes { grid-template-columns: 1fr; }
@@ -1215,6 +1222,7 @@ pre { margin: 0; max-height: 420px; overflow: auto; padding: 11px; border: 1px s
 }
 @media (max-width: 520px) {
   .maintenance-settings-grid { grid-template-columns: 1fr; }
+  .review-budget-group .maintenance-settings-grid { grid-template-columns: 1fr; }
   .model-route-group-main, .model-route-override-row { grid-template-columns: minmax(0, 1fr) 92px; }
   .model-route-group-heading, .model-route-override-row > label { grid-column: 1 / -1; }
   .model-route-group-heading small { white-space: normal; }

@@ -144,6 +144,7 @@ const ZH_MESSAGES = {
   "Operations eligible for optional upgraded review": "可选升级审阅适用的操作",
   "Candidate synthesis review uses the Sol tier. Verification upgrades use required budget checks.": "候选记忆审阅使用 Sol 档位；维护验证的升级审阅遵循必需的预算检查。",
   "Enable Astra review": "启用 Astra 审阅",
+  "Shared limits": "共享限制",
   "Sol effort": "Sol 推理强度",
   "Astra effort": "Astra 推理强度",
   "Concurrent reviews": "并发审阅数",
@@ -3327,7 +3328,7 @@ function renderPreferencesTabs() {
 }
 
 async function openPreferences() {
-  if (!state.maintenance.loaded) renderMaintenanceStatus(await api("/api/maintenance"));
+  renderMaintenanceStatus(await api("/api/maintenance"));
   populateMaintenanceSettings();
   activePreferencesTab = "general";
   renderPreferencesTabs();

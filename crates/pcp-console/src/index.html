@@ -715,22 +715,37 @@
               <summary><strong data-i18n="Upgraded review">Upgraded review</strong><small id="review-budget-summary"></small></summary>
               <fieldset id="review-budget-settings" class="maintenance-settings-body">
                 <label><input id="review-budget-enabled" type="checkbox"><span data-i18n="Enable upgraded review">Enable upgraded review</span></label>
-                <label><input id="review-budget-astra-enabled" type="checkbox"><span data-i18n="Enable Astra review">Enable Astra review</span></label>
                 <p class="muted" data-i18n="Rolling 24 hours. Saving or restarting preserves usage.">Rolling 24 hours. Saving or restarting preserves usage.</p>
-                <div class="maintenance-settings-grid">
-                  <label><span data-i18n="Sol deployment">Sol deployment</span><span class="model-deployment-picker"><select id="review-budget-sol-deployment" required></select><input class="model-deployment-custom" hidden aria-label="Custom Sol deployment ID"></span></label>
-                  <label><span data-i18n="Sol effort">Sol effort</span><select id="review-budget-sol-effort"></select></label>
-                  <label><span data-i18n="Sol calls">Sol calls</span><input id="review-budget-sol-calls" type="number" min="1" value="300" required></label>
-                  <label><span data-i18n="Sol total tokens">Sol total tokens</span><input id="review-budget-sol-tokens" type="number" min="1" value="6000000" required></label>
-                  <label><span data-i18n="Astra deployment">Astra deployment</span><span class="model-deployment-picker"><select id="review-budget-astra-deployment" required></select><input class="model-deployment-custom" hidden aria-label="Custom Astra deployment ID"></span></label>
-                  <label><span data-i18n="Astra effort">Astra effort</span><select id="review-budget-astra-effort"></select></label>
-                  <label><span data-i18n="Astra calls">Astra calls</span><input id="review-budget-astra-calls" type="number" min="1" value="10" required></label>
-                  <label><span data-i18n="Astra tokens (optional)">Astra tokens (optional)</span><input id="review-budget-astra-tokens" type="number" min="1"></label>
-                  <label><span data-i18n="Concurrent reviews">Concurrent reviews</span><input id="review-budget-max-in-flight" type="number" min="1" max="4" required></label>
-                  <label><span data-i18n="Maximum input bytes">Maximum input bytes</span><input id="review-budget-max-input-bytes" type="number" min="1024" max="2000000" required></label>
-                  <label><span data-i18n="Output reservation tokens">Output reservation tokens</span><input id="review-budget-max-output-tokens" type="number" min="256" max="32768" required></label>
-                </div>
-                <p class="muted" data-i18n="The output token value reserves budget for admission; it does not cap the provider response.">The output token value reserves budget for admission; it does not cap the provider response.</p>
+                <section class="review-budget-group" aria-labelledby="review-budget-sol-heading">
+                  <h3 id="review-budget-sol-heading">Sol</h3>
+                  <div class="maintenance-settings-grid">
+                    <label><span data-i18n="Sol deployment">Sol deployment</span><span class="model-deployment-picker"><select id="review-budget-sol-deployment" required></select><input class="model-deployment-custom" hidden aria-label="Custom Sol deployment ID"></span></label>
+                    <label><span data-i18n="Sol effort">Sol effort</span><select id="review-budget-sol-effort"></select></label>
+                    <label><span data-i18n="Sol calls">Sol calls</span><input id="review-budget-sol-calls" type="number" min="1" value="300" required></label>
+                    <label><span data-i18n="Sol total tokens">Sol total tokens</span><input id="review-budget-sol-tokens" type="number" min="1" value="6000000" required></label>
+                  </div>
+                </section>
+                <section class="review-budget-group" aria-labelledby="review-budget-astra-heading">
+                  <div class="review-budget-group-header">
+                    <h3 id="review-budget-astra-heading">Astra</h3>
+                    <label><input id="review-budget-astra-enabled" type="checkbox"><span data-i18n="Enable Astra review">Enable Astra review</span></label>
+                  </div>
+                  <div class="maintenance-settings-grid">
+                    <label><span data-i18n="Astra deployment">Astra deployment</span><span class="model-deployment-picker"><select id="review-budget-astra-deployment" required></select><input class="model-deployment-custom" hidden aria-label="Custom Astra deployment ID"></span></label>
+                    <label><span data-i18n="Astra effort">Astra effort</span><select id="review-budget-astra-effort"></select></label>
+                    <label><span data-i18n="Astra calls">Astra calls</span><input id="review-budget-astra-calls" type="number" min="1" value="10" required></label>
+                    <label><span data-i18n="Astra tokens (optional)">Astra tokens (optional)</span><input id="review-budget-astra-tokens" type="number" min="1"></label>
+                  </div>
+                </section>
+                <section class="review-budget-group review-budget-group-shared" aria-labelledby="review-budget-shared-heading">
+                  <h3 id="review-budget-shared-heading" data-i18n="Shared limits">Shared limits</h3>
+                  <div class="maintenance-settings-grid">
+                    <label><span data-i18n="Concurrent reviews">Concurrent reviews</span><input id="review-budget-max-in-flight" type="number" min="1" max="4" required></label>
+                    <label><span data-i18n="Maximum input bytes">Maximum input bytes</span><input id="review-budget-max-input-bytes" type="number" min="1024" max="2000000" required></label>
+                    <label><span data-i18n="Output reservation tokens">Output reservation tokens</span><input id="review-budget-max-output-tokens" type="number" min="256" max="32768" required></label>
+                  </div>
+                  <p class="muted" data-i18n="The output token value reserves budget for admission; it does not cap the provider response.">The output token value reserves budget for admission; it does not cap the provider response.</p>
+                </section>
                 <p class="muted" data-i18n="The budget gates new calls using actual usage and reservations. Started calls finish normally; the final call may exceed the token threshold.">The budget gates new calls using actual usage and reservations. Started calls finish normally; the final call may exceed the token threshold.</p>
               </fieldset>
             </details>
