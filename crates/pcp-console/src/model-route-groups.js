@@ -6,6 +6,23 @@ export const MODEL_ROUTE_GROUPS = [
   { id: "feedback", operations: ["reconcile_feedback", "review_update"] },
 ];
 
+const ALL_MODEL_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max", "ultra"];
+const INFER_DEPLOYMENT_EFFORTS = {
+  codex_gpt_6_luna: ["low", "medium", "high", "xhigh", "max"],
+  codex_gpt_6_sol: ["low", "medium", "high", "xhigh", "max", "ultra"],
+  codex_gpt_5_6_luna: ["low", "medium", "high", "xhigh", "max"],
+  codex_gpt_5_6_terra: ["low", "medium", "high", "xhigh", "max", "ultra"],
+  codex_gpt_5_6_sol: ["low", "medium", "high", "xhigh", "max", "ultra"],
+};
+
+// Known local Infer deployments. Custom IDs stay editable because Console
+// cannot read the operator-only Infer provider catalog.
+export function modelEffortsForDeployment(deploymentId) {
+  const known = Object.hasOwn(INFER_DEPLOYMENT_EFFORTS, deploymentId)
+    ? INFER_DEPLOYMENT_EFFORTS[deploymentId] : null;
+  return { efforts: known || ALL_MODEL_EFFORTS, verified: Boolean(known) };
+}
+
 function sameRoute(left, right) {
   return left.deployment_id === right.deployment_id && left.effort === right.effort;
 }

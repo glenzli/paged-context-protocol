@@ -1,6 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MODEL_ROUTE_GROUPS, resolveModelRouteGroups, summarizeModelRouteGroups } from "../src/model-route-groups.js";
+import { MODEL_ROUTE_GROUPS, modelEffortsForDeployment, resolveModelRouteGroups, summarizeModelRouteGroups } from "../src/model-route-groups.js";
+
+test("known Infer deployments expose only their configured efforts", () => {
+  const luna = modelEffortsForDeployment("codex_gpt_6_luna");
+  assert.deepEqual(luna, { efforts: ["low", "medium", "high", "xhigh", "max"], verified: true });
+  assert.equal(luna.efforts.includes("ultra"), false);
+  assert.equal(luna.efforts.includes("none"), false);
+  assert.equal(modelEffortsForDeployment("codex_gpt_6_sol").efforts.includes("ultra"), true);
+  assert.equal(modelEffortsForDeployment("codex_gpt_5_6_luna").efforts.includes("ultra"), false);
+  assert.deepEqual(modelEffortsForDeployment("custom_provider"), {
+    efforts: ["none", "low", "medium", "high", "xhigh", "max", "ultra"], verified: false,
+  });
+});
 
 test("category defaults preserve individual efforts and special review routing", () => {
   const original = Object.fromEntries(MODEL_ROUTE_GROUPS.flatMap((group) => group.operations.map((operation) => [operation, {

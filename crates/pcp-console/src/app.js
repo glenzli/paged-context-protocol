@@ -5,7 +5,7 @@ import { createAccessView } from "/access-view.js";
 import { createPageInspector } from "/page-inspector.js?v=20260823.1";
 import { pageListPreview, pageCount, pageJump, PAGE_ROLE_LABELS, pageRoleBadge, appendPageFilters, pageBrowseOrder, pageTimeFields } from "/page-list.js";
 import { compactQuantity } from "/quantity-format.js";
-import { MODEL_ROUTE_GROUPS, summarizeModelRouteGroups } from "/model-route-groups.js";
+import { MODEL_ROUTE_GROUPS, modelEffortsForDeployment, summarizeModelRouteGroups } from "/model-route-groups.js";
 import { formatTimestamp } from "/time-format.js";
 import { reconciliationView } from "/maintenance-reconciliation.js";
 import { describePagePayload, pagePayloadPreviewText } from "/page-content.js?v=20260822.1";
@@ -3033,8 +3033,9 @@ function renderModelRoutingSettings(routing) {
     const deployment = document.createElement("select");
     deployment.className = "model-route-group-deployment";
     deployment.setAttribute("aria-label", `${modelRouteGroupLabel(group.id)} ${currentLanguage === "zh" ? "默认部署" : "default deployment"}`);
-    const deploymentPicker = modelDeploymentPicker(deployment, group.defaultRoute.deployment_id);
-    const effort = modelEffortSelect(group.defaultRoute.effort);
+    const effort = modelEffortSelect(group.defaultRoute.effort, group.defaultRoute.deployment_id);
+    const deploymentPicker = modelDeploymentPicker(deployment, group.defaultRoute.deployment_id,
+      () => populateModelEffortSelect(effort, modelDeploymentValue(deployment)));
     effort.className = "model-route-group-effort";
     effort.setAttribute("aria-label", `${modelRouteGroupLabel(group.id)} ${currentLanguage === "zh" ? "默认推理强度" : "default effort"}`);
     main.append(heading, deploymentPicker, effort);
@@ -3059,9 +3060,10 @@ function renderModelRoutingSettings(routing) {
       const input = document.createElement("select");
       input.className = "model-route-override-deployment";
       input.setAttribute("aria-label", `${modelOperationLabel(operation)} ${currentLanguage === "zh" ? "部署" : "deployment"}`);
-      const picker = modelDeploymentPicker(input, route.deployment_id);
+      const select = modelEffortSelect(route.effort, route.deployment_id);
+      const picker = modelDeploymentPicker(input, route.deployment_id,
+        () => populateModelEffortSelect(select, modelDeploymentValue(input)));
       setModelDeploymentDisabled(input, !toggle.checked);
-      const select = modelEffortSelect(route.effort);
       select.className = "model-route-override-effort";
       select.disabled = !toggle.checked;
       select.setAttribute("aria-label", `${modelOperationLabel(operation)} ${currentLanguage === "zh" ? "推理强度" : "effort"}`);
@@ -3118,15 +3120,33 @@ function modelOperationLabel(operation) {
   })[operation] || operation;
 }
 
-function modelEffortSelect(value) {
+function modelEffortSelect(value, deploymentId) {
   const select = document.createElement("select");
-  for (const effort of ["none", "low", "medium", "high", "xhigh", "max", "ultra"]) {
+  populateModelEffortSelect(select, deploymentId, value);
+  return select;
+}
+
+function populateModelEffortSelect(select, deploymentId, value = select.value) {
+  const { efforts, verified } = modelEffortsForDeployment(deploymentId);
+  select.replaceChildren();
+  for (const effort of efforts) {
     const option = document.createElement("option");
     option.value = option.textContent = effort;
     select.append(option);
   }
+  const unsupported = Boolean(value) && !efforts.includes(value);
+  if (unsupported) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = currentLanguage === "zh" ? `${value}（当前部署不支持）` : `${value} (unsupported by this deployment)`;
+    select.append(option);
+  }
   select.value = value;
-  return select;
+  select.setCustomValidity(unsupported
+    ? (currentLanguage === "zh" ? "请选择当前部署支持的推理强度" : "Choose an effort supported by this deployment")
+    : "");
+  select.title = verified ? "" : (currentLanguage === "zh" ? "自定义部署：请核对 Infer Runtime 支持的推理强度" : "Custom deployment: confirm supported efforts in Infer Runtime");
+  select.onchange = () => populateModelEffortSelect(select, deploymentId);
 }
 
 const CUSTOM_MODEL_DEPLOYMENT = "__custom_deployment__";
@@ -3151,17 +3171,17 @@ function modelDeploymentLabel(id) {
   return `GPT-${version} ${match[2][0].toUpperCase()}${match[2].slice(1)}`;
 }
 
-function modelDeploymentPicker(select, value) {
+function modelDeploymentPicker(select, value, onDeploymentChange = null) {
   const picker = element("span", "model-deployment-picker");
   const custom = document.createElement("input");
   custom.className = "model-deployment-custom";
   custom.setAttribute("aria-label", currentLanguage === "zh" ? "自定义部署 ID" : "Custom deployment ID");
   picker.append(select, custom);
-  populateModelDeploymentPicker(select, value);
+  populateModelDeploymentPicker(select, value, onDeploymentChange);
   return picker;
 }
 
-function populateModelDeploymentPicker(select, value) {
+function populateModelDeploymentPicker(select, value, onDeploymentChange = null) {
   const choices = new Set(modelDeploymentChoices());
   if (value) choices.add(value);
   select.replaceChildren();
@@ -3183,12 +3203,16 @@ function populateModelDeploymentPicker(select, value) {
     custom.hidden = select.value !== CUSTOM_MODEL_DEPLOYMENT;
     custom.required = !custom.hidden;
     if (!custom.hidden) custom.focus();
+    onDeploymentChange?.();
     updateMaintenanceSettingsSummaries();
   };
   select.onchange = update;
   custom.hidden = select.value !== CUSTOM_MODEL_DEPLOYMENT;
   custom.required = !custom.hidden;
-  custom.oninput = updateMaintenanceSettingsSummaries;
+  custom.oninput = () => {
+    onDeploymentChange?.();
+    updateMaintenanceSettingsSummaries();
+  };
 }
 
 function modelDeploymentValue(select) {
@@ -3244,9 +3268,13 @@ function renderReviewBudgetSettings(budget) {
   const c = budget.config;
   byId("review-budget-enabled").checked = c.enabled;
   byId("review-budget-astra-enabled").checked = c.astra_enabled;
-  for (const tier of ["sol", "astra"]) byId(`review-budget-${tier}-effort`).replaceChildren(...modelEffortSelect(c[`${tier}_effort`]).children);
-  for (const tier of ["sol", "astra"]) byId(`review-budget-${tier}-effort`).value = c[`${tier}_effort`];
-  for (const tier of ["sol", "astra"]) populateModelDeploymentPicker(byId(`review-budget-${tier}-deployment`), c[`${tier}_deployment_id`]);
+  for (const tier of ["sol", "astra"]) {
+    const deployment = byId(`review-budget-${tier}-deployment`);
+    const effort = byId(`review-budget-${tier}-effort`);
+    populateModelEffortSelect(effort, c[`${tier}_deployment_id`], c[`${tier}_effort`]);
+    populateModelDeploymentPicker(deployment, c[`${tier}_deployment_id`],
+      () => populateModelEffortSelect(effort, modelDeploymentValue(deployment)));
+  }
   [["sol-calls", "sol_max_calls"], ["sol-tokens", "sol_max_tokens"], ["astra-calls", "astra_max_calls"], ["astra-tokens", "astra_max_tokens"], ["max-in-flight", "max_in_flight"], ["max-input-bytes", "max_input_bytes"], ["max-output-tokens", "max_output_tokens"]].forEach(([id,key]) => { byId(`review-budget-${id}`).value = c[key] ?? ""; });
   const host = byId("review-budget-status"); host.replaceChildren();
   if (budget.error) {
