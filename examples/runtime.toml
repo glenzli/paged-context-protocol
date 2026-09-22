@@ -60,12 +60,35 @@ allowed_scopes = [
 # provider = "infer_runtime"
 # credential_file = "/absolute/path/to/pcp-runtime.token"
 # timeout_seconds = 120
-# summary_deployment_id = "codex_gpt_5_6_luna"
-# reasoning_deployment_id = "codex_gpt_5_6_luna"
-# relation_deployment_id = "codex_gpt_5_6_terra" # optional Relation baseline override
-# escalation_deployment_id = "codex_gpt_5_6_sol" # one attempt only after explicit defer
+# summary_deployment_id = "codex_gpt_6_luna"
+# reasoning_deployment_id = "codex_gpt_6_luna"
+# relation_deployment_id = "codex_gpt_6_sol" # optional Relation baseline override
+# escalation_operations = ["reconcile_feedback", "select_packing", "analyze_packing", "select_relation", "extract_topic", "assess_archive"]
+# escalation_deployment_id = "codex_gpt_6_sol" # legacy, review_budget selects upgrades
 # actor_id = "model:infer-runtime-maintenance"
 # actor_type = "model"
+#
+# [maintenance.worker.route_groups.knowledge]
+# deployment_id = "codex_gpt_6_luna"
+# effort = "medium"
+#
+# [maintenance.worker.operation_routes.select_relation] # overrides its group
+# deployment_id = "codex_gpt_6_luna"
+# effort = "high"
+#
+# [maintenance.worker.review_budget]
+# enabled = true
+# sol_deployment_id = "codex_gpt_6_sol"
+# sol_effort = "high"
+# astra_enabled = false
+# astra_deployment_id = "codex_gpt_6_astra"
+# astra_effort = "low"
+# sol_max_calls = 300
+# sol_max_tokens = 6000000
+# astra_max_calls = 10
+# max_in_flight = 1
+# max_input_bytes = 512000
+# max_output_tokens = 8192 # reservation for admission, not a provider output cap
 #
 # Command alternative:
 # provider = "command"

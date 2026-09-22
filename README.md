@@ -138,7 +138,7 @@ sh scripts/import-store.sh \
   --enrollment-state /absolute/path/to/pcp-enrollments.json
 ```
 
-Infer Runtime worker 的升级审阅通过 `[maintenance.worker.review_budget]` 配置，默认关闭。启用后，Sol High 使用滚动 24 小时 300 次 / 600 万总 token，Astra Low 默认 10 次。Console 可修改额度、查看实际用量与未结预占；重启不重置账本。旧的无预算升级路径已停用。预算统一采用准入阈值：实际用量与预占控制后续调用，已开始的调用正常完成，允许最后一笔超出 Token 阈值。详见[审阅预算与修正流程](design/maintenance-review-budget.md)。
+Infer Runtime worker 的摘要和推理默认使用 GPT-6 Luna，升级审阅通过 `[maintenance.worker.review_budget]` 配置，默认关闭。启用后，GPT-6 Sol High 使用滚动 24 小时 300 次 / 600 万总 token，Astra Low 默认 10 次。托管 Console 按摘要、整理、知识关联、验证留存、反馈更新五类设置默认部署和推理强度，每项操作也可单独覆盖；可选升级操作、超时、Sol/Astra 部署与额度等在折叠区域中配置。用量与未结预占单独显示；重启不重置账本。部署还须由 Infer Runtime 授权给 PCP。旧的无预算升级路径已停用。预算统一采用准入阈值：实际用量与预占控制后续调用，已开始的调用正常完成，允许最后一笔超出 Token 阈值。详见[审阅预算与修正流程](design/maintenance-review-budget.md)。
 
 ### MCP
 

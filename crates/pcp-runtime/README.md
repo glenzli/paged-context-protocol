@@ -226,27 +226,48 @@ does not alter the long-running scheduler configuration.
 
 `maintenance.worker.provider = "infer_runtime"` uses the official Infer Runtime
 Consumer SDK and an independent `pcp-runtime` managed credential. Summary and
-reasoning requests default to the explicitly named Luna deployment. There is no
+reasoning requests default to the explicitly named GPT-6 Luna deployment. There is no
 router fallback. `relation_deployment_id` may still pin Relation work to another
 baseline deployment, but it is not the uncertainty escalation path.
 
-`escalation_deployment_id` enables one sparse, bounded second opinion. Runtime
-uses it only after the baseline returns the explicit `defer` contract for an
-operation listed in `escalation_operations`; missing evidence, stale candidates,
-invalid output, transport failures, and schema failures do not escalate. The
-default eligible set is feedback reconciliation, packing selection/analysis, Relation, Topic, and archive
-review. Summary and retention remain Luna-only. A typical policy is:
+Upgraded review is opt-in through `review_budget`. Eligible operations can use
+a bounded Sol review, then Astra when enabled; missing evidence, stale candidates,
+invalid output, transport failures, and schema failures do not trigger a model
+fallback. The default eligible set is feedback reconciliation, packing
+selection/analysis, Relation, Topic, and archive review. Summary and retention
+remain Luna-only. The legacy `escalation_deployment_id` is accepted but does not
+select the upgraded deployment. A typical policy is:
 
 ```toml
 [maintenance.worker]
 provider = "infer_runtime"
 credential_file = "/absolute/path/to/pcp-runtime.token"
-summary_deployment_id = "codex_gpt_5_6_luna"
-reasoning_deployment_id = "codex_gpt_5_6_luna"
-escalation_deployment_id = "codex_gpt_5_6_sol"
+summary_deployment_id = "codex_gpt_6_luna"
+reasoning_deployment_id = "codex_gpt_6_luna"
+
+# Optional category default and individual override. Candidate synthesis
+# review uses the shared Sol tier. Verification may have a baseline first.
+[maintenance.worker.route_groups.knowledge]
+deployment_id = "codex_gpt_6_luna"
+effort = "medium"
+
+[maintenance.worker.operation_routes.select_relation]
+deployment_id = "codex_gpt_6_luna"
+effort = "high"
+
+[maintenance.worker.review_budget]
+enabled = true
+sol_deployment_id = "codex_gpt_6_sol"
+sol_effort = "high"
+astra_enabled = false
 ```
 
-Both attempts use unary Responses with background scheduling priority, a named
+For baseline maintenance calls, an operation override wins over its category
+default, which wins over the legacy summary/reasoning fields. Console saves
+category defaults with only the individual differences, so changing a
+category later updates the operations that still inherit it.
+
+These calls use unary Responses with background scheduling priority, a named
 deployment, zero estimated cost, and no fallback: an unavailable deployment
 fails instead of silently selecting a different model. Runtime accepts only
 strict JSON from `output_text`; missing text,

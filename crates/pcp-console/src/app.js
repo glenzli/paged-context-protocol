@@ -5,6 +5,7 @@ import { createAccessView } from "/access-view.js";
 import { createPageInspector } from "/page-inspector.js?v=20260823.1";
 import { pageListPreview, pageCount, pageJump, PAGE_ROLE_LABELS, pageRoleBadge, appendPageFilters, pageBrowseOrder, pageTimeFields } from "/page-list.js";
 import { compactQuantity } from "/quantity-format.js";
+import { MODEL_ROUTE_GROUPS, summarizeModelRouteGroups } from "/model-route-groups.js";
 import { formatTimestamp } from "/time-format.js";
 import { reconciliationView } from "/maintenance-reconciliation.js";
 import { describePagePayload, pagePayloadPreviewText } from "/page-content.js?v=20260822.1";
@@ -132,6 +133,28 @@ const ZH_MESSAGES = {
   "Analysis failed": "分析失败",
   "Analysis incomplete": "分析未完成",
   "Automatic maintenance": "自动维护",
+  "Schedule and mode": "执行时机与模式",
+  "Model policy": "模型策略",
+  "Choose a model for each category; use individual overrides only where needed. Infer Runtime must authorize each deployment.": "为每类选择模型；仅在需要时设置单项覆盖。部署仍须获得 Infer Runtime 授权。",
+  "Routing limits and optional upgrades": "路由限制与可选升级",
+  "Review usage": "审阅用量",
+  "Model routing by operation": "按操作配置模型路由",
+  "Each operation has a deployment and reasoning effort. Deployment IDs must be authorized for PCP in Infer Runtime.": "每项操作可分别设置部署和推理强度。部署 ID 须已在 Infer Runtime 中授权给 PCP。",
+  "Worker timeout (seconds)": "工作器超时（秒）",
+  "Operations eligible for optional upgraded review": "可选升级审阅适用的操作",
+  "Candidate synthesis review uses the Sol tier. Verification upgrades use required budget checks.": "候选记忆审阅使用 Sol 档位；维护验证的升级审阅遵循必需的预算检查。",
+  "Enable Astra review": "启用 Astra 审阅",
+  "Sol effort": "Sol 推理强度",
+  "Astra effort": "Astra 推理强度",
+  "Concurrent reviews": "并发审阅数",
+  "Maximum input bytes": "输入字节上限",
+  "Output reservation tokens": "输出预占 token",
+  "The output token value reserves budget for admission; it does not cap the provider response.": "输出 token 值仅用于准入预占，不限制模型实际响应。",
+  "Baseline model routing": "基础模型路由",
+  "Use deployment IDs authorized for PCP in Infer Runtime. An empty Relation override uses the reasoning deployment.": "填写 Infer Runtime 已授权给 PCP 的部署 ID。Relation 留空时使用推理部署。",
+  "Summary deployment": "摘要部署",
+  "Reasoning deployment": "推理部署",
+  "Relation override (optional)": "Relation 覆盖部署（可选）",
   "Automatic maintenance in progress": "自动维护进行中",
   "Settings": "设置",
   "General": "通用",
@@ -2966,6 +2989,7 @@ function populateMaintenanceSettings() {
   byId("maintenance-settings-tab").hidden = !configurable;
   if (!configurable && activePreferencesTab === "maintenance") activePreferencesTab = "general";
   if (!configurable) return;
+  renderModelRoutingSettings(status.modelRouting);
   renderReviewBudgetSettings(status.reviewBudget);
   const trigger = status.writeTrigger || {};
   byId("maintenance-settings-enabled").checked = Boolean(status.enabled);
@@ -2973,20 +2997,266 @@ function populateMaintenanceSettings() {
   byId("maintenance-settings-min-pages").value = trigger.minNewPages || 8;
   byId("maintenance-settings-quiet").value = Math.max(1, Math.round((trigger.quietPeriodSeconds || 600) / 60));
   byId("maintenance-settings-max-wait").value = Math.max(1, Math.round((trigger.maxWaitSeconds || 3600) / 60));
+  updateMaintenanceSettingsSummaries();
+}
+
+function updateMaintenanceSettingsSummaries() {
+  const zh = currentLanguage === "zh";
+  const mode = byId("maintenance-settings-mode").value === "apply" ? (zh ? "应用" : "Apply") : (zh ? "观察" : "Observe");
+  byId("maintenance-trigger-summary").textContent = `${mode} · ${byId("maintenance-settings-min-pages").value} ${zh ? "页" : "pages"}`;
+  const deployments = [...byId("model-routing-rows").querySelectorAll(".model-route-group-deployment")].map(modelDeploymentValue);
+  const distinct = [...new Set(deployments)];
+  byId("model-policy-summary").textContent = distinct.length === 1
+    ? `${deployments.length} ${zh ? "类" : "categories"} · ${modelDeploymentLabel(distinct[0])}`
+    : `${deployments.length} ${zh ? "类" : "categories"} · ${distinct.length} ${zh ? "个部署" : "deployments"}`;
+  const enabled = byId("review-budget-enabled").checked;
+  const astra = byId("review-budget-astra-enabled").checked;
+  byId("review-budget-summary").textContent = enabled
+    ? `${modelDeploymentLabel(modelDeploymentValue(byId("review-budget-sol-deployment")) || "Sol")}${astra ? ` · ${modelDeploymentLabel(modelDeploymentValue(byId("review-budget-astra-deployment")) || "Astra")}` : ""}`
+    : (zh ? "已关闭" : "Off");
+}
+
+function renderModelRoutingSettings(routing) {
+  byId("model-routing-disclosure").hidden = !routing;
+  byId("model-routing-settings").hidden = !routing;
+  byId("model-routing-settings").disabled = !routing;
+  if (!routing) return;
+  const host = byId("model-routing-rows"); host.replaceChildren();
+  for (const group of summarizeModelRouteGroups(routing.routes || {}, routing.route_groups || {}, routing.operation_overrides || {})) {
+    if (!group.defaultRoute) continue;
+    const card = element("section", "model-route-group");
+    card.dataset.group = group.id;
+    const main = element("div", "model-route-group-main");
+    const heading = element("div", "model-route-group-heading");
+    heading.append(element("strong", "", modelRouteGroupLabel(group.id)));
+    heading.append(element("small", "muted", group.operations.map(modelOperationLabel).join(" · ")));
+    const deployment = document.createElement("select");
+    deployment.className = "model-route-group-deployment";
+    deployment.setAttribute("aria-label", `${modelRouteGroupLabel(group.id)} ${currentLanguage === "zh" ? "默认部署" : "default deployment"}`);
+    const deploymentPicker = modelDeploymentPicker(deployment, group.defaultRoute.deployment_id);
+    const effort = modelEffortSelect(group.defaultRoute.effort);
+    effort.className = "model-route-group-effort";
+    effort.setAttribute("aria-label", `${modelRouteGroupLabel(group.id)} ${currentLanguage === "zh" ? "默认推理强度" : "default effort"}`);
+    main.append(heading, deploymentPicker, effort);
+    const details = document.createElement("details");
+    details.className = "model-route-overrides";
+    const summary = document.createElement("summary");
+    const rows = element("div", "model-route-override-rows");
+    const updateCount = () => {
+      const count = rows.querySelectorAll("input[type=checkbox]:checked").length;
+      summary.textContent = currentLanguage === "zh" ? `单项覆盖 · ${count} 项` : `Individual overrides · ${count}`;
+    };
+    for (const operation of group.operations) {
+      const route = routing.routes?.[operation];
+      if (!route) continue;
+      const row = element("div", "model-route-override-row");
+      row.dataset.operation = operation;
+      const toggleLabel = document.createElement("label");
+      const toggle = document.createElement("input");
+      toggle.type = "checkbox";
+      toggle.checked = Object.hasOwn(group.overrides, operation);
+      toggleLabel.append(toggle, document.createTextNode(modelOperationLabel(operation)));
+      const input = document.createElement("select");
+      input.className = "model-route-override-deployment";
+      input.setAttribute("aria-label", `${modelOperationLabel(operation)} ${currentLanguage === "zh" ? "部署" : "deployment"}`);
+      const picker = modelDeploymentPicker(input, route.deployment_id);
+      setModelDeploymentDisabled(input, !toggle.checked);
+      const select = modelEffortSelect(route.effort);
+      select.className = "model-route-override-effort";
+      select.disabled = !toggle.checked;
+      select.setAttribute("aria-label", `${modelOperationLabel(operation)} ${currentLanguage === "zh" ? "推理强度" : "effort"}`);
+      toggle.addEventListener("change", () => {
+        setModelDeploymentDisabled(input, !toggle.checked);
+        select.disabled = !toggle.checked;
+        if (toggle.checked && !modelDeploymentValue(input)) input.value = deployment.value;
+        updateCount();
+      });
+      row.append(toggleLabel, picker, select);
+      rows.append(row);
+    }
+    updateCount();
+    details.append(summary, rows);
+    card.append(main, details);
+    host.append(card);
+  }
+  byId("model-routing-timeout").value = routing.timeout_seconds;
+  const escalation = byId("model-routing-escalation"); escalation.replaceChildren();
+  for (const operation of ["reconcile_feedback", "select_packing", "analyze_packing", "select_relation", "extract_topic", "assess_archive"]) {
+    const label = document.createElement("label");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.dataset.operation = operation;
+    checkbox.checked = (routing.escalation_operations || []).includes(operation);
+    label.append(checkbox, document.createTextNode(modelOperationLabel(operation)));
+    escalation.append(label);
+  }
+}
+
+function modelRouteGroupLabel(group) {
+  const names = currentLanguage === "zh"
+    ? { summary: "摘要", organization: "整理与打包", knowledge: "关联与主题", verification: "验证与留存", feedback: "反馈与更新" }
+    : { summary: "Summaries", organization: "Organization and packing", knowledge: "Relations and topics", verification: "Verification and retention", feedback: "Feedback and updates" };
+  return names[group] || group;
+}
+
+function modelOperationLabel(operation) {
+  if (currentLanguage !== "zh") return operation.replaceAll("_", " ");
+  return ({
+    review_candidate_synthesis: "候选记忆审阅",
+    organize_candidates: "整理候选",
+    summarize_page: "单页摘要",
+    summarize_pages: "批量摘要",
+    select_packing: "打包选择",
+    analyze_packing: "打包分析",
+    select_relation: "关联判断",
+    extract_topic: "主题提取",
+    verify_maintenance: "维护验证",
+    assess_archive: "归档评估",
+    reconcile_feedback: "反馈对账",
+    review_update: "更新审阅",
+    select_retention_milestones: "保留里程碑",
+  })[operation] || operation;
+}
+
+function modelEffortSelect(value) {
+  const select = document.createElement("select");
+  for (const effort of ["none", "low", "medium", "high", "xhigh", "max", "ultra"]) {
+    const option = document.createElement("option");
+    option.value = option.textContent = effort;
+    select.append(option);
+  }
+  select.value = value;
+  return select;
+}
+
+const CUSTOM_MODEL_DEPLOYMENT = "__custom_deployment__";
+
+function modelDeploymentChoices() {
+  const routing = state.maintenance.status?.modelRouting || {};
+  const configured = [
+    ...Object.values(routing.routes || {}),
+    ...Object.values(routing.route_groups || {}),
+    ...Object.values(routing.operation_overrides || {}),
+  ].map((route) => route?.deployment_id);
+  return [...new Set([
+    "codex_gpt_6_luna", "codex_gpt_6_sol",
+    ...configured,
+  ].filter(Boolean))];
+}
+
+function modelDeploymentLabel(id) {
+  const match = /^codex_gpt_(\d+(?:_\d+)?)_(luna|sol|terra|astra)$/.exec(id);
+  if (!match) return id;
+  const version = match[1].replace("_", ".");
+  return `GPT-${version} ${match[2][0].toUpperCase()}${match[2].slice(1)}`;
+}
+
+function modelDeploymentPicker(select, value) {
+  const picker = element("span", "model-deployment-picker");
+  const custom = document.createElement("input");
+  custom.className = "model-deployment-custom";
+  custom.setAttribute("aria-label", currentLanguage === "zh" ? "自定义部署 ID" : "Custom deployment ID");
+  picker.append(select, custom);
+  populateModelDeploymentPicker(select, value);
+  return picker;
+}
+
+function populateModelDeploymentPicker(select, value) {
+  const choices = new Set(modelDeploymentChoices());
+  if (value) choices.add(value);
+  select.replaceChildren();
+  for (const id of choices) {
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = `${modelDeploymentLabel(id)}${id === "codex_gpt_6_luna" || id === "codex_gpt_6_sol" ? "" : currentLanguage === "zh" ? "（当前配置）" : " (configured)"}`;
+    option.title = id;
+    select.append(option);
+  }
+  const other = document.createElement("option");
+  other.value = CUSTOM_MODEL_DEPLOYMENT;
+  other.textContent = currentLanguage === "zh" ? "其他部署…" : "Other deployment…";
+  select.append(other);
+  select.value = value || CUSTOM_MODEL_DEPLOYMENT;
+  select.required = true;
+  const custom = select.parentElement.querySelector(".model-deployment-custom");
+  const update = () => {
+    custom.hidden = select.value !== CUSTOM_MODEL_DEPLOYMENT;
+    custom.required = !custom.hidden;
+    if (!custom.hidden) custom.focus();
+    updateMaintenanceSettingsSummaries();
+  };
+  select.onchange = update;
+  custom.hidden = select.value !== CUSTOM_MODEL_DEPLOYMENT;
+  custom.required = !custom.hidden;
+  custom.oninput = updateMaintenanceSettingsSummaries;
+}
+
+function modelDeploymentValue(select) {
+  return select.value === CUSTOM_MODEL_DEPLOYMENT
+    ? select.parentElement.querySelector(".model-deployment-custom").value.trim()
+    : select.value.trim();
+}
+
+function setModelDeploymentDisabled(select, disabled) {
+  select.disabled = disabled;
+  select.parentElement.querySelector(".model-deployment-custom").disabled = disabled;
+}
+
+function readModelRoutingSettings() {
+  if (!state.maintenance.status?.modelRouting) return null;
+  const groups = [...byId("model-routing-rows").children].map((card) => {
+    const definition = MODEL_ROUTE_GROUPS.find((group) => group.id === card.dataset.group);
+    const overrides = {};
+    for (const row of card.querySelectorAll(".model-route-override-row")) {
+      if (!row.querySelector("input[type=checkbox]").checked) continue;
+      overrides[row.dataset.operation] = {
+        deployment_id: modelDeploymentValue(row.querySelector(".model-route-override-deployment")),
+        effort: row.querySelector(".model-route-override-effort").value,
+      };
+    }
+    return {
+      ...definition,
+      defaultRoute: {
+        deployment_id: modelDeploymentValue(card.querySelector(".model-route-group-deployment")),
+        effort: card.querySelector(".model-route-group-effort").value,
+      },
+      overrides,
+    };
+  });
+  const originalOverrides = state.maintenance.status.modelRouting.operation_overrides || {};
+  const operationOverrides = {};
+  if (originalOverrides.review_candidate_synthesis) operationOverrides.review_candidate_synthesis = originalOverrides.review_candidate_synthesis;
+  for (const group of groups) Object.assign(operationOverrides, group.overrides);
+  return {
+    route_groups: Object.fromEntries(groups.map((group) => [group.id, group.defaultRoute])),
+    operation_overrides: operationOverrides,
+    escalation_operations: [...byId("model-routing-escalation").querySelectorAll("input:checked")].map((node) => node.dataset.operation),
+    timeout_seconds: Number(byId("model-routing-timeout").value),
+  };
 }
 
 function renderReviewBudgetSettings(budget) {
+  byId("review-budget-disclosure").hidden = !budget;
+  byId("review-usage-disclosure").hidden = !budget;
   byId("review-budget-settings").hidden = !budget;
   byId("review-budget-settings").disabled = !budget;
   if (!budget) return;
   const c = budget.config;
   byId("review-budget-enabled").checked = c.enabled;
   byId("review-budget-astra-enabled").checked = c.astra_enabled;
-  [["sol-deployment", "sol_deployment_id"], ["astra-deployment", "astra_deployment_id"], ["sol-calls", "sol_max_calls"], ["sol-tokens", "sol_max_tokens"], ["astra-calls", "astra_max_calls"], ["astra-tokens", "astra_max_tokens"]].forEach(([id,key]) => { byId(`review-budget-${id}`).value = c[key] ?? ""; });
+  for (const tier of ["sol", "astra"]) byId(`review-budget-${tier}-effort`).replaceChildren(...modelEffortSelect(c[`${tier}_effort`]).children);
+  for (const tier of ["sol", "astra"]) byId(`review-budget-${tier}-effort`).value = c[`${tier}_effort`];
+  for (const tier of ["sol", "astra"]) populateModelDeploymentPicker(byId(`review-budget-${tier}-deployment`), c[`${tier}_deployment_id`]);
+  [["sol-calls", "sol_max_calls"], ["sol-tokens", "sol_max_tokens"], ["astra-calls", "astra_max_calls"], ["astra-tokens", "astra_max_tokens"], ["max-in-flight", "max_in_flight"], ["max-input-bytes", "max_input_bytes"], ["max-output-tokens", "max_output_tokens"]].forEach(([id,key]) => { byId(`review-budget-${id}`).value = c[key] ?? ""; });
   const host = byId("review-budget-status"); host.replaceChildren();
-  if (budget.error) { host.append(element("p", "error", budget.error)); return; }
+  if (budget.error) {
+    byId("review-usage-summary").textContent = currentLanguage === "zh" ? "账本不可用" : "Ledger unavailable";
+    host.append(element("p", "error", budget.error));
+    return;
+  }
   const status = budget.status;
   const zh = currentLanguage === "zh";
+  byId("review-usage-summary").textContent = `Sol ${status.sol.usedCalls}/${status.sol.maxCalls} · Astra ${status.astra.usedCalls}/${status.astra.maxCalls}`;
   for (const tier of [status.sol, status.astra]) {
     const tokens = tier.remainingTokens == null ? "—" : compactQuantity(tier.remainingTokens, currentLocale());
     host.append(element("p", "", `${tier.tier.toUpperCase()}: ${tier.usedCalls}/${tier.maxCalls} ${zh ? "次调用" : "calls"} · ${zh ? "实际" : "actual"} ${compactQuantity(tier.actualTokens, currentLocale())} tokens · ${zh ? "预占" : "reserved"} ${compactQuantity(tier.reservedTokens, currentLocale())} · ${zh ? "剩余" : "remaining"} ${tokens}`));
@@ -2994,7 +3264,6 @@ function renderReviewBudgetSettings(budget) {
     if (tier.nextReleaseAtMs) host.append(element("small", "muted", `${zh ? "最早释放" : "Next release"}: ${new Date(tier.nextReleaseAtMs).toLocaleString()}`));
   }
   host.append(element("p", "muted", `${zh ? "未结请求" : "Unsettled"}: ${status.inFlight}`));
-  for (const attempt of (status.attempts || []).slice(0, 8)) host.append(element("p", "muted", `${attempt.tier} ${attempt.effort} · ${attempt.stage} · ${attempt.state} · ${attempt.actualTokens ?? "usage unknown"} tokens · ${attempt.responseId || "request identity unknown"}`));
 }
 
 function readReviewBudgetSettings() {
@@ -3003,12 +3272,17 @@ function readReviewBudgetSettings() {
   return { ...previous,
     enabled: byId("review-budget-enabled").checked,
     astra_enabled: byId("review-budget-astra-enabled").checked,
-    sol_deployment_id: byId("review-budget-sol-deployment").value.trim(),
-    astra_deployment_id: byId("review-budget-astra-deployment").value.trim(),
+    sol_deployment_id: modelDeploymentValue(byId("review-budget-sol-deployment")),
+    astra_deployment_id: modelDeploymentValue(byId("review-budget-astra-deployment")),
+    sol_effort: byId("review-budget-sol-effort").value,
+    astra_effort: byId("review-budget-astra-effort").value,
     sol_max_calls: Number(byId("review-budget-sol-calls").value),
     sol_max_tokens: Number(byId("review-budget-sol-tokens").value),
     astra_max_calls: Number(byId("review-budget-astra-calls").value),
     astra_max_tokens: byId("review-budget-astra-tokens").value ? Number(byId("review-budget-astra-tokens").value) : null,
+    max_in_flight: Number(byId("review-budget-max-in-flight").value),
+    max_input_bytes: Number(byId("review-budget-max-input-bytes").value),
+    max_output_tokens: Number(byId("review-budget-max-output-tokens").value),
     token_limit_mode: "admission",
   };
 }
@@ -3050,6 +3324,7 @@ async function saveMaintenanceSettings(event) {
       minNewPages,
       quietPeriodSeconds,
       maxWaitSeconds,
+      modelRouting: readModelRoutingSettings(),
       reviewBudget: readReviewBudgetSettings(),
     });
     byId("preferences-dialog").close();
@@ -5617,6 +5892,13 @@ byId("archive-rescan").addEventListener("click", () => scanArchiveCandidates().c
 byId("archive-finish").addEventListener("click", () => finishArchiveSession().catch(showError));
 byId("archive-start-new").addEventListener("click", () => startArchiveSession().catch(showError));
 byId("maintenance-settings-form").addEventListener("submit", (event) => saveMaintenanceSettings(event).catch(showError));
+byId("maintenance-settings-form").addEventListener("invalid", (event) => {
+  for (let parent = event.target.parentElement; parent; parent = parent.parentElement) {
+    if (parent.tagName === "DETAILS") parent.open = true;
+  }
+}, true);
+byId("maintenance-settings-form").addEventListener("input", updateMaintenanceSettingsSummaries);
+byId("maintenance-settings-form").addEventListener("change", updateMaintenanceSettingsSummaries);
 const accessView = createAccessView({ api, byId, element, t, formatTime, formatNumber, showError, scopeName });
 byId("health-window").addEventListener("change", () => healthView.load({ reload: true }).catch(showError));
 setMaintenanceWorkspaceTab(state.maintenance.workspaceTab);

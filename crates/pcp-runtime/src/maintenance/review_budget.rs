@@ -25,6 +25,8 @@ pub struct ReviewBudgetConfig {
     pub state_path: PathBuf,
     pub sol_deployment_id: String,
     pub astra_deployment_id: String,
+    pub sol_effort: String,
+    pub astra_effort: String,
     pub sol_max_calls: u32,
     pub sol_max_tokens: u64,
     pub astra_enabled: bool,
@@ -50,8 +52,10 @@ impl Default for ReviewBudgetConfig {
         Self {
             enabled: false,
             state_path: PathBuf::new(),
-            sol_deployment_id: "codex_gpt_5_6_sol".into(),
+            sol_deployment_id: "codex_gpt_6_sol".into(),
             astra_deployment_id: "codex_gpt_6_astra".into(),
+            sol_effort: "high".into(),
+            astra_effort: "low".into(),
             sol_max_calls: 300,
             sol_max_tokens: 6_000_000,
             astra_enabled: true,
@@ -72,6 +76,10 @@ impl ReviewBudgetConfig {
             "review deployments must not be empty"
         );
         ensure!(
+            valid_model_effort(&self.sol_effort) && valid_model_effort(&self.astra_effort),
+            "unsupported review reasoning effort"
+        );
+        ensure!(
             self.sol_max_calls > 0 && self.sol_max_tokens > 0 && self.astra_max_calls > 0,
             "review budgets must be positive"
         );
@@ -90,6 +98,20 @@ impl ReviewBudgetConfig {
     pub fn snapshot(&self) -> Result<BudgetSnapshot> {
         BudgetStore::new(self.clone()).snapshot()
     }
+
+    fn effort(&self, tier: ReviewTier) -> &str {
+        match tier {
+            ReviewTier::Sol => &self.sol_effort,
+            ReviewTier::Astra => &self.astra_effort,
+        }
+    }
+}
+
+pub(super) fn valid_model_effort(effort: &str) -> bool {
+    matches!(
+        effort,
+        "none" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+    )
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -248,7 +270,7 @@ impl BudgetStore {
                     ReviewTier::Sol => self.config.sol_deployment_id.clone(),
                     ReviewTier::Astra => self.config.astra_deployment_id.clone(),
                 },
-                effort: tier.effort().into(),
+                effort: self.config.effort(tier).into(),
                 submitted_at_ms: now,
                 lease_expires_at_ms: Some(
                     now.saturating_add(
@@ -494,6 +516,16 @@ mod tests {
             serde_json::to_value(config).unwrap()["token_limit_mode"],
             "admission"
         );
+    }
+
+    #[test]
+    fn configured_review_effort_is_recorded_in_new_reservation() {
+        let (_dir, mut store) = store();
+        store.config.sol_effort = "xhigh".into();
+        let Admission::Reserved(attempt) = reserve(&store, "custom-effort") else {
+            panic!()
+        };
+        assert_eq!(attempt.effort, "xhigh");
     }
 
     #[test]

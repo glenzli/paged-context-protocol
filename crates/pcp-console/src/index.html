@@ -684,29 +684,61 @@
           <p class="muted preferences-copy" data-i18n="Changes restart the Runtime. Suggested relations still require review.">Changes restart the Runtime. Suggested relations still require review.</p>
           <form id="maintenance-settings-form" class="maintenance-settings-form">
             <label class="maintenance-settings-toggle"><input id="maintenance-settings-enabled" type="checkbox"><span><strong data-i18n="Enable automatic maintenance">Enable automatic maintenance</strong><small data-i18n="When disabled, Runtime records no automatic maintenance heartbeat.">When disabled, Runtime records no automatic maintenance heartbeat.</small></span></label>
-            <label><span data-i18n="Mode">Mode</span><select id="maintenance-settings-mode"><option value="observe" data-i18n="Observe">Observe</option><option value="apply" data-i18n="Apply">Apply</option></select></label>
-            <div class="maintenance-settings-grid">
-              <label><span data-i18n="New Pages">New Pages</span><input id="maintenance-settings-min-pages" type="number" min="1" required></label>
-              <label><span data-i18n="Quiet period (minutes)">Quiet period (minutes)</span><input id="maintenance-settings-quiet" type="number" min="1" required></label>
-              <label><span data-i18n="Maximum wait (minutes)">Maximum wait (minutes)</span><input id="maintenance-settings-max-wait" type="number" min="1" required></label>
-            </div>
-            <fieldset id="review-budget-settings">
-              <legend data-i18n="Upgraded review">Upgraded review</legend>
-              <label><input id="review-budget-enabled" type="checkbox"><span data-i18n="Enable upgraded review">Enable upgraded review</span></label>
-              <label><input id="review-budget-astra-enabled" type="checkbox"><span data-i18n="Enable Astra Low">Enable Astra Low</span></label>
-              <p class="muted" data-i18n="Rolling 24 hours. Saving or restarting preserves usage.">Rolling 24 hours. Saving or restarting preserves usage.</p>
-              <div class="maintenance-settings-grid">
-                <label><span data-i18n="Sol deployment">Sol deployment</span><input id="review-budget-sol-deployment" required></label>
-                <label><span data-i18n="Sol calls">Sol calls</span><input id="review-budget-sol-calls" type="number" min="1" value="300" required></label>
-                <label><span data-i18n="Sol total tokens">Sol total tokens</span><input id="review-budget-sol-tokens" type="number" min="1" value="6000000" required></label>
-                <label><span data-i18n="Astra deployment">Astra deployment</span><input id="review-budget-astra-deployment" required></label>
-                <label><span data-i18n="Astra calls">Astra calls</span><input id="review-budget-astra-calls" type="number" min="1" value="10" required></label>
-                <label><span data-i18n="Astra tokens (optional)">Astra tokens (optional)</span><input id="review-budget-astra-tokens" type="number" min="1"></label>
+            <details class="maintenance-settings-disclosure" id="maintenance-trigger-disclosure">
+              <summary><strong data-i18n="Schedule and mode">Schedule and mode</strong><small id="maintenance-trigger-summary"></small></summary>
+              <div class="maintenance-settings-body">
+                <label><span data-i18n="Mode">Mode</span><select id="maintenance-settings-mode"><option value="observe" data-i18n="Observe">Observe</option><option value="apply" data-i18n="Apply">Apply</option></select></label>
+                <div class="maintenance-settings-grid">
+                  <label><span data-i18n="New Pages">New Pages</span><input id="maintenance-settings-min-pages" type="number" min="1" required></label>
+                  <label><span data-i18n="Quiet period (minutes)">Quiet period (minutes)</span><input id="maintenance-settings-quiet" type="number" min="1" required></label>
+                  <label><span data-i18n="Maximum wait (minutes)">Maximum wait (minutes)</span><input id="maintenance-settings-max-wait" type="number" min="1" required></label>
+                </div>
               </div>
-              <p class="muted" data-i18n="The budget gates new calls using actual usage and reservations. Started calls finish normally; the final call may exceed the token threshold.">The budget gates new calls using actual usage and reservations. Started calls finish normally; the final call may exceed the token threshold.</p>
-              <div id="review-budget-status" aria-live="polite"></div>
-            </fieldset>
-            <button id="maintenance-settings-save" class="primary-button semantic-button" type="submit" data-icon="restart"><span data-i18n="Save and restart Runtime">Save and restart Runtime</span></button>
+            </details>
+            <details class="maintenance-settings-disclosure" id="model-routing-disclosure">
+              <summary><strong data-i18n="Model policy">Model policy</strong><small id="model-policy-summary"></small></summary>
+              <fieldset id="model-routing-settings" class="maintenance-settings-body">
+                <p class="muted" data-i18n="Choose a model for each category; use individual overrides only where needed. Infer Runtime must authorize each deployment.">Choose a model for each category; use individual overrides only where needed. Infer Runtime must authorize each deployment.</p>
+                <div id="model-routing-rows"></div>
+                <details class="maintenance-settings-subdisclosure">
+                  <summary data-i18n="Routing limits and optional upgrades">Routing limits and optional upgrades</summary>
+                  <div class="maintenance-settings-body">
+                    <label><span data-i18n="Worker timeout (seconds)">Worker timeout (seconds)</span><input id="model-routing-timeout" type="number" min="1" required></label>
+                    <p class="muted" data-i18n="Operations eligible for optional upgraded review">Operations eligible for optional upgraded review</p>
+                    <div id="model-routing-escalation"></div>
+                    <p class="muted" data-i18n="Candidate synthesis review uses the Sol tier. Verification upgrades use required budget checks.">Candidate synthesis review uses the Sol tier. Verification upgrades use required budget checks.</p>
+                  </div>
+                </details>
+              </fieldset>
+            </details>
+            <details class="maintenance-settings-disclosure" id="review-budget-disclosure">
+              <summary><strong data-i18n="Upgraded review">Upgraded review</strong><small id="review-budget-summary"></small></summary>
+              <fieldset id="review-budget-settings" class="maintenance-settings-body">
+                <label><input id="review-budget-enabled" type="checkbox"><span data-i18n="Enable upgraded review">Enable upgraded review</span></label>
+                <label><input id="review-budget-astra-enabled" type="checkbox"><span data-i18n="Enable Astra review">Enable Astra review</span></label>
+                <p class="muted" data-i18n="Rolling 24 hours. Saving or restarting preserves usage.">Rolling 24 hours. Saving or restarting preserves usage.</p>
+                <div class="maintenance-settings-grid">
+                  <label><span data-i18n="Sol deployment">Sol deployment</span><span class="model-deployment-picker"><select id="review-budget-sol-deployment" required></select><input class="model-deployment-custom" hidden aria-label="Custom Sol deployment ID"></span></label>
+                  <label><span data-i18n="Sol effort">Sol effort</span><select id="review-budget-sol-effort"></select></label>
+                  <label><span data-i18n="Sol calls">Sol calls</span><input id="review-budget-sol-calls" type="number" min="1" value="300" required></label>
+                  <label><span data-i18n="Sol total tokens">Sol total tokens</span><input id="review-budget-sol-tokens" type="number" min="1" value="6000000" required></label>
+                  <label><span data-i18n="Astra deployment">Astra deployment</span><span class="model-deployment-picker"><select id="review-budget-astra-deployment" required></select><input class="model-deployment-custom" hidden aria-label="Custom Astra deployment ID"></span></label>
+                  <label><span data-i18n="Astra effort">Astra effort</span><select id="review-budget-astra-effort"></select></label>
+                  <label><span data-i18n="Astra calls">Astra calls</span><input id="review-budget-astra-calls" type="number" min="1" value="10" required></label>
+                  <label><span data-i18n="Astra tokens (optional)">Astra tokens (optional)</span><input id="review-budget-astra-tokens" type="number" min="1"></label>
+                  <label><span data-i18n="Concurrent reviews">Concurrent reviews</span><input id="review-budget-max-in-flight" type="number" min="1" max="4" required></label>
+                  <label><span data-i18n="Maximum input bytes">Maximum input bytes</span><input id="review-budget-max-input-bytes" type="number" min="1024" max="2000000" required></label>
+                  <label><span data-i18n="Output reservation tokens">Output reservation tokens</span><input id="review-budget-max-output-tokens" type="number" min="256" max="32768" required></label>
+                </div>
+                <p class="muted" data-i18n="The output token value reserves budget for admission; it does not cap the provider response.">The output token value reserves budget for admission; it does not cap the provider response.</p>
+                <p class="muted" data-i18n="The budget gates new calls using actual usage and reservations. Started calls finish normally; the final call may exceed the token threshold.">The budget gates new calls using actual usage and reservations. Started calls finish normally; the final call may exceed the token threshold.</p>
+              </fieldset>
+            </details>
+            <details class="maintenance-settings-disclosure" id="review-usage-disclosure">
+              <summary><strong data-i18n="Review usage">Review usage</strong><small id="review-usage-summary"></small></summary>
+              <div id="review-budget-status" class="maintenance-settings-body" aria-live="polite"></div>
+            </details>
+            <div class="maintenance-settings-actions"><button id="maintenance-settings-save" class="primary-button semantic-button" type="submit" data-icon="restart"><span data-i18n="Save and restart Runtime">Save and restart Runtime</span></button></div>
           </form>
         </section>
       </section>

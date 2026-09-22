@@ -21,7 +21,8 @@ use anyhow::Result;
 
 pub use audit::{MaintenanceRunAudit, MaintenanceRunAuditRecord, persist_audit};
 pub use config::{
-    MaintenanceConfig, MaintenanceMode, MaintenanceWorkerConfig, PackingMaintenanceConfig,
+    MAINTENANCE_MODEL_OPERATIONS, MAINTENANCE_MODEL_ROUTE_GROUPS, MaintenanceConfig,
+    MaintenanceMode, MaintenanceWorkerConfig, ModelRouteConfig, PackingMaintenanceConfig,
     PeriodicReviewConfig, ReconciliationMaintenanceConfig, RelationMaintenanceConfig,
     RetentionMaintenanceConfig, SummaryMaintenanceConfig, TopicMaintenanceConfig,
     WriteTriggeredMaintenanceConfig,
@@ -84,6 +85,7 @@ pub fn build_semantic_worker(
             summary_deployment_id,
             reasoning_deployment_id,
             relation_deployment_id,
+            operation_routes: _,
             escalation_deployment_id,
             escalation_operations,
             review_budget,
@@ -98,6 +100,7 @@ pub fn build_semantic_worker(
                 escalation_deployment_id.clone(),
                 escalation_operations.clone(),
             )?
+            .with_operation_routes(config.effective_model_routes().unwrap_or_default())
             .with_review_budget(review_budget.clone()),
         )),
     }

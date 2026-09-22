@@ -11,6 +11,7 @@ use pcp_core::{ModelTokenUsage, PACKED_PAGE_MEDIA_TYPE};
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep, timeout};
 
+use super::config::{ModelRouteConfig, default_model_route};
 use super::{
     MaintenanceWorkerOutcome, MaintenanceWorkerRequest, MaintenanceWorkerResponse,
     SemanticMaintenanceWorker, worker::ArchiveWorkerDecision,
@@ -50,6 +51,7 @@ pub struct InferRuntimeSemanticWorker {
     pub(super) summary_deployment_id: String,
     pub(super) reasoning_deployment_id: String,
     pub(super) relation_deployment_id: Option<String>,
+    pub(super) operation_routes: BTreeMap<String, ModelRouteConfig>,
     pub(super) escalation_operations: BTreeSet<String>,
     pub(super) review_budget: super::ReviewBudgetConfig,
 }
@@ -74,6 +76,7 @@ impl InferRuntimeSemanticWorker {
             summary_deployment_id,
             reasoning_deployment_id,
             relation_deployment_id,
+            operation_routes: BTreeMap::new(),
             escalation_operations: escalation_operations.into_iter().collect(),
             review_budget: Default::default(),
         })
@@ -81,6 +84,11 @@ impl InferRuntimeSemanticWorker {
 
     pub fn with_review_budget(mut self, config: super::ReviewBudgetConfig) -> Self {
         self.review_budget = config;
+        self
+    }
+
+    pub fn with_operation_routes(mut self, routes: BTreeMap<String, ModelRouteConfig>) -> Self {
+        self.operation_routes = routes;
         self
     }
 
@@ -99,6 +107,12 @@ impl InferRuntimeSemanticWorker {
             self.relation_deployment_id.as_deref(),
             deployment_override,
         )?;
+        apply_operation_route(
+            &mut infer_request,
+            &self.operation_routes,
+            operation_name(request),
+            deployment_override,
+        );
         if let Some(additional_instructions) = additional_instructions {
             let instructions = infer_request
                 .instructions
@@ -490,61 +504,25 @@ pub(super) fn infer_request(
         ("infer.fallback".to_owned(), "none".to_owned()),
         ("infer.deadline_ms".to_owned(), deadline_ms.to_string()),
     ]);
-    let reasoning = match request {
-        MaintenanceWorkerRequest::SummarizePage { .. }
-        | MaintenanceWorkerRequest::SummarizePages { .. } => {
-            metadata.insert(
-                "infer.deployment_ids".to_owned(),
-                summary_deployment_id.to_owned(),
-            );
-            metadata.insert("infer.placement".to_owned(), "cloud_only".to_owned());
-            metadata.insert("infer.prefer".to_owned(), "cloud".to_owned());
-            metadata.insert(
-                "infer.provider_access_class".to_owned(),
-                "subscription".to_owned(),
-            );
-            metadata.insert("infer.capability_floor".to_owned(), "advanced".to_owned());
-            Some(serde_json::json!({"effort": "medium"}))
-        }
-        MaintenanceWorkerRequest::ReviewCandidateSynthesis { .. }
-        | MaintenanceWorkerRequest::OrganizeCandidates { .. }
-        | MaintenanceWorkerRequest::SelectPacking { .. }
-        | MaintenanceWorkerRequest::AnalyzePacking { .. }
-        | MaintenanceWorkerRequest::ExtractTopic { .. }
-        | MaintenanceWorkerRequest::VerifyMaintenance { .. }
-        | MaintenanceWorkerRequest::AssessArchive { .. }
-        | MaintenanceWorkerRequest::ReconcileFeedback { .. }
-        | MaintenanceWorkerRequest::ReviewUpdate { .. }
-        | MaintenanceWorkerRequest::SelectRelation { .. }
-        | MaintenanceWorkerRequest::SelectRetentionMilestones { .. } => {
-            let deployment_id = deployment_override.unwrap_or_else(|| match request {
-                MaintenanceWorkerRequest::SelectRelation { .. } => {
-                    relation_deployment_id.unwrap_or(reasoning_deployment_id)
-                }
-                _ => reasoning_deployment_id,
-            });
-            metadata.insert("infer.deployment_ids".to_owned(), deployment_id.to_owned());
-            metadata.insert("infer.placement".to_owned(), "cloud_only".to_owned());
-            metadata.insert("infer.prefer".to_owned(), "cloud".to_owned());
-            metadata.insert(
-                "infer.provider_access_class".to_owned(),
-                "subscription".to_owned(),
-            );
-            metadata.insert("infer.capability_floor".to_owned(), "advanced".to_owned());
-            let effort = if matches!(
-                request,
-                MaintenanceWorkerRequest::SelectRelation { .. }
-                    | MaintenanceWorkerRequest::VerifyMaintenance { .. }
-                    | MaintenanceWorkerRequest::ReconcileFeedback { .. }
-                    | MaintenanceWorkerRequest::ReviewUpdate { .. }
-            ) {
-                "high"
-            } else {
-                "medium"
-            };
-            Some(serde_json::json!({"effort": effort}))
-        }
-    };
+    let route = default_model_route(
+        operation_name(request),
+        summary_deployment_id,
+        reasoning_deployment_id,
+        relation_deployment_id,
+    );
+    metadata.insert(
+        "infer.deployment_ids".to_owned(),
+        deployment_override
+            .unwrap_or(&route.deployment_id)
+            .to_owned(),
+    );
+    metadata.insert("infer.placement".to_owned(), "cloud_only".to_owned());
+    metadata.insert("infer.prefer".to_owned(), "cloud".to_owned());
+    metadata.insert(
+        "infer.provider_access_class".to_owned(),
+        "subscription".to_owned(),
+    );
+    metadata.insert("infer.capability_floor".to_owned(), "advanced".to_owned());
     Ok(ResponsesRequest {
         model: intent_for(request).to_owned(),
         input: Value::String(payload),
@@ -553,11 +531,27 @@ pub(super) fn infer_request(
         background: false,
         metadata,
         tools: Vec::new(),
-        reasoning,
+        reasoning: Some(json!({"effort": route.effort})),
         // The Codex App Server bridge deliberately has no output-budget control.
         // Summary length is constrained by the prompt and PCP's response validation.
         max_output_tokens: None,
     })
+}
+
+fn apply_operation_route(
+    request: &mut ResponsesRequest,
+    routes: &BTreeMap<String, ModelRouteConfig>,
+    operation: &str,
+    deployment_override: Option<&str>,
+) {
+    if deployment_override.is_none() {
+        if let Some(route) = routes.get(operation) {
+            request
+                .metadata
+                .insert("infer.deployment_ids".into(), route.deployment_id.clone());
+            request.reasoning = Some(json!({"effort": route.effort}));
+        }
+    }
 }
 
 fn inference_payload(request: &MaintenanceWorkerRequest) -> Result<String> {
@@ -912,6 +906,41 @@ mod tests {
     use super::*;
     use crate::maintenance::worker::{ArchiveCandidatePage, ExistingTopicPage};
     use crate::maintenance::{MaintenanceDetailPage, RelationCandidatePage, RetentionMilestone};
+
+    #[test]
+    fn operation_route_overrides_baseline_but_not_review_tier() {
+        let routes = BTreeMap::from([(
+            "summarize_page".into(),
+            ModelRouteConfig {
+                deployment_id: "configured-luna".into(),
+                effort: "low".into(),
+            },
+        )]);
+        let mut baseline = infer_request(
+            &summary_request(),
+            Duration::from_secs(30),
+            "legacy-luna",
+            "legacy-luna",
+            None,
+            None,
+        )
+        .unwrap();
+        apply_operation_route(&mut baseline, &routes, "summarize_page", None);
+        assert_eq!(baseline.metadata["infer.deployment_ids"], "configured-luna");
+        assert_eq!(baseline.reasoning, Some(json!({"effort": "low"})));
+
+        let mut review = infer_request(
+            &summary_request(),
+            Duration::from_secs(30),
+            "legacy-luna",
+            "legacy-luna",
+            None,
+            Some("review-sol"),
+        )
+        .unwrap();
+        apply_operation_route(&mut review, &routes, "summarize_page", Some("review-sol"));
+        assert_eq!(review.metadata["infer.deployment_ids"], "review-sol");
+    }
 
     fn result(text: &str) -> ResponsesResult {
         ResponsesResult {

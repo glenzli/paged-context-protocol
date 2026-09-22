@@ -256,6 +256,8 @@ struct MaintenanceSettingsRequest {
     quiet_period_seconds: u64,
     max_wait_seconds: u64,
     #[serde(default)]
+    model_routing: Option<managed::MaintenanceModelRouting>,
+    #[serde(default)]
     review_budget: Option<pcp_runtime::ReviewBudgetConfig>,
 }
 
@@ -362,6 +364,7 @@ fn router(state: AppState) -> Router {
         )
         .route("/", get(index))
         .route("/app.js", get(app_js))
+        .route("/model-route-groups.js", get(model_route_groups_js))
         .route("/access-view.js", get(access_view_js))
         .route("/ui-icons.js", get(ui_icons_js))
         .route("/page-inspector.js", get(page_inspector_js))
@@ -624,6 +627,13 @@ async fn access_view_js() -> Response {
 
 async fn app_js() -> Response {
     static_asset("text/javascript; charset=utf-8", include_str!("app.js"))
+}
+
+async fn model_route_groups_js() -> Response {
+    static_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("model-route-groups.js"),
+    )
 }
 
 async fn ui_icons_js() -> Response {
@@ -1334,16 +1344,33 @@ async fn maintenance_status(State(state): State<AppState>) -> Result<Json<Value>
         })));
     };
     let automation = RuntimeMaintainer::automation_status(&maintenance).await?;
-    let review_budget = match &maintenance.worker {
-        pcp_runtime::MaintenanceWorkerConfig::InferRuntime { review_budget, .. } => {
+    let (model_routing, review_budget) = match &maintenance.worker {
+        pcp_runtime::MaintenanceWorkerConfig::InferRuntime {
+            timeout_seconds,
+            escalation_operations,
+            route_groups,
+            operation_routes,
+            review_budget,
+            ..
+        } => {
             let mut settings = serde_json::to_value(review_budget)?;
             settings.as_object_mut().unwrap().remove("state_path");
-            match review_budget.snapshot() {
+            let budget = match review_budget.snapshot() {
                 Ok(snapshot) => json!({"config":settings,"status":snapshot}),
                 Err(error) => json!({"config":settings,"error":format!("{error:#}")}),
-            }
+            };
+            (
+                json!({
+                    "routes": maintenance.worker.effective_model_routes(),
+                    "route_groups": route_groups,
+                    "operation_overrides": operation_routes,
+                    "escalation_operations": escalation_operations,
+                    "timeout_seconds": timeout_seconds,
+                }),
+                budget,
+            )
         }
-        _ => Value::Null,
+        _ => (Value::Null, Value::Null),
     };
     Ok(Json(json!({
         "available": true,
@@ -1373,6 +1400,7 @@ async fn maintenance_status(State(state): State<AppState>) -> Result<Json<Value>
             "maxWaitSeconds": maintenance.write_trigger.max_wait_seconds,
         },
         "automation": automation,
+        "modelRouting": model_routing,
         "reviewBudget": review_budget,
         "packing": {
             "enabled": maintenance.packing.enabled,
@@ -1401,6 +1429,7 @@ async fn update_maintenance_settings(
             min_new_pages: request.min_new_pages,
             quiet_period_seconds: request.quiet_period_seconds,
             max_wait_seconds: request.max_wait_seconds,
+            model_routing: request.model_routing,
             review_budget: request.review_budget,
         })
         .await?;

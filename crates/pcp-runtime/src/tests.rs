@@ -262,8 +262,8 @@ actor_type = "model"
     };
     assert_eq!(credential_file, root.join("secrets/pcp-runtime.token"));
     assert_eq!(timeout_seconds, 90);
-    assert_eq!(summary_deployment_id, "codex_gpt_5_6_luna");
-    assert_eq!(reasoning_deployment_id, "codex_gpt_5_6_luna");
+    assert_eq!(summary_deployment_id, "codex_gpt_6_luna");
+    assert_eq!(reasoning_deployment_id, "codex_gpt_6_luna");
     assert_eq!(relation_deployment_id, None);
     assert_eq!(escalation_deployment_id, None);
     assert_eq!(

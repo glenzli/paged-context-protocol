@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -16,6 +17,82 @@ pub enum MaintenanceMode {
     #[default]
     Observe,
     Apply,
+}
+
+pub const MAINTENANCE_MODEL_OPERATIONS: &[&str] = &[
+    "review_candidate_synthesis",
+    "organize_candidates",
+    "summarize_page",
+    "summarize_pages",
+    "select_packing",
+    "analyze_packing",
+    "select_relation",
+    "extract_topic",
+    "verify_maintenance",
+    "assess_archive",
+    "reconcile_feedback",
+    "review_update",
+    "select_retention_milestones",
+];
+
+pub const MAINTENANCE_MODEL_ROUTE_GROUPS: &[&str] = &[
+    "summary",
+    "organization",
+    "knowledge",
+    "verification",
+    "feedback",
+];
+
+fn model_route_group(operation: &str) -> Option<&'static str> {
+    match operation {
+        "summarize_page" | "summarize_pages" => Some("summary"),
+        "organize_candidates" | "select_packing" | "analyze_packing" => Some("organization"),
+        "select_relation" | "extract_topic" => Some("knowledge"),
+        "verify_maintenance" | "assess_archive" | "select_retention_milestones" => {
+            Some("verification")
+        }
+        "reconcile_feedback" | "review_update" => Some("feedback"),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRouteConfig {
+    pub deployment_id: String,
+    pub effort: String,
+}
+
+impl ModelRouteConfig {
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.deployment_id.trim().is_empty()
+                && super::review_budget::valid_model_effort(&self.effort),
+            "invalid PCP maintenance operation model route"
+        );
+        Ok(())
+    }
+}
+
+pub fn default_model_route(
+    operation: &str,
+    summary_deployment_id: &str,
+    reasoning_deployment_id: &str,
+    relation_deployment_id: Option<&str>,
+) -> ModelRouteConfig {
+    let deployment_id = match operation {
+        "summarize_page" | "summarize_pages" => summary_deployment_id,
+        "select_relation" => relation_deployment_id.unwrap_or(reasoning_deployment_id),
+        _ => reasoning_deployment_id,
+    };
+    let effort = match operation {
+        "select_relation" | "verify_maintenance" | "reconcile_feedback" | "review_update" => "high",
+        _ => "medium",
+    };
+    ModelRouteConfig {
+        deployment_id: deployment_id.to_owned(),
+        effort: effort.to_owned(),
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -91,6 +168,10 @@ pub enum MaintenanceWorkerConfig {
         reasoning_deployment_id: String,
         #[serde(default)]
         relation_deployment_id: Option<String>,
+        #[serde(default)]
+        route_groups: BTreeMap<String, ModelRouteConfig>,
+        #[serde(default)]
+        operation_routes: BTreeMap<String, ModelRouteConfig>,
         /// Legacy deployment field accepted for configuration compatibility.
         /// Upgrades now require review_budget.enabled and use its deployments.
         #[serde(default)]
@@ -108,6 +189,46 @@ pub enum MaintenanceWorkerConfig {
 }
 
 impl MaintenanceWorkerConfig {
+    pub fn effective_model_routes(&self) -> Option<BTreeMap<String, ModelRouteConfig>> {
+        let Self::InferRuntime {
+            summary_deployment_id,
+            reasoning_deployment_id,
+            relation_deployment_id,
+            route_groups,
+            operation_routes,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        Some(
+            MAINTENANCE_MODEL_OPERATIONS
+                .iter()
+                .map(|operation| {
+                    (
+                        (*operation).to_owned(),
+                        operation_routes
+                            .get(*operation)
+                            .cloned()
+                            .or_else(|| {
+                                model_route_group(operation)
+                                    .and_then(|group| route_groups.get(group))
+                                    .cloned()
+                            })
+                            .unwrap_or_else(|| {
+                                default_model_route(
+                                    operation,
+                                    summary_deployment_id,
+                                    reasoning_deployment_id,
+                                    relation_deployment_id.as_deref(),
+                                )
+                            }),
+                    )
+                })
+                .collect(),
+        )
+    }
+
     pub fn timeout_seconds(&self) -> u64 {
         match self {
             Self::Command {
@@ -158,6 +279,8 @@ impl MaintenanceWorkerConfig {
                 summary_deployment_id,
                 reasoning_deployment_id,
                 relation_deployment_id,
+                route_groups,
+                operation_routes,
                 escalation_deployment_id,
                 escalation_operations,
                 review_budget,
@@ -180,6 +303,20 @@ impl MaintenanceWorkerConfig {
                         .as_ref()
                         .is_none_or(|deployment_id| !deployment_id.trim().is_empty()),
                     "PCP Infer Runtime relation_deployment_id must not be empty"
+                );
+                anyhow::ensure!(
+                    route_groups.iter().all(|(group, route)| {
+                        MAINTENANCE_MODEL_ROUTE_GROUPS.contains(&group.as_str())
+                            && route.validate().is_ok()
+                    }),
+                    "invalid PCP maintenance model route group"
+                );
+                anyhow::ensure!(
+                    operation_routes.iter().all(|(operation, route)| {
+                        MAINTENANCE_MODEL_OPERATIONS.contains(&operation.as_str())
+                            && route.validate().is_ok()
+                    }),
+                    "invalid PCP maintenance operation model route"
                 );
                 anyhow::ensure!(
                     escalation_deployment_id
@@ -737,11 +874,11 @@ fn default_worker_actor_type() -> String {
 }
 
 fn default_infer_summary_deployment_id() -> String {
-    "codex_gpt_5_6_luna".to_owned()
+    "codex_gpt_6_luna".to_owned()
 }
 
 fn default_infer_reasoning_deployment_id() -> String {
-    "codex_gpt_5_6_luna".to_owned()
+    "codex_gpt_6_luna".to_owned()
 }
 
 fn default_infer_escalation_operations() -> Vec<String> {
