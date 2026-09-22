@@ -1,7 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { pageListPreview, pageCount, pageJump, pageRoleBadge, appendPageFilters, pageTimeFields, pageBrowseOrder } from "../src/page-list.js";
+import { pageListPreview, pageCount, pageJump, pageRoleBadge, appendPageFilters, pageTimeFields, pageBrowseOrder, pageListSnapshotKey } from "../src/page-list.js";
+
+test("list freshness detects inserted Pages without reacting to preview fallback", () => {
+  const first = { totalPages: 1, totalContentChars: 12, hits: [{ pageId: "page-a", revisionId: "rev-a" }] };
+  const fallback = { ...first, hits: [{ ...first.hits[0], previewPayload: { text: "loaded later" } }] };
+  assert.equal(pageListSnapshotKey(first), pageListSnapshotKey(fallback));
+  assert.notEqual(pageListSnapshotKey(first), pageListSnapshotKey({
+    totalPages: 2, totalContentChars: 20,
+    hits: [{ pageId: "page-b", revisionId: "rev-b" }, first.hits[0]],
+  }));
+  assert.notEqual(pageListSnapshotKey(first), pageListSnapshotKey({
+    ...first, hits: [{ pageId: "page-b", revisionId: "rev-b" }],
+  }));
+});
 
 test("stored time and source observation time remain distinct", () => {
   const createdAt = "2026-09-02T14:48:35Z";

@@ -3,7 +3,7 @@ import { kindLabel, technicalDetails, scopeLabel, refreshScopeLabels } from "/co
 import { createConsoleNavigation } from "/console-navigation.js";
 import { createAccessView } from "/access-view.js";
 import { createPageInspector } from "/page-inspector.js?v=20260823.1";
-import { pageListPreview, pageCount, pageJump, PAGE_ROLE_LABELS, pageRoleBadge, appendPageFilters, pageBrowseOrder, pageTimeFields } from "/page-list.js";
+import { pageListPreview, pageCount, pageJump, PAGE_ROLE_LABELS, pageRoleBadge, appendPageFilters, pageBrowseOrder, pageTimeFields, pageListSnapshotKey } from "/page-list.js";
 import { compactQuantity } from "/quantity-format.js";
 import { MODEL_ROUTE_GROUPS, modelEffortsForDeployment, summarizeModelRouteGroups } from "/model-route-groups.js";
 import { formatTimestamp } from "/time-format.js";
@@ -63,6 +63,8 @@ const PAGE_LIMIT_STORAGE_KEY = "pcp-console.pages-per-page";
 const REVIEW_SESSION_STORAGE_KEY = "pcp-console.maintenance-review-session.v1";
 const MAINTENANCE_WORKSPACE_STORAGE_KEY = "pcp-console.maintenance-workspace.v1";
 let maintenanceStatusPoll = null;
+let pagesPoll = null;
+const PAGES_POLL_INTERVAL_MS = 15_000;
 let maintenanceConvergenceActive = false;
 const ZH_MESSAGES = {
   "Context inbox": "暂存与近况",
@@ -1217,6 +1219,8 @@ const state = {
     page: 1,
     pageCache: new Map(),
     pendingPage: null,
+    pendingRefresh: false,
+    appliedQuery: "",
     previewFallbacks: new Map(),
     previewGeneration: 0,
   },
@@ -2025,21 +2029,28 @@ function resetPages() {
   state.pages.total = 0;
   state.pages.pageCache.clear();
   state.pages.pendingPage = null;
+  state.pages.pendingRefresh = false;
   state.pages.previewGeneration += 1;
 }
 
-async function loadPages({ page = state.pages.page } = {}) {
+async function loadPages({ page = state.pages.page, refresh = false, quiet = false } = {}) {
   if (!Number.isSafeInteger(page) || page < 1) return;
-  if (state.pages.busy) { state.pages.pendingPage = page; return; }
+  if (state.pages.busy) {
+    state.pages.pendingPage = page;
+    state.pages.pendingRefresh ||= refresh;
+    return;
+  }
   const cached = state.pages.pageCache.get(page);
-  if (cached) {
+  if (cached && !refresh) {
     renderPages(cached, page);
     return;
   }
   state.pages.busy = true;
   const generation = state.pages.previewGeneration;
-  byId("pages-status").textContent = t("Loading");
-  renderPagePager();
+  if (!quiet) {
+    byId("pages-status").textContent = t("Loading");
+    renderPagePager();
+  }
   try {
     const params = new URLSearchParams({ limit: String(pageLimit), page: String(page) });
     appendPageFilters(params, state.pages);
@@ -2051,20 +2062,48 @@ async function loadPages({ page = state.pages.page } = {}) {
     params.set("order", pageOrderValue());
     if (scope) params.set("scope", scope);
     const result = await api(`/api/pages?${params}`);
-    if (generation === state.pages.previewGeneration) renderPages(result, result.pageNumber ?? page);
+    if (generation === state.pages.previewGeneration) {
+      const resultPage = result.pageNumber ?? page;
+      if (refresh) state.pages.pageCache.clear();
+      if (refresh && resultPage === state.pages.page && pageListSnapshotKey(cached) === pageListSnapshotKey(result)) {
+        state.pages.pageCache.set(resultPage, result);
+      } else {
+        renderPages(result, resultPage);
+      }
+      state.pages.appliedQuery = query;
+    }
   } catch (error) {
     if (generation === state.pages.previewGeneration) {
-      showError(error);
-      byId("pages-status").textContent = t("Load failed");
+      if (!quiet) {
+        showError(error);
+        byId("pages-status").textContent = t("Load failed");
+      }
     }
   } finally {
     state.pages.busy = false;
     const pending = state.pages.reloadAfterBusy ? 1 : state.pages.pendingPage;
+    const pendingRefresh = state.pages.pendingRefresh;
     state.pages.reloadAfterBusy = false;
     state.pages.pendingPage = null;
+    state.pages.pendingRefresh = false;
     renderPagePager();
-    if (pending !== null) void loadPages({page:pending});
+    if (pending !== null) void loadPages({page:pending, refresh:pendingRefresh});
   }
+}
+
+function schedulePagesPoll() {
+  if (pagesPoll !== null) window.clearTimeout(pagesPoll);
+  pagesPoll = null;
+  if (state.activeView !== "pages" || document.hidden) return;
+  pagesPoll = window.setTimeout(async () => {
+    try {
+      if (!state.pages.busy && byId("query").value.trim() === state.pages.appliedQuery) {
+        await loadPages({ refresh: true, quiet: true });
+      }
+    } finally {
+      schedulePagesPoll();
+    }
+  }, PAGES_POLL_INTERVAL_MS);
 }
 
 function renderGovernanceScopeOptions(scopes = state.overview?.scopes || []) {
@@ -5695,7 +5734,10 @@ async function activateView(name, { reload = false, history = true, focus = fals
   name = navigation.select(name, { history, focus });
   state.activeView = name;
   scheduleMaintenanceStatusPoll();
-  if (name === "pages" && (reload || !state.pages.loaded)) await loadPages();
+  schedulePagesPoll();
+  if (name === "pages" && (!state.pages.loaded || byId("query").value.trim() === state.pages.appliedQuery)) {
+    await loadPages({ refresh: reload || state.pages.loaded, quiet: state.pages.loaded && !reload });
+  }
   if (name === "query") await queryView.load({ reload });
   if (name === "maintenance") await loadMaintenance({ reload });
   if (name === "context-hub") await contextHub.load();
@@ -5795,6 +5837,14 @@ const navigation = createConsoleNavigation({
   host: window, onNavigate: activateView, onError: showError,
 });
 state.activeView = navigation.select(navigation.locationView(), { history: false });
+schedulePagesPoll();
+document.addEventListener("visibilitychange", () => {
+  schedulePagesPoll();
+  if (!document.hidden && state.activeView === "pages" && state.pages.loaded
+    && byId("query").value.trim() === state.pages.appliedQuery) {
+    void loadPages({ refresh: true, quiet: true });
+  }
+});
 document.querySelectorAll("[data-open-view]").forEach(button => {
   button.addEventListener("click", () => activateView(button.dataset.openView).catch(showError));
 });

@@ -61,3 +61,16 @@ export function pageJump(value, total, limit) {
   const page = Number(value);
   return Number.isSafeInteger(page) && page <= pageCount(total, limit) ? page : null;
 }
+
+export function pageListSnapshotKey(data) {
+  if (!data) return null;
+  // Ignore fallback previews and unrelated metadata so an unchanged list keeps
+  // its DOM (and the reader's place) during background checks.
+  return JSON.stringify([
+    data.totalPages,
+    data.hits.map((hit) => [
+      hit.pageId, hit.revisionId, hit.updatedAt, hit.contentRole,
+      hit.relationStats?.total, hit.relationStats?.incoming, hit.relationStats?.outgoing,
+    ]),
+  ]);
+}
