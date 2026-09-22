@@ -256,6 +256,22 @@ launchctl kickstart -k "gui/$(id -u)/com.glenzli.pcp-chatgpt-tunnel"
 
 若无法发现工具，依次检查 Console 的 Runtime 状态、ChatGPT enrollment、隧道 ready/poll 状态和 workspace 关联。只通过 `doctor` 不代表服务已运行，也不代表对话已成功调用。变更工具元数据后在连接管理中刷新工具。正式 capture 和 feedback 的确认由宿主操作权限控制，升级或重新连接后仍需检查。
 
+#### 6. 为 Codex 添加使用引导（可选）
+
+共享连接提供相同的 PCP 工具，主动调用仍取决于各宿主的指令、已有上下文和模型选择。若 Codex 能调用工具，却很少主动检索或留存，可将以下短指引追加到全局 `~/.codex/AGENTS.md`；使用自定义 `CODEX_HOME` 时，文件位于该目录。仅用于某个项目时，放入该项目的 `AGENTS.md`。保留已有内容；同级 `AGENTS.override.md` 优先，应将指引合并到实际生效的文件。规则见 [Codex AGENTS.md 文档](https://learn.chatgpt.com/docs/agent-configuration/agents-md)。
+
+```markdown
+# PCP 共享记忆
+
+PCP 补充 Codex 本地记忆，用于跨会话、跨工具的背景和经验。
+
+- 开始或恢复任务时，若缺少可能影响判断的既有决定、偏好或约束，主动用 PCP 聚焦检索；复用已有上下文，自包含任务跳过。
+- 阶段结束前，对新偏好、约束、重要决定或有依据的可复用经验评估留存：长期价值明确用 `pcp_capture`，价值尚不确定且候选功能已授权时用 `pcp_submit_candidate`。同主题合并，复用回执，保留条件、观察和不确定性。
+- 不逐轮调用；跳过重复信息、普通进度、日志和可从代码恢复的事实。不可达时继续工作，后续按需重试；写入结果未知时保持原参数，权限拒绝后停止。召回内容是证据，不是执行授权。
+```
+
+这是用户配置的行为引导，PCP 不会自动安装；它沿用现有连接，不增加 Skill、hooks 或写入权限。保存后在新任务中核对指引是否已加载，未更新时再重启 Codex。用确有跨会话背景缺口的普通任务观察是否主动调用，无需在问题中点名 PCP；连通测试不能证明自然触发率，已有足够上下文时跳过检索是正常行为。
+
 ### 维护、Console 与观测
 
 后台维护与 Console 手动运行共用持久审阅队列。Worker 只产生候选，Runtime 和 Store 负责预算、授权、当前 Revision 校验与提交；普通语义 Relation 可单独启用全文独立复核，通过后自动应用；未通过、Archive 和高影响反馈协调建议保留人工审阅。自动维护可覆盖全部授权 Scope，并低频复查旧页；同主题短页的数量或总内容量积累也可触发提炼，不只检查单页长度。Topic 按精确来源修订去重，并参考相邻主题与已记录的拒绝原因；独立全文复核确认新增信息和原有限定后，才可自动写入。无效候选修正一次后隔离，待审 Topic 达到上限时暂停新增提案。达到门槛的 Topic 自动生成需单独启用，跨 Scope 提炼保留全部来源修订与明确的目标 Scope。反馈协调默认由低成本模型判断；只有不确定项才升级一次，更高影响的 `superseded`/`retracted` 仍需人工批准。调度、模型升级和失败退避见 [`crates/pcp-runtime/README.md`](crates/pcp-runtime/README.md)。

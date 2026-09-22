@@ -1,6 +1,6 @@
 //! Host-owned bounded delivery. Invoke at native checkpoints, not every model
 //! turn. Exact requests survive offline/unknown outcomes; identity never drifts.
-use crate::{PcpApi, context_hub::ContextHubRequest};
+use crate::{PcpTenantApi, context_hub::ContextHubRequest};
 use anyhow::{Context, Result, ensure};
 use pcp_core::AccessPermission;
 use serde::{Deserialize, Serialize};
@@ -186,7 +186,7 @@ impl ExperienceOutbox {
 
     /// One bounded delivery. Errors retain the exact record and are returned to
     /// the host; no background loop, fallback principal, or content reconstruction.
-    pub async fn flush_one(&self, client: &dyn PcpApi) -> Result<Option<Value>> {
+    pub async fn flush_one(&self, client: &dyn PcpTenantApi) -> Result<Option<Value>> {
         let _lock = self.lock()?;
         let paths = self.pending()?;
         let Some(path) = paths.first() else {

@@ -155,17 +155,10 @@ places these triggers in its own conversation developer instructions and prepare
 local evidence. The shared connector has no equivalent host hook controlled by
 this repository; parameter defaults reduce friction without changing that boundary.
 
-If a host supports user-managed instructions, this compact guidance can be used
-there without another plugin or connection:
-
-> On topic start/resume, recall only missing context that could change the answer.
-> At a new preference, constraint, decision, correction or reusable finding, assess
-> memory before leaving the phase: capture clear durable value, or stage uncertain
-> future value with opt-in. Combine same-subject changes; reuse receipts and skip
-> rewording. Choose one memory route per item. Disputed stored memory uses feedback.
-> Activity is temporary progress. No per-turn calls, polling or quotas. Stop on
-> denial; keep routine success quiet. PCP may be offline: continue work, retry later
-> if needed, preserving original write arguments after unknown outcomes.
+For Codex, optionally append the [short AGENTS.md guidance](../../README-en.md#6-add-codex-guidance-optional)
+to the active global or project instructions. The README includes the copyable
+example, file precedence, and how to check that it loaded. Other hosts with
+user-managed instructions can adapt the same guidance without another plugin or connection.
 
 This is optional host configuration, not something the MCP server installs. After
 updating tool schemas, refresh the connection's discovered metadata and verify the

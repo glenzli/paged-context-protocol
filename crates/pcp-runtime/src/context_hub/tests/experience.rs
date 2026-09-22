@@ -263,7 +263,9 @@ async fn native_experience_round_trips_over_rpc_with_attested_identity() {
     outbox
         .stage(evidence("RPC transported the original evidence"))
         .unwrap();
-    outbox.flush_one(&remote).await.unwrap();
+    // Native hosts expose a tenant API; delivery must not require admin methods.
+    let tenant: &dyn pcp_client::PcpTenantApi = &remote;
+    outbox.flush_one(tenant).await.unwrap();
     let db = LockedState::open(&r.hub.path, r.store.identity_id())
         .await
         .unwrap();
