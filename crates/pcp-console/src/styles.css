@@ -450,6 +450,8 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 .maintenance-review-settled-summary { min-width: 0; overflow: hidden; color: var(--text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .maintenance-review-settled-pending { color: var(--muted); font-size: 10px; white-space: nowrap; }
 .maintenance-review-settled-pending.has-error { color: var(--danger); }
+.maintenance-review-settled-qualification { grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; color: var(--text); font-size: 12px; line-height: 1.5; }
+.maintenance-review-settled-qualification p { margin: 4px 0 0; color: var(--muted); }
 .maintenance-review-undo { display: inline-flex; align-items: center; gap: 4px; min-height: 26px; border-color: transparent; background: transparent; box-shadow: none; color: var(--accent); }
 .maintenance-review-undo:hover { border-color: transparent; background: var(--accent-soft); color: var(--accent); }
 .maintenance-review-session-actions { position: sticky; bottom: 10px; z-index: 4; display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 12px; padding: 10px 11px; border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line)); border-radius: var(--card-radius); background: color-mix(in srgb, var(--surface) 92%, var(--accent-soft)); box-shadow: var(--shadow-panel); -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px); }
@@ -472,6 +474,11 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 .maintenance-review-signals { display: flex; flex-wrap: wrap; gap: 5px; }
 .maintenance-reconciliation-decision { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
 .maintenance-reconciliation-decision.disposition-superseded, .maintenance-reconciliation-decision.disposition-retracted { border-color: color-mix(in srgb, var(--warning) 40%, var(--line)); background: var(--warning-soft); }
+.maintenance-qualification-editor { display: grid; gap: 10px; margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-subtle); }
+.maintenance-qualification-editor > p { margin: 0; font-size: 13px; line-height: 1.5; }
+.maintenance-qualification-field { display: grid; min-width: 0; gap: 5px; color: var(--text); font-size: 13px; font-weight: 650; }
+.maintenance-qualification-field textarea { width: 100%; min-height: 64px; resize: vertical; padding: 8px 10px; border: 1px solid var(--strong-line); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 14px; font-weight: 400; line-height: 1.5; }
+.maintenance-qualification-field textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .maintenance-reconciliation-panel { display: grid; width: 100%; gap: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); text-align: left; }
 .maintenance-reconciliation-target { appearance: none; color: inherit; cursor: pointer; font: inherit; }
 .maintenance-reconciliation-target:hover { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); background: var(--accent-soft); }

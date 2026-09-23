@@ -42,6 +42,7 @@ import {
   groupReviewTopics,
   partitionReviewSession,
   partitionReviewQueues,
+  reviewDecisionBody,
   restoreReviewDecisions,
   reviewDecisionCounts,
   serializeReviewDecisions,
@@ -241,6 +242,11 @@ const ZH_MESSAGES = {
   "Pending approval; original content is unchanged": "待批准；原内容尚未改变",
   "Keep original content": "保留原内容",
   "Qualify the claim": "限定适用范围",
+  "Applicability boundary": "适用边界",
+  "Review rationale": "判定理由",
+  "State the specific limit before accepting this qualification.": "接受限定决定前，请写明原结论适用的具体条件或尚未证实的部分。",
+  "Please complete this field.": "请填写此项。",
+  "Accept with this boundary": "按此边界接受",
   "Mark as disputed": "标记争议",
   "Replace with new content": "以新内容替代",
   "Retract the old claim": "撤回旧结论",
@@ -1265,6 +1271,7 @@ const state = {
     relationReviews: [],
     reviewBusy: new Set(),
     reviewDecisions: restoreReviewDecisions(readSessionValue(REVIEW_SESSION_STORAGE_KEY)),
+    qualificationDrafts: new Map(),
     reviewCommitBusy: false,
     convergence: {
       running: false,
@@ -3643,10 +3650,11 @@ function maintenanceReviewContent(review) {
         element("span", "mono muted", `${page.namespace || ""} · ${page.revisionId || ""}`));
       comparison.append(panel);
     }
-    body.append(comparison, element("p", "maintenance-review-evidence", candidate.rationale));
+    body.append(comparison);
+    if (candidate.disposition !== "qualified") body.append(element("p", "maintenance-review-evidence", candidate.rationale));
     if (view.crossScope) body.append(element("p", "notice warning", t("Cross-scope decision: approval changes the target's validity but does not grant access to the replacement. The decision rationale is stored in the target Scope.")));
     if (view.replacementUnavailable) body.append(element("p", "notice warning", t("Replacement preview unavailable; re-analyze before applying")));
-    if (candidate.scope) body.append(element("span", "status-pill", candidate.scope));
+    if (candidate.scope && candidate.disposition !== "qualified") body.append(element("span", "status-pill", candidate.scope));
     if (candidate.replacement?.revisionId) {
       body.append(element("p", "maintenance-review-evidence", `${t("Replacement Revision")} · ${candidate.replacement.revisionId}`));
     }
@@ -3704,10 +3712,19 @@ function maintenanceReviewSettledRow(review, staged) {
     pending,
     undo,
   );
+  if (staged.decision === REVIEW_DECISION.ACCEPT && staged.kind === "reconciliation" && staged.qualificationScope) {
+    const qualification = element("div", "maintenance-review-settled-qualification");
+    qualification.append(
+      element("strong", "", `${t("Applicability boundary")}：`),
+      element("span", "", staged.qualificationScope),
+      element("p", "", `${t("Review rationale")}：${staged.qualificationRationale}`),
+    );
+    row.append(qualification);
+  }
   return row;
 }
 
-function reviewDecisionButton(review, decision, label, iconNode, tone = "", { iconOnly = true } = {}) {
+function reviewDecisionButton(review, decision, label, iconNode, tone = "", { iconOnly = true, details = null } = {}) {
   const button = element("button", `compact-button maintenance-review-decision${iconOnly ? " compact-icon-button" : ""}${tone ? ` tone-${tone}` : ""}`);
   button.type = "button";
   button.disabled = state.maintenance.reviewCommitBusy;
@@ -3718,8 +3735,51 @@ function reviewDecisionButton(review, decision, label, iconNode, tone = "", { ic
   } else {
     button.append(element("span", "", label));
   }
-  button.addEventListener("click", () => stageMaintenanceReview(review, decision));
+  button.addEventListener("click", () => {
+    const decisionDetails = details ? details() : {};
+    if (decisionDetails !== null) stageMaintenanceReview(review, decision, decisionDetails);
+  });
   return button;
+}
+
+function qualificationReviewEditor(review) {
+  const candidate = review.payload.candidate;
+  const saved = state.maintenance.qualificationDrafts.get(review.candidateId);
+  const draft = saved?.proposedAt === review.proposedAt
+    ? saved
+    : { proposedAt: review.proposedAt, scope: candidate.scope || "", rationale: candidate.rationale || "" };
+  const section = element("section", "maintenance-qualification-editor");
+  section.append(element("p", "muted", t("State the specific limit before accepting this qualification.")));
+  const fields = [];
+  for (const [key, label, limit, rows] of [
+    ["scope", "Applicability boundary", 1000, 2],
+    ["rationale", "Review rationale", 2000, 3],
+  ]) {
+    const wrapper = element("label", "maintenance-qualification-field");
+    const input = element("textarea");
+    input.value = draft[key];
+    input.required = true;
+    input.maxLength = limit;
+    input.rows = rows;
+    input.addEventListener("input", () => {
+      draft[key] = input.value;
+      input.setCustomValidity("");
+      state.maintenance.qualificationDrafts.set(review.candidateId, draft);
+    });
+    wrapper.append(element("span", "", t(label)), input);
+    section.append(wrapper);
+    fields.push(input);
+  }
+  return {
+    node: section,
+    details: () => {
+      for (const field of fields) {
+        field.setCustomValidity(field.value.trim() ? "" : t("Please complete this field."));
+        if (!field.reportValidity()) return null;
+      }
+      return { qualificationScope: fields[0].value.trim(), qualificationRationale: fields[1].value.trim() };
+    },
+  };
 }
 
 function maintenanceReviewCard(review) {
@@ -3739,6 +3799,9 @@ function maintenanceReviewCard(review) {
   heading.append(metadata, model);
   const reason = element("p", "maintenance-relation-review-reason muted", review.reason);
   const actions = element("div", "maintenance-relation-review-actions");
+  const qualification = payload.kind === "reconciliation" && candidate.disposition === "qualified"
+    ? qualificationReviewEditor(review)
+    : null;
   if (payload.kind === "relation") {
     actions.append(relationComparisonButton({
       pages: candidate.pages,
@@ -3756,13 +3819,14 @@ function maintenanceReviewCard(review) {
   const accept = reviewDecisionButton(
     review,
     REVIEW_DECISION.ACCEPT,
-    t(payload.kind === "archive" ? "Archive" : payload.kind === "reconciliation" ? "Accept proposed decision" : "Accept"),
+    t(payload.kind === "archive" ? "Archive" : qualification ? "Accept with this boundary" : payload.kind === "reconciliation" ? "Accept proposed decision" : "Accept"),
     icon(payload.kind === "archive" ? "archive" : "accept"),
     payload.kind === "archive" ? "archive" : "accept",
+    { iconOnly: payload.kind !== "reconciliation", details: qualification?.details },
   );
-  const reject = reviewDecisionButton(review, REVIEW_DECISION.REJECT, t(payload.kind === "reconciliation" ? "Reject this proposal" : "Reject"), icon("reject"), "reject");
+  const reject = reviewDecisionButton(review, REVIEW_DECISION.REJECT, t(payload.kind === "reconciliation" ? "Reject this proposal" : "Reject"), icon("reject"), "reject", { iconOnly: payload.kind !== "reconciliation" });
   if (payload.kind === "reconciliation" && reconciliationView(candidate).replacementUnavailable) accept.disabled = true;
-  const defer = reviewDecisionButton(review, REVIEW_DECISION.DEFER, t("Skip for now"), icon("defer"), "defer");
+  const defer = reviewDecisionButton(review, REVIEW_DECISION.DEFER, t("Skip for now"), icon("defer"), "defer", { iconOnly: payload.kind !== "reconciliation" });
   actions.append(accept, reject, defer);
   if (payload.kind === "relation") {
     const suppress = reviewDecisionButton(
@@ -3799,6 +3863,7 @@ function maintenanceReviewCard(review) {
     card.append(evidence);
   }
   card.append(maintenanceReviewContent(review));
+  if (qualification) card.append(qualification.node);
   if (payload.kind === "topic") {
     const label = element("label", "muted", currentLanguage === "zh" ? "拒绝原因（可选） " : "Rejection reason (optional) ");
     const select = element("select", "");
@@ -3821,6 +3886,11 @@ async function loadRelationReviews() {
   }
   const response = await api("/api/maintenance/reviews");
   state.maintenance.relationReviews = response.reviews || [];
+  for (const [candidateId, draft] of state.maintenance.qualificationDrafts) {
+    if (!state.maintenance.relationReviews.some((review) => review.candidateId === candidateId && review.proposedAt === draft.proposedAt)) {
+      state.maintenance.qualificationDrafts.delete(candidateId);
+    }
+  }
   renderRelationReviews();
   renderAutomationStatus();
 }
@@ -3832,9 +3902,9 @@ function persistMaintenanceReviewSession() {
   );
 }
 
-function stageMaintenanceReview(review, decision) {
+function stageMaintenanceReview(review, decision, details = {}) {
   if (state.maintenance.reviewCommitBusy) return;
-  const staged = stageReviewDecision(state.maintenance.reviewDecisions, review, decision);
+  const staged = stageReviewDecision(state.maintenance.reviewDecisions, review, decision, new Date().toISOString(), details);
   if (decision === REVIEW_DECISION.REJECT && review.decisionNote) staged.reason = review.decisionNote;
   persistMaintenanceReviewSession();
   renderRelationReviews();
@@ -3842,6 +3912,15 @@ function stageMaintenanceReview(review, decision) {
 
 function undoMaintenanceReview(candidateId) {
   if (state.maintenance.reviewCommitBusy) return;
+  const staged = state.maintenance.reviewDecisions.get(candidateId);
+  const review = state.maintenance.relationReviews.find((item) => item.candidateId === candidateId);
+  if (staged?.qualificationScope && review) {
+    state.maintenance.qualificationDrafts.set(candidateId, {
+      proposedAt: review.proposedAt,
+      scope: staged.qualificationScope,
+      rationale: staged.qualificationRationale,
+    });
+  }
   undoReviewDecision(state.maintenance.reviewDecisions, candidateId);
   persistMaintenanceReviewSession();
   renderRelationReviews();
@@ -3849,6 +3928,17 @@ function undoMaintenanceReview(candidateId) {
 
 function undoAllMaintenanceReviews() {
   if (state.maintenance.reviewCommitBusy) return;
+  for (const candidateId of state.maintenance.reviewDecisions.keys()) {
+    const staged = state.maintenance.reviewDecisions.get(candidateId);
+    const review = state.maintenance.relationReviews.find((item) => item.candidateId === candidateId);
+    if (staged?.qualificationScope && review) {
+      state.maintenance.qualificationDrafts.set(candidateId, {
+        proposedAt: review.proposedAt,
+        scope: staged.qualificationScope,
+        rationale: staged.qualificationRationale,
+      });
+    }
+  }
   state.maintenance.reviewDecisions.clear();
   persistMaintenanceReviewSession();
   renderRelationReviews();
@@ -3880,9 +3970,10 @@ async function commitMaintenanceReviewSession() {
     try {
       await maintenanceMutation(
         `/api/maintenance/reviews/${encodeURIComponent(review.candidateId)}/${decision.decision}`,
-        decision.decision === REVIEW_DECISION.REJECT && decision.reason ? { reason: decision.reason } : {},
+        reviewDecisionBody(review, decision),
       );
       state.maintenance.reviewDecisions.delete(review.candidateId);
+      state.maintenance.qualificationDrafts.delete(review.candidateId);
       state.maintenance.relationReviews = state.maintenance.relationReviews
         .filter((item) => item.candidateId !== review.candidateId);
     } catch (error) {

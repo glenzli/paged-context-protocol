@@ -1531,16 +1531,34 @@ async fn maintenance_reviews(State(state): State<AppState>) -> Result<Json<Value
     Ok(Json(json!({"reviews": operator.routed_reviews().await?})))
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+struct ReviewAcceptInput {
+    qualification_scope: Option<String>,
+    qualification_rationale: Option<String>,
+}
+
 async fn accept_maintenance_review(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(candidate_id): Path<String>,
+    Json(request): Json<ReviewAcceptInput>,
 ) -> Result<Json<Value>, ApiError> {
     require_console_mutation(&headers)?;
     let mut operator = maintenance_operator_for_console(&state).await?;
     let item = operator
         .review_item(&candidate_id)
         .context("unknown PCP maintenance review candidate")?;
+    let qualified = matches!(&item.payload, MaintenanceReviewPayload::Reconciliation(candidate)
+        if candidate.disposition == pcp_core::ReconciliationDisposition::Qualified);
+    if !qualified
+        && (request.qualification_scope.is_some() || request.qualification_rationale.is_some())
+    {
+        return Err(anyhow::anyhow!(
+            "qualification edits require a qualified reconciliation proposal"
+        )
+        .into());
+    }
     let result = match item.payload {
         MaintenanceReviewPayload::Pack(candidate) => json!(
             operator
@@ -1622,9 +1640,23 @@ async fn accept_maintenance_review(
                 .await?
         ),
         MaintenanceReviewPayload::Reconciliation(_) => {
-            let result = operator
-                .approve_reconciliation_review(&candidate_id)
-                .await?;
+            let result = if qualified {
+                operator
+                    .approve_reconciliation_review_with_qualification(
+                        &candidate_id,
+                        request
+                            .qualification_scope
+                            .context("qualification scope is required")?,
+                        request
+                            .qualification_rationale
+                            .context("qualification rationale is required")?,
+                    )
+                    .await?
+            } else {
+                operator
+                    .approve_reconciliation_review(&candidate_id)
+                    .await?
+            };
             return Ok(Json(json!({
                 "candidateId": candidate_id,
                 "status": "accepted",

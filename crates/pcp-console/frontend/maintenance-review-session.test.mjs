@@ -7,6 +7,7 @@ import {
   partitionReviewSession,
   partitionReviewQueues,
   reconcileReviewDecisions,
+  reviewDecisionBody,
   restoreReviewDecisions,
   reviewDecisionCounts,
   serializeReviewDecisions,
@@ -83,6 +84,30 @@ test("feedback reconciliation uses the shared reversible review session", () => 
     () => stageReviewDecision(decisions, reconciliation, REVIEW_DECISION.SUPPRESS),
     /unsupported reconciliation review decision/,
   );
+});
+
+test("qualified reconciliation requires and retains the human-written boundary", () => {
+  const item = review("reconcile:qualified", "reconciliation");
+  item.payload.candidate = { disposition: "qualified", scope: null, rationale: "Proposed explanation" };
+  const decisions = new Map();
+  assert.throws(() => stageReviewDecision(decisions, item, REVIEW_DECISION.ACCEPT), /Qualification scope/);
+  assert.equal(decisions.size, 0);
+  const details = { qualificationScope: "  Only in the observed workflow. ", qualificationRationale: "  The mechanism remains unverified. " };
+  stageReviewDecision(decisions, item, REVIEW_DECISION.ACCEPT, "2026-09-24T12:00:00Z", details);
+  const restored = restoreReviewDecisions(serializeReviewDecisions(decisions));
+  assert.equal(partitionReviewSession([item], restored).staged.length, 1);
+  assert.equal(restored.get(item.candidateId).qualificationScope, "Only in the observed workflow.");
+  assert.equal(restored.get(item.candidateId).qualificationRationale, "The mechanism remains unverified.");
+  assert.deepEqual(reviewDecisionBody(item, restored.get(item.candidateId)), {
+    qualificationScope: "Only in the observed workflow.",
+    qualificationRationale: "The mechanism remains unverified.",
+  });
+  restored.get(item.candidateId).qualificationScope = " ";
+  assert.throws(() => reviewDecisionBody(item, restored.get(item.candidateId)), /Qualification scope/);
+  assert.equal(partitionReviewSession([item], restored).staged.length, 0);
+  stageReviewDecision(restored, item, REVIEW_DECISION.ACCEPT, "2026-09-24T12:00:00Z", details);
+  const changed = { ...item, payload: { ...item.payload, candidate: { ...item.payload.candidate, rationale: "Re-analyzed" } } };
+  assert.equal(partitionReviewSession([changed], restored).staged.length, 0);
 });
 
 test("malformed persisted review sessions fail closed", () => {

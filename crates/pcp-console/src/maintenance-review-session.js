@@ -19,8 +19,18 @@ function reviewSnapshot(review) {
     review?.proposedAt ?? null, review?.updatedAt ?? null,
     candidate.expectedAssessmentRevisionId ?? null,
     candidate.target?.revisionId ?? null, candidate.replacement?.revisionId ?? null,
-    candidate.disposition ?? null, candidate.basisRevisionIds ?? [],
+    candidate.disposition ?? null, candidate.scope ?? null, candidate.rationale ?? null,
+    candidate.basisRevisionIds ?? [],
   ]);
+}
+
+function validQualification(staged) {
+  return typeof staged.qualificationScope === "string"
+    && staged.qualificationScope.trim().length > 0
+    && staged.qualificationScope.length <= 1000
+    && typeof staged.qualificationRationale === "string"
+    && staged.qualificationRationale.trim().length > 0
+    && staged.qualificationRationale.length <= 2000;
 }
 
 export function canStageReviewDecision(review, decision) {
@@ -28,18 +38,24 @@ export function canStageReviewDecision(review, decision) {
     && (decision !== REVIEW_DECISION.SUPPRESS || reviewKind(review) === "relation");
 }
 
-export function stageReviewDecision(decisions, review, decision, stagedAt = new Date().toISOString()) {
+export function stageReviewDecision(decisions, review, decision, stagedAt = new Date().toISOString(), details = {}) {
   if (!canStageReviewDecision(review, decision)) {
     throw new Error(`unsupported ${reviewKind(review)} review decision: ${decision}`);
   }
-  decisions.set(review.candidateId, {
+  const staged = {
     candidateId: review.candidateId,
     kind: reviewKind(review),
     snapshot: reviewSnapshot(review),
     decision,
     stagedAt,
     error: null,
-  });
+  };
+  if (staged.kind === "reconciliation" && review.payload.candidate.disposition === "qualified" && decision === REVIEW_DECISION.ACCEPT) {
+    staged.qualificationScope = details.qualificationScope?.trim();
+    staged.qualificationRationale = details.qualificationRationale?.trim();
+    if (!validQualification(staged)) throw new Error("Qualification scope and rationale are required");
+  }
+  decisions.set(review.candidateId, staged);
   return decisions.get(review.candidateId);
 }
 
@@ -51,7 +67,8 @@ export function reconcileReviewDecisions(reviews, decisions) {
   const reviewsById = new Map(reviews.map((review) => [review.candidateId, review]));
   for (const [candidateId, staged] of decisions) {
     const review = reviewsById.get(candidateId);
-    if (!review || staged.kind !== reviewKind(review) || staged.snapshot !== reviewSnapshot(review) || !canStageReviewDecision(review, staged.decision)) {
+    if (!review || staged.kind !== reviewKind(review) || staged.snapshot !== reviewSnapshot(review) || !canStageReviewDecision(review, staged.decision)
+      || (staged.kind === "reconciliation" && review.payload.candidate.disposition === "qualified" && staged.decision === REVIEW_DECISION.ACCEPT && !validQualification(staged))) {
       decisions.delete(candidateId);
     }
   }
@@ -90,14 +107,25 @@ export function reviewDecisionCounts(decisions) {
   return counts;
 }
 
+export function reviewDecisionBody(review, staged) {
+  if (staged.decision === REVIEW_DECISION.ACCEPT && reviewKind(review) === "reconciliation" && review.payload.candidate.disposition === "qualified") {
+    if (!validQualification(staged)) throw new Error("Qualification scope and rationale are required");
+    return { qualificationScope: staged.qualificationScope, qualificationRationale: staged.qualificationRationale };
+  }
+  if (staged.decision === REVIEW_DECISION.REJECT && staged.reason) return { reason: staged.reason };
+  return {};
+}
+
 export function serializeReviewDecisions(decisions) {
-  return JSON.stringify([...decisions.values()].map(({ candidateId, kind, decision, stagedAt, snapshot, reason }) => ({
+  return JSON.stringify([...decisions.values()].map(({ candidateId, kind, decision, stagedAt, snapshot, reason, qualificationScope, qualificationRationale }) => ({
     candidateId,
     kind,
     decision,
     stagedAt,
     snapshot,
     reason,
+    qualificationScope,
+    qualificationRationale,
   })));
 }
 

@@ -1479,6 +1479,25 @@ impl RuntimeMaintainer {
         &mut self,
         candidate_id: &str,
     ) -> Result<pcp_core::ReconciliationResult> {
+        self.approve_reconciliation_review_inner(candidate_id, None)
+            .await
+    }
+
+    pub async fn approve_reconciliation_review_with_qualification(
+        &mut self,
+        candidate_id: &str,
+        scope: String,
+        rationale: String,
+    ) -> Result<pcp_core::ReconciliationResult> {
+        self.approve_reconciliation_review_inner(candidate_id, Some((scope, rationale)))
+            .await
+    }
+
+    async fn approve_reconciliation_review_inner(
+        &mut self,
+        candidate_id: &str,
+        qualification: Option<(String, String)>,
+    ) -> Result<pcp_core::ReconciliationResult> {
         anyhow::ensure!(
             self.config.applies_changes(),
             "PCP reconciliation approval requires apply mode"
@@ -1487,13 +1506,30 @@ impl RuntimeMaintainer {
             .ledger
             .review_item(candidate_id)
             .context("unknown PCP reconciliation review candidate")?;
-        let MaintenanceReviewPayload::Reconciliation(candidate) = item.payload else {
+        let MaintenanceReviewPayload::Reconciliation(mut candidate) = item.payload else {
             anyhow::bail!("maintenance review candidate is not a reconciliation")
         };
         anyhow::ensure!(
             item.status == MaintenanceReviewStatus::Pending,
             "PCP reconciliation review candidate is no longer pending"
         );
+        if candidate.disposition == ReconciliationDisposition::Qualified {
+            let (scope, rationale) = qualification.unwrap_or_else(|| {
+                (
+                    candidate.scope.clone().unwrap_or_default(),
+                    candidate.rationale.clone(),
+                )
+            });
+            let (scope, rationale) =
+                super::reconciliation::reviewed_qualification(&scope, &rationale)?;
+            candidate.scope = Some(scope);
+            candidate.rationale = rationale;
+        } else {
+            anyhow::ensure!(
+                qualification.is_none(),
+                "qualification edits require a qualified proposal"
+            );
+        }
         anyhow::ensure!(
             candidate.replacement.as_ref().is_none_or(|replacement| {
                 candidate.evidence.iter().any(|page| {

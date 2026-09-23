@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use pcp_core::{
     FeedbackSignal, LifecycleStatus, PageRevisionRef, Projection, ReadPagesRequest,
     ReconciliationDisposition,
@@ -39,6 +39,20 @@ impl MaintenanceReconciliationCandidate {
     }
 }
 
+pub(super) fn reviewed_qualification(scope: &str, rationale: &str) -> Result<(String, String)> {
+    let scope = scope.trim();
+    let rationale = rationale.trim();
+    ensure!(
+        !scope.is_empty() && scope.chars().count() <= 1_000,
+        "qualified review requires a specific applicability boundary of at most 1000 characters"
+    );
+    ensure!(
+        !rationale.is_empty() && rationale.chars().count() <= 2_000,
+        "qualified review requires a rationale of at most 2000 characters"
+    );
+    Ok((scope.to_owned(), rationale.to_owned()))
+}
+
 /// Keep proposal explanations in the review ledger. Terminal decisions are
 /// already expressed by standing, exact evidence and (for replacement) a
 /// supersedes Relation; only qualifications/disputes need explanatory content.
@@ -76,6 +90,19 @@ mod tests {
                 "scope-limited grounds"
             );
         }
+    }
+
+    #[test]
+    fn reviewed_qualification_requires_an_explicit_boundary() {
+        assert!(reviewed_qualification("  ", "Evidence is limited").is_err());
+        assert!(reviewed_qualification("Observed workflow only", " ").is_err());
+        assert_eq!(
+            reviewed_qualification(" Observed workflow only ", " Mechanism unverified ").unwrap(),
+            (
+                "Observed workflow only".into(),
+                "Mechanism unverified".into()
+            )
+        );
     }
 }
 
