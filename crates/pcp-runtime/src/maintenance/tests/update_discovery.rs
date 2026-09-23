@@ -267,6 +267,106 @@ async fn assert_update_review(with_provenance: bool) {
 }
 
 #[tokio::test]
+async fn discovered_qualification_requires_and_applies_the_reviewers_boundary() {
+    let f = fixture().await;
+    let old = f
+        .client
+        .write_page(f.page("A proposed general mechanism.", "qualified:old"))
+        .await
+        .unwrap();
+    let mut new = f.page(
+        "One observed workflow supports a narrower claim.",
+        "qualified:new",
+    );
+    new.provenance = vec![ProvenanceEvent {
+        operation: "derive".into(),
+        actor: Actor {
+            actor_type: ActorType::Tool,
+            actor_id: "reviewer".into(),
+        },
+        timestamp: "2026-09-02T00:00:00Z".into(),
+        input_revision_ids: vec![old.revision_id.clone()],
+        tool_or_model: None,
+        reason: None,
+    }];
+    let new = f.client.write_page(new).await.unwrap();
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::ReconcileFeedback {
+            target_revision_id: old.revision_id.clone(),
+            disposition: ReconciliationDisposition::Qualified,
+            rationale: "A narrower claim may be appropriate.".into(),
+            scope: None,
+            replacement_revision_id: None,
+        },
+    ]));
+    let mut config = f.config();
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = false;
+    config.retention.enabled = false;
+    config.reconciliation.discover_updates = true;
+    let mut maintainer = RuntimeMaintainer::for_test(f.client.clone(), worker, config);
+    assert_eq!(
+        maintainer
+            .run_once()
+            .await
+            .unwrap()
+            .reconciliations_proposed,
+        1
+    );
+    let review = maintainer.pending_reviews().remove(0);
+    let MaintenanceReviewPayload::Reconciliation(candidate) = &review.payload else {
+        panic!("wrong review type")
+    };
+    assert_eq!(candidate.evidence[0].revision_id, new.revision_id);
+    assert!(candidate.scope.is_none());
+    assert!(
+        maintainer
+            .approve_reconciliation_review(&review.candidate_id)
+            .await
+            .is_err()
+    );
+
+    let request = ReadPagesRequest {
+        page_ids: Vec::new(),
+        revision_ids: vec![old.revision_id],
+        projections: vec![Projection::Validity],
+        max_chars: 4000,
+    };
+    assert!(
+        f.client.read_pages(request.clone()).await.unwrap()[0]
+            .validity
+            .is_none()
+    );
+    maintainer
+        .approve_reconciliation_review_with_qualification(
+            &review.candidate_id,
+            " Only for the observed workflow. ".into(),
+            " The broader mechanism remains unverified. ".into(),
+        )
+        .await
+        .unwrap();
+    let validity = f
+        .client
+        .read_pages(request)
+        .await
+        .unwrap()
+        .remove(0)
+        .validity
+        .unwrap();
+    assert_eq!(validity.standing, ValidityStanding::Qualified);
+    assert_eq!(
+        validity.scope.as_deref(),
+        Some("Only for the observed workflow.")
+    );
+    assert_eq!(
+        validity.rationale,
+        "The broader mechanism remains unverified."
+    );
+    f.close().await;
+}
+
+#[tokio::test]
 async fn new_feedback_evidence_is_offered_separately_and_cross_scope_dispute_waits_for_review() {
     let f = fixture().await;
     let old = f
