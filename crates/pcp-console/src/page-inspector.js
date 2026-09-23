@@ -119,12 +119,18 @@ export function createPageInspector({ request, mutate, confirmAction, onMutation
     return actor.actorId.startsWith(prefix) ? actor.actorId : `${prefix}${actor.actorId}`;
   }
 
-  function pageLabel(page) {
+  function pageTitle(page) {
     const facetTitle = page.revision.facets?.title;
-    if (facetTitle) return facetTitle;
-    const preview = page.summary?.content || pagePayloadPreviewText(page.revision.payload?.content, page.revision.payload?.mediaType);
-    const firstLine = preview?.split("\n").find((line) => line.trim());
-    return firstLine?.replace(/^#+\s*/, "").slice(0, 120) || page.page.pageId;
+    if (typeof facetTitle === "string" && facetTitle.trim()) return facetTitle.trim();
+    const payload = page.revision.payload;
+    if (!/^(text\/(?:x-)?markdown)(?:;|$)/i.test(payload?.mediaType || "")) return "";
+    const preview = pagePayloadPreviewText(payload?.content, payload?.mediaType);
+    const firstLine = preview.split(/\r?\n/).find((line) => line.trim());
+    return firstLine?.match(/^ {0,3}#{1,6}\s+(.+?)(?:\s+#+)?\s*$/)?.[1]?.trim() || "";
+  }
+
+  function pageLabel(page) {
+    return pageTitle(page) || kindLabel(page.page.kind, t);
   }
 
   function truncate(value, limit) {
@@ -488,7 +494,7 @@ export function createPageInspector({ request, mutate, confirmAction, onMutation
         detailCache.set(pageId, page);
       }
       if (currentPageId !== pageId || generation !== inspectGeneration) return;
-      title.textContent = pageLabel(page);
+      title.textContent = pageTitle(page) || t("Page");
       subtitle.replaceChildren(scopeLabel(element, [page.page.namespace], scopeName), ` · ${kindLabel(page.page.kind, t)} · ${t("Updated")} ${formatTime(page.page.updatedAt)}`);
       renderSummary(page);
       editor.attach(page);
