@@ -1,7 +1,7 @@
 use anyhow::{Result, ensure};
 use pcp_core::{
-    FeedbackSignal, LifecycleStatus, PageRevisionRef, Projection, ReadPagesRequest,
-    ReconciliationDisposition,
+    ConsolidatedPageOutput, ConsolidationCoverage, FeedbackSignal, LifecycleStatus,
+    PageRevisionRef, Projection, ReadPagesRequest, ReconciliationDisposition,
 };
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +31,15 @@ pub struct MaintenanceReconciliationCandidate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement: Option<PageRevisionRef>,
     pub basis_revision_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_consolidation: Option<SuggestedConsolidation>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestedConsolidation {
+    pub outputs: Vec<ConsolidatedPageOutput>,
+    pub coverage: Vec<ConsolidationCoverage>,
 }
 
 impl MaintenanceReconciliationCandidate {

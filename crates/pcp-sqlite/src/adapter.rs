@@ -5,15 +5,16 @@ use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessDecision, AccessPermission, AccessPrincipalType, AccessSession, Actor,
     ActorType, ApplyReconciliationRequest, ArchivePageRequest, AssessPageValidityRequest,
-    Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest, ExtractTopicRequest,
-    FeedbackSignal, FeedbackSubmission, IngestPageRequest, LifecycleStatus, LinkPagesRequest,
-    OperationTelemetry, PackPagesRequest, PageLifecycleTransitionResult, PageMutability,
-    PlanRevisionRetentionRequest, Projection, ProvenanceEvent, PutRevisionRetentionLeaseRequest,
-    QueryAuditEvent, ReadPage, ReadPagesRequest, ReconciliationResult, Relation, RepairPageRequest,
-    RestoreArchivedPageRequest, RevisePageRequest, RevisionCollectionResult,
-    RevisionRetentionLease, RevisionRetentionPlan, RuntimeUsageEvent, Scope, SearchPagesRequest,
-    SearchResult, SubmitFeedbackRequest, UnpackPageRequest, WritePageRequest, WriteResult,
-    WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    Capabilities, CollectRevisionRetentionRequest, ConsolidatePagesRequest, ConsolidationResult,
+    CreateScopeRequest, ExtractTopicRequest, FeedbackSignal, FeedbackSubmission, IngestPageRequest,
+    LifecycleStatus, LinkPagesRequest, OperationTelemetry, PackPagesRequest,
+    PageLifecycleTransitionResult, PageMutability, PlanRevisionRetentionRequest, Projection,
+    ProvenanceEvent, PutRevisionRetentionLeaseRequest, QueryAuditEvent, ReadPage, ReadPagesRequest,
+    ReconciliationResult, Relation, RepairPageRequest, RestoreArchivedPageRequest,
+    RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan,
+    RuntimeUsageEvent, Scope, SearchPagesRequest, SearchResult, SubmitFeedbackRequest,
+    UnpackPageRequest, WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult,
+    WriteValidityResult,
 };
 use pcp_store::{
     ContentLibraryResult, ContentLibrarySummary, DurablePageInventoryItem, HealthSnapshot,
@@ -1528,6 +1529,51 @@ impl PcpStore for SqlitePcpStore {
             access,
             "extract_topic",
             scopes,
+            result,
+            false,
+            observation,
+        )
+        .await
+    }
+
+    async fn consolidate_pages(
+        &self,
+        access: &AccessSession,
+        mut request: ConsolidatePagesRequest,
+    ) -> Result<ConsolidationResult> {
+        let scope = request.namespace.clone();
+        let observation =
+            OperationObservation::start().with_input_count(request.source_pages.len());
+        let authorization = authorize_exact(access, &scope, AccessPermission::ReadDetail)
+            .and_then(|_| authorize_exact(access, &scope, AccessPermission::Ingest))
+            .and_then(|_| authorize_exact(access, &scope, AccessPermission::ManageLifecycle));
+        if let Err(error) = authorization {
+            return complete(
+                self,
+                access,
+                "consolidate_pages",
+                vec![scope],
+                Err(error),
+                true,
+                observation,
+            )
+            .await;
+        }
+        request.created_by = Actor {
+            actor_type: match access.principal.principal_type {
+                AccessPrincipalType::ModelClient => ActorType::Model,
+                AccessPrincipalType::Host
+                | AccessPrincipalType::Cli
+                | AccessPrincipalType::Service => ActorType::Tool,
+            },
+            actor_id: access.principal.principal_id.clone(),
+        };
+        let result = SqlitePcpStore::consolidate_pages(self, request).await;
+        complete(
+            self,
+            access,
+            "consolidate_pages",
+            vec![scope],
             result,
             false,
             observation,

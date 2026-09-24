@@ -1758,6 +1758,7 @@ mod tests {
             provenance_input_revision_ids: Vec::new(),
             topic_source_page_ids: Vec::new(),
             superseded: false,
+            source_only: false,
             packing_protected: false,
         }
     }

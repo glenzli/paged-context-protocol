@@ -176,7 +176,7 @@ pub struct RestoreArchivedPageRequest {
     pub reason: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageRevisionRef {
     pub page_id: String,
@@ -298,6 +298,54 @@ pub struct ExtractTopicRequest {
     pub provenance: Vec<ProvenanceEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+}
+
+/// A reviewed, atomic replacement of overlapping source Pages by one or more
+/// complete Pages. Source Revisions remain readable by exact ID as provenance.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsolidatePagesRequest {
+    pub namespace: String,
+    /// Current, active source heads in the same Scope, in review order.
+    pub source_pages: Vec<PageRevisionRef>,
+    /// One output per coherent subject. A mixed source may contribute to more
+    /// than one output; each output records its exact source Revisions.
+    pub outputs: Vec<ConsolidatedPageOutput>,
+    /// Every source needs an explicit coverage decision. Only complete entries
+    /// leave default recall; partial entries remain searchable.
+    pub coverage: Vec<ConsolidationCoverage>,
+    pub created_by: Actor,
+    /// Required for safe replay of the multi-Page transaction.
+    pub idempotency_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsolidatedPageOutput {
+    pub title: String,
+    pub content: String,
+    /// Indexes into `sourcePages` used for this complete subject Page.
+    pub source_indexes: Vec<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsolidationCoverage {
+    /// Index into `sourcePages`.
+    pub source_index: usize,
+    /// Indexes into `outputs` carrying this source's relevant claims.
+    pub output_indexes: Vec<usize>,
+    /// Operator-reviewed explanation of retained claims, time, and limits.
+    pub explanation: String,
+    pub complete: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsolidationResult {
+    pub outputs: Vec<PageRevisionRef>,
+    pub source_only: Vec<PageRevisionRef>,
+    pub created: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]

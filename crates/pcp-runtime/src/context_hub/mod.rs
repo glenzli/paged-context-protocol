@@ -135,10 +135,12 @@ impl ContextHub {
                 .candidates
                 .iter()
                 .filter(|c| c.client_id == access.principal.principal_id
-                    && matches!(c.status.as_str(), "pending" | "deferred" | "promoting"))
+                    && (c.status == "promoting"
+                        || (matches!(c.status.as_str(), "pending" | "deferred")
+                            && c.organized_version != c.version)))
                 .count()
                 < 50,
-            "client candidate quota reached; do not retry this submission repeatedly"
+            "client candidate quota reached: 50 candidates still await organization or write; organized evidence does not count. Do not retry this submission repeatedly"
         );
         db.state.candidates.push(Candidate {
             candidate_id: id.clone(),

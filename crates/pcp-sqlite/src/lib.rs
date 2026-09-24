@@ -2,6 +2,7 @@ mod access;
 mod access_query;
 mod adapter;
 mod audit_writer;
+mod consolidation;
 mod extraction;
 mod governance;
 mod health;

@@ -479,6 +479,19 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 38%, var(-
 .maintenance-qualification-field { display: grid; min-width: 0; gap: 5px; color: var(--text); font-size: 13px; font-weight: 650; }
 .maintenance-qualification-field textarea { width: 100%; min-height: 64px; resize: vertical; padding: 8px 10px; border: 1px solid var(--strong-line); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 14px; font-weight: 400; line-height: 1.5; }
 .maintenance-qualification-field textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.maintenance-consolidation-editor { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-subtle); }
+.maintenance-consolidation-editor > summary { cursor: pointer; font-size: 13px; font-weight: 700; }
+.maintenance-consolidation-body { display: grid; gap: 12px; margin-top: 12px; font-size: 13px; }
+.maintenance-consolidation-body > p { margin: 0; line-height: 1.5; }
+.maintenance-consolidation-sources, .maintenance-consolidation-outputs { display: grid; gap: 9px; }
+.maintenance-consolidation-source, .maintenance-consolidation-output { display: grid; gap: 8px; min-width: 0; padding: 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+.maintenance-consolidation-source .maintenance-review-preview { max-height: 220px; overflow: auto; white-space: pre-wrap; }
+.maintenance-consolidation-output-heading, .maintenance-consolidation-controls { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.maintenance-consolidation-field { display: grid; gap: 5px; font-weight: 650; }
+.maintenance-consolidation-field input, .maintenance-consolidation-field textarea { width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--strong-line); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; font-weight: 400; line-height: 1.5; }
+.maintenance-consolidation-field textarea { resize: vertical; }
+.maintenance-consolidation-membership { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.maintenance-consolidation-check { display: inline-flex; gap: 6px; align-items: center; font-weight: 500; }
 .maintenance-reconciliation-panel { display: grid; width: 100%; gap: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); text-align: left; }
 .maintenance-reconciliation-target { appearance: none; color: inherit; cursor: pointer; font: inherit; }
 .maintenance-reconciliation-target:hover { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); background: var(--accent-soft); }

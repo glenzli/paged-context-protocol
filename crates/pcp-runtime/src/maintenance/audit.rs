@@ -285,6 +285,7 @@ fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
         MaintenanceWorkerResponse::ArchiveReview { .. } => "archive_review",
         MaintenanceWorkerResponse::Retain { .. } => "retain",
         MaintenanceWorkerResponse::ReconcileFeedback { .. } => "reconcile_feedback",
+        MaintenanceWorkerResponse::ConsolidatePages { .. } => "consolidate_pages",
         MaintenanceWorkerResponse::NoCandidate => "no_candidate",
         MaintenanceWorkerResponse::Defer => "defer",
     }

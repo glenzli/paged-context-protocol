@@ -1,4 +1,11 @@
-use std::{collections::HashMap, env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -14,7 +21,8 @@ use pcp_client::{
     ContentLibraryFilter, ContentLibraryResult, ContentPageRole, PcpApi, PcpTenantApi,
 };
 use pcp_core::{
-    AccessPermission, Actor, ActorType, ArchivePageRequest, BrowseIndexOrder, IntentEffort,
+    AccessPermission, Actor, ActorType, ArchivePageRequest, BrowseIndexOrder,
+    ConsolidatePagesRequest, ConsolidatedPageOutput, ConsolidationCoverage, IntentEffort,
     LifecycleStatus, PackPagesRequest, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest,
     Projection, QueryContextRequest, ReadPage, ReadPagesRequest, Relation,
     RestoreArchivedPageRequest, RetentionPolicy, SearchFilters, SearchHit, SearchMode,
@@ -57,6 +65,16 @@ struct AppState {
     enrollment: EnrollmentAdminClient,
     runtime: Option<Arc<managed::ManagedRuntime>>,
     runtime_config: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConsoleConsolidationRequest {
+    review_candidate_id: String,
+    namespace: String,
+    source_pages: Vec<PageRevisionRef>,
+    outputs: Vec<ConsolidatedPageOutput>,
+    coverage: Vec<ConsolidationCoverage>,
 }
 
 #[derive(Debug)]
@@ -463,6 +481,10 @@ fn router(state: AppState) -> Router {
         .route("/api/maintenance/analyze", post(maintenance_analyze))
         .route("/api/maintenance/converge", post(maintenance_converge))
         .route("/api/maintenance/reviews", get(maintenance_reviews))
+        .route(
+            "/api/maintenance/consolidations",
+            post(create_consolidation),
+        )
         .route(
             "/api/maintenance/reviews/{candidate_id}/accept",
             post(accept_maintenance_review),
@@ -1531,6 +1553,88 @@ async fn maintenance_reviews(State(state): State<AppState>) -> Result<Json<Value
     Ok(Json(json!({"reviews": operator.routed_reviews().await?})))
 }
 
+async fn create_consolidation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ConsoleConsolidationRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let mut operator = maintenance_operator_for_console(&state).await?;
+    let review = operator
+        .review_item(&request.review_candidate_id)
+        .context("unknown PCP reconciliation review")?;
+    if review.status != MaintenanceReviewStatus::Pending {
+        return Err(anyhow::anyhow!("reconciliation review is no longer pending").into());
+    }
+    let MaintenanceReviewPayload::Reconciliation(candidate) = review.payload else {
+        return Err(anyhow::anyhow!("Page consolidation requires a reconciliation review").into());
+    };
+    let reviewed = std::iter::once((&candidate.target.page_id, &candidate.target.revision_id))
+        .chain(
+            candidate
+                .evidence
+                .iter()
+                .map(|page| (&page.page_id, &page.revision_id)),
+        )
+        .map(|(page, revision)| (page.clone(), revision.clone()))
+        .collect::<HashSet<_>>();
+    let selected = request
+        .source_pages
+        .iter()
+        .map(|source| (source.page_id.clone(), source.revision_id.clone()))
+        .collect::<HashSet<_>>();
+    if reviewed != selected {
+        return Err(
+            anyhow::anyhow!("consolidation sources must match the reviewed Pages exactly").into(),
+        );
+    }
+    let inventory = state.client.durable_page_inventory(vec![]).await?;
+    for decision in request.coverage.iter().filter(|decision| decision.complete) {
+        let source = request
+            .source_pages
+            .get(decision.source_index)
+            .context("coverage refers to an unknown source")?;
+        let shown = std::iter::once(&candidate.target)
+            .chain(candidate.evidence.iter())
+            .find(|page| page.page_id == source.page_id && page.revision_id == source.revision_id)
+            .and_then(|page| page.content.as_ref())
+            .context("complete source content is unavailable in this review")?;
+        let full_chars = inventory
+            .iter()
+            .find(|page| page.revision_id == source.revision_id)
+            .map(|page| page.content_chars)
+            .context("reviewed source is no longer current")?;
+        if shown.chars().count() as u64 != full_chars {
+            return Err(anyhow::anyhow!(
+                "complete source content is required before retiring it from recall"
+            )
+            .into());
+        }
+    }
+    let principal = &state.client.access().principal;
+    let result = state
+        .client
+        .consolidate_pages(ConsolidatePagesRequest {
+            namespace: request.namespace,
+            source_pages: request.source_pages,
+            outputs: request.outputs,
+            coverage: request.coverage,
+            created_by: Actor {
+                actor_type: ActorType::Tool,
+                actor_id: principal.principal_id.clone(),
+            },
+            idempotency_key: format!("console-review:{}", request.review_candidate_id),
+        })
+        .await?;
+    operator
+        .resolve_review(
+            &request.review_candidate_id,
+            MaintenanceReviewStatus::Rejected,
+        )
+        .await?;
+    Ok(Json(json!(result)))
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 struct ReviewAcceptInput {
@@ -1551,6 +1655,14 @@ async fn accept_maintenance_review(
         .context("unknown PCP maintenance review candidate")?;
     let qualified = matches!(&item.payload, MaintenanceReviewPayload::Reconciliation(candidate)
         if candidate.disposition == pcp_core::ReconciliationDisposition::Qualified);
+    if matches!(&item.payload, MaintenanceReviewPayload::Reconciliation(candidate)
+        if candidate.suggested_consolidation.is_some())
+    {
+        return Err(anyhow::anyhow!(
+            "This proposal needs reviewed consolidated Pages; use the consolidation editor"
+        )
+        .into());
+    }
     if !qualified
         && (request.qualification_scope.is_some() || request.qualification_rationale.is_some())
     {

@@ -1272,6 +1272,7 @@ const state = {
     reviewBusy: new Set(),
     reviewDecisions: restoreReviewDecisions(readSessionValue(REVIEW_SESSION_STORAGE_KEY)),
     qualificationDrafts: new Map(),
+    consolidationDrafts: new Map(),
     reviewCommitBusy: false,
     convergence: {
       running: false,
@@ -3633,7 +3634,9 @@ function maintenanceReviewContent(review) {
     const decision = element("div", `maintenance-reconciliation-decision disposition-${candidate.disposition || "unknown"}`);
     decision.append(
       element("span", "muted", t("Proposed disposition")),
-      element("strong", "", t(disposition)),
+      element("strong", "", candidate.suggestedConsolidation
+        ? (currentLanguage === "zh" ? "建议融合／拆分页面" : "Propose merged / split Pages")
+        : t(disposition)),
     );
     body.append(decision, element("p", "muted", t("Pending approval; original content is unchanged")));
     if (candidate.feedback) {
@@ -3651,6 +3654,14 @@ function maintenanceReviewContent(review) {
       comparison.append(panel);
     }
     body.append(comparison);
+    if (candidate.suggestedConsolidation?.outputs?.length) {
+      const suggestion = element("div", "maintenance-consolidation-suggestion");
+      suggestion.append(element("strong", "", currentLanguage === "zh" ? "新页草稿" : "Suggested new Pages"));
+      candidate.suggestedConsolidation.outputs.forEach((output) => suggestion.append(
+        element("p", "maintenance-review-evidence", `${output.title} · ${output.content.slice(0, 180)}${output.content.length > 180 ? "…" : ""}`),
+      ));
+      body.append(suggestion);
+    }
     if (candidate.disposition !== "qualified") body.append(element("p", "maintenance-review-evidence", candidate.rationale));
     if (view.crossScope) body.append(element("p", "notice warning", t("Cross-scope decision: approval changes the target's validity but does not grant access to the replacement. The decision rationale is stored in the target Scope.")));
     if (view.replacementUnavailable) body.append(element("p", "notice warning", t("Replacement preview unavailable; re-analyze before applying")));
@@ -3782,6 +3793,179 @@ function qualificationReviewEditor(review) {
   };
 }
 
+function consolidationReviewEditor(review) {
+  const zh = currentLanguage === "zh";
+  const candidate = review.payload.candidate;
+  const sources = [candidate.target, ...(candidate.evidence || [])]
+    .filter((page, index, pages) => page?.pageId && pages.findIndex((item) => item?.pageId === page.pageId) === index);
+  const sameScope = sources.length > 0 && sources.every((page) => page.namespace === sources[0].namespace);
+  const saved = state.maintenance.consolidationDrafts.get(review.candidateId);
+  const suggestion = candidate.suggestedConsolidation;
+  const draft = saved?.proposedAt === review.proposedAt ? saved : {
+    proposedAt: review.proposedAt,
+    outputs: suggestion?.outputs?.map((output) => ({
+      title: output.title || "", content: output.content || "",
+      sourceIndexes: [...(output.sourceIndexes || [])],
+    })) || [{ title: "", content: "", sourceIndexes: sources.map((_, index) => index) }],
+    coverage: sources.map((_, sourceIndex) => ({
+      complete: false,
+      explanation: suggestion?.coverage?.find((item) => item.sourceIndex === sourceIndex)?.explanation || "",
+    })),
+    submitted: false,
+    failed: false,
+    busy: false,
+    error: "",
+  };
+  state.maintenance.consolidationDrafts.set(review.candidateId, draft);
+  const details = element("details", "maintenance-consolidation-editor");
+  const summary = element("summary", "", zh ? "改为融合／拆分页面" : "Create merged / split Pages");
+  details.append(summary);
+  if (!sameScope) {
+    details.append(element("p", "notice warning", zh
+      ? "来源跨越不同范围，当前不能将它们作为一组退出召回。请分别处理各范围。"
+      : "Sources span different Scopes. Consolidate them separately before changing recall."));
+    return details;
+  }
+  const body = element("div", "maintenance-consolidation-body");
+  details.append(body);
+
+  function rerender() {
+    body.replaceChildren();
+    body.append(element("p", "muted", zh
+      ? "每个新页面写完整的同一话题；混合话题可拆成多个页面。只有确认该来源的事实、时间、转折和限定均已覆盖，才勾选退出默认召回。原修订仍可按 ID 读取。"
+      : "Write a complete Page for each subject. Split mixed subjects into several Pages. Remove a source from default recall only after its claims, timing, changes, and limits are fully covered. Its exact Revision remains readable."));
+    const sourceList = element("div", "maintenance-consolidation-sources");
+    sources.forEach((source, index) => {
+      const section = element("section", "maintenance-consolidation-source");
+      section.append(
+        element("strong", "", `${zh ? "来源" : "Source"} ${index + 1} · ${source.namespace}`),
+        element("span", "mono muted", `${source.pageId} · ${source.revisionId}`),
+        element("p", "maintenance-review-preview", `${(source.content || source.summary || "—").slice(0, 180)}${(source.content || source.summary || "").length > 180 ? "…" : ""}`),
+      );
+      const explanation = element("textarea", "");
+      explanation.value = draft.coverage[index].explanation;
+      explanation.disabled = draft.submitted;
+      explanation.rows = 2;
+      explanation.maxLength = 2000;
+      explanation.placeholder = zh ? "说明保留了哪些事实、时间、限定；未覆盖的部分是什么" : "Explain retained claims, timing, limits, and any uncovered part";
+      explanation.addEventListener("input", () => { draft.coverage[index].explanation = explanation.value; });
+      const field = element("label", "maintenance-consolidation-field");
+      field.append(element("span", "", zh ? "覆盖说明" : "Coverage explanation"), explanation);
+      const retirement = element("label", "maintenance-consolidation-check");
+      const checkbox = element("input", ""); checkbox.type = "checkbox";
+      checkbox.checked = draft.coverage[index].complete;
+      checkbox.disabled = draft.submitted;
+      checkbox.addEventListener("change", () => { draft.coverage[index].complete = checkbox.checked; });
+      retirement.append(checkbox, element("span", "", zh ? "已完整覆盖，旧页仅作来源，不参与默认召回" : "Fully covered; retain old Page as provenance only"));
+      section.append(field, retirement);
+      sourceList.append(section);
+    });
+    body.append(sourceList);
+
+    const outputList = element("div", "maintenance-consolidation-outputs");
+    draft.outputs.forEach((output, outputIndex) => {
+      const section = element("section", "maintenance-consolidation-output");
+      const heading = element("div", "maintenance-consolidation-output-heading");
+      heading.append(element("strong", "", `${zh ? "新页面" : "New Page"} ${outputIndex + 1}`));
+      if (draft.outputs.length > 1) {
+        const remove = element("button", "compact-button secondary-button", zh ? "移除" : "Remove");
+        remove.type = "button";
+        remove.disabled = draft.submitted;
+        remove.addEventListener("click", () => { draft.outputs.splice(outputIndex, 1); rerender(); });
+        heading.append(remove);
+      }
+      section.append(heading);
+      for (const [key, label, rows] of [["title", zh ? "标题" : "Title", 1], ["content", zh ? "完整内容" : "Complete content", 7]]) {
+        const field = element("label", "maintenance-consolidation-field");
+        const input = key === "title" ? element("input", "") : element("textarea", "");
+        input.value = output[key];
+        input.disabled = draft.submitted;
+        input.maxLength = key === "title" ? 160 : 64000;
+        if (key === "content") input.rows = rows;
+        input.addEventListener("input", () => { output[key] = input.value; });
+        field.append(element("span", "", label), input);
+        section.append(field);
+      }
+      const membership = element("div", "maintenance-consolidation-membership");
+      membership.append(element("span", "muted", zh ? "此页取自" : "Sources for this Page"));
+      sources.forEach((_, sourceIndex) => {
+        const label = element("label", "maintenance-consolidation-check");
+        const checkbox = element("input", ""); checkbox.type = "checkbox";
+        checkbox.checked = output.sourceIndexes.includes(sourceIndex);
+        checkbox.disabled = draft.submitted;
+        checkbox.addEventListener("change", () => {
+          output.sourceIndexes = checkbox.checked
+            ? [...output.sourceIndexes, sourceIndex].sort((a, b) => a - b)
+            : output.sourceIndexes.filter((index) => index !== sourceIndex);
+        });
+        label.append(checkbox, element("span", "", `${zh ? "来源" : "Source"} ${sourceIndex + 1}`));
+        membership.append(label);
+      });
+      section.append(membership);
+      outputList.append(section);
+    });
+    body.append(outputList);
+    const controls = element("div", "maintenance-consolidation-controls");
+    const add = element("button", "compact-button secondary-button", zh ? "添加拆分页面" : "Add split Page");
+    add.type = "button";
+    add.disabled = draft.outputs.length >= 8 || draft.busy || draft.submitted;
+    add.addEventListener("click", () => {
+      draft.outputs.push({ title: "", content: "", sourceIndexes: [] });
+      rerender();
+    });
+    const publish = element("button", "compact-button primary-button", draft.failed
+      ? (zh ? "重试同一方案" : "Retry same plan")
+      : (zh ? "发布融合页面" : "Publish consolidated Pages"));
+    publish.type = "button";
+    publish.disabled = draft.busy || (draft.submitted && !draft.failed);
+    publish.addEventListener("click", async () => {
+      const outputs = draft.outputs.map((output) => ({
+        title: output.title.trim(), content: output.content.trim(), sourceIndexes: [...output.sourceIndexes],
+      }));
+      const coverage = draft.coverage.map((decision, sourceIndex) => ({
+        sourceIndex,
+        outputIndexes: outputs.flatMap((output, index) => output.sourceIndexes.includes(sourceIndex) ? [index] : []),
+        explanation: decision.explanation.trim(),
+        complete: decision.complete,
+      }));
+      if (outputs.some((output) => !output.title || !output.content || !output.sourceIndexes.length)
+          || coverage.some((decision) => !decision.explanation || !decision.outputIndexes.length)) {
+        draft.error = zh ? "填写每个新页的标题、完整内容、来源，以及每个旧页的覆盖说明。" : "Complete each new Page and every source coverage explanation.";
+        error.textContent = draft.error;
+        return;
+      }
+      draft.busy = true; draft.submitted = true; draft.failed = false; draft.error = "";
+      for (const control of body.querySelectorAll("input, textarea, button")) control.disabled = true;
+      error.textContent = "";
+      try {
+        const result = await maintenanceMutation("/api/maintenance/consolidations", {
+          reviewCandidateId: review.candidateId,
+          namespace: sources[0].namespace,
+          sourcePages: sources.map((source) => ({ pageId: source.pageId, revisionId: source.revisionId })),
+          outputs, coverage,
+        });
+        state.maintenance.consolidationDrafts.delete(review.candidateId);
+        try { await Promise.all([loadRelationReviews(), loadOverview()]); }
+        catch (refreshFailure) { showError(refreshFailure); }
+        if (result.outputs?.[0]?.pageId) pageInspector.open(result.outputs[0].pageId);
+      } catch (failure) {
+        draft.failed = true;
+        draft.error = failure.message || String(failure);
+        error.textContent = draft.error;
+        // Keep the exact submitted plan and key for a safe replay after an
+        // ambiguous transport error. A new plan needs a fresh review.
+        publish.textContent = zh ? "重试同一方案" : "Retry same plan";
+        publish.disabled = false;
+      } finally { draft.busy = false; }
+    });
+    controls.append(add, publish);
+    const error = element("p", "notice warning", draft.error);
+    body.append(controls, error);
+  }
+  rerender();
+  return details;
+}
+
 function maintenanceReviewCard(review) {
   const payload = review.payload || {};
   const candidate = payload.candidate || {};
@@ -3826,8 +4010,10 @@ function maintenanceReviewCard(review) {
   );
   const reject = reviewDecisionButton(review, REVIEW_DECISION.REJECT, t(payload.kind === "reconciliation" ? "Reject this proposal" : "Reject"), icon("reject"), "reject", { iconOnly: payload.kind !== "reconciliation" });
   if (payload.kind === "reconciliation" && reconciliationView(candidate).replacementUnavailable) accept.disabled = true;
+  if (candidate.suggestedConsolidation) accept.disabled = true;
   const defer = reviewDecisionButton(review, REVIEW_DECISION.DEFER, t("Skip for now"), icon("defer"), "defer", { iconOnly: payload.kind !== "reconciliation" });
-  actions.append(accept, reject, defer);
+  if (!candidate.suggestedConsolidation) actions.append(accept);
+  actions.append(reject, defer);
   if (payload.kind === "relation") {
     const suppress = reviewDecisionButton(
       review,
@@ -3864,6 +4050,7 @@ function maintenanceReviewCard(review) {
   }
   card.append(maintenanceReviewContent(review));
   if (qualification) card.append(qualification.node);
+  if (payload.kind === "reconciliation") card.append(consolidationReviewEditor(review));
   if (payload.kind === "topic") {
     const label = element("label", "muted", currentLanguage === "zh" ? "拒绝原因（可选） " : "Rejection reason (optional) ");
     const select = element("select", "");
@@ -3889,6 +4076,11 @@ async function loadRelationReviews() {
   for (const [candidateId, draft] of state.maintenance.qualificationDrafts) {
     if (!state.maintenance.relationReviews.some((review) => review.candidateId === candidateId && review.proposedAt === draft.proposedAt)) {
       state.maintenance.qualificationDrafts.delete(candidateId);
+    }
+  }
+  for (const [candidateId, draft] of state.maintenance.consolidationDrafts) {
+    if (!state.maintenance.relationReviews.some((review) => review.candidateId === candidateId && review.proposedAt === draft.proposedAt)) {
+      state.maintenance.consolidationDrafts.delete(candidateId);
     }
   }
   renderRelationReviews();

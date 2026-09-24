@@ -2,6 +2,10 @@ import { maintenanceFailureKind, maintenanceFailureLabel } from "./maintenance-d
 import { technicalDetails, scopeLabel } from "./console-presentation.js";
 // Bounded operational UI. Draft decisions are reversible until explicit submission.
 export function pendingCandidate(item) { return ["pending", "deferred"].includes(item.status); }
+export function candidateUsesIntakeSlot(item) {
+  return item.status === "promoting"
+    || (pendingCandidate(item) && item.organizedVersion !== item.version);
+}
 export function reviewDraft(items, action, {title, content, targetRevisionId} = {}) {
   if (!items.length || items.some((item) => !pendingCandidate(item))) throw new Error("Candidate is not reviewable");
   if (new Set(items.map((item) => item.candidateId)).size !== items.length) throw new Error("Duplicate candidate");
@@ -499,6 +503,13 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     for(const [id,name] of identities){
       const p=policyDrafts.get(id) || {clientId:id,submitCandidates:false,publishActivity:false,readActivity:false,...snapshot.policies.find((p)=>p.clientId===id)};
       const card=node("section","context-card");card.append(node("h3","",name||id),node("p","context-meta",id));
+      const own = snapshot.candidates.filter((candidate) => candidate.clientId === id);
+      const intake = own.filter(candidateUsesIntakeSlot).length;
+      const organized = own.filter((candidate) => pendingCandidate(candidate) && !candidateUsesIntakeSlot(candidate)).length;
+      card.append(node("p", "context-note", text(
+        `候选入口 ${intake}/50 待整理或写入；已整理 ${organized} 条仍保留为未决证据，不占客户端入口额度。`,
+        `Candidate intake ${intake}/50 awaiting organization or write; ${organized} organized unresolved records remain as evidence without using client intake slots.`,
+      )));
       const options=node("div","context-policy");
       for(const [key,label] of [["submitCandidates",text("提交候选","Submit candidates")],["publishActivity",text("发布近况","Publish activity")],["readActivity",text("读取近况","Read activity")]]){
         const labelNode=node("label","",label),check=node("input");check.type="checkbox";check.checked=p[key];check.disabled=busy || loading;check.addEventListener("change",()=>{p[key]=check.checked;policyDrafts.set(id,p);save.disabled=false;note.hidden=false;});labelNode.prepend(check);options.append(labelNode);

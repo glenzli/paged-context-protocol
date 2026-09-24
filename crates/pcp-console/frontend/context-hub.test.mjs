@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { pendingCandidate, reviewDraft, reconcileDrafts, candidateReviewQueue } from "../src/context-hub.js";
+import { pendingCandidate, candidateUsesIntakeSlot, reviewDraft, reconcileDrafts, candidateReviewQueue } from "../src/context-hub.js";
 const candidate = (id, scope = "a") => ({candidateId:id,version:1,status:"pending",input:{scope,title:"Title",content:"Evidence"}});
 
 test("review stages exact versions, can undo, and requires an explicit edited body", () => {
@@ -17,6 +17,12 @@ test("combining different scopes, duplicates and already decided items is reject
   assert.throws(()=>reviewDraft([{...candidate("a"),status:"promoted"}],"reject"),/reviewable/);
   assert.equal(pendingCandidate({...candidate("a"),status:"deferred"}),true);
   assert.equal(pendingCandidate({...candidate("a"),status:"promoting"}),false);
+});
+test("organized unresolved evidence does not use candidate intake slots", () => {
+  const fresh = candidate("fresh");
+  assert.equal(candidateUsesIntakeSlot(fresh), true);
+  assert.equal(candidateUsesIntakeSlot({...fresh, organizedVersion: 1, result: {status: "partially_represented"}}), false);
+  assert.equal(candidateUsesIntakeSlot({...fresh, organizedVersion: 1, status: "promoting"}), true);
 });
 test("reloaded or expired candidates invalidate stale decisions without applying them", () => {
   const drafts=new Map([["a",reviewDraft([candidate("a")],"reject")],["b",reviewDraft([candidate("b")],"defer")]]);

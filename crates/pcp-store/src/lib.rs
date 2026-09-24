@@ -6,14 +6,15 @@ use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessSession, ApplyReconciliationRequest, ArchivePageRequest,
     AssessPageValidityRequest, BrowseIndexOrder, Capabilities, CollectRevisionRetentionRequest,
-    CreateScopeRequest, ExtractTopicRequest, FeedbackSignal, FeedbackSubmission, IngestPageRequest,
-    LinkPagesRequest, PackPagesRequest, PageLifecycleTransitionResult, PageMutability,
-    PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, QueryAuditEvent, ReadPage,
-    ReadPagesRequest, ReconciliationResult, Relation, RepairPageRequest,
-    RestoreArchivedPageRequest, RevisePageRequest, RevisionCollectionResult,
-    RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchHit, SearchPagesRequest,
-    SearchResult, SourceSpan, SubmitFeedbackRequest, UnpackPageRequest, WritePageRequest,
-    WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    ConsolidatePagesRequest, ConsolidationResult, CreateScopeRequest, ExtractTopicRequest,
+    FeedbackSignal, FeedbackSubmission, IngestPageRequest, LinkPagesRequest, PackPagesRequest,
+    PageLifecycleTransitionResult, PageMutability, PlanRevisionRetentionRequest,
+    PutRevisionRetentionLeaseRequest, QueryAuditEvent, ReadPage, ReadPagesRequest,
+    ReconciliationResult, Relation, RepairPageRequest, RestoreArchivedPageRequest,
+    RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan,
+    Scope, SearchHit, SearchPagesRequest, SearchResult, SourceSpan, SubmitFeedbackRequest,
+    UnpackPageRequest, WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult,
+    WriteValidityResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -74,6 +75,9 @@ pub struct DurablePageInventoryItem {
     /// Whether another active Page explicitly supersedes this Page.
     #[serde(default)]
     pub superseded: bool,
+    /// A fully covered provenance source while its reviewed canonical outputs remain current.
+    #[serde(default)]
+    pub source_only: bool,
     #[serde(default)]
     pub packing_protected: bool,
 }
@@ -293,6 +297,11 @@ pub trait PcpStore: Send + Sync {
         access: &AccessSession,
         request: ExtractTopicRequest,
     ) -> Result<WriteResult>;
+    async fn consolidate_pages(
+        &self,
+        access: &AccessSession,
+        request: ConsolidatePagesRequest,
+    ) -> Result<ConsolidationResult>;
     async fn next_summary_candidate(
         &self,
         access: &AccessSession,

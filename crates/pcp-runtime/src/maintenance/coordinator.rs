@@ -1513,6 +1513,10 @@ impl RuntimeMaintainer {
             item.status == MaintenanceReviewStatus::Pending,
             "PCP reconciliation review candidate is no longer pending"
         );
+        anyhow::ensure!(
+            candidate.suggested_consolidation.is_none(),
+            "fusion draft requires reviewed consolidated Pages, not a validity decision"
+        );
         if candidate.disposition == ReconciliationDisposition::Qualified {
             let (scope, rationale) = qualification.unwrap_or_else(|| {
                 (
@@ -2926,6 +2930,7 @@ impl RuntimeMaintainer {
             scope,
             replacement,
             basis_revision_ids,
+            suggested_consolidation: None,
         };
         let safe_to_auto_apply = self.config.applies_changes()
             && !cross_scope
@@ -3697,6 +3702,7 @@ impl RuntimeMaintainer {
                     p.page_id == source.page_id
                         && p.revision_id == source.revision_id
                         && !p.superseded
+                        && !p.source_only
                 })
             });
             let status = if !current {
@@ -5314,7 +5320,8 @@ fn archive_scan_page(
     // archived after the worker and a human inspect that evidence.
     // PCP has no per-Page read metrics, so eligibility must never imply a
     // measurement of real-world usage or value.
-    if page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE)
+    if page.source_only
+        || page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE)
         || page.kind == "topic_summary"
         || page.packing_protected
     {
@@ -5549,7 +5556,7 @@ fn existing_topics_for_selected(
 
     let mut candidates = inventory
         .iter()
-        .filter(|page| page.kind == "topic_summary" && !page.superseded)
+        .filter(|page| page.kind == "topic_summary" && !page.superseded && !page.source_only)
         .filter_map(|page| {
             let shared = page
                 .topic_source_page_ids
@@ -6136,6 +6143,7 @@ fn packing_page_eligible(
             && page.summary_revision_id.is_none()
     };
     valid_shape
+        && !page.source_only
         && page.source_span.is_some()
         && page.content_chars > 0
         && !excluded_kind(&page.kind, &config.excluded_page_kinds)
@@ -6272,7 +6280,8 @@ fn summary_page_eligible(
     page: &pcp_store::DurablePageInventoryItem,
     config: &super::SummaryMaintenanceConfig,
 ) -> bool {
-    page.content_chars >= config.minimum_chars as u64
+    !page.source_only
+        && page.content_chars >= config.minimum_chars as u64
         && (page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE)
             || !excluded_kind(&page.kind, &config.excluded_page_kinds))
 }
@@ -6287,7 +6296,9 @@ fn relation_page_eligible(
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty())
         || page.facets.is_some();
-    has_semantic_input && !excluded_kind(&page.kind, &config.excluded_page_kinds)
+    has_semantic_input
+        && !page.source_only
+        && !excluded_kind(&page.kind, &config.excluded_page_kinds)
 }
 
 fn build_summary_candidate(
@@ -6746,6 +6757,7 @@ fn response_name(response: &MaintenanceWorkerResponse) -> &'static str {
         MaintenanceWorkerResponse::VerifyMaintenance { .. } => "verify_maintenance",
         MaintenanceWorkerResponse::ArchiveReview { .. } => "archive_review",
         MaintenanceWorkerResponse::ReconcileFeedback { .. } => "reconcile_feedback",
+        MaintenanceWorkerResponse::ConsolidatePages { .. } => "consolidate_pages",
         MaintenanceWorkerResponse::Retain { .. } => "retain",
         MaintenanceWorkerResponse::NoCandidate => "no_candidate",
         MaintenanceWorkerResponse::Defer => "defer",
@@ -6807,6 +6819,7 @@ mod relation_window_tests {
             provenance_input_revision_ids: Vec::new(),
             topic_source_page_ids: Vec::new(),
             superseded: false,
+            source_only: false,
             packing_protected: false,
         }
     }

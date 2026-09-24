@@ -5,9 +5,10 @@ use super::super::{
 use super::{FakeWorker, Fixture};
 use pcp_client::{AccessMode, EmbeddedPcpClient};
 use pcp_core::{
-    AccessPrincipal, AccessPrincipalType, Actor, ActorType, CreateScopeRequest, FeedbackAuthority,
-    FeedbackKind, PagePayload, Projection, ProvenanceEvent, ReadPagesRequest,
-    ReconciliationDisposition, SubmitFeedbackRequest, ValidityStanding,
+    AccessPrincipal, AccessPrincipalType, Actor, ActorType, ConsolidatedPageOutput,
+    ConsolidationCoverage, CreateScopeRequest, FeedbackAuthority, FeedbackKind, PagePayload,
+    Projection, ProvenanceEvent, ReadPagesRequest, ReconciliationDisposition,
+    SubmitFeedbackRequest, ValidityStanding,
 };
 use std::sync::Arc;
 
@@ -157,6 +158,97 @@ async fn ordinary_cross_scope_update_requires_review_and_preserves_source_histor
 #[tokio::test]
 async fn provenance_only_guides_discovery_and_never_asserts_replacement() {
     assert_update_review(true).await;
+}
+
+#[tokio::test]
+async fn overlapping_pages_propose_reviewed_fusion_without_changing_validity() {
+    let f = fixture().await;
+    let old = f
+        .client
+        .write_page(f.page(
+            "The workflow uses plan A. Issue B remains open.",
+            "fusion:old",
+        ))
+        .await
+        .unwrap();
+    let mut new = f.page(
+        "The workflow changed plan A to A2. Issue B remains open.",
+        "fusion:new",
+    );
+    new.provenance = vec![ProvenanceEvent {
+        operation: "derive".into(),
+        actor: Actor {
+            actor_type: ActorType::Tool,
+            actor_id: "reviewer".into(),
+        },
+        timestamp: "2026-09-02T00:00:00Z".into(),
+        input_revision_ids: vec![old.revision_id.clone()],
+        tool_or_model: None,
+        reason: None,
+    }];
+    let new = f.client.write_page(new).await.unwrap();
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::ConsolidatePages {
+            rationale: "The two Pages overlap, but the second changes only plan A.".into(),
+            outputs: vec![
+                ConsolidatedPageOutput {
+                    title: "Plan A".into(),
+                    content: "The workflow formerly used A and later changed to A2.".into(),
+                    source_indexes: vec![0, 1],
+                },
+                ConsolidatedPageOutput {
+                    title: "Issue B".into(),
+                    content: "Issue B remains open in both observations.".into(),
+                    source_indexes: vec![0, 1],
+                },
+            ],
+            coverage: vec![
+                ConsolidationCoverage {
+                    source_index: 0,
+                    output_indexes: vec![0, 1],
+                    explanation: "Both its plan and open issue are preserved.".into(),
+                    complete: true,
+                },
+                ConsolidationCoverage {
+                    source_index: 1,
+                    output_indexes: vec![0, 1],
+                    explanation: "Both its plan change and open issue are preserved.".into(),
+                    complete: true,
+                },
+            ],
+        },
+    ]));
+    let mut config = f.config();
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = false;
+    config.retention.enabled = false;
+    config.reconciliation.discover_updates = true;
+    let mut maintainer = RuntimeMaintainer::for_test(f.client.clone(), worker, config);
+    let report = maintainer.run_once().await.unwrap();
+    assert_eq!(report.reconciliations_proposed, 1);
+    let reviews = maintainer.pending_reviews();
+    assert_eq!(reviews.len(), 1);
+    let MaintenanceReviewPayload::Reconciliation(candidate) = &reviews[0].payload else {
+        panic!("wrong review type")
+    };
+    assert!(candidate.suggested_consolidation.is_some());
+    assert_eq!(
+        candidate.disposition,
+        ReconciliationDisposition::NoSourceChange
+    );
+    assert_eq!(candidate.target.revision_id, old.revision_id);
+    assert_eq!(candidate.evidence[0].revision_id, new.revision_id);
+    assert!(
+        maintainer
+            .approve_reconciliation_review(&reviews[0].candidate_id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("fusion draft")
+    );
+    assert_eq!(f.client.page_count(vec![]).await.unwrap(), 2);
+    f.close().await;
 }
 
 async fn assert_update_review(with_provenance: bool) {

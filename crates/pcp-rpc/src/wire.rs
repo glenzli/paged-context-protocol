@@ -6,14 +6,14 @@ use pcp_client::{
 use pcp_core::{
     AccessAuditEvent, AccessSession, Actor, ApplyReconciliationRequest, ArchivePageRequest,
     AssessPageValidityRequest, BrowseIndexOrder, Capabilities, CollectRevisionRetentionRequest,
-    CreateScopeRequest, ExpandGraphRequest, ExtractTopicRequest, FeedbackSignal,
-    FeedbackSubmission, GraphSliceResponse, IngestPageRequest, LinkPagesRequest, PackPagesRequest,
-    PageLifecycleTransitionResult, PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest,
-    ReadPage, ReadPagesRequest, ReconciliationResult, Relation, RepairPageRequest,
-    RestoreArchivedPageRequest, RevisePageRequest, RevisionCollectionResult,
-    RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult,
-    SubmitFeedbackRequest, UnpackPageRequest, WritePageRequest, WriteResult, WriteSummaryRequest,
-    WriteSummaryResult, WriteValidityResult,
+    ConsolidatePagesRequest, ConsolidationResult, CreateScopeRequest, ExpandGraphRequest,
+    ExtractTopicRequest, FeedbackSignal, FeedbackSubmission, GraphSliceResponse, IngestPageRequest,
+    LinkPagesRequest, PackPagesRequest, PageLifecycleTransitionResult,
+    PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest, ReadPage, ReadPagesRequest,
+    ReconciliationResult, Relation, RepairPageRequest, RestoreArchivedPageRequest,
+    RevisePageRequest, RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan,
+    Scope, SearchPagesRequest, SearchResult, SubmitFeedbackRequest, UnpackPageRequest,
+    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -122,6 +122,7 @@ pub(crate) enum RpcOperation {
     LinkPages(LinkPagesRequest),
     WriteSummary(WriteSummaryRequest),
     ExtractTopic(ExtractTopicRequest),
+    ConsolidatePages(ConsolidatePagesRequest),
     NextSummaryCandidate {
         minimum_chars: usize,
         excluded_page_kinds: Vec<String>,
@@ -220,6 +221,7 @@ impl RpcOperation {
             Self::LinkPages(..) => "link_pages",
             Self::WriteSummary(..) => "write_summary",
             Self::ExtractTopic(..) => "extract_topic",
+            Self::ConsolidatePages(..) => "consolidate_pages",
             Self::NextSummaryCandidate { .. } => "next_summary_candidate",
             Self::MarkSummaryAssessed { .. } => "mark_summary_assessed",
             Self::AssessPageValidity(..) => "assess_page_validity",
@@ -279,6 +281,7 @@ pub(crate) enum RpcValue {
     Relation(Relation),
     SummaryResult(WriteSummaryResult),
     TopicExtractionResult(WriteResult),
+    ConsolidationResult(ConsolidationResult),
     SummaryCandidate(Option<String>),
     ValidityResult(WriteValidityResult),
     FeedbackSubmission(FeedbackSubmission),

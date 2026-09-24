@@ -28,6 +28,8 @@ use super::SqlitePcpStore;
 
 #[path = "tests/browse_time.rs"]
 mod browse_time;
+#[path = "tests/consolidation.rs"]
+mod consolidation;
 #[path = "tests/content_filters.rs"]
 mod content_filters;
 #[path = "tests/cross_scope_topic.rs"]
@@ -894,7 +896,7 @@ async fn migrates_clean_association_store_to_topic_extraction_schema() {
             |row| row.get(0),
         )
         .expect("read topic Store schema version");
-    assert_eq!(version, "0.8.0-clean.4");
+    assert_eq!(version, "0.8.0-clean.5");
     let table_count: u32 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master
@@ -1039,7 +1041,7 @@ async fn migrates_draft_store_to_minimal_clean_schema() {
             |row| row.get(0),
         )
         .expect("read migrated version");
-    assert_eq!(version, "0.8.0-clean.4");
+    assert_eq!(version, "0.8.0-clean.5");
     for (table, removed_column) in [
         ("pcp_relations", "from_revision_id"),
         ("pcp_summaries", "content"),
@@ -1282,7 +1284,7 @@ async fn migrates_clean_store_associations_without_erasing_exact_inputs() {
                 |row| row.get::<_, String>(0),
             )
             .expect("read cleaned Store version"),
-        "0.8.0-clean.4"
+        "0.8.0-clean.5"
     );
     assert_eq!(
         connection

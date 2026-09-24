@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 
-const STORE_SCHEMA_VERSION: &str = "0.8.0-clean.4";
+const STORE_SCHEMA_VERSION: &str = "0.8.0-clean.5";
+const LEGACY_CLEAN_RECONCILIATION_SCHEMA_VERSION: &str = "0.8.0-clean.4";
 const LEGACY_DRAFT_SCHEMA_VERSION: &str = "0.8.0-draft";
 const LEGACY_CLEAN_SCHEMA_VERSION: &str = "0.8.0-clean";
 const LEGACY_CLEAN_ASSOCIATIONS_SCHEMA_VERSION: &str = "0.8.0-clean.1";
@@ -29,24 +30,39 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
         )
         .optional()
         .context("read PCP Store schema version")?;
+    let needs_consolidation_migration =
+        stored_version.is_some() && stored_version.as_deref() != Some(STORE_SCHEMA_VERSION);
     match stored_version {
         Some(version) if version == STORE_SCHEMA_VERSION => {}
+        Some(version) if version == LEGACY_CLEAN_RECONCILIATION_SCHEMA_VERSION => {}
         Some(version) if version == LEGACY_DRAFT_SCHEMA_VERSION => {
-            crate::migration::migrate_draft_to_clean(connection, STORE_SCHEMA_VERSION)?;
+            crate::migration::migrate_draft_to_clean(
+                connection,
+                LEGACY_CLEAN_RECONCILIATION_SCHEMA_VERSION,
+            )?;
         }
         Some(version) if version == LEGACY_CLEAN_SCHEMA_VERSION => {
-            crate::migration::migrate_clean_associations(connection, STORE_SCHEMA_VERSION)?;
+            crate::migration::migrate_clean_associations(
+                connection,
+                LEGACY_CLEAN_RECONCILIATION_SCHEMA_VERSION,
+            )?;
         }
         Some(version) if version == LEGACY_CLEAN_ASSOCIATIONS_SCHEMA_VERSION => {
-            crate::migration::migrate_clean_topic_extractions(connection, STORE_SCHEMA_VERSION)?;
+            crate::migration::migrate_clean_topic_extractions(
+                connection,
+                LEGACY_CLEAN_RECONCILIATION_SCHEMA_VERSION,
+            )?;
         }
         Some(version) if version == LEGACY_CLEAN_TOPIC_EXTRACTIONS_SCHEMA_VERSION => {
-            crate::migration::migrate_clean_content_governance(connection, STORE_SCHEMA_VERSION)?;
+            crate::migration::migrate_clean_content_governance(
+                connection,
+                LEGACY_CLEAN_RECONCILIATION_SCHEMA_VERSION,
+            )?;
         }
         Some(version) if version == LEGACY_CLEAN_CONTENT_GOVERNANCE_SCHEMA_VERSION => {
             crate::migration::migrate_clean_feedback_reconciliation(
                 connection,
-                STORE_SCHEMA_VERSION,
+                LEGACY_CLEAN_RECONCILIATION_SCHEMA_VERSION,
             )?;
         }
         Some(version) => {
@@ -77,6 +93,9 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 )
                 .context("record PCP Store schema version")?;
         }
+    }
+    if needs_consolidation_migration {
+        crate::migration::migrate_clean_consolidations(connection, STORE_SCHEMA_VERSION)?;
     }
     connection
         .execute_batch(
@@ -199,6 +218,32 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 position INTEGER NOT NULL,
                 PRIMARY KEY (topic_revision_id, source_revision_id),
                 UNIQUE (topic_revision_id, position)
+            );
+
+            CREATE TABLE IF NOT EXISTS pcp_consolidations (
+                consolidation_id TEXT PRIMARY KEY,
+                namespace TEXT NOT NULL REFERENCES pcp_scopes(namespace),
+                actor_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                request_json TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(actor_id, idempotency_key)
+            );
+            CREATE TABLE IF NOT EXISTS pcp_consolidation_sources (
+                consolidation_id TEXT NOT NULL REFERENCES pcp_consolidations(consolidation_id),
+                source_page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
+                source_revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+                source_only INTEGER NOT NULL CHECK(source_only IN (0, 1)),
+                explanation TEXT NOT NULL,
+                PRIMARY KEY(consolidation_id, source_revision_id)
+            );
+            CREATE TABLE IF NOT EXISTS pcp_consolidation_coverage (
+                consolidation_id TEXT NOT NULL REFERENCES pcp_consolidations(consolidation_id),
+                source_revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+                output_page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
+                output_revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+                PRIMARY KEY(consolidation_id, source_revision_id, output_revision_id)
             );
 
             CREATE TABLE IF NOT EXISTS pcp_validity_assessments (
@@ -390,6 +435,8 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 ON pcp_summary_assessments(policy_version, assessed_at DESC);
             CREATE INDEX IF NOT EXISTS pcp_topic_extraction_members_source
                 ON pcp_topic_extraction_members(source_page_id, source_revision_id);
+            CREATE INDEX IF NOT EXISTS pcp_consolidation_sources_current
+                ON pcp_consolidation_sources(source_page_id, source_revision_id, source_only);
             CREATE INDEX IF NOT EXISTS pcp_validity_target
                 ON pcp_validity_assessments(target_revision_id, assessment_revision_id);
             CREATE INDEX IF NOT EXISTS pcp_feedback_signals_pending

@@ -178,6 +178,102 @@ async fn candidate_is_opt_in_isolated_idempotent_and_operator_reviewed() {
 }
 
 #[tokio::test]
+async fn organized_candidates_release_client_intake_quota_without_losing_receipts() {
+    let r = Rig::new().await;
+    r.enable("client:a").await;
+    let client = r.client("client:a", &["a"]);
+    for index in 0..50 {
+        client
+            .context_hub(ContextHubRequest::SubmitCandidate(candidate(&format!(
+                "e{index}"
+            ))))
+            .await
+            .unwrap();
+    }
+    assert!(
+        client
+            .context_hub(ContextHubRequest::SubmitCandidate(candidate("over-quota")))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("client candidate quota reached")
+    );
+
+    let mut db = LockedState::open(&r.hub.path, r.store.identity_id())
+        .await
+        .unwrap();
+    for item in &mut db.state.candidates {
+        item.organized_version = item.version;
+        item.result = Some(json!({"status":"partially_represented"}));
+    }
+    db.save().unwrap();
+    drop(db);
+
+    let created = client
+        .context_hub(ContextHubRequest::SubmitCandidate(candidate(
+            "after-organization",
+        )))
+        .await
+        .unwrap();
+    assert_eq!(created["created"], true);
+    let db = LockedState::open(&r.hub.path, r.store.identity_id())
+        .await
+        .unwrap();
+    assert_eq!(db.state.candidates.len(), 51);
+    assert_eq!(
+        db.state.candidates[0].result.as_ref().unwrap()["status"],
+        "partially_represented"
+    );
+}
+
+#[tokio::test]
+async fn partially_represented_evidence_rejoins_organization_when_new_evidence_arrives() {
+    let r = Rig::new().await;
+    r.enable("client:a").await;
+    let client = r.client("client:a", &["a"]);
+    client
+        .context_hub(ContextHubRequest::SubmitCandidate(candidate("old")))
+        .await
+        .unwrap();
+    let mut db = LockedState::open(&r.hub.path, r.store.identity_id())
+        .await
+        .unwrap();
+    db.state.candidates[0].organized_version = db.state.candidates[0].version;
+    db.state.candidates[0].result = Some(json!({"status":"partially_represented"}));
+    db.save().unwrap();
+    drop(db);
+    client
+        .context_hub(ContextHubRequest::SubmitCandidate(candidate("new")))
+        .await
+        .unwrap();
+    let mut db = LockedState::open(&r.hub.path, r.store.identity_id())
+        .await
+        .unwrap();
+    db.state.organization.queued = true;
+    db.save().unwrap();
+    drop(db);
+    let input = r
+        .hub
+        .prepare_organization(r.admin.as_ref(), &[])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(input.candidates.len(), 2);
+    assert!(
+        input
+            .candidates
+            .iter()
+            .any(|item| item.input.event_id == "old")
+    );
+    assert!(
+        input
+            .candidates
+            .iter()
+            .any(|item| item.input.event_id == "new")
+    );
+}
+
+#[tokio::test]
 async fn same_client_windows_share_activity_by_default_without_crossing_scope_or_cursor_boundaries()
 {
     let r = Rig::new().await;

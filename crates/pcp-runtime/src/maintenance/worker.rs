@@ -347,6 +347,11 @@ pub enum MaintenanceWorkerResponse {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replacement_revision_id: Option<String>,
     },
+    ConsolidatePages {
+        rationale: String,
+        outputs: Vec<pcp_core::ConsolidatedPageOutput>,
+        coverage: Vec<pcp_core::ConsolidationCoverage>,
+    },
     Retain {
         milestones: Vec<RetentionMilestone>,
     },

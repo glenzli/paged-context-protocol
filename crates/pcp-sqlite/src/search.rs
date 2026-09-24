@@ -21,6 +21,11 @@ use crate::{
 
 mod content_roles;
 
+pub(crate) fn current_consolidation_coverage(page_alias: &str) -> String {
+    content_roles::CURRENT_CONSOLIDATION_COVERAGE
+        .replace("p.page_id", &format!("{page_alias}.page_id"))
+}
+
 impl SqlitePcpStore {
     pub async fn search_pages(&self, mut request: SearchPagesRequest) -> Result<SearchResult> {
         if request.scopes.is_empty() {
@@ -257,6 +262,7 @@ fn browse_index_once(
            )",
     );
     append_non_assessment_page_filter(&mut sql);
+    append_consolidated_source_filter(&mut sql);
     if !excluded_page_kinds.is_empty() {
         sql.push_str(" AND p.kind NOT IN (");
         push_placeholders(&mut sql, excluded_page_kinds.len());
@@ -574,6 +580,12 @@ fn append_current_content_page_filter(sql: &mut String) {
 fn append_topic_front_door_filter(sql: &mut String, scope_count: usize) {
     sql.push_str(" AND NOT ");
     sql.push_str(&content_roles::current_topic_coverage(scope_count));
+    append_consolidated_source_filter(sql);
+}
+
+fn append_consolidated_source_filter(sql: &mut String) {
+    sql.push_str(" AND NOT ");
+    sql.push_str(content_roles::CURRENT_CONSOLIDATION_COVERAGE);
 }
 
 fn append_content_library_query_filter(
@@ -850,6 +862,7 @@ fn search_revision_surface(
     values.extend(request.scopes.iter().cloned().map(SqlValue::Text));
 
     append_effective_page_filter(&mut sql);
+    append_consolidated_source_filter(&mut sql);
     append_lifecycle_filter(&mut sql, &mut values, request);
     append_time_filters(&mut sql, &mut values, request);
     append_relation_filter(&mut sql, &mut values, request);
@@ -950,6 +963,7 @@ fn search_summaries(
     sql.push(')');
     values.extend(request.scopes.iter().cloned().map(SqlValue::Text));
     append_effective_page_filter(&mut sql);
+    append_consolidated_source_filter(&mut sql);
     append_lifecycle_filter(&mut sql, &mut values, request);
     append_time_filters(&mut sql, &mut values, request);
     append_relation_filter(&mut sql, &mut values, request);
@@ -1110,6 +1124,7 @@ fn search_graph(
     values.extend(request.scopes.iter().cloned().map(SqlValue::Text));
     append_lifecycle_filter(&mut sql, &mut values, request);
     append_effective_page_filter(&mut sql);
+    append_consolidated_source_filter(&mut sql);
     append_time_filters(&mut sql, &mut values, request);
     sql.push_str(
         " ORDER BY neighbors.edge_created_at DESC, r.revision_id DESC

@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use pcp_core::{PageRevisionRef, ReconciliationDisposition};
 use pcp_store::DurablePageInventoryItem;
 
+use super::reconciliation::SuggestedConsolidation;
 use super::{
     MaintenanceCycleReport, MaintenanceReconciliationCandidate, MaintenanceReviewOrigin,
     MaintenanceReviewPayload, MaintenanceReviewStatus, MaintenanceWorkerRequest,
@@ -116,38 +117,58 @@ impl RuntimeMaintainer {
         };
         report.worker_calls += outcome.model_attempts;
         report.escalated_decisions += u32::from(outcome.escalated);
-        let (disposition, rationale, scope, replacement_revision_id) = match outcome.response {
-            MaintenanceWorkerResponse::NoCandidate | MaintenanceWorkerResponse::Defer => {
-                self.ledger.record(
-                    key,
-                    "no_confirmed_update",
-                    self.config.reconciliation.retry_after_seconds,
-                );
-                report.deferred += 1;
-                return Ok(true);
-            }
-            MaintenanceWorkerResponse::ReconcileFeedback {
-                target_revision_id,
-                disposition,
-                rationale,
-                scope,
-                replacement_revision_id,
-            } => {
-                anyhow::ensure!(
-                    target_revision_id == target.revision_id,
-                    "worker selected an unoffered update target"
-                );
-                (disposition, rationale, scope, replacement_revision_id)
-            }
-            _ => anyhow::bail!("worker returned an invalid content update decision"),
-        };
+        let (disposition, rationale, scope, replacement_revision_id, suggested_consolidation) =
+            match outcome.response {
+                MaintenanceWorkerResponse::NoCandidate | MaintenanceWorkerResponse::Defer => {
+                    self.ledger.record(
+                        key,
+                        "no_confirmed_update",
+                        self.config.reconciliation.retry_after_seconds,
+                    );
+                    report.deferred += 1;
+                    return Ok(true);
+                }
+                MaintenanceWorkerResponse::ReconcileFeedback {
+                    target_revision_id,
+                    disposition,
+                    rationale,
+                    scope,
+                    replacement_revision_id,
+                } => {
+                    anyhow::ensure!(
+                        target_revision_id == target.revision_id,
+                        "worker selected an unoffered update target"
+                    );
+                    (disposition, rationale, scope, replacement_revision_id, None)
+                }
+                MaintenanceWorkerResponse::ConsolidatePages {
+                    rationale,
+                    outputs,
+                    coverage,
+                } => {
+                    anyhow::ensure!(
+                        target.namespace == evidence.namespace,
+                        "consolidation proposal cannot retire cross-Scope sources"
+                    );
+                    validate_consolidation_suggestion(&outputs, &coverage)?;
+                    (
+                        ReconciliationDisposition::NoSourceChange,
+                        rationale,
+                        None,
+                        None,
+                        Some(SuggestedConsolidation { outputs, coverage }),
+                    )
+                }
+                _ => anyhow::bail!("worker returned an invalid content update decision"),
+            };
         anyhow::ensure!(
-            matches!(
-                disposition,
-                ReconciliationDisposition::Qualified
-                    | ReconciliationDisposition::Disputed
-                    | ReconciliationDisposition::Superseded
-            ),
+            suggested_consolidation.is_some()
+                || matches!(
+                    disposition,
+                    ReconciliationDisposition::Qualified
+                        | ReconciliationDisposition::Disputed
+                        | ReconciliationDisposition::Superseded
+                ),
             "ordinary content discovery cannot retract a Page"
         );
         anyhow::ensure!(
@@ -184,9 +205,14 @@ impl RuntimeMaintainer {
                 revision_id: evidence.revision_id.clone(),
             }),
             basis_revision_ids: vec![target.revision_id.clone(), evidence.revision_id.clone()],
+            suggested_consolidation: suggested_consolidation.clone(),
         };
         self.ledger.enqueue_review(MaintenanceReviewPayload::Reconciliation(candidate), origin,
-            "New content may change an earlier claim. No validity change occurs until this proposal is approved.".to_owned(),
+            if suggested_consolidation.is_some() {
+                "Overlapping Pages may be better represented by complete fused or split Pages. Review every source's coverage before publication; existing Pages are unchanged.".to_owned()
+            } else {
+                "New content may change an earlier claim. No validity change occurs until this proposal is approved.".to_owned()
+            },
             outcome.model_attempts, outcome.escalated);
         self.ledger.record(
             key,
@@ -203,6 +229,65 @@ fn pair_key(target: &DurablePageInventoryItem, evidence: &DurablePageInventoryIt
     format!("update:{}:{}", target.revision_id, evidence.revision_id)
 }
 
+fn validate_consolidation_suggestion(
+    outputs: &[pcp_core::ConsolidatedPageOutput],
+    coverage: &[pcp_core::ConsolidationCoverage],
+) -> Result<()> {
+    anyhow::ensure!(
+        (1..=4).contains(&outputs.len()),
+        "worker proposed too many consolidation outputs"
+    );
+    anyhow::ensure!(
+        coverage.len() == 2,
+        "worker must assess both offered sources"
+    );
+    let mut expected = [BTreeSet::new(), BTreeSet::new()];
+    for (index, output) in outputs.iter().enumerate() {
+        anyhow::ensure!(
+            !output.title.trim().is_empty()
+                && output.title.chars().count() <= 160
+                && !output.content.trim().is_empty()
+                && output.content.chars().count() <= 64_000,
+            "worker proposed an invalid complete Page"
+        );
+        anyhow::ensure!(
+            !output.source_indexes.is_empty(),
+            "worker output needs source evidence"
+        );
+        for &source in &output.source_indexes {
+            anyhow::ensure!(
+                source < 2 && expected[source].insert(index),
+                "worker used an invalid source index"
+            );
+        }
+    }
+    let mut seen = BTreeSet::new();
+    for decision in coverage {
+        anyhow::ensure!(
+            decision.source_index < 2 && seen.insert(decision.source_index),
+            "worker repeated or omitted a source coverage decision"
+        );
+        let actual = decision
+            .output_indexes
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        anyhow::ensure!(
+            actual.len() == decision.output_indexes.len()
+                && !actual.is_empty()
+                && actual == expected[decision.source_index]
+                && !decision.explanation.trim().is_empty()
+                && decision.explanation.chars().count() <= 2_000,
+            "worker coverage does not match its output sources"
+        );
+    }
+    anyhow::ensure!(
+        coverage.iter().any(|decision| decision.complete),
+        "worker did not identify a fully covered source"
+    );
+    Ok(())
+}
+
 fn candidate_pairs(
     inventory: &[DurablePageInventoryItem],
 ) -> Vec<(&DurablePageInventoryItem, &DurablePageInventoryItem)> {
@@ -210,6 +295,7 @@ fn candidate_pairs(
         .iter()
         .filter(|page| {
             !page.superseded
+                && !page.source_only
                 && page.content_chars > 0
                 && !matches!(
                     page.kind.as_str(),

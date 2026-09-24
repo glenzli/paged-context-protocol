@@ -444,6 +444,9 @@ async fn dispatch(
         RpcOperation::ExtractTopic(request) => {
             RpcValue::TopicExtractionResult(client.extract_topic(request).await?)
         }
+        RpcOperation::ConsolidatePages(request) => {
+            RpcValue::ConsolidationResult(client.consolidate_pages(request).await?)
+        }
         RpcOperation::NextSummaryCandidate {
             minimum_chars,
             excluded_page_kinds,

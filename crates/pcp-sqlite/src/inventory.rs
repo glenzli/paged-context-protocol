@@ -21,6 +21,7 @@ impl SqlitePcpStore {
                 .map(|_| "?")
                 .collect::<Vec<_>>()
                 .join(",");
+            let source_only_sql = crate::search::current_consolidation_coverage("page");
             let mut sql = format!(
                 "
                 SELECT r.page_id, r.revision_id, r.namespace,
@@ -88,6 +89,7 @@ impl SqlitePcpStore {
                                  WHERE retraction.relation_id = superseding.relation_id
                              )
                        ),
+                       {source_only_sql},
                        EXISTS (
                            SELECT 1 FROM pcp_summaries summary_reference
                            WHERE summary_reference.target_revision_id = r.revision_id
@@ -177,7 +179,8 @@ impl SqlitePcpStore {
                         topic_source_page_ids: serde_json::from_str(&row.get::<_, String>(17)?)
                             .unwrap_or_default(),
                         superseded: row.get(18)?,
-                        packing_protected: row.get(19)?,
+                        source_only: row.get(19)?,
+                        packing_protected: row.get(20)?,
                     })
                 })
                 .context("query durable PCP inventory")?

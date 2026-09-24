@@ -255,30 +255,43 @@ impl ContextHub {
             {
                 // An unchanged prior draft is optional context, admitted whole.
                 // Never split a settled draft just to fill the next batch.
-                let Some(prior) = db.state.syntheses.iter().find(|s| {
+                let prior = db.state.syntheses.iter().find(|s| {
                     s.status == "pending"
                         && s.candidates
                             .iter()
                             .any(|c| c.candidate_id == peer.candidate_id)
-                }) else {
+                });
+                if let Some(prior) = prior {
+                    db.state
+                        .candidates
+                        .iter()
+                        .filter(|c| {
+                            active(c)
+                                && c.input.scope == scope
+                                && prior
+                                    .candidates
+                                    .iter()
+                                    .any(|old| old.candidate_id == c.candidate_id)
+                                && !candidates
+                                    .iter()
+                                    .any(|selected| selected.candidate_id == c.candidate_id)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                } else if peer
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("status"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("partially_represented")
+                {
+                    // A reviewed output can preserve an unresolved question
+                    // after its draft is written. Keep it eligible as context
+                    // when fresh evidence arrives instead of stranding it.
+                    vec![peer]
+                } else {
                     continue;
-                };
-                db.state
-                    .candidates
-                    .iter()
-                    .filter(|c| {
-                        active(c)
-                            && c.input.scope == scope
-                            && prior
-                                .candidates
-                                .iter()
-                                .any(|old| old.candidate_id == c.candidate_id)
-                            && !candidates
-                                .iter()
-                                .any(|selected| selected.candidate_id == c.candidate_id)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
+                }
             } else {
                 vec![peer]
             };

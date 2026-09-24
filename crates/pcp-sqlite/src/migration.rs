@@ -6,6 +6,51 @@ use serde_json::{Map, Value, json};
 
 const PACKED_PAGE_MEDIA_TYPE: &str = "application/vnd.pcp.packed-page+json";
 
+pub(crate) fn migrate_clean_consolidations(
+    connection: &mut Connection,
+    target_version: &str,
+) -> Result<()> {
+    let transaction = connection
+        .transaction()
+        .context("start PCP consolidation schema migration")?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS pcp_consolidations (
+            consolidation_id TEXT PRIMARY KEY,
+            namespace TEXT NOT NULL REFERENCES pcp_scopes(namespace),
+            actor_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            request_json TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(actor_id, idempotency_key)
+        );
+        CREATE TABLE IF NOT EXISTS pcp_consolidation_sources (
+            consolidation_id TEXT NOT NULL REFERENCES pcp_consolidations(consolidation_id),
+            source_page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
+            source_revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+            source_only INTEGER NOT NULL CHECK(source_only IN (0, 1)),
+            explanation TEXT NOT NULL,
+            PRIMARY KEY(consolidation_id, source_revision_id)
+        );
+        CREATE TABLE IF NOT EXISTS pcp_consolidation_coverage (
+            consolidation_id TEXT NOT NULL REFERENCES pcp_consolidations(consolidation_id),
+            source_revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+            output_page_id TEXT NOT NULL REFERENCES pcp_pages(page_id),
+            output_revision_id TEXT NOT NULL REFERENCES pcp_revisions(revision_id),
+            PRIMARY KEY(consolidation_id, source_revision_id, output_revision_id)
+        );
+        CREATE INDEX IF NOT EXISTS pcp_consolidation_sources_current
+            ON pcp_consolidation_sources(source_page_id, source_revision_id, source_only);",
+    )?;
+    transaction.execute(
+        "UPDATE pcp_metadata SET value = ?1 WHERE key = 'schema_version'",
+        [target_version],
+    )?;
+    transaction
+        .commit()
+        .context("commit PCP consolidation schema migration")
+}
+
 struct RevisionRow {
     revision_id: String,
     page_id: String,

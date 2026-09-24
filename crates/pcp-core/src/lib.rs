@@ -32,7 +32,8 @@ pub use reconciliation::{
     FeedbackSubmission, ReconciliationDisposition, ReconciliationResult, SubmitFeedbackRequest,
 };
 pub use request::{
-    ArchivePageRequest, AssessPageValidityRequest, CreateScopeRequest, DeletePageRequest,
+    ArchivePageRequest, AssessPageValidityRequest, ConsolidatePagesRequest, ConsolidatedPageOutput,
+    ConsolidationCoverage, ConsolidationResult, CreateScopeRequest, DeletePageRequest,
     ExtractTopicRequest, IngestPageRequest, InitialRelation, LinkPagesRequest, PackPagesRequest,
     PageRevisionRef, ReadPagesRequest, RepairPageRequest, RestoreArchivedPageRequest,
     RevisePageRequest, SearchFilters, SearchPagesRequest, UnpackPageRequest, WritePageRequest,

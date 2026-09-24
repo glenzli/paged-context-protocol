@@ -12,15 +12,15 @@ use async_trait::async_trait;
 use pcp_core::{
     AccessAuditEvent, AccessPermission, AccessPrincipal, AccessSession, ApplyReconciliationRequest,
     AssessPageValidityRequest, BrowseIndexOrder, Capabilities, CollectRevisionRetentionRequest,
-    CreateScopeRequest, ExpandGraphRequest, ExtractTopicRequest, FeedbackSignal,
-    FeedbackSubmission, GraphEdgeDirection, GraphSliceEdge, GraphSliceResponse, IngestPageRequest,
-    IntentEffort, LinkPagesRequest, PackPagesRequest, PlanRevisionRetentionRequest, Projection,
-    PutRevisionRetentionLeaseRequest, QueryContextRequest, QueryContextResponse, ReadPage,
-    ReadPagesRequest, ReconciliationResult, Relation, RepairPageRequest, RevisePageRequest,
-    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope, ScopeGrant,
-    SearchFilters, SearchMode, SearchPagesRequest, SearchResult, SearchTermMatch,
-    SubmitFeedbackRequest, UnpackPageRequest, WritePageRequest, WriteResult, WriteSummaryRequest,
-    WriteSummaryResult, WriteValidityResult,
+    ConsolidatePagesRequest, ConsolidationResult, CreateScopeRequest, ExpandGraphRequest,
+    ExtractTopicRequest, FeedbackSignal, FeedbackSubmission, GraphEdgeDirection, GraphSliceEdge,
+    GraphSliceResponse, IngestPageRequest, IntentEffort, LinkPagesRequest, PackPagesRequest,
+    PlanRevisionRetentionRequest, Projection, PutRevisionRetentionLeaseRequest,
+    QueryContextRequest, QueryContextResponse, ReadPage, ReadPagesRequest, ReconciliationResult,
+    Relation, RepairPageRequest, RevisePageRequest, RevisionCollectionResult,
+    RevisionRetentionLease, RevisionRetentionPlan, Scope, ScopeGrant, SearchFilters, SearchMode,
+    SearchPagesRequest, SearchResult, SearchTermMatch, SubmitFeedbackRequest, UnpackPageRequest,
+    WritePageRequest, WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
 };
 use pcp_store::PcpStore;
 pub use pcp_store::request_audit;
@@ -409,6 +409,10 @@ pub trait PcpApi: PcpTenantApi {
     async fn link_pages(&self, request: LinkPagesRequest) -> Result<Relation>;
     async fn write_summary(&self, request: WriteSummaryRequest) -> Result<WriteSummaryResult>;
     async fn extract_topic(&self, request: ExtractTopicRequest) -> Result<WriteResult>;
+    async fn consolidate_pages(
+        &self,
+        request: ConsolidatePagesRequest,
+    ) -> Result<ConsolidationResult>;
     async fn next_summary_candidate(
         &self,
         minimum_chars: usize,
@@ -792,6 +796,14 @@ impl PcpApi for EmbeddedPcpClient {
 
     async fn extract_topic(&self, request: ExtractTopicRequest) -> Result<WriteResult> {
         let result = self.store.extract_topic(&self.access, request).await;
+        self.observe_successful_write(result)
+    }
+
+    async fn consolidate_pages(
+        &self,
+        request: ConsolidatePagesRequest,
+    ) -> Result<ConsolidationResult> {
+        let result = self.store.consolidate_pages(&self.access, request).await;
         self.observe_successful_write(result)
     }
 

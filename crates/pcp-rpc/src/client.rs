@@ -15,14 +15,15 @@ use pcp_client::{
 };
 use pcp_core::{
     AccessAuditEvent, AccessSession, ApplyReconciliationRequest, AssessPageValidityRequest,
-    Capabilities, CollectRevisionRetentionRequest, CreateScopeRequest, ExpandGraphRequest,
-    ExtractTopicRequest, FeedbackSignal, FeedbackSubmission, GraphSliceResponse, IngestPageRequest,
-    IntentEffort, LinkPagesRequest, PackPagesRequest, PlanRevisionRetentionRequest,
-    PutRevisionRetentionLeaseRequest, QueryContextRequest, QueryContextResponse, ReadPage,
-    ReadPagesRequest, ReconciliationResult, Relation, RepairPageRequest, RevisePageRequest,
-    RevisionCollectionResult, RevisionRetentionLease, RevisionRetentionPlan, Scope,
-    SearchPagesRequest, SearchResult, SubmitFeedbackRequest, UnpackPageRequest, WritePageRequest,
-    WriteResult, WriteSummaryRequest, WriteSummaryResult, WriteValidityResult,
+    Capabilities, CollectRevisionRetentionRequest, ConsolidatePagesRequest, ConsolidationResult,
+    CreateScopeRequest, ExpandGraphRequest, ExtractTopicRequest, FeedbackSignal,
+    FeedbackSubmission, GraphSliceResponse, IngestPageRequest, IntentEffort, LinkPagesRequest,
+    PackPagesRequest, PlanRevisionRetentionRequest, PutRevisionRetentionLeaseRequest,
+    QueryContextRequest, QueryContextResponse, ReadPage, ReadPagesRequest, ReconciliationResult,
+    Relation, RepairPageRequest, RevisePageRequest, RevisionCollectionResult,
+    RevisionRetentionLease, RevisionRetentionPlan, Scope, SearchPagesRequest, SearchResult,
+    SubmitFeedbackRequest, UnpackPageRequest, WritePageRequest, WriteResult, WriteSummaryRequest,
+    WriteSummaryResult, WriteValidityResult,
 };
 use tokio::{net::UnixStream, sync::Mutex};
 
@@ -652,6 +653,19 @@ impl PcpApi for RemotePcpClient {
         match self.request(RpcOperation::ExtractTopic(request)).await? {
             RpcValue::TopicExtractionResult(value) => Ok(value),
             _ => Err(unexpected("extract_topic")),
+        }
+    }
+
+    async fn consolidate_pages(
+        &self,
+        request: ConsolidatePagesRequest,
+    ) -> Result<ConsolidationResult> {
+        match self
+            .request(RpcOperation::ConsolidatePages(request))
+            .await?
+        {
+            RpcValue::ConsolidationResult(value) => Ok(value),
+            _ => Err(unexpected("consolidate_pages")),
         }
     }
 
