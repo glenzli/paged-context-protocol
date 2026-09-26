@@ -133,6 +133,13 @@ Recommended model flow:
 4. `pcp_capture` only for confirmed reusable context or requested retention. Use
    `pcp_submit_feedback` for explicit corrections; feedback remains pending Console review.
 
+Choose the write Scope by the subject's owner, not the MCP client or source label. User-wide
+preferences and constraints use the identity Scope; project decisions and useful project
+experience use that project's Scope. Candidate and activity writes follow the same ownership.
+Do not create a shared `experience` Scope solely to categorize a Page: the candidate organizer
+compares same-Scope evidence. When multiple write Scopes are granted, pass `scope` explicitly;
+inspect authorized Scopes when the destination is unknown and stop on denied access.
+
 Retrieval tools accept `format=json` (default) or `format=text`. MCP returns **one text content
 block**, containing compact JSON or evidence text. It does not duplicate retrieval bodies in
 `structuredContent` or advertise the full Store output schema on every tool. Small write receipts

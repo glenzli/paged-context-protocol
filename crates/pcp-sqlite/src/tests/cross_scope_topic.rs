@@ -119,6 +119,58 @@ async fn cross_scope_topic_requires_explicit_authority_and_preserves_sources_and
         .unwrap();
     assert_eq!(all.hits.len(), 1);
     assert_eq!(all.hits[0].page_id, topic.page_id);
+    let summary = operator.content_library_summary(vec![]).await.unwrap();
+    assert_eq!(summary.page_count, 3);
+    assert_eq!(summary.source_only_page_count, Some(0));
+    assert_eq!(summary.secondary_search_page_count, Some(2));
+    let related = operator
+        .search_pages(SearchPagesRequest {
+            query: topic.revision_id.clone(),
+            scopes: vec!["a".into(), "b".into(), "personal".into()],
+            mode: SearchMode::Graph,
+            term_match: SearchTermMatch::All,
+            projections: pcp_core::default_search_projections(),
+            filters: SearchFilters::default(),
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(related.hits.iter().any(|hit| hit.page_id == first.page_id));
+    assert!(related.hits.iter().any(|hit| hit.page_id == second.page_id));
+    let exact = operator
+        .search_pages(SearchPagesRequest {
+            query: "certificate locality".into(),
+            scopes: vec!["a".into(), "b".into(), "personal".into()],
+            mode: SearchMode::Exact,
+            term_match: SearchTermMatch::All,
+            projections: vec![Projection::Payload],
+            filters: SearchFilters::default(),
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(exact.hits.iter().any(|hit| hit.page_id == second.page_id));
+    let first_pass = operator
+        .search_pages(SearchPagesRequest {
+            query: "certificate locality".into(),
+            scopes: vec!["a".into(), "b".into(), "personal".into()],
+            mode: SearchMode::Text,
+            term_match: SearchTermMatch::All,
+            projections: vec![Projection::Payload],
+            filters: SearchFilters::default(),
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        !first_pass
+            .hits
+            .iter()
+            .any(|hit| hit.page_id == second.page_id)
+    );
     let read = operator
         .read_pages(ReadPagesRequest {
             page_ids: vec![topic.page_id.clone()],

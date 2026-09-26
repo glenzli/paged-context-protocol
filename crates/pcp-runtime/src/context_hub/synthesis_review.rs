@@ -177,6 +177,22 @@ impl ContextHub {
         // uses Store idempotency rather than treating our own committed head as stale.
         if !retry {
             for output in &request.outputs {
+                if output.action == "create" {
+                    ensure!(
+                        output.candidate_ids.iter().any(|id| {
+                            items.iter().any(|candidate| {
+                                &candidate.candidate_id == id
+                                    && !candidate
+                                        .result
+                                        .as_ref()
+                                        .and_then(|result| result.get("outputs"))
+                                        .and_then(Value::as_array)
+                                        .is_some_and(|outputs| !outputs.is_empty())
+                            })
+                        }),
+                        "Candidate evidence already produced a Page; use an existing target or submit new evidence"
+                    );
+                }
                 if let Some(id) = &output.target_revision_id {
                     let pages = client
                         .read_pages(ReadPagesRequest {

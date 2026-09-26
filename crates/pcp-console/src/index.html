@@ -20,7 +20,7 @@
     </div>
     <div class="topbar-end">
       <div class="headline" aria-live="polite">
-        <span><b id="headline-pages">-</b> <span data-i18n="retrievable pages">retrievable pages</span></span>
+        <span><b id="headline-pages">-</b> <span id="headline-pages-label" data-i18n="default recall Pages">default recall Pages</span></span>
         <span><b id="headline-content">-</b></span>
       </div>
       <div class="topbar-actions" role="toolbar" data-i18n-aria-label="Console controls" aria-label="Console controls">
@@ -59,7 +59,7 @@
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th data-i18n="Scope">Scope</th><th data-i18n="Pages">Pages</th><th data-i18n="Updated">Updated</th><th></th></tr></thead>
+          <thead><tr><th data-i18n="Scope">Scope</th><th data-i18n="Current content Pages">Current content Pages</th><th data-i18n="Updated">Updated</th><th></th></tr></thead>
           <tbody id="scope-rows"></tbody>
         </table>
       </div>
@@ -83,7 +83,7 @@
 
     <section id="view-pages" class="view">
       <div class="view-heading">
-        <div class="view-heading-copy"><h2 data-i18n="Pages">Pages</h2><span id="pages-status" class="muted" aria-live="polite" data-i18n="Not loaded">Not loaded</span><p class="view-description" data-i18n="Browse remembered content. Open a memory to see its sources, revisions and related Pages.">Browse remembered content. Open a memory to see its sources, revisions and related Pages.</p></div>
+        <div class="view-heading-copy"><h2 data-i18n="Pages">Pages</h2><span id="pages-status" class="muted" aria-live="polite" data-i18n="Not loaded">Not loaded</span><p class="view-description" data-i18n="Browse current content Pages, including sources routed behind condensed Pages. Open a Page to inspect its sources and revisions.">Browse current content Pages, including sources routed behind condensed Pages. Open a Page to inspect its sources and revisions.</p></div>
       </div>
       <form id="page-search" class="page-search-bar">
         <div class="page-query-control">
@@ -101,7 +101,7 @@
             <div id="page-filter-options" class="page-menu-options"></div>
             <div class="page-menu-heading page-filter-divider" data-i18n="Content role">Content role</div>
             <div id="page-role-options" class="page-menu-options"></div>
-            <p class="page-filter-help" data-i18n="Other pages have neither a current extraction record nor current summary coverage.">Other pages have neither a current extraction record nor current summary coverage.</p>
+            <p class="page-filter-help" data-i18n="Source Pages remain active and readable here. A visible Topic or complete consolidation can route first-pass search through a condensed Page.">Source Pages remain active and readable here. A visible Topic or complete consolidation can route first-pass search through a condensed Page.</p>
             <label class="page-summary-filter page-filter-divider"><input id="page-with-summary" type="checkbox"><span data-i18n="With attached summary">With attached summary</span></label>
             <p class="page-filter-help" data-i18n="Attached summaries belong to a Page; they are not separate condensed Pages.">Attached summaries belong to a Page; they are not separate condensed Pages.</p>
           </div>

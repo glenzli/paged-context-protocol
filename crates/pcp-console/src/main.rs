@@ -21,12 +21,12 @@ use pcp_client::{
     ContentLibraryFilter, ContentLibraryResult, ContentPageRole, PcpApi, PcpTenantApi,
 };
 use pcp_core::{
-    AccessPermission, Actor, ActorType, ArchivePageRequest, BrowseIndexOrder,
-    ConsolidatePagesRequest, ConsolidatedPageOutput, ConsolidationCoverage, IntentEffort,
-    LifecycleStatus, PackPagesRequest, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest,
-    Projection, QueryContextRequest, ReadPage, ReadPagesRequest, Relation,
-    RestoreArchivedPageRequest, RetentionPolicy, SearchFilters, SearchHit, SearchMode,
-    SearchPagesRequest, SourceSpan, UnpackPageRequest,
+    AccessPermission, Actor, ActorType, ArchivePageRequest, AssessPageValidityRequest,
+    BrowseIndexOrder, ConsolidatePagesRequest, ConsolidatedPageOutput, ConsolidationCoverage,
+    IntentEffort, LifecycleStatus, PackPagesRequest, PagePayload, PageRevisionRef,
+    PlanRevisionRetentionRequest, Projection, QueryContextRequest, ReadPage, ReadPagesRequest,
+    Relation, RestoreArchivedPageRequest, RetentionPolicy, SearchFilters, SearchHit, SearchMode,
+    SearchPagesRequest, SourceSpan, UnpackPageRequest, ValidityStanding,
 };
 use pcp_rpc::{EnrollmentAdminClient, EnrollmentAdminResponse, RemotePcpClient};
 use pcp_runtime::{
@@ -494,12 +494,20 @@ fn router(state: AppState) -> Router {
             post(reject_maintenance_review),
         )
         .route(
+            "/api/maintenance/reviews/{candidate_id}/restore-validity",
+            post(restore_review_qualification),
+        )
+        .route(
             "/api/maintenance/reviews/{candidate_id}/reason",
             post(record_maintenance_review_reason),
         )
         .route(
             "/api/maintenance/reviews/{candidate_id}/defer",
             post(defer_maintenance_review),
+        )
+        .route(
+            "/api/maintenance/reviews/{candidate_id}/snooze-until",
+            post(snooze_maintenance_review_until),
         )
         .route(
             "/api/maintenance/reviews/{candidate_id}/suppress",
@@ -884,6 +892,9 @@ async fn overview(State(state): State<AppState>) -> Result<Json<Value>, ApiError
             "startedAtUnixMs": state.client.server_started_at_unix_ms(),
         },
         "pageCount": content_library.page_count,
+        "sourceOnlyPageCount": content_library.source_only_page_count,
+        "secondarySearchPageCount": content_library.secondary_search_page_count,
+        "condensedPageCount": content_library.condensed_page_count,
         "contentChars": content_library.content_chars,
         "scopes": scopes,
     })))
@@ -1789,6 +1800,87 @@ async fn accept_maintenance_review(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RestoreQualificationInput {
+    expected_assessment_revision_id: String,
+    reason: String,
+}
+
+async fn restore_review_qualification(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(candidate_id): Path<String>,
+    Json(request): Json<RestoreQualificationInput>,
+) -> Result<Json<pcp_core::WriteValidityResult>, ApiError> {
+    require_console_mutation(&headers)?;
+    let reason = request.reason.trim();
+    if reason.is_empty() || reason.chars().count() > 2_000 {
+        return Err(anyhow::anyhow!("a concise validity restoration reason is required").into());
+    }
+    let operator = maintenance_operator_for_console(&state).await?;
+    let item = operator
+        .review_item(&candidate_id)
+        .context("unknown PCP maintenance review candidate")?;
+    if item.status != MaintenanceReviewStatus::Accepted {
+        return Err(anyhow::anyhow!("only an accepted review can be restored").into());
+    }
+    let MaintenanceReviewPayload::Reconciliation(candidate) = item.payload else {
+        return Err(anyhow::anyhow!("review is not a content reconciliation").into());
+    };
+    if candidate.disposition != pcp_core::ReconciliationDisposition::Qualified {
+        return Err(anyhow::anyhow!("only an accepted qualification can be restored here").into());
+    }
+    let target = read_one_page(
+        state.client.as_ref(),
+        candidate.target.page_id.clone(),
+        vec![Projection::Manifest, Projection::Validity],
+        state.client.capabilities().max_read_chars,
+    )
+    .await?;
+    if target.revision.revision_id != candidate.target.revision_id {
+        return Err(anyhow::anyhow!(
+            "target Page changed; review the current Revision before restoring validity"
+        )
+        .into());
+    }
+    let validity = target
+        .validity
+        .context("target has no current validity assessment")?;
+    if validity.standing != ValidityStanding::Qualified
+        || validity.assessment_revision_id != request.expected_assessment_revision_id
+        || validity.target_revision_id != candidate.target.revision_id
+        || !candidate
+            .evidence
+            .iter()
+            .all(|page| validity.basis_revision_ids.contains(&page.revision_id))
+    {
+        return Err(anyhow::anyhow!(
+            "current validity assessment no longer matches the reviewed qualification"
+        )
+        .into());
+    }
+    let result = state
+        .client
+        .assess_page_validity(AssessPageValidityRequest {
+            target_page_id: candidate.target.page_id,
+            target_revision_id: candidate.target.revision_id,
+            expected_assessment_revision_id: Some(request.expected_assessment_revision_id),
+            standing: ValidityStanding::Live,
+            rationale: reason.to_owned(),
+            scope: None,
+            basis_revision_ids: candidate.basis_revision_ids,
+            created_by: Actor {
+                actor_type: ActorType::Tool,
+                actor_id: state.client.identity_id().to_owned(),
+            },
+            tool_or_model: Some("PCP Console review audit".to_owned()),
+            idempotency_key: Some(format!("console:restore-review:{candidate_id}")),
+        })
+        .await?;
+    Ok(Json(result))
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReviewReasonInput {
     reason: String,
@@ -1885,6 +1977,31 @@ async fn defer_maintenance_review(
     Ok(Json(
         json!({"candidateId": candidate_id, "status": "snoozed", "snoozedForSeconds": 86400}),
     ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReviewSnoozeUntilInput {
+    until: String,
+}
+
+async fn snooze_maintenance_review_until(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(candidate_id): Path<String>,
+    Json(request): Json<ReviewSnoozeUntilInput>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let until = DateTime::parse_from_rfc3339(&request.until)
+        .context("review snooze needs a timestamp with timezone")?
+        .with_timezone(&Utc);
+    let mut operator = maintenance_operator_for_console(&state).await?;
+    operator.snooze_review_until(&candidate_id, until).await?;
+    Ok(Json(json!({
+        "candidateId": candidate_id,
+        "status": "snoozed",
+        "snoozedUntil": until.to_rfc3339(),
+    })))
 }
 
 async fn suppress_maintenance_review(

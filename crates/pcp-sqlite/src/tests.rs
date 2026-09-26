@@ -560,7 +560,7 @@ async fn content_governance_archives_without_deleting_and_can_restore() {
 }
 
 #[tokio::test]
-async fn topic_extraction_preserves_sources_but_routes_retrieval_through_topic_page() {
+async fn topic_extraction_routes_default_search_through_topic_without_retiring_sources() {
     let root = std::env::temp_dir().join(format!(
         "pcp-sqlite-topic-extraction-{}",
         SystemTime::now()
@@ -681,7 +681,11 @@ async fn topic_extraction_preserves_sources_but_routes_retrieval_through_topic_p
         )
         .await
         .expect_err("reject exact logical-source duplicate");
-    assert!(duplicate.to_string().contains("refresh that Topic"));
+    assert!(
+        duplicate
+            .to_string()
+            .contains("refresh or retire that Topic")
+    );
 
     let refreshed = store
         .extract_topic(
@@ -704,7 +708,7 @@ async fn topic_extraction_preserves_sources_but_routes_retrieval_through_topic_p
                 title: "A refreshed long-lived topic".to_owned(),
                 content: "This refreshed front-door Topic keeps one Page identity while updating its grounded routing content."
                     .to_owned(),
-                created_by: actor,
+                created_by: actor.clone(),
                 tool_or_model: Some("topic-extraction-test".to_owned()),
                 provenance: Vec::new(),
                 idempotency_key: Some("topic:refresh".to_owned()),
@@ -816,15 +820,77 @@ async fn topic_extraction_preserves_sources_but_routes_retrieval_through_topic_p
         .read_pages(
             ReadPagesRequest {
                 page_ids: Vec::new(),
-                revision_ids: vec![first.revision_id, second.revision_id],
+                revision_ids: vec![first.revision_id.clone(), second.revision_id.clone()],
                 projections: vec![Projection::Payload],
                 max_chars: 1_000,
             },
-            vec![namespace],
+            vec![namespace.clone()],
         )
         .await
         .expect("read retained exact source revisions");
     assert_eq!(sources.len(), 2);
+
+    store
+        .extract_topic(
+            ExtractTopicRequest {
+                target_namespace: None,
+                target_topic: None,
+                source_pages: vec![
+                    PageRevisionRef {
+                        page_id: first.page_id.clone(),
+                        revision_id: first.revision_id.clone(),
+                    },
+                    PageRevisionRef {
+                        page_id: second.page_id.clone(),
+                        revision_id: second.revision_id.clone(),
+                    },
+                    PageRevisionRef {
+                        page_id: unrelated.page_id.clone(),
+                        revision_id: unrelated.revision_id.clone(),
+                    },
+                ],
+                title: "Expanded topic".into(),
+                content: "Three sources ground the expanded topic.".into(),
+                created_by: actor.clone(),
+                tool_or_model: None,
+                provenance: Vec::new(),
+                idempotency_key: Some("topic:expanded".into()),
+            },
+            vec![namespace.clone()],
+        )
+        .await
+        .expect("new source evidence may create a larger Topic");
+    let subset_error = store
+        .extract_topic(
+            ExtractTopicRequest {
+                target_namespace: None,
+                target_topic: None,
+                source_pages: vec![
+                    PageRevisionRef {
+                        page_id: first.page_id,
+                        revision_id: first.revision_id,
+                    },
+                    PageRevisionRef {
+                        page_id: unrelated.page_id,
+                        revision_id: unrelated.revision_id,
+                    },
+                ],
+                title: "Redundant subset".into(),
+                content: "This subset is already represented by the larger Topic.".into(),
+                created_by: actor,
+                tool_or_model: None,
+                provenance: Vec::new(),
+                idempotency_key: Some("topic:subset".into()),
+            },
+            vec![namespace],
+        )
+        .await
+        .expect_err("covered source subset cannot create another Topic");
+    assert!(
+        subset_error
+            .to_string()
+            .contains("refresh or retire that Topic")
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }

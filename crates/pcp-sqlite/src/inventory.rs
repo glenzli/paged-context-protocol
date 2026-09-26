@@ -22,6 +22,12 @@ impl SqlitePcpStore {
                 .collect::<Vec<_>>()
                 .join(",");
             let source_only_sql = crate::search::current_consolidation_coverage("page");
+            // Bind the shared complete-coverage gate to this consolidation,
+            // not merely to any canonical output covering the same source.
+            let output_coverage_sql = source_only_sql.replace(
+                "AND source.source_only = 1",
+                "AND source.source_only = 1 AND source.consolidation_id = output_coverage.consolidation_id",
+            );
             let mut sql = format!(
                 "
                 SELECT r.page_id, r.revision_id, r.namespace,
@@ -104,7 +110,13 @@ impl SqlitePcpStore {
                            UNION ALL
                            SELECT 1 FROM pcp_revision_retention_leases retention
                            WHERE retention.revision_id = r.revision_id
-                       )
+                       ),
+                       COALESCE((
+                           SELECT json_group_array(DISTINCT output_coverage.output_revision_id)
+                           FROM pcp_consolidation_coverage output_coverage
+                           WHERE output_coverage.source_revision_id = r.revision_id
+                             AND {output_coverage_sql}
+                       ), '[]')
                 FROM pcp_pages page
                 JOIN pcp_revisions r ON r.revision_id = page.current_revision_id
                 LEFT JOIN pcp_page_summary_heads summary_head
@@ -181,6 +193,9 @@ impl SqlitePcpStore {
                         superseded: row.get(18)?,
                         source_only: row.get(19)?,
                         packing_protected: row.get(20)?,
+                        consolidation_covering_revision_ids: serde_json::from_str(
+                            &row.get::<_, String>(21)?,
+                        ).unwrap_or_default(),
                     })
                 })
                 .context("query durable PCP inventory")?

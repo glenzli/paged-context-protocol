@@ -5,7 +5,7 @@ use std::collections::{BTreeSet, HashSet};
 
 use anyhow::{Context, Result, ensure};
 use pcp_core::{ConsolidatePagesRequest, ConsolidationResult, PagePayload, PageRevisionRef};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 use serde_json::json;
 
 use crate::{
@@ -70,6 +70,7 @@ impl SqlitePcpStore {
                     "consolidation source Revision is not active"
                 );
             }
+            ensure_no_active_duplicate(&transaction, &request)?;
 
             let created_at = now();
             let consolidation_id = random_id(&transaction, "con_")?;
@@ -197,6 +198,55 @@ impl SqlitePcpStore {
         })
         .await
     }
+}
+
+/// A fresh key is not new evidence. An earlier active consolidation of the
+/// same source Revisions must be retired before another set of Pages is made.
+fn ensure_no_active_duplicate(
+    transaction: &Transaction<'_>,
+    request: &ConsolidatePagesRequest,
+) -> Result<()> {
+    let requested = request
+        .source_pages
+        .iter()
+        .map(|source| source.revision_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut statement = transaction.prepare(
+        "SELECT consolidation_id, result_json FROM pcp_consolidations WHERE namespace = ?1",
+    )?;
+    let previous = statement
+        .query_map([request.namespace.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, result_json) in previous {
+        let mut sources = transaction.prepare(
+            "SELECT source_revision_id FROM pcp_consolidation_sources WHERE consolidation_id = ?1",
+        )?;
+        let existing = sources
+            .query_map([id.as_str()], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+        if existing.iter().map(String::as_str).collect::<BTreeSet<_>>() != requested {
+            continue;
+        }
+        let result: ConsolidationResult = serde_json::from_str(&result_json)?;
+        let mut all_active = !result.outputs.is_empty();
+        for output in result.outputs {
+            let lifecycle: Option<String> = transaction
+                .query_row(
+                    "SELECT lifecycle_status FROM pcp_pages WHERE page_id = ?1",
+                    [output.page_id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            all_active &= lifecycle.as_deref() == Some("active");
+        }
+        ensure!(
+            !all_active,
+            "an active consolidation already covers these source Revisions; review its Pages instead"
+        );
+    }
+    Ok(())
 }
 
 fn validate_request(request: &ConsolidatePagesRequest) -> Result<()> {

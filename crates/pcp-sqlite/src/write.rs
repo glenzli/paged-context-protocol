@@ -437,11 +437,11 @@ pub(crate) fn validate_document(
     Ok(())
 }
 
-fn scope_set(scopes: Vec<String>) -> HashSet<String> {
+pub(crate) fn scope_set(scopes: Vec<String>) -> HashSet<String> {
     scopes.into_iter().collect()
 }
 
-fn ensure_scope_access(
+pub(crate) fn ensure_scope_access(
     transaction: &Transaction<'_>,
     namespace: &str,
     allowed_scopes: &HashSet<String>,

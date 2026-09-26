@@ -9,10 +9,10 @@ use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use pcp_client::PcpApi;
 use pcp_core::{
     AccessSession, ApplyReconciliationRequest, ExtractTopicRequest, FeedbackAuthority,
-    LinkPagesRequest, PACKED_PAGE_MEDIA_TYPE, PackPagesRequest, PageMutability, PageRevisionRef,
-    PlanRevisionRetentionRequest, Projection, PutRevisionRetentionLeaseRequest, ReadPagesRequest,
-    ReconciliationDisposition, RetentionPolicy, RuntimeUsageEvent, SourceSpan, WriteResult,
-    WriteSummaryRequest,
+    LifecycleStatus, LinkPagesRequest, PACKED_PAGE_MEDIA_TYPE, PackPagesRequest, PageMutability,
+    PageRevisionRef, PlanRevisionRetentionRequest, Projection, PutRevisionRetentionLeaseRequest,
+    ReadPagesRequest, ReconciliationDisposition, RetentionPolicy, RuntimeUsageEvent, SourceSpan,
+    WriteResult, WriteSummaryRequest,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1142,6 +1142,9 @@ impl RuntimeMaintainer {
             self.ledger.update_scheduled_cycle(aggregate.clone());
             self.ledger.save(&self.config.state_path).await?;
         }
+        if !self.ledger.discovery_ready() {
+            return Ok(aggregate);
+        }
         let mut regions = self.ledger.ready_regions(&self.config.write_trigger);
         self.ledger.reconcile_job_issues(&inventory);
         regions.extend(self.ledger.due_job_regions(&inventory));
@@ -1151,6 +1154,7 @@ impl RuntimeMaintainer {
         }
         aggregate.periodic_review = periodic_review;
         let expected = MaintenanceLedger::region_snapshot(&inventory, &regions);
+        let before_discovery = aggregate.jobs_advanced;
         while aggregate.jobs_advanced < self.config.max_jobs_per_cycle {
             let report = self
                 .run_once_inner(
@@ -1178,10 +1182,12 @@ impl RuntimeMaintainer {
             .observe_writes(&refreshed, &self.config.write_trigger);
         self.ledger.reconcile_job_issues(&refreshed);
         self.ledger.defer_unselected_job_issues();
-        if aggregate.jobs_advanced < self.config.max_jobs_per_cycle {
-            self.ledger
-                .acknowledge_unchanged_regions(&expected, &refreshed);
-        }
+        self.ledger.finish_discovery_pass(
+            &expected,
+            &refreshed,
+            aggregate.jobs_advanced.saturating_sub(before_discovery),
+            aggregate.jobs_advanced < self.config.max_jobs_per_cycle,
+        );
         Ok(aggregate)
     }
 
@@ -1192,9 +1198,13 @@ impl RuntimeMaintainer {
         let inventory = self.client.durable_page_inventory(Vec::new()).await?;
         Ok(match regions {
             Some(regions) => {
+                let changed = self.ledger.changed_page_ids(regions, &inventory);
                 let mut selected = inventory
                     .iter()
-                    .filter(|page| regions.contains(&maintenance_region_key(page)))
+                    .filter(|page| {
+                        regions.contains(&maintenance_region_key(page))
+                            && (changed.is_empty() || changed.contains(&page.page_id))
+                    })
                     .map(|page| page.page_id.clone())
                     .collect::<BTreeSet<_>>();
                 let anchors = selected.clone();
@@ -1413,6 +1423,33 @@ impl RuntimeMaintainer {
         self.ledger.save(&self.config.state_path).await
     }
 
+    pub async fn snooze_review_until(
+        &mut self,
+        candidate_id: &str,
+        until: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        let now = chrono::Utc::now();
+        anyhow::ensure!(
+            until > now && until <= now + chrono::Duration::days(7),
+            "review snooze must end within the next seven days"
+        );
+        let _decision = MaintenanceLedger::decision_lock(&self.config.state_path).await?;
+        let mut fresh = MaintenanceLedger::load(&self.config.state_path).await?;
+        anyhow::ensure!(
+            fresh
+                .review_item(candidate_id)
+                .is_some_and(|item| item.status == MaintenanceReviewStatus::Pending)
+                || fresh
+                    .relation_review(candidate_id)
+                    .is_some_and(|item| item.status == MaintenanceRelationReviewStatus::Pending),
+            "review is no longer pending"
+        );
+        fresh.snooze_review_until(candidate_id, until)?;
+        fresh.save(&self.config.state_path).await?;
+        self.ledger = fresh;
+        Ok(())
+    }
+
     pub async fn approve_relation_review(
         &mut self,
         candidate_id: &str,
@@ -1452,6 +1489,16 @@ impl RuntimeMaintainer {
             proposal.pages[0].page_id.clone(),
             proposal.pages[1].page_id.clone(),
         ];
+        let inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        if let (Some(left), Some(right)) = (
+            inventory.iter().find(|page| page.page_id == page_ids[0]),
+            inventory.iter().find(|page| page.page_id == page_ids[1]),
+        ) {
+            anyhow::ensure!(
+                !super::update_discovery::is_covered_source_output_pair(left, right),
+                "PCP relation review candidate duplicates a complete consolidation source"
+            );
+        }
         if let Some(relation) = self.existing_related_pair(&page_ids, &revision_ids).await? {
             self.ledger
                 .resolve_relation_review(candidate_id, MaintenanceRelationReviewStatus::Accepted)?;
@@ -1959,12 +2006,12 @@ impl RuntimeMaintainer {
                         other => {
                             analysis.deferred_pages = analysis.deferred_pages.saturating_add(1);
                             analysis.issues.push(MaintenanceSummaryAnalysisIssue {
-                        batch_index: page_index,
-                        message: format!(
+                                batch_index: page_index,
+                                message: format!(
                             "semantic worker returned {} for a summarize_page review request",
                             response_name(&other)
                         ),
-                    });
+                            });
                         }
                     }
                 }
@@ -2070,6 +2117,7 @@ impl RuntimeMaintainer {
             &offered_page_ids,
             &relation_edges,
             &recorded_relation_pairs,
+            &window,
         );
         if all_relation_pairs_excluded(&offered_page_ids, &excluded_page_pairs) {
             return Ok(MaintenanceRelationAnalysis::no_candidate());
@@ -2160,6 +2208,10 @@ impl RuntimeMaintainer {
             })
             .collect::<Result<Vec<_>>>()?;
         selected.sort_by(|left, right| left.page_id.cmp(&right.page_id));
+        anyhow::ensure!(
+            !super::update_discovery::is_covered_source_output_pair(selected[0], selected[1]),
+            "maintenance relation candidate duplicates a complete consolidation source"
+        );
         let candidate = build_relation_candidate(&selected);
         anyhow::ensure!(
             candidate.candidate_id == request.candidate_id,
@@ -2242,6 +2294,110 @@ impl RuntimeMaintainer {
             request.pages[0].page_id != request.pages[1].page_id,
             "maintenance relation candidate contains duplicate Pages"
         );
+        if status == MaintenanceRelationReviewStatus::Suppressed
+            && request
+                .pages
+                .iter()
+                .any(|page| !current_by_id.contains_key(page.page_id.as_str()))
+        {
+            // Archived Pages leave the active maintenance inventory, but an
+            // existing historical edge still needs a durable suppression before
+            // an operator retracts it. This path cannot create a new relation.
+            let mut current = self
+                .client
+                .read_pages(ReadPagesRequest {
+                    page_ids: request
+                        .pages
+                        .iter()
+                        .map(|page| page.page_id.clone())
+                        .collect(),
+                    revision_ids: Vec::new(),
+                    projections: vec![
+                        Projection::Manifest,
+                        Projection::Payload,
+                        Projection::Relations,
+                    ],
+                    max_chars: 2_048,
+                })
+                .await?;
+            anyhow::ensure!(
+                current.len() == 2
+                    && current
+                        .iter()
+                        .any(|page| page.page.lifecycle_status == LifecycleStatus::Archived)
+                    && current.iter().all(|page| matches!(
+                        page.page.lifecycle_status,
+                        LifecycleStatus::Active | LifecycleStatus::Archived
+                    ))
+                    && current
+                        .iter()
+                        .all(|page| request.pages.iter().any(|requested| {
+                            page.page.page_id == requested.page_id
+                                && page.page.head_revision_id == requested.revision_id
+                                && page.revision.revision_id == requested.revision_id
+                        })),
+                "maintenance relation candidate is stale or no longer eligible"
+            );
+            anyhow::ensure!(
+                current
+                    .iter()
+                    .flat_map(|page| &page.relations)
+                    .any(|relation| {
+                        relation.relation_type == "related_to"
+                            && request
+                                .pages
+                                .iter()
+                                .any(|page| page.page_id == relation.from_page_id)
+                            && request
+                                .pages
+                                .iter()
+                                .any(|page| page.page_id == relation.to_page_id)
+                    }),
+                "maintenance relation candidate is not an existing related_to edge"
+            );
+            current.sort_by(|left, right| left.page.page_id.cmp(&right.page.page_id));
+            let refs = [
+                (
+                    current[0].page.page_id.as_str(),
+                    current[0].revision.revision_id.as_str(),
+                ),
+                (
+                    current[1].page.page_id.as_str(),
+                    current[1].revision.revision_id.as_str(),
+                ),
+            ];
+            anyhow::ensure!(
+                relation_candidate_id(refs) == request.candidate_id,
+                "maintenance relation candidate identity no longer matches the reviewed Pages"
+            );
+            let namespace = current[0].page.namespace.clone();
+            let pages = current
+                .into_iter()
+                .map(|page| MaintenanceRelationReviewPage {
+                    page_id: page.page.page_id,
+                    revision_id: page.revision.revision_id,
+                    preview: page
+                        .revision
+                        .payload
+                        .as_ref()
+                        .map_or_else(String::new, |payload| {
+                            payload
+                                .content
+                                .chars()
+                                .take(PACKING_PREVIEW_CHARS)
+                                .collect()
+                        }),
+                })
+                .collect::<Vec<_>>()
+                .try_into()
+                .expect("validated relation pair has two Pages");
+            self.ledger.suppress_relation_pair(
+                namespace,
+                pages,
+                "Operator suppressed an existing related_to edge with an archived Page.".to_owned(),
+            )?;
+            return self.ledger.save(&self.config.state_path).await;
+        }
         let mut selected = request
             .pages
             .iter()
@@ -2404,15 +2560,22 @@ impl RuntimeMaintainer {
                 .context("Topic refresh target is unavailable")?
                 .namespace
                 .clone()
+        } else if let Some(first) = selected.first().filter(|first| {
+            first.namespace.starts_with("project:")
+                && selected.iter().all(|p| p.namespace == first.namespace)
+        }) {
+            first.namespace.clone()
         } else if let Some(scope) = &self.config.topic.target_scope {
             scope.replace("{identity_id}", self.client.identity_id())
         } else {
-            selected
-                .iter()
-                .map(|page| &page.namespace)
-                .min()
-                .context("Topic requires sources")?
-                .clone()
+            let first = selected.first().context("Topic requires sources")?;
+            anyhow::ensure!(
+                selected
+                    .iter()
+                    .all(|page| page.namespace == first.namespace),
+                "mixed-Scope Topic requires an explicitly configured destination"
+            );
+            first.namespace.clone()
         };
         if selected.iter().any(|page| page.namespace != target) {
             anyhow::ensure!(
@@ -3144,6 +3307,11 @@ impl RuntimeMaintainer {
         inventory: &[pcp_store::DurablePageInventoryItem],
         report: &mut MaintenanceCycleReport,
     ) -> Result<bool> {
+        // Paused and snoozed proposals still occupy review capacity. Avoid
+        // spending another model call when the operator queue is already full.
+        if self.ledger.relation_pending_count() >= self.config.relation.max_pending_reviews {
+            return Ok(false);
+        }
         let active_packing_page_ids = self.active_packing_page_ids();
         let Some(candidates) =
             relation_candidate_windows(inventory, &self.config.relation, &active_packing_page_ids)
@@ -3185,6 +3353,7 @@ impl RuntimeMaintainer {
             &offered_page_ids,
             &relation_edges,
             &recorded_relation_pairs,
+            &candidates,
         );
         if all_relation_pairs_excluded(&offered_page_ids, &excluded_page_pairs) {
             self.ledger.record(
@@ -3306,10 +3475,7 @@ impl RuntimeMaintainer {
         let mut verified = false;
         let mut relation_verification = None;
         let calls_before_verification = report.worker_calls;
-        if self.config.applies_changes()
-            && self.config.relation.auto_apply_verified
-            && !is_low_risk_automatic_relation(&selected_pages)
-        {
+        if self.config.applies_changes() && self.config.relation.auto_apply_verified {
             match self
                 .verify_maintenance_candidate(
                     "relation",
@@ -3368,8 +3534,9 @@ impl RuntimeMaintainer {
                 }
             }
         }
-        let requires_review = !self.config.applies_changes()
-            || !(is_low_risk_automatic_relation(&selected_pages) || verified);
+        // Routing snippets and Pack adjacency nominate candidates; neither
+        // establishes a semantic relation without a complete-source review.
+        let requires_review = !self.config.applies_changes() || !verified;
         if requires_review {
             let selected = page_ids
                 .iter()
@@ -3667,6 +3834,18 @@ impl RuntimeMaintainer {
         let mut retained_topics = Vec::<super::MaintenanceTopicCandidate>::new();
         let mut changed = false;
         for item in reviews {
+            if matches!(&item.payload, MaintenanceReviewPayload::Reconciliation(c) if c.signal.is_none())
+                && super::review::review_queue(&item, &self.config, &inventory).state == "stale"
+            {
+                self.ledger
+                    .resolve_review(&item.candidate_id, MaintenanceReviewStatus::Stale)?;
+                self.ledger.set_review_reason(
+                    &item.candidate_id,
+                    "Update sources changed or this source/output pair is already covered; retire the obsolete proposal.".into(),
+                )?;
+                changed = true;
+                continue;
+            }
             let MaintenanceReviewPayload::Topic(c) = &item.payload else {
                 continue;
             };
@@ -3702,7 +3881,6 @@ impl RuntimeMaintainer {
                     p.page_id == source.page_id
                         && p.revision_id == source.revision_id
                         && !p.superseded
-                        && !p.source_only
                 })
             });
             let status = if !current {
@@ -4024,7 +4202,12 @@ impl RuntimeMaintainer {
         report: &mut MaintenanceCycleReport,
         review_origin: MaintenanceReviewOrigin,
     ) -> Result<bool> {
-        if self.ledger.topic_pending_count() >= self.config.topic.max_pending_reviews {
+        let comparison_inventory = self.client.durable_page_inventory(Vec::new()).await?;
+        if self
+            .ledger
+            .topic_pending_count(&comparison_inventory, &self.config.topic)
+            >= self.config.topic.max_pending_reviews
+        {
             report.topic_backlog_paused = true;
             return Ok(false);
         }
@@ -4060,7 +4243,7 @@ impl RuntimeMaintainer {
             .map(|p| p.revision_id.clone())
             .collect::<Vec<_>>();
         let key = topic_window_key(&revisions);
-        let existing_topics = existing_topics_for_window(inventory, &window);
+        let existing_topics = existing_topics_for_window(&comparison_inventory, &window);
         let mut request = MaintenanceWorkerRequest::ExtractTopic {
             pages: window
                 .iter()
@@ -4113,7 +4296,12 @@ impl RuntimeMaintainer {
                     return Ok(true);
                 }
                 response => {
-                    match self.topic_from_response(inventory, &window, &existing_topics, response) {
+                    match self.topic_from_response(
+                        &comparison_inventory,
+                        &window,
+                        &existing_topics,
+                        response,
+                    ) {
                         Ok(value) => {
                             candidate = Some(value);
                             break;
@@ -4160,10 +4348,9 @@ impl RuntimeMaintainer {
         let selected = candidate
             .pages
             .iter()
-            .filter_map(|p| inventory.iter().find(|i| i.page_id == p.page_id))
+            .filter_map(|p| comparison_inventory.iter().find(|i| i.page_id == p.page_id))
             .collect::<Vec<_>>();
         if review_origin == MaintenanceReviewOrigin::Automatic
-            && self.config.topic.auto_apply
             && !super::discovery::accumulated(&selected, &self.config.topic)
         {
             // A short automatic draft is not a human decision. Keep the source
@@ -4215,7 +4402,7 @@ impl RuntimeMaintainer {
         let no_change = matches!(assessment.verdict, super::VerificationVerdict::NoChange);
         let approved = matches!(assessment.verdict, super::VerificationVerdict::Approve);
         let verification_reason = assessment.reason.clone();
-        apply_verified_topic_revision(&mut candidate, &assessment, &inventory)?;
+        apply_verified_topic_revision(&mut candidate, &assessment, &comparison_inventory)?;
         candidate.verification = Some(assessment);
         // Persist no-change decisions too, so other windows cannot regenerate a paraphrase.
         let id = {
@@ -4252,7 +4439,7 @@ impl RuntimeMaintainer {
             let selected = candidate
                 .pages
                 .iter()
-                .filter_map(|p| inventory.iter().find(|i| i.page_id == p.page_id))
+                .filter_map(|p| comparison_inventory.iter().find(|i| i.page_id == p.page_id))
                 .collect::<Vec<_>>();
             self.ledger.save(&self.config.state_path).await?;
             if approved
@@ -4887,26 +5074,6 @@ impl RuntimeMaintainer {
     }
 }
 
-/// The only automatic relation assertion allowed by the conservative policy:
-/// the model has selected two adjacent Pack Pages from one source stream that
-/// independently share a protected identifier. Every other model-selected
-/// relation remains a revision-bound Console review proposal.
-fn is_low_risk_automatic_relation(pages: &[&pcp_store::DurablePageInventoryItem]) -> bool {
-    let [left, right] = pages else {
-        return false;
-    };
-    let (Some(left_span), Some(right_span)) = (&left.source_span, &right.source_span) else {
-        return false;
-    };
-    left.namespace == right.namespace
-        && left_span.stream_id == right_span.stream_id
-        && left.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE)
-        && right.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE)
-        && ((right_span.start <= left_span.end.saturating_add(1))
-            || (left_span.start <= right_span.end.saturating_add(1)))
-        && shares_protected_identifier(left, right)
-}
-
 fn packing_page_entry_times(page: &pcp_core::ReadPage) -> Result<Vec<DateTime<Utc>>> {
     let payload = page
         .revision
@@ -5196,6 +5363,7 @@ fn relation_excluded_page_pairs(
     offered_page_ids: &BTreeSet<String>,
     relation_edges: &[[String; 2]],
     suppressed_pairs: &[[String; 2]],
+    offered_pages: &[pcp_store::DurablePageInventoryItem],
 ) -> Vec<[String; 2]> {
     // Existing asserted relations exclude their whole connected component.  An
     // operator suppression is intentionally narrower: it excludes only the
@@ -5206,6 +5374,16 @@ fn relation_excluded_page_pairs(
         (offered_page_ids.contains(&pair[0]) && offered_page_ids.contains(&pair[1]))
             .then(|| normalized_relation_pair(pair.clone()))
     }));
+    for (index, left) in offered_pages.iter().enumerate() {
+        for right in &offered_pages[index + 1..] {
+            if super::update_discovery::is_covered_source_output_pair(left, right) {
+                excluded.push(normalized_relation_pair([
+                    left.page_id.clone(),
+                    right.page_id.clone(),
+                ]));
+            }
+        }
+    }
     excluded.sort();
     excluded.dedup();
     excluded
@@ -5529,7 +5707,9 @@ fn topic_candidate_windows(
                 .map(|page| page.revision_id.clone())
                 .collect::<Vec<_>>();
             revisions.sort();
-            seen.insert(revisions)
+            let covered_pair = pages.len() == 2
+                && super::update_discovery::is_covered_source_output_pair(&pages[0], &pages[1]);
+            !covered_pair && seen.insert(revisions)
         })
         .collect()
 }
@@ -5556,13 +5736,30 @@ fn existing_topics_for_selected(
 
     let mut candidates = inventory
         .iter()
-        .filter(|page| page.kind == "topic_summary" && !page.superseded && !page.source_only)
+        .filter(|page| {
+            matches!(page.kind.as_str(), "topic_summary" | "consolidated")
+                && !page.superseded
+                && !page.source_only
+        })
         .filter_map(|page| {
             let shared = page
                 .topic_source_page_ids
                 .iter()
                 .filter(|id| selected_page_ids.contains(id.as_str()))
                 .count();
+            let shared = shared
+                + selected
+                    .iter()
+                    .filter(|source| {
+                        source.page_id == page.page_id
+                            || source
+                                .consolidation_covering_revision_ids
+                                .contains(&page.revision_id)
+                            || page
+                                .provenance_input_revision_ids
+                                .contains(&source.revision_id)
+                    })
+                    .count();
             let affinity = selected
                 .iter()
                 .map(|source| super::topic_policy::subject_affinity(page, source))
@@ -5581,12 +5778,13 @@ fn existing_topics_for_selected(
         .take(12)
         .map(|(page, _, _)| page)
         .map(|page| ExistingTopicPage {
+            kind: page.kind.clone(),
             page_id: page.page_id.clone(),
             revision_id: page.revision_id.clone(),
             title: page
                 .facets
                 .as_ref()
-                .and_then(|facets| facets.get("topicTitle"))
+                .and_then(|facets| facets.get("topicTitle").or_else(|| facets.get("title")))
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("Topic")
                 .to_owned(),
@@ -5615,18 +5813,21 @@ fn select_topic_refresh_target(
         Some(
             existing_topics
                 .iter()
-                .find(|topic| topic.page_id == requested_page_id)
+                .find(|topic| topic.kind == "topic_summary" && topic.page_id == requested_page_id)
                 .context("semantic worker selected an unavailable Topic refresh target")?,
         )
     } else {
-        existing_topics.iter().find(|topic| {
-            topic
-                .source_page_ids
-                .iter()
-                .map(String::as_str)
-                .collect::<BTreeSet<_>>()
-                == selected_page_ids
-        })
+        existing_topics
+            .iter()
+            .filter(|topic| topic.kind == "topic_summary")
+            .find(|topic| {
+                topic
+                    .source_page_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>()
+                    == selected_page_ids
+            })
     };
     let Some(topic) = selected_topic else {
         return Ok(None);
@@ -6280,8 +6481,7 @@ fn summary_page_eligible(
     page: &pcp_store::DurablePageInventoryItem,
     config: &super::SummaryMaintenanceConfig,
 ) -> bool {
-    !page.source_only
-        && page.content_chars >= config.minimum_chars as u64
+    page.content_chars >= config.minimum_chars as u64
         && (page.media_type.as_deref() == Some(PACKED_PAGE_MEDIA_TYPE)
             || !excluded_kind(&page.kind, &config.excluded_page_kinds))
 }
@@ -6296,9 +6496,7 @@ fn relation_page_eligible(
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty())
         || page.facets.is_some();
-    has_semantic_input
-        && !page.source_only
-        && !excluded_kind(&page.kind, &config.excluded_page_kinds)
+    has_semantic_input && !excluded_kind(&page.kind, &config.excluded_page_kinds)
 }
 
 fn build_summary_candidate(
@@ -6347,16 +6545,12 @@ fn build_relation_candidate(
         .collect::<Vec<_>>();
     inputs.sort_by(|left, right| left.page_id.cmp(&right.page_id));
     let namespace = pages[0].namespace.clone();
-    let mut digest = Sha256::new();
-    for page in &inputs {
-        digest.update(page.page_id.as_bytes());
-        digest.update([0]);
-        digest.update(page.revision_id.as_bytes());
-        digest.update([0]);
-    }
-    let encoded = format!("{:x}", digest.finalize());
+    let candidate_id = relation_candidate_id([
+        (inputs[0].page_id.as_str(), inputs[0].revision_id.as_str()),
+        (inputs[1].page_id.as_str(), inputs[1].revision_id.as_str()),
+    ]);
     MaintenanceRelationCandidate {
-        candidate_id: format!("mrl_{}", &encoded[..24]),
+        candidate_id,
         namespace,
         pages: inputs
             .try_into()
@@ -6364,6 +6558,19 @@ fn build_relation_candidate(
         relation_reason: String::new(),
         verification: None,
     }
+}
+
+pub(super) fn relation_candidate_id(mut pages: [(&str, &str); 2]) -> String {
+    pages.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    let mut digest = Sha256::new();
+    for (page_id, revision_id) in pages {
+        digest.update(page_id.as_bytes());
+        digest.update([0]);
+        digest.update(revision_id.as_bytes());
+        digest.update([0]);
+    }
+    let encoded = format!("{:x}", digest.finalize());
+    format!("mrl_{}", &encoded[..24])
 }
 
 fn build_archive_candidate(
@@ -6777,9 +6984,10 @@ mod relation_window_tests {
 
     use super::{
         MaintenanceWakeReason, PackingMaintenanceConfig, RelationMaintenanceConfig,
-        archive_scan_from_inventory, existing_topics_for_selected, packing_candidate_windows,
-        relation_candidate_windows, select_topic_refresh_target, source_boundary_relation_windows,
-        wait_for_scheduler_wakeup,
+        all_relation_pairs_excluded, archive_scan_from_inventory, existing_topics_for_selected,
+        packing_candidate_windows, relation_candidate_windows, relation_excluded_page_pairs,
+        relation_page_eligible, select_topic_refresh_target, source_boundary_relation_windows,
+        summary_page_eligible, topic_candidate_windows, wait_for_scheduler_wakeup,
     };
 
     #[tokio::test]
@@ -6820,8 +7028,51 @@ mod relation_window_tests {
             topic_source_page_ids: Vec::new(),
             superseded: false,
             source_only: false,
+            consolidation_covering_revision_ids: Vec::new(),
             packing_protected: false,
         }
+    }
+
+    #[test]
+    fn exact_consolidation_coverage_excludes_only_its_own_relation_pair() {
+        let mut source = page("conversation:alpha", "source");
+        let output = page("conversation:alpha", "output");
+        let unrelated = page("conversation:alpha", "unrelated");
+        source.consolidation_covering_revision_ids = vec![output.revision_id.clone()];
+        let pages = vec![source, output, unrelated];
+        let ids = pages
+            .iter()
+            .map(|page| page.page_id.clone())
+            .collect::<BTreeSet<_>>();
+
+        let excluded = relation_excluded_page_pairs(&ids, &[], &[], &pages);
+        assert_eq!(excluded, vec![["output".to_owned(), "source".to_owned()]]);
+        assert!(!all_relation_pairs_excluded(&ids, &excluded));
+        assert!(all_relation_pairs_excluded(
+            &BTreeSet::from(["output".to_owned(), "source".to_owned()]),
+            &excluded,
+        ));
+    }
+
+    #[test]
+    fn canonical_fusion_is_compared_but_cannot_be_a_topic_refresh_target() {
+        let mut source = page("project:alpha", "source");
+        source.source_only = true;
+        let mut fusion = page("project:alpha", "fusion");
+        fusion.kind = "consolidated".into();
+        fusion.provenance_input_revision_ids = vec![source.revision_id.clone()];
+        source.consolidation_covering_revision_ids = vec![fusion.revision_id.clone()];
+        let inventory = vec![source, fusion];
+        let selected = vec![&inventory[0]];
+        let existing = existing_topics_for_selected(&inventory, &selected);
+        assert_eq!(existing.len(), 1);
+        assert_eq!(existing[0].kind, "consolidated");
+        assert!(
+            select_topic_refresh_target(&selected, &existing, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(select_topic_refresh_target(&selected, &existing, Some("fusion")).is_err());
     }
 
     #[test]
@@ -6874,6 +7125,40 @@ mod relation_window_tests {
             .map(|page| page.page_id.as_str())
             .collect::<BTreeSet<_>>();
         assert_eq!(offered.len(), inventory.len());
+    }
+
+    #[test]
+    fn secondary_search_sources_remain_topic_maintenance_candidates() {
+        let mut first = page("conversation:alpha", "source-1");
+        first.source_only = true;
+        let second = page("conversation:alpha", "source-2");
+        let inventory = vec![first.clone(), second];
+        let relation = RelationMaintenanceConfig {
+            candidate_window: 2,
+            ..RelationMaintenanceConfig::default()
+        };
+        let topic = crate::maintenance::TopicMaintenanceConfig {
+            minimum_pages: 2,
+            minimum_total_chars: 2,
+            max_source_pages: 2,
+            ..crate::maintenance::TopicMaintenanceConfig::default()
+        };
+
+        assert!(relation_page_eligible(&first, &relation));
+        assert!(summary_page_eligible(
+            &first,
+            &crate::maintenance::SummaryMaintenanceConfig {
+                minimum_chars: 1,
+                ..crate::maintenance::SummaryMaintenanceConfig::default()
+            }
+        ));
+        let windows =
+            topic_candidate_windows(&inventory, &relation, &topic, false, &BTreeSet::new());
+        assert!(
+            windows
+                .iter()
+                .any(|window| window.iter().any(|page| page.page_id == first.page_id))
+        );
     }
 
     #[test]

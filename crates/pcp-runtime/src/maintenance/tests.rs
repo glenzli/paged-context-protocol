@@ -10,11 +10,11 @@ use async_trait::async_trait;
 use pcp_client::{EmbeddedPcpClient, PcpApi};
 use pcp_core::{
     AccessPermission, AccessPrincipal, AccessPrincipalType, AccessSession, Actor, ActorType,
-    CreateScopeRequest, FeedbackAuthority, FeedbackKind, LifecycleStatus, LinkPagesRequest,
-    PackPagesRequest, PageMutability, PagePayload, PageRevisionRef, PlanRevisionRetentionRequest,
-    Projection, ProvenanceEvent, ReadPagesRequest, ReconciliationDisposition, RetentionPolicy,
-    RetentionProtectionReason, RevisePageRequest, SourceSpan, SubmitFeedbackRequest,
-    ValidityStanding, WritePageRequest,
+    ArchivePageRequest, CreateScopeRequest, FeedbackAuthority, FeedbackKind, LifecycleStatus,
+    LinkPagesRequest, PackPagesRequest, PageMutability, PagePayload, PageRevisionRef,
+    PlanRevisionRetentionRequest, Projection, ProvenanceEvent, ReadPagesRequest,
+    ReconciliationDisposition, RetentionPolicy, RetentionProtectionReason, RevisePageRequest,
+    SourceSpan, SubmitFeedbackRequest, ValidityStanding, WritePageRequest,
 };
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
@@ -2470,6 +2470,46 @@ async fn relation_runs_after_packing_against_the_refreshed_inventory() {
 }
 
 #[tokio::test]
+async fn relation_discovery_stops_when_pending_review_capacity_is_full() {
+    let fixture = Fixture::open("relation-review-capacity").await;
+    let first = fixture
+        .client
+        .write_page(fixture.page("First related document.", "relation-review-capacity:1"))
+        .await
+        .expect("write first document");
+    let second = fixture
+        .client
+        .write_page(fixture.page("Second related document.", "relation-review-capacity:2"))
+        .await
+        .expect("write second document");
+    let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
+        page_ids: [first.page_id, second.page_id],
+        reason: "Both documents describe the same durable subject.".to_owned(),
+    }]));
+    let mut config = fixture.config();
+    config.summary.enabled = false;
+    config.packing.enabled = false;
+    config.relation.enabled = true;
+    config.relation.max_pending_reviews = 1;
+    config.topic.enabled = false;
+    config.retention.enabled = false;
+    let mut maintainer =
+        RuntimeMaintainer::for_test(fixture.client.clone(), worker.clone(), config);
+
+    let first_report = maintainer.run_once().await.expect("discover one relation");
+    assert_eq!(first_report.relations_proposed, 1);
+    assert_eq!(maintainer.pending_relation_reviews().len(), 1);
+    let calls = worker.request_count();
+    let second_report = maintainer
+        .run_once()
+        .await
+        .expect("respect full relation queue");
+    assert_eq!(second_report.relations_proposed, 0);
+    assert_eq!(worker.request_count(), calls);
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn relation_maintains_a_source_page_without_a_pack_window() {
     let fixture = Fixture::open("relation-singleton-source-page").await;
     let source_page = fixture
@@ -2915,6 +2955,128 @@ async fn suppressed_manual_relation_pair_skips_manual_and_scheduled_analysis() {
 }
 
 #[tokio::test]
+async fn archived_endpoint_of_existing_relation_can_be_suppressed() {
+    let fixture = Fixture::open("suppressed-archived-relation").await;
+    let first = fixture
+        .client
+        .write_page(fixture.page("A historical source Page.", "suppressed-archived:1"))
+        .await
+        .expect("write first Page");
+    let second = fixture
+        .client
+        .write_page(fixture.page("A distinct active Page.", "suppressed-archived:2"))
+        .await
+        .expect("write second Page");
+    let unrelated = fixture
+        .client
+        .write_page(fixture.page("An unrelated active Page.", "suppressed-archived:3"))
+        .await
+        .expect("write unrelated Page");
+    fixture
+        .client
+        .link_pages(LinkPagesRequest {
+            from_page_id: first.page_id.clone(),
+            relation_type: "related_to".to_owned(),
+            to_page_id: second.page_id.clone(),
+            basis_revision_ids: vec![first.revision_id.clone(), second.revision_id.clone()],
+            created_by: Actor {
+                actor_type: ActorType::Tool,
+                actor_id: "tool:suppressed-archived-test".to_owned(),
+            },
+            idempotency_key: Some("suppressed-archived:relation".to_owned()),
+        })
+        .await
+        .expect("link existing relation");
+    fixture
+        .client
+        .archive_page(ArchivePageRequest {
+            page_id: first.page_id.clone(),
+            expected_revision_id: first.revision_id.clone(),
+            reason: Some("Historical source retained for navigation".to_owned()),
+        })
+        .await
+        .expect("archive historical Page");
+
+    let config = fixture.config();
+    let state_path = config.state_path.clone();
+    let mut maintainer = RuntimeMaintainer::for_test(
+        fixture.client.clone(),
+        Arc::new(FakeWorker::new(Vec::new())),
+        config,
+    );
+    let request = ApplyMaintenanceRelationRequest {
+        candidate_id: super::coordinator::relation_candidate_id([
+            (&first.page_id, &first.revision_id),
+            (&second.page_id, &second.revision_id),
+        ]),
+        pages: [
+            PageRevisionRef {
+                page_id: first.page_id.clone(),
+                revision_id: first.revision_id.clone(),
+            },
+            PageRevisionRef {
+                page_id: second.page_id.clone(),
+                revision_id: second.revision_id.clone(),
+            },
+        ],
+    };
+    let mut invalid_id = request.clone();
+    invalid_id.candidate_id = "mrl_invalid".to_owned();
+    assert!(
+        maintainer
+            .suppress_relation_candidate(invalid_id)
+            .await
+            .is_err()
+    );
+    let mut stale_revision = request.clone();
+    stale_revision.pages[0].revision_id = "rev_stale".to_owned();
+    assert!(
+        maintainer
+            .suppress_relation_candidate(stale_revision)
+            .await
+            .is_err()
+    );
+    assert!(
+        maintainer
+            .reject_relation_candidate(request.clone())
+            .await
+            .is_err()
+    );
+    let no_edge = ApplyMaintenanceRelationRequest {
+        candidate_id: super::coordinator::relation_candidate_id([
+            (&first.page_id, &first.revision_id),
+            (&unrelated.page_id, &unrelated.revision_id),
+        ]),
+        pages: [
+            request.pages[0].clone(),
+            PageRevisionRef {
+                page_id: unrelated.page_id,
+                revision_id: unrelated.revision_id,
+            },
+        ],
+    };
+    assert!(
+        maintainer
+            .suppress_relation_candidate(no_edge)
+            .await
+            .is_err()
+    );
+
+    maintainer
+        .suppress_relation_candidate(request.clone())
+        .await
+        .expect("suppress existing relation with archived endpoint");
+    let persisted = MaintenanceLedger::load(&state_path)
+        .await
+        .expect("read persisted suppression");
+    let mut pair = [first.page_id.clone(), second.page_id.clone()];
+    pair.sort();
+    assert_eq!(persisted.suppressed_relation_pairs(), vec![pair]);
+    assert!(maintainer.apply_relation_candidate(request).await.is_err());
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn suppressed_relation_pair_does_not_block_other_pairs_in_the_same_window() {
     let fixture = Fixture::open("suppressed-exact-relation").await;
     let first = fixture
@@ -3164,7 +3326,7 @@ async fn scheduled_relation_waits_for_review_before_it_is_asserted() {
 }
 
 #[tokio::test]
-async fn scheduled_low_risk_pack_boundary_relation_is_asserted_automatically() {
+async fn scheduled_pack_boundary_relation_requires_review_without_auto_apply() {
     let fixture = Fixture::open("scheduled-low-risk-pack-relation").await;
     let mut leaves = Vec::new();
     for sequence in 1..=4 {
@@ -3216,6 +3378,7 @@ async fn scheduled_low_risk_pack_boundary_relation_is_asserted_automatically() {
     config.summary.enabled = false;
     config.packing.enabled = false;
     config.relation.enabled = true;
+    config.relation.auto_apply_verified = false;
     config.max_jobs_per_cycle = 1;
     config.write_trigger.min_new_pages = 1;
     config.write_trigger.quiet_period_seconds = 0;
@@ -3239,10 +3402,11 @@ async fn scheduled_low_risk_pack_boundary_relation_is_asserted_automatically() {
     let report = maintainer
         .run_scheduled_cycle()
         .await
-        .expect("run low-risk automatic relation");
-    assert_eq!(report.relations_committed, 1);
-    assert_eq!(report.relations_proposed, 0);
-    assert!(maintainer.pending_relation_reviews().is_empty());
+        .expect("review the shared-identifier Pack boundary");
+    assert_eq!(report.worker_calls, 1);
+    assert_eq!(report.relations_committed, 0);
+    assert_eq!(report.relations_proposed, 1);
+    assert_eq!(maintainer.pending_relation_reviews().len(), 1);
     let pages = fixture
         .client
         .read_pages(ReadPagesRequest {
@@ -3252,8 +3416,8 @@ async fn scheduled_low_risk_pack_boundary_relation_is_asserted_automatically() {
             max_chars: 1,
         })
         .await
-        .expect("read asserted automatic relation");
-    assert!(pages.iter().any(|page| {
+        .expect("read Pack boundary without an asserted relation");
+    assert!(!pages.iter().any(|page| {
         let counterpart = if page.page.page_id == first_pack.page_id {
             &second_pack.page_id
         } else {
@@ -4016,4 +4180,99 @@ async fn scheduler_status_exposes_live_progress_and_retains_failed_partial_repor
         13
     );
     fixture.close().await;
+}
+
+#[tokio::test]
+async fn discovered_update_retires_archived_target_without_model_calls() {
+    let f = Fixture::open("archived-update-cleanup").await;
+    let target = f
+        .client
+        .write_page(f.page("Old claim", "update-cleanup:target"))
+        .await
+        .unwrap();
+    let evidence = f
+        .client
+        .write_page(f.page("New evidence", "update-cleanup:evidence"))
+        .await
+        .unwrap();
+    let config = f.config();
+    let worker = Arc::new(FakeWorker::new(Vec::new()));
+    let mut m = RuntimeMaintainer::for_test(f.client.clone(), worker.clone(), config.clone());
+    let details = m
+        .read_detail_pages(
+            vec![target.revision_id.clone(), evidence.revision_id.clone()],
+            8000,
+        )
+        .await
+        .unwrap();
+    let candidate = super::MaintenanceReconciliationCandidate {
+        candidate_id: "update:cleanup-test".into(),
+        signal: None,
+        feedback: None,
+        target: details
+            .iter()
+            .find(|p| p.page_id == target.page_id)
+            .unwrap()
+            .clone(),
+        evidence: vec![
+            details
+                .iter()
+                .find(|p| p.page_id == evidence.page_id)
+                .unwrap()
+                .clone(),
+        ],
+        expected_assessment_revision_id: None,
+        disposition: ReconciliationDisposition::Superseded,
+        rationale: "Review replacement".into(),
+        scope: None,
+        replacement: Some(PageRevisionRef {
+            page_id: evidence.page_id,
+            revision_id: evidence.revision_id,
+        }),
+        basis_revision_ids: vec![],
+        suggested_consolidation: None,
+    };
+    let id = m.ledger.enqueue_review(
+        MaintenanceReviewPayload::Reconciliation(candidate),
+        super::MaintenanceReviewOrigin::Manual,
+        "review".into(),
+        1,
+        false,
+    );
+    m.ledger.save(&config.state_path).await.unwrap();
+    assert!(!m.refresh_maintenance_reviews().await.unwrap());
+    assert_eq!(
+        m.routed_reviews(&config).await.unwrap()[0]
+            .queue
+            .as_ref()
+            .unwrap()
+            .state,
+        "human"
+    );
+    f.client
+        .archive_page(ArchivePageRequest {
+            page_id: target.page_id,
+            expected_revision_id: target.revision_id,
+            reason: Some("retired".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        m.routed_reviews(&config).await.unwrap()[0]
+            .queue
+            .as_ref()
+            .unwrap()
+            .state,
+        "stale"
+    );
+    assert!(m.refresh_maintenance_reviews().await.unwrap());
+    assert!(m.pending_reviews().is_empty());
+    assert!(!m.refresh_maintenance_reviews().await.unwrap());
+    assert_eq!(worker.request_count(), 0);
+    let persisted = MaintenanceLedger::load(&config.state_path).await.unwrap();
+    assert_eq!(
+        persisted.review_item(&id).unwrap().status,
+        super::MaintenanceReviewStatus::Stale
+    );
+    f.close().await;
 }

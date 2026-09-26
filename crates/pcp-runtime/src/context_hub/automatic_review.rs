@@ -16,6 +16,7 @@ use pcp_client::{
 use pcp_core::{AccessPermission, AccessSession, Projection, ReadPagesRequest};
 use pcp_store::DurablePageInventoryItem;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -121,6 +122,41 @@ fn review_input_changed(
         })
 }
 
+fn settle_no_change(
+    candidates: &mut [Candidate],
+    input: &CandidateReviewInput,
+    decisions: &[OutputAssessment],
+) {
+    let other = decisions
+        .iter()
+        .filter(|decision| decision.verdict != "no_change")
+        .flat_map(|decision| input.outputs[decision.output_index].candidate_ids.iter())
+        .collect::<BTreeSet<_>>();
+    let terminal = decisions
+        .iter()
+        .filter(|decision| decision.verdict == "no_change")
+        .flat_map(|decision| input.outputs[decision.output_index].candidate_ids.iter())
+        .filter(|id| !other.contains(id))
+        .collect::<BTreeSet<_>>();
+    for candidate in candidates {
+        if candidate.status != "pending" || !terminal.contains(&candidate.candidate_id) {
+            continue;
+        }
+        // Keep earlier Page receipts and source metadata intact. Only annotate
+        // the terminal review of this exact candidate evidence.
+        let mut result = candidate.result.take().unwrap_or_else(|| json!({}));
+        if !result.is_object() {
+            result = json!({"previousResult":result});
+        }
+        result["status"] = json!("no_change");
+        result["noChangeReview"] =
+            json!({"synthesisId":input.synthesis_id,"version":input.version});
+        candidate.result = Some(result);
+        candidate.status = "promoted".into();
+        candidate.version += 1;
+    }
+}
+
 impl ContextHub {
     pub(crate) fn enable_automatic_review(&self, available: bool) {
         self.automatic_review_available
@@ -137,6 +173,74 @@ impl ContextHub {
         let mut db = LockedState::open(&self.path, self.store.identity_id()).await?;
         if db.state.organization.automatic_review_enabled != Some(true) {
             return Ok(None);
+        }
+        let legacy = db
+            .state
+            .syntheses
+            .iter()
+            .enumerate()
+            .filter_map(|(index, group)| {
+                let review = group.automatic_review.as_ref()?;
+                let input = review.input.as_ref()?;
+                (group.status == "pending"
+                    && review.state == "accumulating"
+                    && group.version == input.version
+                    && group.synthesis_id == input.synthesis_id
+                    && current(group, &db.state.candidates)
+                    && input.validate(&review.decisions).is_ok()
+                    && !review.decisions.is_empty()
+                    && review
+                        .decisions
+                        .iter()
+                        .all(|d| d.verdict == "no_change" && d.revision.is_none())
+                    && input.candidates.iter().all(|c| {
+                        input
+                            .outputs
+                            .iter()
+                            .any(|o| o.candidate_ids.contains(&c.candidate_id))
+                    })
+                    && !review.steps.is_empty()
+                    && review.steps.iter().all(|s| {
+                        s.tier == "sol" && s.state == "completed" && s.request_id.is_some()
+                    })
+                    && permission(client.access(), &input.scope, AccessPermission::Ingest).is_ok()
+                    && permission(client.access(), &input.scope, AccessPermission::ReadDetail)
+                        .is_ok())
+                .then(|| (index, input.clone(), review.decisions.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (index, input, decisions) in &legacy {
+            if review_input_changed(input, &db.state.candidates, inventory) {
+                let review = db.state.syntheses[*index]
+                    .automatic_review
+                    .as_mut()
+                    .unwrap();
+                review.state = "stale".into();
+                review.reason = "Legacy no-change evidence changed; reorganization required".into();
+                for candidate in &mut db.state.candidates {
+                    if input
+                        .candidates
+                        .iter()
+                        .any(|c| c.candidate_id == candidate.candidate_id)
+                        && active(candidate)
+                    {
+                        candidate.organized_version = 0;
+                    }
+                }
+            } else {
+                settle_no_change(&mut db.state.candidates, input, decisions);
+                let review = db.state.syntheses[*index]
+                    .automatic_review
+                    .as_mut()
+                    .unwrap();
+                review.state = "no_change".into();
+                review.reason =
+                    "Recovered completed no-change review; prior receipts preserved".into();
+            }
+        }
+        if !legacy.is_empty() {
+            super::synthesis::invalidate_stale(&mut db.state);
+            db.save()?;
         }
         let next = db
             .state
@@ -211,6 +315,41 @@ impl ContextHub {
                 })
                 .collect::<Vec<_>>();
             let mut revisions = group.offered_revision_ids.clone();
+            // A lexical top-k can miss an earlier Page created from this very
+            // candidate. Always compare those heads before nearby memories.
+            let candidate_ids = candidates
+                .iter()
+                .map(|c| c.candidate_id.as_str())
+                .collect::<BTreeSet<_>>();
+            for page in inventory.iter().filter(|p| {
+                p.namespace == group.scope
+                    && p.facets
+                        .as_ref()
+                        .and_then(|f| f.get("reviewedCandidates"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|items| {
+                            items.iter().any(|item| {
+                                item.get("candidateId")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|id| candidate_ids.contains(id))
+                            })
+                        })
+            }) {
+                if !revisions.contains(&page.revision_id) {
+                    revisions.push(page.revision_id.clone());
+                }
+            }
+            if revisions.len() > 12 {
+                db.state.syntheses[index].automatic_review = Some(AutomaticReview {
+                    state: "needs_review".into(),
+                    reason:
+                        "More than twelve candidate-linked comparison Pages require operator review"
+                            .into(),
+                    ..Default::default()
+                });
+                db.save()?;
+                return Ok(None);
+            }
             // Refresh nearby memories before review, including writes after organization.
             let terms = super::synthesis::grams(&format!("{} {}", group.title, group.narrative));
             let mut related = inventory
@@ -227,6 +366,9 @@ impl ContextHub {
                 )
             });
             for page in related.into_iter().take(6) {
+                if revisions.len() >= 12 {
+                    break;
+                }
                 if !revisions.contains(&page.revision_id) {
                     revisions.push(page.revision_id.clone());
                 }
@@ -350,11 +492,6 @@ impl ContextHub {
             );
             let mut outputs = vec![];
             let mut retain = BTreeSet::new();
-            // An approved observation need not settle every open question carried
-            // by the same source. Keep that source available for later evidence.
-            if !input.unresolved.is_empty() {
-                retain.extend(input.candidates.iter().map(|c| c.candidate_id.clone()));
-            }
             for decision in &decisions {
                 let mut output = input.outputs[decision.output_index].clone();
                 if decision.verdict == "approve" {
@@ -372,7 +509,7 @@ impl ContextHub {
                         &db.state.syntheses[index].offered_revision_ids,
                     )?;
                     outputs.push(output);
-                } else {
+                } else if matches!(decision.verdict.as_str(), "accumulating" | "needs_input") {
                     retain.extend(output.candidate_ids.clone());
                 }
             }
@@ -383,6 +520,15 @@ impl ContextHub {
             review.state = if outputs.is_empty() {
                 if review.decisions.iter().any(|d| d.verdict == "needs_input") {
                     "needs_input"
+                } else if review.decisions.iter().all(|d| d.verdict == "no_change")
+                    && input.candidates.iter().all(|candidate| {
+                        input
+                            .outputs
+                            .iter()
+                            .any(|output| output.candidate_ids.contains(&candidate.candidate_id))
+                    })
+                {
+                    "no_change"
                 } else {
                     "accumulating"
                 }
@@ -397,6 +543,9 @@ impl ContextHub {
                     version: input.version,
                     outputs,
                 });
+            } else if review.state == "no_change" {
+                settle_no_change(&mut db.state.candidates, input, &review.decisions);
+                super::synthesis::invalidate_stale(&mut db.state);
             }
         }
         db.state.syntheses[index].automatic_review = Some(review);
@@ -462,11 +611,18 @@ impl ContextHub {
             .unwrap()
             .state = "applying".into();
         let result = self.review_synthesis(access, &mut db, request, true).await;
+        if result.is_ok() {
+            if let Some(input) = &review.input {
+                settle_no_change(&mut db.state.candidates, input, &review.decisions);
+                super::synthesis::invalidate_stale(&mut db.state);
+            }
+        }
         let auto = db.state.syntheses[index].automatic_review.as_mut().unwrap();
         match result {
             Ok(_) => {
                 auto.state = "written".into();
-                auto.reason = "Sol-reviewed memories applied; unresolved evidence retained".into();
+                auto.reason =
+                    "Sol-reviewed memories applied; only unapproved evidence retained".into();
             }
             Err(error) => {
                 auto.state = "write_interrupted".into();

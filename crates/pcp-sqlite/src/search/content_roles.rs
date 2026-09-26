@@ -10,19 +10,40 @@ pub(super) fn scope_parameters(scope_count: usize) -> String {
         .join(",")
 }
 
-pub(super) fn current_topic_coverage(scope_count: usize) -> String {
+/// A Topic is a first-pass route only while its current Revision is usable
+/// and visible to the reader. This does not change the source's lifecycle.
+pub(super) fn current_topic_route(scope_count: usize) -> String {
     format!(
         "EXISTS (
-    SELECT 1
-    FROM pcp_topic_extraction_members extraction_member
-    JOIN pcp_pages topic_page ON topic_page.page_id = extraction_member.topic_page_id
-    JOIN pcp_revisions topic_revision ON topic_revision.revision_id = topic_page.current_revision_id
-    WHERE extraction_member.source_page_id = p.page_id
-      AND extraction_member.source_revision_id = r.revision_id
-      AND extraction_member.topic_revision_id = topic_page.current_revision_id
-      AND topic_page.lifecycle_status = 'active'
+    SELECT 1 FROM pcp_topic_extraction_members member
+    JOIN pcp_pages topic ON topic.page_id = member.topic_page_id
+    JOIN pcp_revisions topic_revision ON topic_revision.revision_id = topic.current_revision_id
+    WHERE member.source_page_id = p.page_id
+      AND member.source_revision_id = r.revision_id
+      AND member.topic_revision_id = topic.current_revision_id
+      AND topic.lifecycle_status = 'active'
       AND topic_revision.lifecycle_status = 'active'
-      AND topic_page.namespace IN ({})
+      AND topic.namespace IN ({})
+      AND NOT EXISTS (
+          SELECT 1 FROM pcp_relations newer
+          WHERE newer.relation_type = 'supersedes'
+            AND newer.to_page_id = topic.page_id
+            AND NOT EXISTS (
+                SELECT 1 FROM pcp_relation_retractions retraction
+                WHERE retraction.relation_id = newer.relation_id
+            )
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM pcp_validity_heads head
+          JOIN pcp_pages assessment_page ON assessment_page.page_id = head.assessment_page_id
+          JOIN pcp_validity_assessments assessment
+            ON assessment.assessment_revision_id = assessment_page.current_revision_id
+          JOIN pcp_revisions validity_revision
+            ON validity_revision.revision_id = assessment.assessment_revision_id
+          WHERE head.target_page_id = topic.page_id
+            AND assessment.target_revision_id = topic_revision.revision_id
+            AND json_extract(validity_revision.facets_json, '$.standing') = 'retracted'
+      )
 )",
         scope_parameters(scope_count)
     )
@@ -79,16 +100,16 @@ pub(super) const CURRENT_SUMMARY: &str = "CASE WHEN summary_revision.lifecycle_s
     THEN summary_revision.revision_id ELSE NULL END";
 
 pub(super) fn role_sql(scope_count: usize) -> String {
-    let coverage = current_topic_coverage(scope_count);
+    let topic_route = current_topic_route(scope_count);
     format!(
-        "CASE WHEN EXISTS (
+        "CASE WHEN {CURRENT_CONSOLIDATION_COVERAGE} OR {topic_route}
+      THEN 'covered_source' WHEN EXISTS (
         SELECT 1 FROM pcp_topic_extractions extraction
         WHERE extraction.topic_revision_id = r.revision_id
     ) OR EXISTS (
         SELECT 1 FROM pcp_consolidation_coverage canonical
         WHERE canonical.output_revision_id = r.revision_id
-    ) THEN 'condensed' WHEN {coverage} OR {CURRENT_CONSOLIDATION_COVERAGE}
-      THEN 'covered_source' ELSE 'other' END"
+    ) THEN 'condensed' ELSE 'other' END"
     )
 }
 

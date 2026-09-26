@@ -1,7 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { pageListPreview, pageCount, pageJump, pageRoleBadge, appendPageFilters, pageTimeFields, pageBrowseOrder, pageListSnapshotKey } from "../src/page-list.js";
+import { pageListPreview, pageCount, pageJump, pageRoleBadge, appendPageFilters, pageTimeFields, pageBrowseOrder, pageListSnapshotKey, pageRecallBreakdown } from "../src/page-list.js";
+
+test("recall counts distinguish active content from secondary search and condensed Pages", () => {
+  assert.deepEqual(pageRecallBreakdown({pageCount: 12, sourceOnlyPageCount: 2, secondarySearchPageCount: 3, condensedPageCount: 4}), {
+    current: 12, defaultRecall: 9, secondarySearch: 3, condensed: 4,
+  });
+  assert.equal(pageRecallBreakdown({pageCount: 12}).defaultRecall, null);
+  assert.equal(pageRecallBreakdown({pageCount: 12, sourceOnlyPageCount: 13}).defaultRecall, null);
+  assert.equal(pageRecallBreakdown({pageCount: 12, sourceOnlyPageCount: 3, condensedPageCount: 10}).condensed, null);
+  assert.equal(pageRecallBreakdown({pageCount: 12, sourceOnlyPageCount: 2}).secondarySearch, 2);
+});
 
 test("list freshness detects inserted Pages without reacting to preview fallback", () => {
   const first = { totalPages: 1, totalContentChars: 12, hits: [{ pageId: "page-a", revisionId: "rev-a" }] };
@@ -41,7 +51,7 @@ test("content badges use structural metadata, not suggestive page kinds", () => 
     assert.equal(pageRoleBadge(hit), null);
   }
   assert.equal(pageRoleBadge({contentRole:"condensed",kind:"document"}).label,"Condensed summary");
-  assert.equal(pageRoleBadge({contentRole:"covered_source"}).label,"Summarized source");
+  assert.equal(pageRoleBadge({contentRole:"covered_source"}).label,"Secondary search source");
 });
 
 test("structural filters combine with scope, query and direct page number", () => {

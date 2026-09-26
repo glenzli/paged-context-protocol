@@ -262,7 +262,7 @@ fn browse_index_once(
            )",
     );
     append_non_assessment_page_filter(&mut sql);
-    append_consolidated_source_filter(&mut sql);
+    append_default_retrieval_filter(&mut sql, scopes.len());
     if !excluded_page_kinds.is_empty() {
         sql.push_str(" AND p.kind NOT IN (");
         push_placeholders(&mut sql, excluded_page_kinds.len());
@@ -390,7 +390,7 @@ fn browse_content_pages_once(
     sql.push(')');
     append_current_content_page_filter(&mut sql);
     if retrieval_only {
-        append_topic_front_door_filter(&mut sql, scopes.len());
+        append_default_retrieval_filter(&mut sql, scopes.len());
     }
     append_content_library_query_filter(&mut sql, &mut values, query);
     content_roles::append_filter(&mut sql, &mut values, filter, scopes.len());
@@ -475,15 +475,21 @@ fn content_library_summary_once(
         .cloned()
         .map(SqlValue::Text)
         .collect::<Vec<_>>();
-    let mut sql = String::from(
+    let mut sql = format!(
         "SELECT r.namespace,
                 COUNT(*),
-                COALESCE(SUM(length(COALESCE(r.payload_content, ''))), 0)
+                COALESCE(SUM(length(COALESCE(r.payload_content, ''))), 0),
+                COALESCE(SUM(CASE WHEN {source_only} THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN {source_only} OR {topic_route} THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN ({role}) = 'condensed' THEN 1 ELSE 0 END), 0)
          FROM pcp_pages p
          JOIN pcp_revisions r ON r.revision_id = p.current_revision_id
          WHERE r.namespace IN (",
+        source_only = content_roles::CURRENT_CONSOLIDATION_COVERAGE,
+        topic_route = content_roles::current_topic_route(scopes.len()),
+        role = content_roles::role_sql(scopes.len()),
     );
-    push_placeholders(&mut sql, scopes.len());
+    sql.push_str(&content_roles::scope_parameters(scopes.len()));
     sql.push(')');
     append_current_content_page_filter(&mut sql);
     sql.push_str(" GROUP BY r.namespace ORDER BY r.namespace ASC");
@@ -497,14 +503,28 @@ fn content_library_summary_once(
     let mut scopes = Vec::new();
     let mut page_count = 0_u64;
     let mut content_chars = 0_u64;
+    let mut source_only_page_count = 0_u64;
+    let mut secondary_search_page_count = 0_u64;
+    let mut condensed_page_count = 0_u64;
     while let Some(row) = rows.next().context("read PCP content library scope")? {
         let namespace: String = row.get(0)?;
         let scope_page_count = u64::try_from(row.get::<_, i64>(1)?)
             .context("PCP content library page count must be non-negative")?;
         let scope_content_chars = u64::try_from(row.get::<_, i64>(2)?)
             .context("PCP content library character count must be non-negative")?;
+        let scope_source_only_page_count = u64::try_from(row.get::<_, i64>(3)?)
+            .context("PCP content library source-only count must be non-negative")?;
+        let scope_secondary_search_page_count = u64::try_from(row.get::<_, i64>(4)?)
+            .context("PCP content library secondary search count must be non-negative")?;
+        let scope_condensed_page_count = u64::try_from(row.get::<_, i64>(5)?)
+            .context("PCP content library condensed count must be non-negative")?;
         page_count = page_count.saturating_add(scope_page_count);
         content_chars = content_chars.saturating_add(scope_content_chars);
+        source_only_page_count =
+            source_only_page_count.saturating_add(scope_source_only_page_count);
+        secondary_search_page_count =
+            secondary_search_page_count.saturating_add(scope_secondary_search_page_count);
+        condensed_page_count = condensed_page_count.saturating_add(scope_condensed_page_count);
         scopes.push(ContentLibraryScope {
             namespace,
             page_count: scope_page_count,
@@ -515,6 +535,9 @@ fn content_library_summary_once(
         page_count,
         content_chars,
         scopes,
+        source_only_page_count: Some(source_only_page_count),
+        secondary_search_page_count: Some(secondary_search_page_count),
+        condensed_page_count: Some(condensed_page_count),
     })
 }
 
@@ -547,7 +570,7 @@ fn content_library_totals_once(
     sql.push(')');
     append_current_content_page_filter(&mut sql);
     if retrieval_only {
-        append_topic_front_door_filter(&mut sql, scopes.len());
+        append_default_retrieval_filter(&mut sql, scopes.len());
     }
     append_content_library_query_filter(&mut sql, &mut values, query);
     content_roles::append_filter(&mut sql, &mut values, filter, scopes.len());
@@ -574,16 +597,9 @@ fn append_current_content_page_filter(sql: &mut String) {
     );
 }
 
-/// A topic extraction changes default retrieval routing, not source retention:
-/// its active current topic Page is the front door while the exact member
-/// revisions remain readable by ID and traversable through `summarizes`.
-fn append_topic_front_door_filter(sql: &mut String, scope_count: usize) {
+fn append_default_retrieval_filter(sql: &mut String, scope_count: usize) {
     sql.push_str(" AND NOT ");
-    sql.push_str(&content_roles::current_topic_coverage(scope_count));
-    append_consolidated_source_filter(sql);
-}
-
-fn append_consolidated_source_filter(sql: &mut String) {
+    sql.push_str(&content_roles::current_topic_route(scope_count));
     sql.push_str(" AND NOT ");
     sql.push_str(content_roles::CURRENT_CONSOLIDATION_COVERAGE);
 }
@@ -862,7 +878,9 @@ fn search_revision_surface(
     values.extend(request.scopes.iter().cloned().map(SqlValue::Text));
 
     append_effective_page_filter(&mut sql);
-    append_consolidated_source_filter(&mut sql);
+    if mode != SearchMode::Exact {
+        append_default_retrieval_filter(&mut sql, request.scopes.len());
+    }
     append_lifecycle_filter(&mut sql, &mut values, request);
     append_time_filters(&mut sql, &mut values, request);
     append_relation_filter(&mut sql, &mut values, request);
@@ -963,7 +981,9 @@ fn search_summaries(
     sql.push(')');
     values.extend(request.scopes.iter().cloned().map(SqlValue::Text));
     append_effective_page_filter(&mut sql);
-    append_consolidated_source_filter(&mut sql);
+    if mode != SearchMode::Exact {
+        append_default_retrieval_filter(&mut sql, request.scopes.len());
+    }
     append_lifecycle_filter(&mut sql, &mut values, request);
     append_time_filters(&mut sql, &mut values, request);
     append_relation_filter(&mut sql, &mut values, request);
@@ -1124,7 +1144,6 @@ fn search_graph(
     values.extend(request.scopes.iter().cloned().map(SqlValue::Text));
     append_lifecycle_filter(&mut sql, &mut values, request);
     append_effective_page_filter(&mut sql);
-    append_consolidated_source_filter(&mut sql);
     append_time_filters(&mut sql, &mut values, request);
     sql.push_str(
         " ORDER BY neighbors.edge_created_at DESC, r.revision_id DESC

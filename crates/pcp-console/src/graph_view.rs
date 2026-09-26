@@ -525,6 +525,7 @@ mod tests {
                 topic_source_page_ids: Vec::new(),
                 superseded: false,
                 source_only: false,
+                consolidation_covering_revision_ids: Vec::new(),
                 packing_protected: false,
             }
         }

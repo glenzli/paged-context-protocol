@@ -189,11 +189,17 @@ pub struct MaintenanceReviewStep {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExistingTopicPage {
+    #[serde(default = "default_topic_kind")]
+    pub kind: String,
     pub page_id: String,
     pub revision_id: String,
     pub title: String,
     pub routing_text: String,
     pub source_page_ids: Vec<String>,
+}
+
+fn default_topic_kind() -> String {
+    "topic_summary".into()
 }
 
 /// A bounded, reviewable view of an otherwise archive-eligible Page.  The

@@ -2,7 +2,12 @@
 set -eu
 
 pcp_home="${PCP_HOME:-$HOME/Library/Application Support/PCP}"
-enrollment_file="${PCP_CHATGPT_ENROLLMENT_FILE:-$pcp_home/clients/chatgpt-pcp.json}"
+default_enrollment_file="$pcp_home/clients/chatgpt-pcp.json"
+project_enrollment_file="$pcp_home/clients/chatgpt-pcp-projects.json"
+if [ -f "$project_enrollment_file" ]; then
+  default_enrollment_file="$project_enrollment_file"
+fi
+enrollment_file="${PCP_CHATGPT_ENROLLMENT_FILE:-$default_enrollment_file}"
 pcp_mcp_binary="${PCP_MCP_BINARY:-$pcp_home/bin/pcp-mcp}"
 
 if [ ! -x "$pcp_mcp_binary" ]; then
@@ -21,7 +26,7 @@ case "${1:-serve}" in
         PCP_CLIENT_ID="chatgpt:pcp" \
         PCP_CLIENT_NAME="ChatGPT" \
         PCP_ACCESS_MODE="contribute" \
-        PCP_ALLOWED_SCOPES="user:self" \
+        PCP_ALLOWED_SCOPES="${PCP_SHARED_WRITE_SCOPES:-user:self}" \
         PCP_READ_ALL_SCOPES="true" \
         PCP_ENROLLMENT_FILE="$enrollment_file" \
         PCP_DISCOVERY_MANIFEST="$3" \

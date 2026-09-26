@@ -157,6 +157,45 @@ pub(super) fn review_queue(
             }
             (candidate.verification.as_ref(), config.topic.auto_apply)
         }
+        MaintenanceReviewPayload::Reconciliation(candidate) if candidate.signal.is_none() => {
+            // Discovered updates compare current active heads. Explicit feedback
+            // can challenge historical revisions and has its own validation path.
+            let current = std::iter::once(&candidate.target)
+                .chain(candidate.evidence.iter())
+                .all(|source| {
+                    inventory.iter().any(|p| {
+                        p.page_id == source.page_id
+                            && p.revision_id == source.revision_id
+                            && !p.superseded
+                    })
+                });
+            let covered_output_pair = inventory
+                .iter()
+                .find(|p| p.revision_id == candidate.target.revision_id)
+                .is_some_and(|target| {
+                    candidate.evidence.iter().any(|source| {
+                        inventory
+                            .iter()
+                            .find(|p| p.revision_id == source.revision_id)
+                            .is_some_and(|evidence| {
+                                super::update_discovery::is_covered_source_output_pair(
+                                    target, evidence,
+                                )
+                            })
+                    })
+                });
+            return if current && !covered_output_pair {
+                route(
+                    "human",
+                    "This operation requires an explicit review decision.".into(),
+                )
+            } else {
+                route(
+                    "stale",
+                    "Update sources changed or this source/output pair is already covered.".into(),
+                )
+            };
+        }
         MaintenanceReviewPayload::Relation(candidate) => (
             candidate.verification.as_ref(),
             config.relation.auto_apply_verified,

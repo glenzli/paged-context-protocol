@@ -210,6 +210,7 @@ async fn refresh_preserves_all_existing_source_references() {
     old.kind = "topic_summary".into();
     old.topic_source_page_ids = pages[..3].iter().map(|p| p.page_id.clone()).collect();
     let existing = vec![crate::maintenance::worker::ExistingTopicPage {
+        kind: "topic_summary".into(),
         page_id: old.page_id.clone(),
         revision_id: old.revision_id.clone(),
         title: "Old review boundary".into(),
@@ -430,7 +431,7 @@ async fn approved_small_topics_wait_without_human_backpressure_or_repeat_calls()
     let route = queue[0].queue.as_ref().unwrap();
     assert_eq!(route.state, "waiting_accumulation");
     assert_eq!(route.accumulation.as_ref().unwrap().source_pages, 2);
-    assert_eq!(m.ledger.topic_pending_count(), 0);
+    assert_eq!(m.ledger.topic_pending_count(&pages, &c.topic), 0);
     assert!(
         !m.resume_budget_review(&pages, &mut MaintenanceCycleReport::default())
             .await
@@ -918,6 +919,84 @@ async fn unavailable_verification_retains_pending_proposal_without_approving_or_
         assessment
             .reason
             .contains("verification provider unavailable")
+    );
+    f.close().await;
+}
+
+#[tokio::test]
+async fn automatic_short_topic_is_not_verified_or_enqueued_when_auto_apply_is_disabled() {
+    let f = Fixture::open("automatic-short-manual-mode").await;
+    let pages = sources(&f).await;
+    let worker = Arc::new(FakeWorker::new(vec![proposal(&pages[..2])]));
+    let mut c = config(&f);
+    c.topic.auto_apply = false;
+    let mut m = RuntimeMaintainer::for_test(f.client.clone(), worker.clone(), c);
+    let mut report = MaintenanceCycleReport::default();
+    assert!(
+        m.run_topic_review_job(&pages, &mut report, MaintenanceReviewOrigin::Automatic)
+            .await
+            .unwrap()
+    );
+    assert_eq!(worker.request_count(), 1);
+    assert!(m.pending_reviews().is_empty());
+    assert_eq!(report.topics_written, 0);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn approved_accumulated_topic_still_counts_toward_backpressure() {
+    let f = Fixture::open("approved-ready-backpressure").await;
+    let pages = sources(&f).await;
+    let worker = Arc::new(FakeWorker::new(vec![]));
+    let mut c = config(&f);
+    c.topic.auto_apply = false;
+    c.topic.max_pending_reviews = 1;
+    let mut m = RuntimeMaintainer::for_test(f.client.clone(), worker.clone(), c.clone());
+    let mut candidate = m
+        .topic_from_response(&pages, &pages, &[], proposal(&pages))
+        .unwrap();
+    candidate.verification = Some(approved());
+    m.ledger.enqueue_review(
+        MaintenanceReviewPayload::Topic(candidate),
+        MaintenanceReviewOrigin::Automatic,
+        "ready".into(),
+        2,
+        false,
+    );
+    assert_eq!(m.ledger.topic_pending_count(&pages, &c.topic), 1);
+    let mut report = MaintenanceCycleReport::default();
+    // A narrow discovery window cannot hide a global ready backlog.
+    assert!(
+        !m.run_topic_review_job(&pages[..1], &mut report, MaintenanceReviewOrigin::Automatic)
+            .await
+            .unwrap()
+    );
+    assert!(report.topic_backlog_paused);
+    assert_eq!(worker.request_count(), 0);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn project_topic_keeps_ownership_and_mixed_scopes_require_destination() {
+    let f = Fixture::open("topic-scope-ownership").await;
+    let mut pages = sources(&f).await;
+    for page in &mut pages {
+        page.namespace = "project:owner".into();
+    }
+    let mut c = config(&f);
+    c.topic.target_scope = Some("user:{identity_id}".into());
+    let mut m = RuntimeMaintainer::for_test(f.client.clone(), Arc::new(FakeWorker::new(vec![])), c);
+    assert_eq!(
+        m.topic_from_response(&pages, &pages, &[], proposal(&pages))
+            .unwrap()
+            .namespace,
+        "project:owner"
+    );
+    pages[0].namespace = "project:other".into();
+    m.config.topic.target_scope = None;
+    assert!(
+        m.topic_from_response(&pages, &pages, &[], proposal(&pages))
+            .is_err()
     );
     f.close().await;
 }

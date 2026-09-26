@@ -17,7 +17,7 @@ export function pageTimeFields(hit) {
 
 export const PAGE_ROLE_LABELS = Object.freeze({
   condensed: "Condensed summary",
-  covered_source: "Summarized source",
+  covered_source: "Secondary search source",
   other: "Other pages",
 });
 
@@ -25,11 +25,11 @@ export function pageRoleBadge(hit) {
   // Only trust Runtime's structural metadata, not a tenant's kind/title/facets.
   if (hit.contentRole === "condensed") return {
     role: "condensed", label: PAGE_ROLE_LABELS.condensed,
-    description: "A condensed Page used as the retrieval entry for its source Pages. Originals are retained.",
+    description: "A synthesized Page is a first-pass search route to its sources. Source Pages remain active and readable.",
   };
   if (hit.contentRole === "covered_source") return {
     role: "covered_source", label: PAGE_ROLE_LABELS.covered_source,
-    description: "This current Revision is covered by a condensed summary. Original content is retained here.",
+    description: "This Page stays active and accessible through related Pages or exact search, but is omitted from first-pass search.",
   };
   return null;
 }
@@ -54,6 +54,22 @@ export function pageListPreview(hit, snippet) {
 
 export function pageCount(total, limit) {
   return Math.max(1, Math.ceil(Math.max(0, Number(total) || 0) / Math.max(1, limit)));
+}
+
+export function pageRecallBreakdown(data) {
+  const current = data?.pageCount;
+  // Older Runtimes only report complete consolidation sources.
+  const secondarySearch = data?.secondarySearchPageCount ?? data?.sourceOnlyPageCount;
+  const condensed = data?.condensedPageCount;
+  if (!Number.isSafeInteger(current) || current < 0) return { current: null, defaultRecall: null, secondarySearch: null, condensed: null };
+  if (!Number.isSafeInteger(secondarySearch) || secondarySearch < 0 || secondarySearch > current) {
+    return { current, defaultRecall: null, secondarySearch: null, condensed: null };
+  }
+  const defaultRecall = current - secondarySearch;
+  return {
+    current, defaultRecall, secondarySearch,
+    condensed: Number.isSafeInteger(condensed) && condensed >= 0 && condensed <= defaultRecall ? condensed : null,
+  };
 }
 
 export function pageJump(value, total, limit) {

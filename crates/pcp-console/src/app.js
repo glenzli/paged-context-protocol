@@ -3,7 +3,7 @@ import { kindLabel, technicalDetails, scopeLabel, refreshScopeLabels } from "/co
 import { createConsoleNavigation } from "/console-navigation.js";
 import { createAccessView } from "/access-view.js";
 import { createPageInspector } from "/page-inspector.js?v=20260823.1";
-import { pageListPreview, pageCount, pageJump, PAGE_ROLE_LABELS, pageRoleBadge, appendPageFilters, pageBrowseOrder, pageTimeFields, pageListSnapshotKey } from "/page-list.js";
+import { pageListPreview, pageCount, pageJump, pageRecallBreakdown, PAGE_ROLE_LABELS, pageRoleBadge, appendPageFilters, pageBrowseOrder, pageTimeFields, pageListSnapshotKey } from "/page-list.js";
 import { compactQuantity } from "/quantity-format.js";
 import { MODEL_ROUTE_GROUPS, modelEffortsForDeployment, summarizeModelRouteGroups } from "/model-route-groups.js";
 import { formatTimestamp } from "/time-format.js";
@@ -39,7 +39,7 @@ import {
 } from "/maintenance-operation-state.js?v=20260824.1";
 import {
   REVIEW_DECISION,
-  groupReviewTopics,
+  groupReviewProposals,
   partitionReviewSession,
   partitionReviewQueues,
   reviewDecisionBody,
@@ -100,7 +100,9 @@ const ZH_MESSAGES = {
   "Content role": "内容角色",
   "All content": "全部内容",
   "Condensed summary": "凝练摘要",
-  "Summarized source": "已被摘要覆盖的原文",
+  "Secondary search source": "二线检索来源页",
+  "A synthesized Page is a first-pass search route to its sources. Source Pages remain active and readable.": "凝聚页是来源页的首轮检索入口；来源页仍有效且可读取。",
+  "This Page stays active and accessible through related Pages or exact search, but is omitted from first-pass search.": "此页仍有效，可沿关联页面或通过精确搜索找到，但不参加首轮检索。",
   "Other pages": "其他页面",
   "With attached summary": "含页面摘要",
   "Attached summary": "附属摘要",
@@ -109,7 +111,7 @@ const ZH_MESSAGES = {
   "A condensed Page used as the retrieval entry for its source Pages. Originals are retained.": "凝练出的独立页面，作为原文的检索入口；原文仍然保留。",
   "This current Revision is covered by a condensed summary. Original content is retained here.": "当前修订已被凝练摘要覆盖，这里保留原始内容。",
   "Attached summaries belong to a Page; they are not separate condensed Pages.": "附属摘要属于原页面，不是另一个凝练页面。",
-  "Other pages have neither a current extraction record nor current summary coverage.": "其他页面既非当前凝练页，也未被当前凝练摘要覆盖。",
+  "Source Pages remain active and readable here. A visible Topic or complete consolidation can route first-pass search through a condensed Page.": "来源页仍有效并可在这里查看。可见的 Topic 或完整融合可让首轮搜索先经过凝聚页。",
   "Jump to page": "跳转到指定页",
   "Edit content": "编辑正文",
   "Edit summary": "编辑摘要",
@@ -203,10 +205,10 @@ const ZH_MESSAGES = {
   "Ready regions": "已就绪范围",
   "Pending relation review": "待审关联",
   "Pending review": "待审决策",
-  "Pending work": "待处理工作",
+  "Open proposals": "未结提案总数",
   "Human decisions": "需要人工决定",
   "No human decisions needed": "目前没有需要人工决定的事项",
-  "Automatic and waiting proposals": "自动处理与等待中的提案",
+  "Paused and background proposals": "已暂停与后台提案",
   "Awaiting upgraded review or application": "等待自动复核或应用",
   "Approved; waiting for accumulation": "已通过，等待资料积累",
   "Waiting for review budget": "等待审核预算",
@@ -237,16 +239,21 @@ const ZH_MESSAGES = {
   "Feedback reconciliation": "反馈协调",
   "Content update review": "内容更新审阅",
   "Current evidence": "原内容",
+  "Earlier Page": "待核对的原页",
+  "Later related Page": "后续相关页面",
   "Proposed replacement": "建议替代内容",
   "Correction evidence": "纠正证据",
   "Pending approval; original content is unchanged": "待批准；原内容尚未改变",
   "Keep original content": "保留原内容",
-  "Qualify the claim": "限定适用范围",
-  "Applicability boundary": "适用边界",
-  "Review rationale": "判定理由",
-  "State the specific limit before accepting this qualification.": "接受限定决定前，请写明原结论适用的具体条件或尚未证实的部分。",
+  "Qualify the claim": "补充原结论的成立条件",
+  "Applicability boundary": "原结论在哪些条件下仍成立",
+  "Review rationale": "后续内容改变了什么",
+  "State the specific limit before accepting this qualification.": "请先指出原页哪项结论需要收窄。如果后续页面只是支持或补充原页，请拒绝这条建议。",
   "Please complete this field.": "请填写此项。",
-  "Accept with this boundary": "按此边界接受",
+  "Accept with this boundary": "确认这处限定",
+  "New content may change an earlier claim. No validity change occurs until this proposal is approved.": "系统发现两页内容相关。请核对后续页面是否真的改变了原结论；确认前不会修改原页。",
+  "Overlapping Pages may be better represented by complete fused or split Pages. Review every source's coverage before publication; existing Pages are unchanged.": "两页可能适合融合或按话题拆分。发布前请核对每个来源是否完整保留；现有页面尚未改变。",
+  "The model suggested a navigation link between these Pages. Review it when useful; a fused or split Page may be a better choice.": "模型建议为这两页建立导航关联。需要时再审阅；如果内容重叠较多，融合或拆分页面可能更合适。",
   "Mark as disputed": "标记争议",
   "Replace with new content": "以新内容替代",
   "Retract the old claim": "撤回旧结论",
@@ -385,7 +392,14 @@ const ZH_MESSAGES = {
   "Cycle details and schedule": "本轮明细与调度时间",
   "Restart Runtime?": "重启 Runtime？",
   "Active PCP calls may be interrupted. Stored memories are retained.": "正在进行的 PCP 调用可能中断，已保存的记忆会保留。",
-  "Retrievable memories": "可召回记忆",
+  "Current content Pages": "当前有效内容页",
+  "Default recall Pages": "默认可召回页",
+  "Secondary search sources": "二线检索来源页",
+  "Condensed Pages": "凝练页",
+  "Includes active source Pages routed behind condensed Pages.": "包含通过凝聚页进入的有效来源页；不含已替代、撤回及附属摘要页。",
+  "Eligible for default recall, not necessarily returned by every query.": "可参与默认检索；并非每次查询都会命中。",
+  "Active Pages reachable through relations or exact search and available to maintenance.": "有效页面，可沿关联或精确搜索找到，也继续参与后台维护。",
+  "Topic and consolidation outputs eligible for default recall.": "可参与默认召回的 Topic 与融合产出页。",
   "Stored content": "正文规模",
   "Memory scopes": "记忆范围",
   "Store integrity": "存储完整性",
@@ -591,7 +605,9 @@ const ZH_MESSAGES = {
   "Scope and source": "范围与源",
   "Page views": "页面视图",
   "Pages": "页面",
-  "retrievable pages": "可检索页",
+  "default recall Pages": "默认可召回页",
+  "current content Pages": "当前有效内容页",
+  "Browse current content Pages, including sources routed behind condensed Pages. Open a Page to inspect its sources and revisions.": "浏览当前有效内容页，包括由凝聚页引导的来源页；打开页面可查看来源与修订。",
   "Query": "查询",
   "Query failed": "查询失败",
   "No query yet": "尚未查询",
@@ -1728,20 +1744,22 @@ function buildLabel(build) {
 
 function renderOverview(data) {
   state.overview = data;
+  const counts = pageRecallBreakdown(data);
   refreshScopeLabels(document, scopeName);
   queryView.setScopes(data.scopes || []);
   const connected = data.integrity === "ok";
   byId("connection").textContent = connected ? t("Connected") : t("Degraded");
   byId("connection").classList.toggle("ready", connected);
   byId("connection").classList.toggle("degraded", !connected);
-  byId("headline-pages").textContent = formatNumber(data.pageCount);
+  byId("headline-pages").textContent = formatNumber(counts.defaultRecall ?? counts.current ?? 0);
+  byId("headline-pages-label").textContent = t(counts.defaultRecall === null ? "current content Pages" : "default recall Pages");
   byId("headline-content").textContent = formatSize(data.contentChars);
 
   byId("metrics").replaceChildren(
-    metric(t("Retrievable memories"), formatNumber(data.pageCount), "", t("Available for default recall")),
-    metric(t("Memory scopes"), formatNumber(data.scopes.length), "", t("Authorized memory collections")),
-    metric(t("Stored content"), formatSize(data.contentChars), "", t("Text retained in retrievable Pages")),
-    metric(t("Store integrity"), t(connected ? "Healthy" : "Needs inspection"), connected ? "positive" : "danger", connected ? t("Storage integrity check passed") : data.integrity),
+    metric(t("Current content Pages"), formatNumber(counts.current ?? 0), "", t("Includes active source Pages routed behind condensed Pages.")),
+    metric(t("Default recall Pages"), counts.defaultRecall === null ? t("Unavailable") : formatNumber(counts.defaultRecall), "", t("Eligible for default recall, not necessarily returned by every query.")),
+    metric(t("Secondary search sources"), counts.secondarySearch === null ? t("Unavailable") : formatNumber(counts.secondarySearch), "", t("Active Pages reachable through relations or exact search and available to maintenance.")),
+    metric(t("Condensed Pages"), counts.condensed === null ? t("Unavailable") : formatNumber(counts.condensed), "", t("Topic and consolidation outputs eligible for default recall.")),
   );
 
   byId("scope-rows").replaceChildren(...orderedScopes([...data.scopes]).map(({ scope, depth }) => {
@@ -2822,7 +2840,7 @@ function renderMaintenanceAutomationChart(status) {
   const queueValues = [
     [t("Dirty regions"), automation.dirtyRegionCount || 0, "warning"],
     [t("Ready regions"), automation.readyRegionCount || 0, "accent"],
-    [t("Pending work"), automation.pendingReviewCount || 0, "positive"],
+    [t("Open proposals"), automation.pendingReviewCount || 0, "positive"],
   ];
   const queueMax = Math.max(1, ...queueValues.map(([, value]) => value));
   const queue = element("section", "maintenance-chart-card maintenance-queue-chart");
@@ -2880,7 +2898,7 @@ function renderAutomationStatus() {
     ),
     metric(t("Dirty regions"), formatNumber(automation.dirtyRegionCount), automation.dirtyRegionCount ? "warning" : ""),
     metric(t("Ready regions"), formatNumber(automation.readyRegionCount), automation.readyRegionCount ? "info" : ""),
-    metric(t("Pending work"), formatNumber(automation.pendingReviewCount)),
+    metric(t("Open proposals"), formatNumber(automation.pendingReviewCount)),
     metric(t("Human decisions"), formatNumber(partitionReviewQueues(state.maintenance.relationReviews).human.length)),
   );
   renderMaintenanceAutomationChart(status);
@@ -3332,8 +3350,13 @@ function renderReviewBudgetSettings(budget) {
   }
   const status = budget.status;
   const zh = currentLanguage === "zh";
-  byId("review-usage-summary").textContent = `Sol ${status.sol.usedCalls}/${status.sol.maxCalls} · Astra ${status.astra.usedCalls}/${status.astra.maxCalls}`;
-  for (const tier of [status.sol, status.astra]) {
+  const total = status.total;
+  const tierSummary = "Sol " + status.sol.usedCalls + "/" + status.sol.maxCalls + " · Astra " + status.astra.usedCalls + "/" + status.astra.maxCalls;
+  byId("review-usage-summary").textContent = total
+    ? (zh ? "全部维护 " : "All maintenance ") + total.usedCalls + "/" + total.maxCalls + " · " + tierSummary
+    : tierSummary;
+  const tiers = total ? [{ ...total, tier: zh ? "全部维护（含初筛）" : "All maintenance (including baseline)" }, status.sol, status.astra] : [status.sol, status.astra];
+  for (const tier of tiers) {
     const tokens = tier.remainingTokens == null ? "—" : compactQuantity(tier.remainingTokens, currentLocale());
     host.append(element("p", "", `${tier.tier.toUpperCase()}: ${tier.usedCalls}/${tier.maxCalls} ${zh ? "次调用" : "calls"} · ${zh ? "实际" : "actual"} ${compactQuantity(tier.actualTokens, currentLocale())} tokens · ${zh ? "预占" : "reserved"} ${compactQuantity(tier.reservedTokens, currentLocale())} · ${zh ? "剩余" : "remaining"} ${tokens}`));
     host.lastElementChild.title = `${tier.actualTokens.toLocaleString(currentLocale())} tokens · ${tier.reservedTokens.toLocaleString(currentLocale())} reserved · ${tier.remainingTokens == null ? "—" : tier.remainingTokens.toLocaleString(currentLocale())} remaining`;
@@ -3474,8 +3497,8 @@ function renderRelationReviews() {
     ? `前往审阅 · ${human.length} 需人工 · ${staged.length} 待提交 ↓`
     : `Go to review · ${human.length} need input · ${staged.length} staged ↓`;
   byId("maintenance-relation-review-count").textContent = currentLanguage === "zh"
-    ? `${formatNumber(human.length)} 需人工 · ${formatNumber(background.length)} 自动／等待 · ${formatNumber(stagedCount)} 待提交`
-    : `${formatNumber(human.length)} human · ${formatNumber(background.length)} automatic / waiting · ${formatNumber(stagedCount)} staged`;
+    ? `${formatNumber(human.length)} 需人工 · ${formatNumber(background.length)} 已暂停／后台 · ${formatNumber(stagedCount)} 待提交`
+    : `${formatNumber(human.length)} human · ${formatNumber(background.length)} paused / background · ${formatNumber(stagedCount)} staged`;
 
   const progress = byId("maintenance-review-progress");
   progress.hidden = total === 0;
@@ -3504,11 +3527,25 @@ function renderRelationReviews() {
 
   byId("maintenance-relation-review-cards").replaceChildren(
     ...(human.length
-      ? groupReviewTopics(human).map((group) => {
-          if (group.length === 1) return maintenanceReviewCard(group[0]);
+      ? groupReviewProposals(human).map((group) => {
+          if (group.length === 1) {
+            const review = group[0];
+            if (!["topic", "relation"].includes(review.payload.kind)) return maintenanceReviewCard(review);
+            const detail = element("details", "maintenance-review-topic-group");
+            detail.append(element("summary", "", `${t(maintenanceReviewKindLabel(review.payload.kind))} · ${maintenanceReviewSummary(review)}`));
+            detail.addEventListener("toggle", () => {
+              if (detail.open && detail.children.length === 1) detail.append(maintenanceReviewCard(review));
+            });
+            return detail;
+          }
           const details = element("details", "maintenance-review-topic-group");
-          const summary = element("summary", "", `${group[0].payload.candidate.title} · ${group.length} ${currentLanguage === "zh" ? "个相关提案，逐项决定" : "related proposals; decide individually"}`);
-          details.append(summary, ...group.map(maintenanceReviewCard));
+          const kind = group[0].payload.kind;
+          const summary = element("summary", "", currentLanguage === "zh"
+            ? `${kind === "topic" ? "交叉 Topic 提案" : "交叉内容提案"} · ${group.length} 项，先核对整体方案`
+            : `${kind === "topic" ? "Overlapping Topic drafts" : "Overlapping content drafts"} · ${group.length}; review the whole set`);
+          details.append(summary, element("p", "maintenance-review-evidence", currentLanguage === "zh"
+            ? "这些提案使用了交叉来源；可分别拒绝或延后，但接受前请先核对是否需要一次融合、拆分或刷新。"
+            : "These drafts share sources. Compare the whole set before accepting, and decide whether one fusion, split, or refresh is needed."), ...group.map(maintenanceReviewCard));
           return details;
         })
       : total
@@ -3517,7 +3554,7 @@ function renderRelationReviews() {
   );
   const automatic = byId("maintenance-review-background");
   automatic.hidden = background.length === 0;
-  const summary = element("summary", "", `${t("Automatic and waiting proposals")} · ${formatNumber(background.length)}`);
+  const summary = element("summary", "", `${t("Paused and background proposals")} · ${formatNumber(background.length)}`);
   const cards = element("div", "maintenance-relation-review-cards");
   // Keep this secondary list compact; each proposal is independently inspectable.
   for (const review of background) {
@@ -3689,6 +3726,9 @@ function maintenanceReviewSummary(review) {
   }
   if (candidate.title) return candidate.title;
   if (candidate.pageId) return candidate.pageId;
+  if (review.payload?.kind === "relation" && candidate.pages?.length) {
+    return candidate.pages.map((page) => compactRelationReviewPreview(page.preview).slice(0, 55)).join(" ↔ ");
+  }
   if (candidate.pages?.length) {
     return candidate.pages.map((page) => page.pageId).join(" ↔ ");
   }
@@ -3981,7 +4021,11 @@ function maintenanceReviewCard(review) {
     ? `${t("Escalated model")} · ${formatNumber(review.modelAttempts)}`
     : `${t("Baseline model")} · ${formatNumber(review.modelAttempts)}`);
   heading.append(metadata, model);
-  const reason = element("p", "maintenance-relation-review-reason muted", review.reason);
+  const legacyRelationReason = "The selected Pages are not a continuous Pack boundary with a shared protected identifier.";
+  const reviewReason = payload.kind === "relation" && review.reason === legacyRelationReason
+    ? "The model suggested a navigation link between these Pages. Review it when useful; a fused or split Page may be a better choice."
+    : review.reason;
+  const reason = element("p", "maintenance-relation-review-reason muted", t(reviewReason));
   const actions = element("div", "maintenance-relation-review-actions");
   const qualification = payload.kind === "reconciliation" && candidate.disposition === "qualified"
     ? qualificationReviewEditor(review)
@@ -4026,6 +4070,23 @@ function maintenanceReviewCard(review) {
     actions.append(suppress);
   }
   card.append(heading, reason);
+  if (payload.kind === "relation") {
+    card.append(element("p", "maintenance-review-evidence", currentLanguage === "zh"
+      ? "批准后只新增页面间的导航关系，不改变两页内容或有效性。"
+      : "Approval adds a navigation relation; neither Page's content or validity changes."));
+  } else if (payload.kind === "topic") {
+    card.append(element("p", "maintenance-review-evidence", currentLanguage === "zh"
+      ? `批准后${candidate.refreshTarget ? "刷新" : "创建"} Topic；来源页仍有效，首轮检索由 Topic 引导。`
+      : `Approval ${candidate.refreshTarget ? "refreshes" : "creates"} a Topic; source Pages remain in default retrieval.`));
+  } else if (payload.kind === "reconciliation") {
+    const zh = currentLanguage === "zh";
+    const effect = candidate.suggestedConsolidation
+      ? (zh ? "发布融合页面后，只有逐项确认完整覆盖的来源才退出默认召回。" : "Publishing a consolidation retires only sources individually confirmed fully covered.")
+      : candidate.disposition === "superseded"
+        ? (zh ? "批准后原页退出默认召回；后续页面作为替代，历史仍保留。" : "Approval removes the earlier Page from default retrieval and retains its history.")
+        : (zh ? "批准后会追加原页的有效性判定；页面正文不变。" : "Approval appends a validity assessment to the earlier Page; its content remains unchanged.");
+    card.append(element("p", "maintenance-review-evidence", effect));
+  }
   if (review.queue) {
     const a = review.queue.accumulation;
     const detail = a ? (currentLanguage === "zh"
@@ -4065,14 +4126,19 @@ function maintenanceReviewCard(review) {
   return card;
 }
 
-async function loadRelationReviews() {
+async function loadRelationReviews({ onlyIfChanged = false } = {}) {
   if (!maintenanceAvailable()) {
     state.maintenance.relationReviews = [];
     renderRelationReviews();
     return;
   }
   const response = await api("/api/maintenance/reviews");
-  state.maintenance.relationReviews = response.reviews || [];
+  const reviews = response.reviews || [];
+  if (onlyIfChanged) {
+    const signature = (items) => items.map((item) => [item.candidateId, item.updatedAt, item.queue?.state].join("|")).join("\n");
+    if (signature(reviews) === signature(state.maintenance.relationReviews)) return;
+  }
+  state.maintenance.relationReviews = reviews;
   for (const [candidateId, draft] of state.maintenance.qualificationDrafts) {
     if (!state.maintenance.relationReviews.some((review) => review.candidateId === candidateId && review.proposedAt === draft.proposedAt)) {
       state.maintenance.qualificationDrafts.delete(candidateId);
@@ -5121,6 +5187,7 @@ function scheduleMaintenanceStatusPoll() {
       state.maintenance.loaded = true;
       reconcileMaintenanceConvergence(state.maintenance.status);
       renderAutomationStatus();
+      if (!state.maintenance.reviewCommitBusy) await loadRelationReviews({ onlyIfChanged: true });
     } catch (_) {
       // A status poll is advisory; the next scheduled read can recover without
       // replacing the operator's current review state with an error screen.

@@ -78,6 +78,10 @@ pub struct DurablePageInventoryItem {
     /// A fully covered provenance source while its reviewed canonical outputs remain current.
     #[serde(default)]
     pub source_only: bool,
+    /// Exact current outputs carrying this source's complete coverage.
+    /// Partial outputs from a different consolidation are not included.
+    #[serde(default)]
+    pub consolidation_covering_revision_ids: Vec<String>,
     #[serde(default)]
     pub packing_protected: bool,
 }
@@ -111,9 +115,22 @@ pub struct ContentLibraryScope {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContentLibrarySummary {
+    /// Current effective content Pages, including Pages routed behind a synthesis.
     pub page_count: u64,
     pub content_chars: u64,
     pub scopes: Vec<ContentLibraryScope>,
+    /// Current Pages retained as complete consolidation sources but omitted
+    /// from first-pass retrieval. Absent in older Runtime responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_only_page_count: Option<u64>,
+    /// Current source Pages routed behind a visible Topic or reviewed
+    /// consolidation in first-pass search. They remain active and readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary_search_page_count: Option<u64>,
+    /// Current synthesized Pages that participate in default retrieval.
+    /// Absent when reading an older Runtime response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condensed_page_count: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

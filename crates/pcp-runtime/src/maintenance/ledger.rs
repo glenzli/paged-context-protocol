@@ -206,11 +206,17 @@ struct DirtyRegion {
     first_dirty_at_unix_ms: u64,
     last_dirty_at_unix_ms: u64,
     new_page_ids: BTreeSet<String>,
+    #[serde(default)]
+    changed_page_ids: BTreeSet<String>,
+    #[serde(default)]
+    discovery_jobs: u32,
 }
 
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SchedulerLedger {
+    #[serde(default)]
+    discovery_not_before_unix_ms: u64,
     #[serde(default)]
     last_analysis_at_unix_ms: Option<u64>,
     #[serde(default)]
@@ -384,11 +390,29 @@ impl MaintenanceLedger {
             }
         }
         for (candidate_id, persisted_proposal) in persisted.relation_reviews {
-            match self.relation_reviews.get(&candidate_id) {
+            match self.relation_reviews.get_mut(&candidate_id) {
                 Some(local_proposal)
                     if local_proposal.status != MaintenanceRelationReviewStatus::Pending => {}
-                Some(_)
-                    if persisted_proposal.status == MaintenanceRelationReviewStatus::Pending => {}
+                Some(local_proposal)
+                    if persisted_proposal.status == MaintenanceRelationReviewStatus::Pending =>
+                {
+                    // A scheduled maintainer can save a stale pending snapshot
+                    // after a Console decision. Keep the later snooze just as
+                    // review_items keeps the later updated_at revision.
+                    let local_until = local_proposal
+                        .snoozed_until
+                        .as_deref()
+                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+                    let persisted_until = persisted_proposal
+                        .snoozed_until
+                        .as_deref()
+                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+                    if persisted_until
+                        .is_some_and(|until| local_until.is_none_or(|local| until > local))
+                    {
+                        local_proposal.snoozed_until = persisted_proposal.snoozed_until;
+                    }
+                }
                 _ => {
                     self.relation_reviews
                         .insert(candidate_id, persisted_proposal);
@@ -635,7 +659,7 @@ impl MaintenanceLedger {
                 pages,
                 proposed_at: chrono::Utc::now().to_rfc3339(),
                 risk: "manual_review".to_owned(),
-                review_reason: "The selected Pages are not a continuous Pack boundary with a shared protected identifier.".to_owned(),
+                review_reason: "The model suggested a navigation link between these Pages. Review it when useful; a fused or split Page may be a better choice.".to_owned(),
                 relation_reason,
                 verification: None,
                 model_attempts: model_attempts.max(1),
@@ -701,6 +725,13 @@ impl MaintenanceLedger {
             .collect()
     }
 
+    pub(crate) fn relation_pending_count(&self) -> usize {
+        self.relation_reviews
+            .values()
+            .filter(|proposal| proposal.status == MaintenanceRelationReviewStatus::Pending)
+            .count()
+    }
+
     pub(crate) fn relation_review(
         &self,
         candidate_id: &str,
@@ -725,13 +756,20 @@ impl MaintenanceLedger {
         Ok(())
     }
 
-    pub(crate) fn topic_pending_count(&self) -> usize {
+    pub(crate) fn topic_pending_count(
+        &self,
+        inventory: &[DurablePageInventoryItem],
+        config: &super::TopicMaintenanceConfig,
+    ) -> usize {
         self.review_items
             .values()
             .filter(|item| {
                 item.status == MaintenanceReviewStatus::Pending
                     && matches!(&item.payload, MaintenanceReviewPayload::Topic(c)
-                        if !c.verification.as_ref().is_some_and(|v| matches!(v.verdict, super::VerificationVerdict::Approve)))
+                        if !c.verification.as_ref().is_some_and(|v| matches!(v.verdict, super::VerificationVerdict::Approve))
+                            || super::discovery::accumulated(&c.pages.iter().filter_map(|source|
+                                inventory.iter().find(|p| p.page_id == source.page_id && p.revision_id == source.revision_id)
+                            ).collect::<Vec<_>>(), config))
             })
             .count()
     }
@@ -1196,6 +1234,14 @@ impl MaintenanceLedger {
     pub(crate) fn snooze_review(&mut self, candidate_id: &str, seconds: u64) -> Result<()> {
         let until =
             chrono::Utc::now() + chrono::Duration::seconds(seconds.try_into().unwrap_or(i64::MAX));
+        self.snooze_review_until(candidate_id, until)
+    }
+
+    pub(crate) fn snooze_review_until(
+        &mut self,
+        candidate_id: &str,
+        until: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
         if let Some(item) = self.review_items.get_mut(candidate_id) {
             anyhow::ensure!(
                 item.status == MaintenanceReviewStatus::Pending,
@@ -1267,7 +1313,23 @@ impl MaintenanceLedger {
         report: &MaintenanceCycleReport,
     ) -> u64 {
         self.scheduler.consecutive_failures = 0;
-        let no_model_progress = report.worker_calls == 0 && report.content_changes() == 0;
+        // Candidate inbox polling may wake earlier, but must not restart
+        // unchanged semantic discovery or erase its increasing delay.
+        let remaining = self
+            .scheduler
+            .discovery_not_before_unix_ms
+            .saturating_sub(now_unix_ms());
+        if remaining > 0 && report.jobs_advanced == 0 {
+            let delay = remaining.div_ceil(1000);
+            self.record_next_wake(delay);
+            return delay;
+        }
+        let no_model_progress = report.content_changes() == 0
+            && report.review_items_proposed == 0
+            && report.summaries_proposed == 0
+            && report.packs_proposed == 0
+            && report.relations_proposed == 0
+            && report.retention_leases_written == 0;
         let delay = if !report.periodic_review
             && report.jobs_advanced >= config.max_jobs_per_cycle
             && no_model_progress
@@ -1307,8 +1369,21 @@ impl MaintenanceLedger {
         } else {
             delay
         };
+        if !report.periodic_review
+            && report.jobs_advanced >= config.max_jobs_per_cycle
+            && no_model_progress
+        {
+            self.scheduler.discovery_not_before_unix_ms =
+                now_unix_ms().saturating_add(delay.saturating_mul(1000));
+        } else {
+            self.scheduler.discovery_not_before_unix_ms = 0;
+        }
         self.record_next_wake(delay);
         delay
+    }
+
+    pub(crate) fn discovery_ready(&self) -> bool {
+        now_unix_ms() >= self.scheduler.discovery_not_before_unix_ms
     }
 
     pub(crate) fn has_dirty_regions(&self) -> bool {
@@ -1481,6 +1556,10 @@ impl MaintenanceLedger {
                         current
                             .new_page_ids
                             .extend(old.new_page_ids.iter().cloned());
+                        current
+                            .changed_page_ids
+                            .extend(old.changed_page_ids.iter().cloned());
+                        current.discovery_jobs = current.discovery_jobs.min(old.discovery_jobs);
                     })
                     .or_insert(old);
             }
@@ -1497,6 +1576,8 @@ impl MaintenanceLedger {
                     first_dirty_at_unix_ms: now,
                     last_dirty_at_unix_ms: now,
                     new_page_ids: BTreeSet::new(),
+                    changed_page_ids: BTreeSet::new(),
+                    discovery_jobs: 0,
                 });
             if !self
                 .write_trigger
@@ -1505,10 +1586,56 @@ impl MaintenanceLedger {
             {
                 dirty.new_page_ids.insert(page.page_id.clone());
             }
+            dirty.changed_page_ids.insert(page.page_id.clone());
+            dirty.discovery_jobs = 0;
+            self.scheduler.discovery_not_before_unix_ms = 0;
+            self.scheduler.idle_cycles = 0;
             dirty.last_dirty_at_unix_ms = now;
         }
         self.write_trigger.observed_revisions = current;
         self.ready_regions_at(config, now)
+    }
+
+    pub(crate) fn changed_page_ids(
+        &self,
+        regions: &BTreeSet<String>,
+        inventory: &[DurablePageInventoryItem],
+    ) -> BTreeSet<String> {
+        inventory
+            .iter()
+            .filter(|page| {
+                let region = maintenance_region_key(page);
+                regions.contains(&region)
+                    && self
+                        .write_trigger
+                        .dirty_regions
+                        .get(&region)
+                        .is_none_or(|dirty| {
+                            dirty.changed_page_ids.is_empty()
+                                || dirty.changed_page_ids.contains(&page.page_id)
+                        })
+            })
+            .map(|page| page.page_id.clone())
+            .collect()
+    }
+
+    /// A write opens a finite discovery pass. Periodic review explores the
+    /// remaining windows later; a changing or unscanned region is never cleared.
+    pub(crate) fn finish_discovery_pass(
+        &mut self,
+        expected: &BTreeMap<String, BTreeMap<String, String>>,
+        inventory: &[DurablePageInventoryItem],
+        jobs: u32,
+        exhausted: bool,
+    ) {
+        let current = Self::region_snapshot(inventory, &expected.keys().cloned().collect());
+        self.write_trigger.dirty_regions.retain(|region, dirty| {
+            if expected.get(region).is_none() || expected.get(region) != current.get(region) {
+                return true;
+            }
+            dirty.discovery_jobs = dirty.discovery_jobs.saturating_add(jobs);
+            !exhausted && dirty.discovery_jobs < 24
+        });
     }
 
     pub(crate) fn ready_regions(
@@ -1557,6 +1684,7 @@ impl MaintenanceLedger {
     /// Clears only regions whose exact Page-head snapshot survived the job.
     /// A concurrent write (or a maintenance write that needs a follow-up pass)
     /// remains dirty and is eligible after another quiet window.
+    #[cfg(test)]
     pub(crate) fn acknowledge_unchanged_regions(
         &mut self,
         expected: &BTreeMap<String, BTreeMap<String, String>>,
@@ -1759,8 +1887,120 @@ mod tests {
             topic_source_page_ids: Vec::new(),
             superseded: false,
             source_only: false,
+            consolidation_covering_revision_ids: Vec::new(),
             packing_protected: false,
         }
+    }
+
+    #[test]
+    fn inbox_poll_does_not_override_discovery_backoff_and_new_write_reopens_it() {
+        let mut config = scheduler_config();
+        config.interval_seconds = 600;
+        let mut ledger = MaintenanceLedger::default();
+        let first = page("1", "r1");
+        ledger.observe_writes(&[first.clone()], &config.write_trigger);
+        let full = MaintenanceCycleReport {
+            jobs_advanced: config.max_jobs_per_cycle,
+            worker_calls: 3,
+            ..Default::default()
+        };
+        assert_eq!(ledger.schedule_after_success(&config, &full), 60);
+        assert!(!ledger.discovery_ready());
+        assert_eq!(
+            ledger.schedule_after_success(&config, &MaintenanceCycleReport::default()),
+            60
+        );
+        assert_eq!(ledger.scheduler.idle_cycles, 1);
+        let mut reopened: MaintenanceLedger =
+            serde_json::from_slice(&serde_json::to_vec(&ledger).unwrap()).unwrap();
+        assert!(!reopened.discovery_ready());
+        let mut changed = first;
+        changed.revision_id = "r2".into();
+        reopened.observe_writes(&[changed], &config.write_trigger);
+        assert!(reopened.discovery_ready());
+        assert_eq!(reopened.scheduler.idle_cycles, 0);
+    }
+
+    #[test]
+    fn legacy_and_new_regions_keep_their_own_discovery_anchors() {
+        let trigger = WriteTriggeredMaintenanceConfig {
+            min_new_pages: 1,
+            quiet_period_seconds: 0,
+            max_wait_seconds: 0,
+        };
+        let mut ledger = MaintenanceLedger::default();
+        let mut a = page("1", "r1");
+        a.source_span = None;
+        let mut b = page("2", "r2");
+        b.source_span = None;
+        b.namespace = "project:other".into();
+        let mut old = page("3", "r3");
+        old.source_span = None;
+        ledger.observe_writes(&[a.clone(), b.clone(), old.clone()], &trigger);
+        a.revision_id = "r1b".into();
+        b.revision_id = "r2b".into();
+        let inventory = vec![a.clone(), b.clone(), old.clone()];
+        let regions = ledger.observe_writes(&inventory, &trigger);
+        ledger
+            .write_trigger
+            .dirty_regions
+            .get_mut(&maintenance_region_key(&b))
+            .unwrap()
+            .changed_page_ids
+            .clear();
+        let anchors = ledger.changed_page_ids(&regions, &inventory);
+        assert!(anchors.contains(&a.page_id) && anchors.contains(&b.page_id));
+        assert!(!anchors.contains(&old.page_id));
+    }
+
+    #[test]
+    fn discovery_pass_finishes_after_bounded_jobs_and_preserves_new_writes() {
+        let trigger = WriteTriggeredMaintenanceConfig {
+            min_new_pages: 1,
+            quiet_period_seconds: 0,
+            max_wait_seconds: 0,
+        };
+        let mut ledger = MaintenanceLedger::default();
+        let mut first = page("1", "r1");
+        let mut second = page("2", "r2");
+        first.source_span = None;
+        second.source_span = None;
+        second.namespace = "project:other".into();
+        ledger.observe_writes(&[first.clone(), second.clone()], &trigger);
+        first.revision_id = "r1b".into();
+        second.revision_id = "r2b".into();
+        let inventory = vec![first.clone(), second.clone()];
+        ledger.observe_writes(&inventory, &trigger);
+        let region = maintenance_region_key(&first);
+        let selected = BTreeSet::from([region.clone()]);
+        assert_eq!(
+            ledger.changed_page_ids(&selected, &inventory),
+            BTreeSet::from(["1".into()])
+        );
+        let expected = MaintenanceLedger::region_snapshot(&inventory, &selected);
+        for _ in 0..7 {
+            ledger.finish_discovery_pass(&expected, &inventory, 3, false);
+        }
+        let mut ledger: MaintenanceLedger =
+            serde_json::from_slice(&serde_json::to_vec(&ledger).unwrap()).unwrap();
+        assert!(ledger.write_trigger.dirty_regions.contains_key(&region));
+        let mut concurrent = inventory.clone();
+        concurrent[0].revision_id = "r1c".into();
+        ledger.finish_discovery_pass(&expected, &concurrent, 3, false);
+        assert!(ledger.write_trigger.dirty_regions.contains_key(&region));
+        ledger.finish_discovery_pass(&expected, &inventory, 3, false);
+        assert!(!ledger.write_trigger.dirty_regions.contains_key(&region));
+        assert!(
+            ledger
+                .write_trigger
+                .dirty_regions
+                .contains_key(&maintenance_region_key(&second))
+        );
+        ledger.observe_writes(&concurrent, &trigger);
+        assert_eq!(
+            ledger.write_trigger.dirty_regions[&region].discovery_jobs,
+            0
+        );
     }
 
     #[test]
@@ -1798,6 +2038,8 @@ mod tests {
                 first_dirty_at_unix_ms: old_time,
                 last_dirty_at_unix_ms: old_time,
                 new_page_ids: BTreeSet::from(["0".into()]),
+                changed_page_ids: BTreeSet::from(["0".into()]),
+                discovery_jobs: 0,
             },
         );
         ledger.observe_writes(&inventory, &trigger);
@@ -1871,7 +2113,9 @@ mod tests {
         assert_eq!(ledger.schedule_after_success(&c, &report), 60);
         assert_eq!(ledger.schedule_after_success(&c, &report), 120);
         assert_eq!(ledger.schedule_after_success(&c, &report), 240);
-        report.worker_calls = 1;
+        report.worker_calls = 3;
+        assert_eq!(ledger.schedule_after_success(&c, &report), 480);
+        report.review_items_proposed = 1;
         assert_eq!(
             ledger.schedule_after_success(&c, &report),
             ACTIVE_RETRY_SECONDS
@@ -2085,9 +2329,10 @@ mod tests {
             false,
         );
 
+        let until = chrono::Utc::now() + chrono::Duration::hours(32);
         ledger
-            .snooze_review("msu_snooze", 60)
-            .expect("snooze review");
+            .snooze_review_until("msu_snooze", until)
+            .expect("snooze review until the requested morning");
 
         assert!(ledger.review_items().is_empty());
         assert_eq!(
@@ -2097,6 +2342,49 @@ mod tests {
                 .status,
             MaintenanceReviewStatus::Pending
         );
+        assert_eq!(
+            ledger.review_item("msu_snooze").unwrap().snoozed_until,
+            Some(until.to_rfc3339())
+        );
+    }
+
+    #[test]
+    fn a_stale_maintenance_save_cannot_undo_a_relation_snooze() {
+        let mut stale = MaintenanceLedger::default();
+        let id = stale.propose_relation_review(
+            "conversation:test".to_owned(),
+            [
+                MaintenanceRelationReviewPage {
+                    page_id: "pg_1".to_owned(),
+                    revision_id: "rev_1".to_owned(),
+                    preview: "First Page".to_owned(),
+                },
+                MaintenanceRelationReviewPage {
+                    page_id: "pg_2".to_owned(),
+                    revision_id: "rev_2".to_owned(),
+                    preview: "Second Page".to_owned(),
+                },
+            ],
+            "Specific evidence chain".to_owned(),
+            1,
+            false,
+        );
+        let mut persisted: MaintenanceLedger =
+            serde_json::from_value(serde_json::to_value(&stale).unwrap()).unwrap();
+        let until = chrono::Utc::now() + chrono::Duration::hours(8);
+        persisted
+            .snooze_review_until(&id, until)
+            .expect("snooze relation review");
+
+        stale.merge_persisted_reviews(persisted);
+
+        assert_eq!(stale.relation_reviews.len(), 1);
+        assert_eq!(
+            stale.relation_reviews[&id].snoozed_until,
+            Some(until.to_rfc3339())
+        );
+        assert!(stale.relation_reviews().is_empty());
+        assert_eq!(stale.relation_pending_count(), 1);
     }
 
     #[test]

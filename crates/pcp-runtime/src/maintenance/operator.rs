@@ -220,6 +220,16 @@ impl MaintenanceOperator {
         self.maintainer.resolve_review(candidate_id, status).await
     }
 
+    pub async fn snooze_review_until(
+        &mut self,
+        candidate_id: &str,
+        until: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        self.maintainer
+            .snooze_review_until(candidate_id, until)
+            .await
+    }
+
     pub async fn converge_once(&mut self) -> Result<super::MaintenanceCycleReport> {
         self.maintainer.run_convergence_once(1).await
     }

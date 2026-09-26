@@ -258,8 +258,8 @@ fn resolve_refresh_target(
     anyhow::ensure!(
         !topics
             .values()
-            .any(|topic| topic.source_page_ids == requested_source_ids),
-        "an active Topic already has the same logical source Pages; refresh that Topic instead"
+            .any(|topic| requested_source_ids.is_subset(&topic.source_page_ids)),
+        "an active Topic already covers these logical source Pages; refresh or retire that Topic instead"
     );
     Ok(None)
 }

@@ -125,6 +125,16 @@ async fn reviewed_split_is_atomic_and_only_complete_sources_leave_recall() {
     let replay = client.consolidate_pages(request.clone()).await.unwrap();
     assert!(!replay.created);
     assert_eq!(replay.outputs, result.outputs);
+    let mut repeated = request.clone();
+    repeated.idempotency_key = "split-a-b-new-key".into();
+    assert!(
+        client
+            .consolidate_pages(repeated)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("already covers these source Revisions")
+    );
     let mut changed = request.clone();
     changed.outputs[0].content.push_str(" changed");
     assert!(
@@ -171,8 +181,40 @@ async fn reviewed_split_is_atomic_and_only_complete_sources_leave_recall() {
         )
         .await
         .unwrap();
+    let summary = client
+        .content_library_summary(vec![namespace.into()])
+        .await
+        .unwrap();
+    assert_eq!(summary.page_count, 4);
+    assert_eq!(summary.source_only_page_count, Some(1));
+    assert_eq!(summary.secondary_search_page_count, Some(1));
+    assert_eq!(summary.condensed_page_count, Some(2));
+    assert_eq!(
+        routed.total_pages,
+        summary.page_count - summary.source_only_page_count.unwrap()
+    );
     assert!(!routed.hits.iter().any(|hit| hit.page_id == first.page_id));
     assert!(routed.hits.iter().any(|hit| hit.page_id == second.page_id));
+    let related = client
+        .search_pages(SearchPagesRequest {
+            query: result.outputs[0].revision_id.clone(),
+            scopes: vec![namespace.into()],
+            mode: SearchMode::Graph,
+            term_match: SearchTermMatch::All,
+            projections: pcp_core::default_search_projections(),
+            filters: SearchFilters::default(),
+            limit: 20,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(related.hits.iter().any(|hit| {
+        hit.page_id == first.page_id
+            && hit
+                .graph_edges
+                .iter()
+                .any(|edge| edge.edge_kind == GraphEdgeKind::Provenance)
+    }));
     let exact = client
         .read_pages(ReadPagesRequest {
             page_ids: vec![],
@@ -216,6 +258,14 @@ async fn reviewed_split_is_atomic_and_only_complete_sources_leave_recall() {
         })
         .await
         .unwrap();
+    let summary = client
+        .content_library_summary(vec![namespace.into()])
+        .await
+        .unwrap();
+    assert_eq!(summary.page_count, 3);
+    assert_eq!(summary.source_only_page_count, Some(0));
+    assert_eq!(summary.secondary_search_page_count, Some(0));
+    assert_eq!(summary.condensed_page_count, Some(1));
     assert!(recall(&client, namespace).await.contains(&first.page_id));
     assert!(
         !client

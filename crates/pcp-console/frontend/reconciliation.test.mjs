@@ -8,8 +8,12 @@ test("feedback and discovered updates share exact old/new evidence projection", 
   assert.equal(view.title, "Content update review");
   assert.equal(view.crossScope, true);
   assert.deepEqual(view.panels.map((panel) => panel.page.revisionId), ["old", "new"]);
+  assert.equal(view.panels[0].label, "Earlier Page");
   assert.equal(view.panels[1].label, "Proposed replacement");
-  assert.equal(reconciliationView({...candidate, signal:{}}).title, "Feedback reconciliation");
+  const feedback = reconciliationView({...candidate, signal:{}});
+  assert.equal(feedback.title, "Feedback reconciliation");
+  assert.equal(feedback.panels[0].label, "Current evidence");
+  assert.equal(reconciliationView({target:candidate.target,evidence:candidate.evidence}).panels[1].label, "Later related Page");
 });
 
 test("legacy proposals without replacement evidence are flagged", () => {

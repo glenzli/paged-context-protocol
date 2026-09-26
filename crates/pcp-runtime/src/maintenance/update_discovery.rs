@@ -288,14 +288,13 @@ fn validate_consolidation_suggestion(
     Ok(())
 }
 
-fn candidate_pairs(
+pub(super) fn candidate_pairs(
     inventory: &[DurablePageInventoryItem],
 ) -> Vec<(&DurablePageInventoryItem, &DurablePageInventoryItem)> {
     let mut pages: Vec<_> = inventory
         .iter()
         .filter(|page| {
             !page.superseded
-                && !page.source_only
                 && page.content_chars > 0
                 && !matches!(
                     page.kind.as_str(),
@@ -328,7 +327,10 @@ fn candidate_pairs(
     for new in pages.iter().take(48) {
         for revision in new.provenance_input_revision_ids.iter().take(8) {
             if let Some(old) = by_revision.get(revision.as_str()) {
-                if old.page_id != new.page_id && seen.insert(pair_key(old, new)) {
+                if old.page_id != new.page_id
+                    && !is_covered_source_output_pair(old, new)
+                    && seen.insert(pair_key(old, new))
+                {
                     pairs.push((*old, *new));
                 }
             }
@@ -337,6 +339,7 @@ fn candidate_pairs(
         let mut matches: Vec<_> = pages
             .iter()
             .filter(|old| old.page_id != new.page_id && old.created_at < new.created_at)
+            .filter(|old| !is_covered_source_output_pair(old, new))
             .filter_map(|old| {
                 let old_terms = &terms[old.page_id.as_str()];
                 let shared = new_terms.intersection(old_terms).count();
@@ -356,6 +359,21 @@ fn candidate_pairs(
         }
     }
     pairs
+}
+
+// Complete coverage is output-specific. Other evidence and partial outputs
+// remain available even when a different consolidation covers this source.
+pub(super) fn is_covered_source_output_pair(
+    left: &DurablePageInventoryItem,
+    right: &DurablePageInventoryItem,
+) -> bool {
+    [(left, right), (right, left)]
+        .into_iter()
+        .any(|(source, output)| {
+            source
+                .consolidation_covering_revision_ids
+                .contains(&output.revision_id)
+        })
 }
 
 fn subject_terms(text: &str) -> BTreeSet<String> {

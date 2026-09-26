@@ -63,9 +63,15 @@ budget never falls back to Luna approval or silently forwards ordinary work into
 
 Runtime persists exact evidence, assessed outputs, review request IDs, usage and the approved plan
 before writing. New same-Scope intake or changed comparison heads invalidate approval before the first
-write; in-flight plans instead recover through their durable idempotency keys. Pending evidence shared
-with an unresolved output or open group question remains pending, without triggering another review
-by itself. Source snapshots and review metadata are also attached to formal memory facets so they outlive
+write; in-flight plans instead recover through their durable idempotency keys. Evidence shared
+with an accumulating or needs-input output remains pending, without triggering another review
+by itself. An open group question alone does not leave already published evidence pending;
+a no-change verdict closes candidate evidence when every candidate in the group is accounted for
+and no output from that evidence still awaits input or accumulation. Existing result metadata is
+preserved when closing it.
+Previously published candidate evidence cannot
+create another Page in a later synthesis without new candidate evidence. Source snapshots and
+review metadata are also attached to formal memory facets so they outlive
 the operational inbox receipts. Manual edits to a new plan are not attributed to a previous Sol review.
 
 Existing deployments retain manual review until the operator enables candidate automatic review. Console provides a global pause switch and per-output review explanations. A pause prevents new calls

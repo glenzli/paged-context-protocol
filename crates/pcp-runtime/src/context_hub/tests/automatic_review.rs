@@ -80,6 +80,130 @@ async fn finish(r: &Rig, input: &CandidateReviewInput, decisions: Vec<OutputAsse
 }
 
 #[tokio::test]
+async fn open_question_does_not_requeue_published_candidate() {
+    let (r, input) = setup(1, false).await;
+    assert!(!input.unresolved.is_empty());
+    finish(&r, &input, vec![assessment(0, "approve")]).await;
+    assert!(
+        r.hub
+            .resume_automatic_write(r.admin.access(), &[])
+            .await
+            .unwrap()
+    );
+    let snapshot = r
+        .admin
+        .context_hub(ContextHubRequest::Inspect)
+        .await
+        .unwrap();
+    assert_eq!(snapshot["candidates"][0]["status"], "promoted");
+    assert_eq!(snapshot["candidates"][0]["result"]["status"], "promoted");
+    assert_eq!(r.admin.page_count(vec![]).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn no_change_closes_candidate_without_discarding_review_receipt() {
+    let (r, input) = setup(1, false).await;
+    {
+        let mut db = LockedState::open(&r.hub.path, r.store.identity_id())
+            .await
+            .unwrap();
+        db.state.candidates[0].result = Some(serde_json::json!({
+            "status":"partially_represented",
+            "outputs":[{"pageId":"pg_prior","revisionId":"rev_prior"}],
+            "sourceReceipt":"retained"
+        }));
+        db.save().unwrap();
+    }
+    finish(&r, &input, vec![assessment(0, "no_change")]).await;
+    let snapshot = r
+        .admin
+        .context_hub(ContextHubRequest::Inspect)
+        .await
+        .unwrap();
+    assert_eq!(snapshot["candidates"][0]["status"], "promoted");
+    assert_eq!(snapshot["candidates"][0]["result"]["status"], "no_change");
+    assert_eq!(
+        snapshot["candidates"][0]["result"]["sourceReceipt"],
+        "retained"
+    );
+    assert_eq!(
+        snapshot["candidates"][0]["result"]["outputs"][0]["pageId"],
+        "pg_prior"
+    );
+    assert_eq!(snapshot["syntheses"][0]["status"], "superseded");
+    assert_eq!(
+        snapshot["syntheses"][0]["automaticReview"]["state"],
+        "no_change"
+    );
+    assert_eq!(r.admin.page_count(vec![]).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn no_change_does_not_close_unrepresented_group_evidence() {
+    let r = Rig::new().await;
+    r.admin
+        .context_hub(ContextHubRequest::SetAutomaticReview { enabled: true })
+        .await
+        .unwrap();
+    let input = inputs(&r, 2).await;
+    let mut group = proposed(&input);
+    group.outputs[0].candidate_ids = vec![input.candidates[0].candidate_id.clone()];
+    r.hub
+        .finish_organization(&input, vec![group])
+        .await
+        .unwrap();
+    age(&r).await;
+    let review = r
+        .hub
+        .prepare_automatic_review(r.admin.as_ref(), &[])
+        .await
+        .unwrap()
+        .unwrap();
+    finish(&r, &review, vec![assessment(0, "no_change")]).await;
+    let snapshot = r
+        .admin
+        .context_hub(ContextHubRequest::Inspect)
+        .await
+        .unwrap();
+    assert!(
+        snapshot["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|candidate| candidate["status"] == "pending")
+    );
+    assert_eq!(snapshot["syntheses"][0]["status"], "pending");
+}
+
+#[tokio::test]
+async fn prior_published_candidate_cannot_create_again_with_new_plan() {
+    let (r, input) = setup(1, false).await;
+    {
+        let mut db = LockedState::open(&r.hub.path, r.store.identity_id())
+            .await
+            .unwrap();
+        db.state.candidates[0].result = Some(serde_json::json!({
+            "status":"partially_represented",
+            "outputs":[{"action":"create","pageId":"pg_prior","revisionId":"rev_prior"}]
+        }));
+        db.save().unwrap();
+    }
+    let error = r
+        .admin
+        .context_hub(ContextHubRequest::ReviewSynthesis(
+            pcp_client::context_hub::SynthesisReview {
+                synthesis_id: input.synthesis_id,
+                version: input.version,
+                outputs: input.outputs,
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("already produced a Page"));
+    assert_eq!(r.admin.page_count(vec![]).await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn partial_automatic_write_preserves_shared_unresolved_evidence_and_does_not_repeat() {
     let (r, input) = setup(2, true).await;
     finish(
@@ -667,8 +791,15 @@ async fn older_inboxes_keep_manual_review_until_operator_enables_automatic_write
 
 #[tokio::test]
 async fn terminal_receipt_expiry_does_not_expire_unresolved_sources_or_formal_memories() {
-    let (r, input) = setup(1, false).await;
-    finish(&r, &input, vec![assessment(0, "approve")]).await;
+    let (r, input) = setup(1, true).await;
+    // The remaining output is unresolved evidence; an open question alone
+    // no longer reopens a successfully published candidate.
+    finish(
+        &r,
+        &input,
+        vec![assessment(0, "approve"), assessment(1, "accumulating")],
+    )
+    .await;
     r.hub
         .resume_automatic_write(r.admin.access(), &[])
         .await
@@ -681,4 +812,83 @@ async fn terminal_receipt_expiry_does_not_expire_unresolved_sources_or_formal_me
     assert_eq!(db.state.candidates.len(), 1);
     assert_eq!(db.state.candidates[0].status, "pending");
     assert_eq!(r.admin.page_count(vec![]).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn legacy_completed_no_change_is_recovered_once_with_receipts_preserved() {
+    let (r, input) = setup(1, false).await;
+    {
+        let mut db = LockedState::open(&r.hub.path, r.store.identity_id())
+            .await
+            .unwrap();
+        let review = db.state.syntheses[0].automatic_review.as_mut().unwrap();
+        review.state = "accumulating".into();
+        review.input = Some(input.clone());
+        review.decisions = vec![assessment(0, "no_change")];
+        review.steps = steps();
+        db.state.candidates[0].result = Some(serde_json::json!({
+            "status":"partially_represented","sourceReceipt":"retained",
+            "outputs":[{"pageId":"pg_prior","revisionId":"rev_prior"}]
+        }));
+        db.save().unwrap();
+    }
+    for _ in 0..2 {
+        assert!(
+            r.hub
+                .prepare_automatic_review(r.admin.as_ref(), &[])
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let snapshot = r
+            .admin
+            .context_hub(ContextHubRequest::Inspect)
+            .await
+            .unwrap();
+        assert_eq!(snapshot["candidates"][0]["status"], "promoted");
+        assert_eq!(
+            snapshot["candidates"][0]["result"]["sourceReceipt"],
+            "retained"
+        );
+        assert_eq!(
+            snapshot["syntheses"][0]["automaticReview"]["state"],
+            "no_change"
+        );
+    }
+    assert_eq!(r.admin.page_count(vec![]).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn legacy_no_change_with_changed_evidence_reorganizes_instead_of_closing() {
+    let (r, input) = setup(1, false).await;
+    {
+        let mut db = LockedState::open(&r.hub.path, r.store.identity_id())
+            .await
+            .unwrap();
+        let review = db.state.syntheses[0].automatic_review.as_mut().unwrap();
+        review.state = "accumulating".into();
+        review.input = Some(input.clone());
+        review.input.as_mut().unwrap().intake_watermark = "2020-01-01T00:00:00Z".into();
+        review.decisions = vec![assessment(0, "no_change")];
+        review.steps = steps();
+        db.save().unwrap();
+    }
+    assert!(
+        r.hub
+            .prepare_automatic_review(r.admin.as_ref(), &[])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let snapshot = r
+        .admin
+        .context_hub(ContextHubRequest::Inspect)
+        .await
+        .unwrap();
+    assert_eq!(snapshot["candidates"][0]["status"], "pending");
+    assert_eq!(snapshot["candidates"][0]["organizedVersion"], 0);
+    assert_eq!(
+        snapshot["syntheses"][0]["automaticReview"]["state"],
+        "stale"
+    );
 }

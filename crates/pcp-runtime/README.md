@@ -132,9 +132,10 @@ retry_after_seconds = 3600
 ```
 
 Scheduled packing and Summary work may apply in `mode = "apply"`. A relation is
-applied automatically only for the narrow structural case of two continuous
-Pack Pages in one source stream with a shared protected identifier. General
-relations, archive recommendations, and high-impact feedback reconciliation enter
+applied automatically only when `relation.auto_apply_verified` is explicitly
+enabled and full-source verification approves it. Adjacent Pack Pages and shared
+identifiers do not bypass review. Other relations, archive recommendations, and
+high-impact feedback reconciliation enter
 one persistent typed review queue even in apply mode. Topic synthesis is separate
 from long-Page summarization: shared subject markers route short Pages together,
 and either `minimum_pages` or `minimum_total_chars` signals useful accumulation.
@@ -171,7 +172,25 @@ One cycle is bounded by `max_jobs_per_cycle`:
 7. Summary, Relation, Topic, and ordinary-update discovery take turns within the scheduled budget. Runtime may send subject-affinity and overlapping bounded current-Page routing windows as `select_relation`. Exact current Page pairs connected by provenance inputs are offered before broad recency windows, but provenance never asserts a Relation. The request lists already related or previously reviewed pairs; the worker can return only two other offered Page IDs. Runtime fixes the relation to symmetric `related_to`, binds the exact current Revisions as basis, rejects stale or excluded pairs, and sends general semantic relations to review.
 8. Runtime may synthesize a source-grounded Topic before all relation windows quiesce. Sources can span authorized Scopes; cross-Scope output requires `allow_cross_scope_derivation` and a writable destination. New Topics use `topic.target_scope` when set; otherwise the lexicographically first source Scope is selected explicitly. Refreshes preserve the existing Topic Scope. Valid accumulated Topics may apply under the opt-in above; other Topic proposals and archive recommendations are review items. Archive is never applied automatically.
 9. Runtime obtains a bounded dry-run Revision-payload retention plan and may ask the worker whether an eligible old Revision from that plan is a semantic milestone. These retention candidates are not Runtime context-inbox candidates.
-10. In apply mode only, validated low-risk reconciliation, Summary writes, packing, structurally low-risk Relations, eligible opted-in Topic synthesis, or finite retention leases cross into the PCP commit API. Leases additionally require `maintenance.retention.write_leases = true`. Lease selection and physical collection remain separate operations; the current maintainer does not collect Revision payloads automatically.
+10. In apply mode only, validated low-risk reconciliation, Summary writes, packing, explicitly opted-in and verified Relations, eligible opted-in Topic synthesis, or finite retention leases cross into the PCP commit API. Leases additionally require `maintenance.retention.write_leases = true`. Lease selection and physical collection remain separate operations; the current maintainer does not collect Revision payloads automatically.
+
+A fully covered source remains eligible for other subjects and new evidence.
+Ordinary-update discovery skips only a source paired with an exact current
+output named by that source's effective complete-coverage receipt, avoiding
+recursive re-fusion of an output with its own source. Explicit feedback remains
+reviewable. Partial outputs from other consolidations remain eligible. Losing
+current coverage restores ordinary discovery eligibility.
+
+Topic extraction creates a navigation Page and exact source links. While that
+route is current, its sources move behind the Topic in default retrieval; they
+remain readable and eligible for maintenance. Consolidation has a separate
+explicit complete-coverage gate for provenance-only sources. If either derived
+route becomes invalid, its own gate restores the source to default retrieval. A later or more detailed Page does not by itself narrow
+an earlier claim: `qualified` requires a specific changed assertion and condition,
+while `superseded` requires complete replacement. Mere shared subject is not a
+reason to add `related_to`; substantially overlapping content belongs in a
+reviewed fusion or split proposal. Pairwise discovery remains a candidate hint,
+so overlapping pending proposals must be compared together before approval.
 
 Runtime keeps cooldown decisions in `state_path`. This operational state is not
 written as user memory. Successful Summary writes remain traceable through normal
@@ -338,3 +357,45 @@ shared Scope, co-retrieval, lexical similarity, and broad analogies such as both
 discussing AI infrastructure or workspaces are not sufficient. When packing is
 enabled, unpacked sealed stream leaves are kept out of the relation window so a
 premature Relation cannot block lossless packing.
+
+
+### Convergence admission and existing-content comparison
+
+Automatic maintenance distinguishes useful output from model activity. Full
+batches that produce no content or actionable proposals back off even when
+inference was called. Each unchanged write-triggered region receives at most
+24 discovery jobs before the region is acknowledged; concurrent writes remain
+dirty, and a new source revision starts a fresh pass. Persisted progress survives
+restart. Periodic discovery keeps its separate small exploration budget.
+Changed Page IDs anchor the local neighborhood; legacy regions without those
+IDs conservatively use their prior region until that bounded pass finishes.
+
+Topic generation compares both current Topics and consolidated Pages, using the
+full inventory even for a local source window. Consolidated Pages are comparison
+evidence, never Topic refresh targets. A covered source and its own covering
+output alone are not independent input for a new Topic; the source remains usable
+with other evidence. Automatic drafts below the accumulation threshold stay out
+of the review queue even when automatic application is disabled. Approved drafts
+with sufficient evidence still count against actionable review backpressure.
+Existing below-threshold drafts remain visible as waiting for evidence.
+
+When review budgeting is enabled, total_max_calls (default 360) and
+total_max_tokens (default 8,000,000) bound rolling 24-hour admission across
+baseline inference and Sol/Astra upgrades. Upgraded calls also retain their tier
+limits. Unknown baseline usage retains its estimate for the window; a completed
+admitted call may exceed the estimate, after which new admission stops. This is
+an admission budget, not a provider-side token cap. Old upgraded attempts count
+immediately; baseline calls made before this ledger existed cannot be reconstructed
+from it. The maintenance budget snapshot exposes total actual and reserved usage.
+
+A strict schema failure can make one correction call with the same evidence and
+deployment, charged to the total budget. Missing indexes or reasons are never
+filled by local guesses; another invalid result remains isolated. Transport
+failures do not trigger this correction. Legacy completed all-no-change candidate
+reviews can settle without new inference only when their exact evidence is still
+current; changed evidence returns to organization, preserving earlier receipts.
+
+A new Topic wholly owned by one project Scope remains there. Mixed-Scope
+derivation requires an explicit configured destination and existing cross-Scope
+authority. A refresh keeps its target Scope. These rules do not infer semantic
+ownership from a client name and do not change automatic approval switches.

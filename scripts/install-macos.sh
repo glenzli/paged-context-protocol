@@ -23,15 +23,16 @@ escape_replacement() {
   printf '%s' "$1" | sed 's/[\\&|]/\\&/g'
 }
 
-wait_for_console_exit() {
+wait_for_console_unload() {
   attempt=0
-  while curl -fsS http://127.0.0.1:4318/api/health >/dev/null 2>&1; do
+  while launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 ||
+        curl -fsS http://127.0.0.1:4318/api/health >/dev/null 2>&1; do
     attempt=$((attempt + 1))
-    if [ "$attempt" -ge 50 ]; then
-      echo "PCP Console did not release port 4318 after launchd bootout" >&2
+    if [ "$attempt" -ge 150 ]; then
+      echo "PCP Console did not fully unload after launchd bootout" >&2
       return 1
     fi
-    sleep 0.1
+    sleep 0.2
   done
 }
 
@@ -40,15 +41,16 @@ bootstrap_console() {
   while ! launchctl bootstrap "$DOMAIN" "$PLIST_PATH"; do
     # launchd can report an error after accepting the job. Do not turn that race into a
     # duplicate bootstrap, and otherwise give a just-removed label a bounded time to settle.
-    if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+    if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 &&
+       curl -fsS http://127.0.0.1:4318/api/health >/dev/null 2>&1; then
       return 0
     fi
     attempt=$((attempt + 1))
-    if [ "$attempt" -ge 50 ]; then
+    if [ "$attempt" -ge 150 ]; then
       echo "PCP Console could not be loaded after $attempt attempts" >&2
       return 1
     fi
-    sleep 0.1
+    sleep 0.2
   done
 }
 
@@ -84,7 +86,7 @@ plutil -lint "$temporary" >/dev/null
 chmod 600 "$temporary"
 
 launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
-wait_for_console_exit
+wait_for_console_unload
 mv "$temporary" "$PLIST_PATH"
 trap - EXIT
 bootstrap_console

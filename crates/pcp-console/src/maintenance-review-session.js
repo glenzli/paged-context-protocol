@@ -147,15 +147,20 @@ export function restoreReviewDecisions(serialized) {
   }
 }
 
-// Group for presentation only: every alternative retains its own explicit decision.
-export function groupReviewTopics(reviews) {
-  const groups = [];
+// Group overlapping drafts for comparison; every decision remains independent.
+export function groupReviewProposals(reviews) {
   const terms = (title) => {
     const text = String(title || "").toLowerCase().replace(/[\s\p{P}\p{S}]/gu, "");
     return new Set(Array.from({ length: Math.max(0, text.length - 2) }, (_, i) => text.slice(i, i + 3)));
   };
   const related = (a, b) => {
+    if (reviewKind(a) !== reviewKind(b)) return false;
     const ca = a.payload.candidate, cb = b.payload.candidate;
+    if (reviewKind(a) === "reconciliation") {
+      const ids = new Set([ca.target, ...(ca.evidence || [])].map((p) => p?.pageId).filter(Boolean));
+      return [cb.target, ...(cb.evidence || [])].some((p) => ids.has(p?.pageId));
+    }
+    if (reviewKind(a) !== "topic") return false;
     if (ca.refreshTarget?.pageId && ca.refreshTarget.pageId === cb.refreshTarget?.pageId) return true;
     const sources = new Set((ca.pages || []).map((p) => p.pageId));
     if ((cb.pages || []).filter((p) => sources.has(p.pageId)).length >= 2) return true;
@@ -163,11 +168,21 @@ export function groupReviewTopics(reviews) {
     const shared = [...left].filter((t) => right.has(t)).length;
     return shared >= 4 && shared / Math.max(1, left.size + right.size - shared) >= 0.55;
   };
-  for (const review of reviews) {
-    const group = reviewKind(review) === "topic"
-      ? groups.find((g) => reviewKind(g[0]) === "topic" && related(g[0], review)) : null;
-    if (group) group.push(review);
-    else groups.push([review]);
+  const parent = reviews.map((_, index) => index);
+  const root = (index) => {
+    while (parent[index] !== index) index = parent[index];
+    return index;
+  };
+  for (let left = 0; left < reviews.length; left += 1) {
+    for (let right = left + 1; right < reviews.length; right += 1) {
+      if (related(reviews[left], reviews[right])) parent[root(right)] = root(left);
+    }
   }
-  return groups;
+  const groups = new Map();
+  reviews.forEach((review, index) => {
+    const key = root(index);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(review);
+  });
+  return [...groups.values()];
 }

@@ -450,6 +450,8 @@ pub struct RelationMaintenanceConfig {
     /// Verify full sources before automatically adding ordinary related_to edges.
     #[serde(default)]
     pub auto_apply_verified: bool,
+    /// Stop discovering new links while the unresolved relation queue is full.
+    pub max_pending_reviews: usize,
     pub candidate_window: usize,
     pub routing_chars_per_page: usize,
     pub retry_after_seconds: u64,
@@ -571,6 +573,7 @@ impl Default for RelationMaintenanceConfig {
         Self {
             enabled: false,
             auto_apply_verified: false,
+            max_pending_reviews: 24,
             candidate_window: 24,
             routing_chars_per_page: 800,
             retry_after_seconds: 86_400,
@@ -671,6 +674,10 @@ impl MaintenanceConfig {
         anyhow::ensure!(
             !self.relation.enabled || (2..=64).contains(&self.relation.candidate_window),
             "PCP relation candidate_window must be between 2 and 64"
+        );
+        anyhow::ensure!(
+            !self.relation.enabled || (1..=1000).contains(&self.relation.max_pending_reviews),
+            "PCP relation max_pending_reviews must be between 1 and 1000"
         );
         anyhow::ensure!(
             !self.relation.enabled || (1..=4_096).contains(&self.relation.routing_chars_per_page),

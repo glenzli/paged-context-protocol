@@ -3,7 +3,7 @@ import test from "node:test";
 
 import {
   REVIEW_DECISION,
-  groupReviewTopics,
+  groupReviewProposals,
   partitionReviewSession,
   partitionReviewQueues,
   reconcileReviewDecisions,
@@ -19,11 +19,12 @@ function review(candidateId, kind = "summary") {
   return { candidateId, payload: { kind, candidate: {} } };
 }
 
-test("automatic, budget, and accumulation waits never count as human decisions or disappear", () => {
+test("paused and waiting proposals stay visible without inflating human decisions", () => {
   const human = review("human");
-  const waiting = ["automatic", "waiting_budget", "waiting_accumulation", "paused", "stale"].map((state) => ({ ...review(state, "topic"), queue: { state } }));
-  const reviews = [human, ...waiting];
-  assert.deepEqual(partitionReviewQueues(reviews), { human: [human], background: waiting });
+  const waiting = ["automatic", "waiting_budget", "waiting_accumulation", "stale"].map((state) => ({ ...review(state, "topic"), queue: { state } }));
+  const paused = { ...review("paused", "topic"), queue: { state: "paused" } };
+  const reviews = [human, paused, ...waiting];
+  assert.deepEqual(partitionReviewQueues(reviews), { human: [human], background: [paused, ...waiting] });
   const decisions = new Map();
   stageReviewDecision(decisions, waiting[2], REVIEW_DECISION.DEFER);
   const session = partitionReviewSession(reviews, decisions);
@@ -131,12 +132,16 @@ test("legacy staged decisions require a fresh review instead of unbound approval
   assert.equal(restored.size, 0);
 });
 
- test("topic grouping keeps distinct decisions and rejection reasons survive reload", () => {
+test("overlapping proposals group transitively while decisions remain separate", () => {
  const a = review("a", "topic"), b = review("b", "topic"), c = review("c", "topic");
  a.payload.candidate = {title:"PCP review", pages:[{pageId:"1"},{pageId:"2"}]};
- b.payload.candidate = {title:"Reworded", pages:[{pageId:"1"},{pageId:"2"}]};
- c.payload.candidate = {title:"Unrelated", pages:[{pageId:"3"}]};
- assert.deepEqual(groupReviewTopics([a,b,c]).map(g => g.map(r => r.candidateId)), [["a","b"],["c"]]);
+ b.payload.candidate = {title:"Reworded", pages:[{pageId:"1"},{pageId:"2"},{pageId:"3"},{pageId:"4"}]};
+ c.payload.candidate = {title:"Other part", pages:[{pageId:"3"},{pageId:"4"}]};
+ assert.deepEqual(groupReviewProposals([a,c,b]).map(g => g.map(r => r.candidateId)), [["a","c","b"]]);
+ const old = review("old", "reconciliation"), other = review("other", "reconciliation");
+ old.payload.candidate = {target:{pageId:"old-page"},evidence:[{pageId:"shared"}]};
+ other.payload.candidate = {target:{pageId:"new-page"},evidence:[{pageId:"shared"}]};
+ assert.deepEqual(groupReviewProposals([old,a,other]).map(g => g.map(r => r.candidateId)), [["old","other"],["a"]]);
  const decisions = new Map();
  stageReviewDecision(decisions, a, REVIEW_DECISION.REJECT).reason = "no_increment";
  const restored = restoreReviewDecisions(serializeReviewDecisions(decisions));

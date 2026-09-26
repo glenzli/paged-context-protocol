@@ -27,6 +27,9 @@ pub struct ReviewBudgetConfig {
     pub astra_deployment_id: String,
     pub sol_effort: String,
     pub astra_effort: String,
+    /// Shared rolling admission budget for baseline and upgraded inference.
+    pub total_max_calls: u32,
+    pub total_max_tokens: u64,
     pub sol_max_calls: u32,
     pub sol_max_tokens: u64,
     pub astra_enabled: bool,
@@ -56,6 +59,8 @@ impl Default for ReviewBudgetConfig {
             astra_deployment_id: "codex_gpt_6_astra".into(),
             sol_effort: "high".into(),
             astra_effort: "low".into(),
+            total_max_calls: 360,
+            total_max_tokens: 8_000_000,
             sol_max_calls: 300,
             sol_max_tokens: 6_000_000,
             astra_enabled: true,
@@ -80,7 +85,11 @@ impl ReviewBudgetConfig {
             "unsupported review reasoning effort"
         );
         ensure!(
-            self.sol_max_calls > 0 && self.sol_max_tokens > 0 && self.astra_max_calls > 0,
+            self.total_max_calls > 0
+                && self.total_max_tokens > 0
+                && self.sol_max_calls > 0
+                && self.sol_max_tokens > 0
+                && self.astra_max_calls > 0,
             "review budgets must be positive"
         );
         ensure!(
@@ -150,9 +159,30 @@ pub struct ReviewAttempt {
 #[derive(Default, Deserialize, Serialize)]
 struct BudgetLedger {
     #[serde(default)]
+    baseline_calls: BTreeMap<String, BaselineCall>,
+
+    #[serde(default)]
     clock_ms: u64,
     #[serde(default)]
     attempts: BTreeMap<String, ReviewAttempt>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct BaselineCall {
+    submitted_at_ms: u64,
+    reserved_tokens: u64,
+    actual_tokens: Option<u64>,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TotalBudgetStatus {
+    pub max_calls: u32,
+    pub max_tokens: u64,
+    pub used_calls: u32,
+    pub actual_tokens: u64,
+    pub reserved_tokens: u64,
+    pub remaining_calls: u32,
+    pub remaining_tokens: u64,
+    pub next_release_at_ms: Option<u64>,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -174,6 +204,7 @@ pub struct BudgetSnapshot {
     pub token_limit_mode: TokenLimitMode,
     pub window_seconds: u64,
     pub in_flight: u32,
+    pub total: TotalBudgetStatus,
     pub sol: TierBudgetStatus,
     pub astra: TierBudgetStatus,
     pub attempts: Vec<ReviewAttempt>,
@@ -228,6 +259,86 @@ impl BudgetStore {
         }
         Ok(result)
     }
+    pub fn reserve_baseline(&self, tokens: u64) -> Result<String> {
+        self.transaction(|ledger, now| {
+            let total = self.total_status(ledger, now);
+            ensure!(
+                total.remaining_calls > 0 && total.remaining_tokens >= tokens,
+                "PCP total maintenance budget exhausted; waiting for rolling budget release"
+            );
+            ledger
+                .baseline_calls
+                .retain(|_, call| now.saturating_sub(call.submitted_at_ms) < WINDOW_MS);
+            let key = uuid::Uuid::new_v4().to_string();
+            ledger.baseline_calls.insert(
+                key.clone(),
+                BaselineCall {
+                    submitted_at_ms: now,
+                    reserved_tokens: tokens,
+                    actual_tokens: None,
+                },
+            );
+            Ok(key)
+        })
+    }
+
+    pub fn settle_baseline(&self, key: &str, tokens: Option<u64>) -> Result<()> {
+        self.transaction(|ledger, _| {
+            let call = ledger
+                .baseline_calls
+                .get_mut(key)
+                .context("missing baseline reservation")?;
+            if call.actual_tokens.is_none() {
+                call.actual_tokens = tokens;
+            }
+            Ok(())
+        })
+    }
+
+    fn total_status(&self, ledger: &BudgetLedger, now: u64) -> TotalBudgetStatus {
+        let mut used = 0u32;
+        let mut actual = 0u64;
+        let mut reserved = 0u64;
+        let mut next: Option<u64> = None;
+        let calls = ledger
+            .baseline_calls
+            .values()
+            .map(|c| (c.submitted_at_ms, c.reserved_tokens, c.actual_tokens))
+            .chain(
+                ledger
+                    .attempts
+                    .values()
+                    .filter(|a| a.state != "not_submitted")
+                    .map(|a| (a.submitted_at_ms, a.reserved_tokens, a.actual_tokens)),
+            );
+        for (at, estimate, measured) in
+            calls.filter(|(at, _, _)| now.saturating_sub(*at) < WINDOW_MS)
+        {
+            used = used.saturating_add(1);
+            if let Some(n) = measured {
+                actual = actual.saturating_add(n);
+            } else {
+                reserved = reserved.saturating_add(estimate);
+            }
+            next = Some(next.map_or(at.saturating_add(WINDOW_MS), |n| {
+                n.min(at.saturating_add(WINDOW_MS))
+            }));
+        }
+        TotalBudgetStatus {
+            max_calls: self.config.total_max_calls,
+            max_tokens: self.config.total_max_tokens,
+            used_calls: used,
+            actual_tokens: actual,
+            reserved_tokens: reserved,
+            remaining_calls: self.config.total_max_calls.saturating_sub(used),
+            remaining_tokens: self
+                .config
+                .total_max_tokens
+                .saturating_sub(actual.saturating_add(reserved)),
+            next_release_at_ms: next,
+        }
+    }
+
     pub fn reserve(
         &self,
         evidence: &str,
@@ -242,6 +353,13 @@ impl BudgetStore {
         self.transaction(|ledger, now| {
             if let Some(old) = ledger.attempts.get(&key) {
                 return Ok(Admission::Existing(old.clone()));
+            }
+            let total = self.total_status(ledger, now);
+            if total.remaining_calls == 0 || total.remaining_tokens < tokens {
+                return Ok(Admission::Waiting(
+                    "PCP total maintenance budget exhausted; waiting for rolling budget release"
+                        .into(),
+                ));
             }
             let active = ledger
                 .attempts
@@ -375,6 +493,7 @@ impl BudgetStore {
                 token_limit_mode: self.config.token_limit_mode,
                 window_seconds: WINDOW_MS / 1000,
                 in_flight: l.attempts.values().filter(|a| occupies_slot(a)).count() as u32,
+                total: self.total_status(l, now),
                 sol: self.tier_status(l, now, ReviewTier::Sol),
                 astra: self.tier_status(l, now, ReviewTier::Astra),
                 attempts,
@@ -503,6 +622,59 @@ mod tests {
         )
         .unwrap()
     }
+
+    #[test]
+    fn baseline_and_upgrades_share_persisted_total_budget() {
+        let (_dir, mut s) = store();
+        s.config.total_max_calls = 2;
+        s.config.total_max_tokens = 200;
+        let baseline = s.reserve_baseline(90).unwrap();
+        s.settle_baseline(&baseline, Some(30)).unwrap();
+        let Admission::Reserved(upgrade) = reserve(&s, "upgrade") else {
+            panic!()
+        };
+        let reopened = BudgetStore::new(s.config.clone());
+        let total = reopened.snapshot().unwrap().total;
+        assert_eq!(total.used_calls, 2);
+        assert_eq!(total.actual_tokens, 30);
+        assert_eq!(total.reserved_tokens, 80);
+        assert_eq!(total.remaining_tokens, 90);
+        assert!(reopened.reserve_baseline(1).is_err());
+        assert!(matches!(reserve(&reopened, "other"), Admission::Waiting(_)));
+        assert!(matches!(
+            reserve(&reopened, "upgrade"),
+            Admission::Existing(_)
+        ));
+        reopened
+            .settle(&upgrade.key, Some(60), None, "completed")
+            .unwrap();
+        assert_eq!(reopened.snapshot().unwrap().total.used_calls, 2);
+        assert_eq!(reopened.snapshot().unwrap().total.actual_tokens, 90);
+    }
+
+    #[test]
+    fn unknown_baseline_usage_reserves_tokens_until_rolling_release() {
+        let (_dir, mut s) = store();
+        s.config.total_max_tokens = 100;
+        let key = s.reserve_baseline(95).unwrap();
+        s.settle_baseline(&key, None).unwrap();
+        let reopened = BudgetStore::new(s.config.clone());
+        assert_eq!(reopened.snapshot().unwrap().total.reserved_tokens, 95);
+        assert!(reopened.reserve_baseline(6).is_err());
+        assert!(matches!(
+            reserve(&reopened, "upgrade"),
+            Admission::Waiting(_)
+        ));
+        reopened
+            .transaction(|ledger, now| {
+                ledger.baseline_calls.get_mut(&key).unwrap().submitted_at_ms = now - WINDOW_MS - 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(reopened.snapshot().unwrap().total.used_calls, 0);
+        assert!(reopened.reserve_baseline(100).is_ok());
+    }
+
     #[test]
     fn defaults_and_legacy_hard_config_use_admission() {
         assert_eq!(

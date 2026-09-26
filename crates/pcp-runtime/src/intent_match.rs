@@ -411,7 +411,13 @@ impl IntentMatchProvider {
                 let relations = neighbor
                     .graph_edges
                     .iter()
-                    .filter(|edge| edge.edge_kind == GraphEdgeKind::Relation)
+                    .filter(|edge| {
+                        edge.edge_kind == GraphEdgeKind::Relation
+                            || (seed.kind == "consolidated"
+                                && edge.edge_kind == GraphEdgeKind::Provenance
+                                && edge.relation_type == "derived_from"
+                                && edge.direction == GraphEdgeDirection::Outgoing)
+                    })
                     .map(|edge| {
                         format!(
                             "{} ({})",

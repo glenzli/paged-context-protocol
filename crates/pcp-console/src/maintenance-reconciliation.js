@@ -3,10 +3,10 @@ export function reconciliationView(candidate = {}) {
   const evidence = candidate.evidence || [];
   const replacement = evidence.find((page) => page.revisionId === candidate.replacement?.revisionId);
   const target = candidate.target || {};
-  const panels = [{label: "Current evidence", page: target}];
+  const panels = [{label: candidate.signal ? "Current evidence" : "Earlier Page", page: target}];
   if (replacement) panels.push({label: "Proposed replacement", page: replacement});
   for (const page of evidence) {
-    if (page !== replacement) panels.push({label: "Correction evidence", page});
+    if (page !== replacement) panels.push({label: candidate.signal ? "Correction evidence" : "Later related Page", page});
   }
   const scopes = new Set([target.namespace, candidate.feedback?.namespace, ...evidence.map((page) => page.namespace)].filter(Boolean));
   return {

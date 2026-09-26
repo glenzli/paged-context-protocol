@@ -35,7 +35,7 @@ PCP_HOME="$HOME/Library/Application Support/PCP"
 "$PCP_HOME/bin/pcp-chatgpt-mcp" enroll status
 ```
 
-The requested policy contributes only to `user:self` and reads all current Scopes. Runtime resolves `user:self` to this Store's user Scope. Reopen the MCP session after a new Scope is created if it should become readable.
+The default requested policy contributes only to `user:self` and reads all current Scopes. Runtime resolves `user:self` to this Store's user Scope. To request project write access for a new enrollment, set `PCP_SHARED_WRITE_SCOPES` to an explicit comma-separated list such as `user:self,project:shadow`; each literal project Scope must already exist. An existing approved enrollment keeps its original grants: request and approve a new registration in a separate enrollment state file before switching the launcher to it. The launcher prefers `clients/chatgpt-pcp-projects.json` when that file exists; otherwise it uses `clients/chatgpt-pcp.json`. Set `PCP_CHATGPT_ENROLLMENT_FILE` to override either default. Place the project enrollment file at the preferred path only after approval, then reopen the MCP session. Reopen the session again after a new Scope is created if it should become readable.
 
 ## 3. Configure Secure MCP Tunnel
 
@@ -132,6 +132,13 @@ Both tools can omit `scope` when a live session check identifies exactly one Sco
 with ingest access. Multiple writable Scopes, no writable Scope, or store-wide
 ingest permission require an explicit destination; the adapter never picks the
 first readable Scope. Runtime still checks Scope access and Console opt-in.
+
+Route writes by subject: cross-project user preferences and constraints to the user Scope;
+project decisions, project experience and project activity to the matching authorized project
+Scope. Keep useful experience beside its project evidence rather than in a generic experience
+Scope. With multiple writable Scopes, `scope` is required for capture, candidate and activity
+writes. Check the Scope inventory when ownership is unclear; never silently fall back to
+`user:self` or infer ownership from `captureSurface` or a SourceRef.
 
 Candidates can omit `eventId`: the adapter derives a stable identifier from the
 exact destination, title, content and evidence fields. Identical retries reuse it

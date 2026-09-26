@@ -20,6 +20,7 @@ mod retract;
 mod row;
 mod runtime_usage;
 mod schema;
+mod scope_transfer;
 mod search;
 mod store;
 mod summary;

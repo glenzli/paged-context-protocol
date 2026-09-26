@@ -524,3 +524,148 @@ async fn new_feedback_evidence_is_offered_separately_and_cross_scope_dispute_wai
     drop(requests);
     f.close().await;
 }
+
+#[tokio::test]
+async fn covered_source_skips_own_output_but_remains_available_for_new_evidence() {
+    let f = fixture().await;
+    let old = f
+        .client
+        .write_page(f.page(
+            "PCP source evidence retains the original workflow boundary.",
+            "covered-loop:old",
+        ))
+        .await
+        .unwrap();
+    let second = f
+        .client
+        .write_page(f.page(
+            "PCP source evidence adds the workflow validation boundary.",
+            "covered-loop:second",
+        ))
+        .await
+        .unwrap();
+    let published = f.client.consolidate_pages(pcp_core::ConsolidatePagesRequest {
+        namespace: f.namespace.clone(),
+        source_pages: vec![
+            pcp_core::PageRevisionRef { page_id: old.page_id.clone(), revision_id: old.revision_id.clone() },
+            pcp_core::PageRevisionRef { page_id: second.page_id.clone(), revision_id: second.revision_id.clone() },
+        ],
+        outputs: vec![ConsolidatedPageOutput {
+            title: "Workflow boundaries".into(),
+            content: "PCP source evidence retains the original workflow boundary and adds the validation boundary.".into(),
+            source_indexes: vec![0, 1],
+        }],
+        coverage: (0..2).map(|source_index| ConsolidationCoverage {
+            source_index,
+            output_indexes: vec![0],
+            explanation: "Both complete source boundaries are retained.".into(),
+            complete: true,
+        }).collect(),
+        created_by: Actor { actor_type: ActorType::Tool, actor_id: "operator".into() },
+        idempotency_key: "covered-loop:publish".into(),
+    }).await.unwrap();
+    let output = &published.outputs[0];
+    let mut independent = f.page(
+        "PCP source evidence now adds a separate workflow authorization condition.",
+        "covered-loop:independent",
+    );
+    independent.provenance = vec![ProvenanceEvent {
+        operation: "derive".into(),
+        actor: Actor {
+            actor_type: ActorType::Tool,
+            actor_id: "independent-observer".into(),
+        },
+        timestamp: "2026-09-26T00:00:00Z".into(),
+        input_revision_ids: vec![old.revision_id.clone()],
+        tool_or_model: None,
+        reason: None,
+    }];
+    let independent = f.client.write_page(independent).await.unwrap();
+
+    let partial = f.client.consolidate_pages(pcp_core::ConsolidatePagesRequest {
+        namespace: f.namespace.clone(),
+        source_pages: vec![
+            pcp_core::PageRevisionRef { page_id: old.page_id.clone(), revision_id: old.revision_id.clone() },
+            pcp_core::PageRevisionRef { page_id: independent.page_id.clone(), revision_id: independent.revision_id.clone() },
+        ],
+        outputs: vec![ConsolidatedPageOutput {
+            title: "Separate authorization condition".into(),
+            content: "PCP workflow authorization now has a separate condition; this output does not preserve the original boundary.".into(),
+            source_indexes: vec![0, 1],
+        }],
+        coverage: vec![
+            ConsolidationCoverage { source_index: 0, output_indexes: vec![0], explanation: "The original boundary is not fully preserved here.".into(), complete: false },
+            ConsolidationCoverage { source_index: 1, output_indexes: vec![0], explanation: "The independent authorization observation is fully preserved.".into(), complete: true },
+        ],
+        created_by: Actor { actor_type: ActorType::Tool, actor_id: "operator".into() },
+        idempotency_key: "covered-loop:partial-output".into(),
+    }).await.unwrap();
+    let inventory = f.client.durable_page_inventory(vec![]).await.unwrap();
+    let source = inventory.iter().find(|p| p.page_id == old.page_id).unwrap();
+    let canonical = inventory
+        .iter()
+        .find(|p| p.page_id == output.page_id)
+        .unwrap();
+    assert!(source.source_only);
+    assert_eq!(
+        source.consolidation_covering_revision_ids,
+        vec![output.revision_id.clone()]
+    );
+    let partial_output = inventory
+        .iter()
+        .find(|p| p.page_id == partial.outputs[0].page_id)
+        .unwrap();
+    assert!(!super::super::update_discovery::is_covered_source_output_pair(source, partial_output));
+    assert!(super::super::update_discovery::is_covered_source_output_pair(source, canonical));
+    let pairs = super::super::update_discovery::candidate_pairs(&inventory);
+    assert!(!pairs.iter().any(|(a, b)| {
+        [old.page_id.as_str(), output.page_id.as_str()]
+            .iter()
+            .all(|id| a.page_id == *id || b.page_id == *id)
+    }));
+    assert!(
+        pairs
+            .iter()
+            .any(|(a, b)| { a.page_id == old.page_id && b.page_id == independent.page_id })
+    );
+    assert!(
+        pairs
+            .iter()
+            .any(|(a, b)| { a.page_id == old.page_id && b.page_id == partial.outputs[0].page_id })
+    );
+    // Source-only routing does not archive sources or make them unreadable.
+    let read = f
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![old.page_id.clone()],
+            revision_ids: vec![],
+            projections: vec![Projection::Payload],
+            max_chars: 4000,
+        })
+        .await
+        .unwrap();
+    assert!(
+        read[0]
+            .revision
+            .payload
+            .as_ref()
+            .unwrap()
+            .content
+            .contains("original workflow")
+    );
+    // Loss of canonical coverage must not permanently suppress the source.
+    f.client
+        .archive_page(pcp_core::ArchivePageRequest {
+            page_id: output.page_id.clone(),
+            expected_revision_id: output.revision_id.clone(),
+            reason: Some("Coverage no longer current".into()),
+        })
+        .await
+        .unwrap();
+    let restored = f.client.durable_page_inventory(vec![]).await.unwrap();
+    let source = restored.iter().find(|p| p.page_id == old.page_id).unwrap();
+    assert!(!source.source_only);
+    assert!(source.consolidation_covering_revision_ids.is_empty());
+    assert!(!super::super::update_discovery::is_covered_source_output_pair(source, canonical));
+    f.close().await;
+}

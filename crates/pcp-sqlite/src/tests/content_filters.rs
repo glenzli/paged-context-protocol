@@ -141,8 +141,24 @@ async fn content_roles_filter_before_pagination_and_follow_exact_revisions() {
 
     let all = browse(&client, None, false, None, 20, None).await;
     assert_eq!(all.total_pages, 5); // No attached-summary duplicate and no other scope.
+    let library_summary = client
+        .content_library_summary(vec![namespace.into()])
+        .await
+        .unwrap();
+    assert_eq!(library_summary.page_count, 5);
+    assert_eq!(library_summary.source_only_page_count, Some(0));
+    assert_eq!(library_summary.secondary_search_page_count, Some(2));
+    assert_eq!(library_summary.condensed_page_count, Some(1));
     assert_eq!(all.page_roles[&pages[2].page_id], ContentPageRole::Other);
     assert_eq!(all.page_roles[&topic.page_id], ContentPageRole::Condensed);
+    assert_eq!(
+        all.page_roles[&pages[0].page_id],
+        ContentPageRole::CoveredSource
+    );
+    assert_eq!(
+        all.page_roles[&pages[1].page_id],
+        ContentPageRole::CoveredSource
+    );
     let condensed = browse(
         &client,
         Some(ContentPageRole::Condensed),
@@ -154,18 +170,10 @@ async fn content_roles_filter_before_pagination_and_follow_exact_revisions() {
     .await;
     assert_eq!(condensed.total_pages, 1);
     assert_eq!(condensed.hits[0].page_id, topic.page_id);
-    let first = browse(
-        &client,
-        Some(ContentPageRole::CoveredSource),
-        false,
-        None,
-        1,
-        None,
-    )
-    .await;
+    let first = browse(&client, Some(ContentPageRole::Other), false, None, 1, None).await;
     let second = browse(
         &client,
-        Some(ContentPageRole::CoveredSource),
+        Some(ContentPageRole::Other),
         false,
         None,
         1,
@@ -180,15 +188,15 @@ async fn content_roles_filter_before_pagination_and_follow_exact_revisions() {
     assert!(second.next_cursor.is_none());
     let text = browse(
         &client,
-        Some(ContentPageRole::CoveredSource),
+        Some(ContentPageRole::Other),
         false,
-        Some("alpha"),
+        Some("Ordinary tenant"),
         20,
         None,
     )
     .await;
     assert_eq!(text.total_pages, 1);
-    assert_eq!(text.hits[0].page_id, pages[0].page_id);
+    assert_eq!(text.hits[0].page_id, pages[2].page_id);
     let attached = browse(
         &client,
         Some(ContentPageRole::Other),
@@ -216,7 +224,7 @@ async fn content_roles_filter_before_pagination_and_follow_exact_revisions() {
     assert_eq!(empty.total_pages, 0);
     assert!(empty.hits.is_empty());
 
-    // Updating a source does not imply the old Topic covers the new Revision.
+    // Updating a source does not turn its earlier Topic membership into coverage.
     for index in [0, 3] {
         store
             .revise_page(
