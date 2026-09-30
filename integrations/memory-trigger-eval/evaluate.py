@@ -17,7 +17,7 @@ SOURCE = HERE.parents[1] / "crates/pcp-mcp/src/lib.rs"
 TOOLS = {
     "pcp_capture", "pcp_submit_candidate", "pcp_publish_activity",
     "pcp_read_activity", "pcp_semantic_search", "pcp_search_pages",
-    "pcp_read_pages", "pcp_submit_feedback",
+    "pcp_read_pages", "pcp_submit_feedback", "pcp_ensure_project_scope",
 }
 
 

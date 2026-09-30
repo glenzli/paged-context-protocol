@@ -4,3 +4,6 @@
 /.infer-runtime/
 /.agent-coordination/
 .DS_Store
+
+# Conversation evaluation datasets stay local.
+/integrations/memory-trigger-eval/conversations.json
