@@ -17,12 +17,12 @@ fn toolset_profiles_are_bounded_and_context_arguments_are_tenant_safe() {
     let context = profile(PcpMcpToolset::Context, true);
     let standard = profile(PcpMcpToolset::Standard, true);
     let maintenance = profile(PcpMcpToolset::Maintenance, true);
-    assert_eq!(core.len(), 5);
-    assert_eq!(context.len(), 11);
-    assert_eq!(standard.len(), 14);
+    assert_eq!(core.len(), 6);
+    assert_eq!(context.len(), 12);
+    assert_eq!(standard.len(), 15);
     assert_eq!(maintenance.len(), tools.len());
-    assert_eq!(profile(PcpMcpToolset::Context, false).len(), 8);
-    assert_eq!(profile(PcpMcpToolset::Standard, false).len(), 11);
+    assert_eq!(profile(PcpMcpToolset::Context, false).len(), 9);
+    assert_eq!(profile(PcpMcpToolset::Standard, false).len(), 12);
 
     let chars = serde_json::to_string(&context).unwrap().chars().count();
     let instructions = PcpMcpSurface::Codex.instructions().chars().count();
@@ -277,7 +277,10 @@ async fn core_wire_is_compact_retrievable_and_permission_bound() {
     let info = client.peer_info().unwrap();
     let instruction_chars = info.instructions.as_ref().unwrap().chars().count();
     assert!(instruction_chars <= 800);
-    assert!(definition_chars + instruction_chars * tools.len() < 18_000);
+    assert!(
+        definition_chars + instruction_chars * tools.len() < 18_000,
+        "definitions={definition_chars}, instructions={instruction_chars}"
+    );
     for format in ["json", "text"] {
         let result = client
             .call_tool(
@@ -342,4 +345,33 @@ async fn core_wire_is_compact_retrievable_and_permission_bound() {
     drop(client);
     task.await.unwrap();
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn project_registration_and_routing_are_available_without_operator_parameters() {
+    let tools = PcpMcpServer::tool_router().list_all();
+    let ensure = tools
+        .iter()
+        .find(|t| t.name == "pcp_ensure_project_scope")
+        .unwrap();
+    assert_eq!(
+        ensure.annotations.as_ref().unwrap().read_only_hint,
+        Some(false)
+    );
+    for forbidden in [
+        "credential",
+        "registrationId",
+        "allowProjectRegistration",
+        "principalId",
+    ] {
+        assert!(ensure.input_schema["properties"].get(forbidden).is_none());
+    }
+    for name in [
+        "pcp_capture",
+        "pcp_submit_candidate",
+        "pcp_publish_activity",
+    ] {
+        let tool = tools.iter().find(|t| t.name == name).unwrap();
+        assert!(tool.input_schema["properties"].get("projectKey").is_some());
+    }
 }

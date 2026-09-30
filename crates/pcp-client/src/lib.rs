@@ -2,6 +2,7 @@ use std::sync::Arc;
 pub mod context_hub;
 pub mod experience;
 pub mod model_context;
+pub mod project_scope;
 use std::{
     collections::{BTreeSet, HashSet, VecDeque},
     str::FromStr,
@@ -171,6 +172,14 @@ pub trait PcpTenantApi: Send + Sync {
         _request: context_hub::ContextHubRequest,
     ) -> Result<serde_json::Value> {
         anyhow::bail!("Runtime context inbox is unavailable on this endpoint")
+    }
+
+    /// Explicitly register/reuse a project under an operator-approved enrollment policy.
+    async fn ensure_project_scope(
+        &self,
+        _request: project_scope::ProjectScopeRequest,
+    ) -> Result<project_scope::ProjectScopeResult> {
+        anyhow::bail!("project registration requires an enrolled PCP connection")
     }
 
     async fn list_scopes(

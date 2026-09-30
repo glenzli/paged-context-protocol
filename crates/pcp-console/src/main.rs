@@ -586,6 +586,10 @@ fn router(state: AppState) -> Router {
             "/api/maintenance/relation-reviews/{candidate_id}/reject",
             post(reject_relation_review),
         )
+        .route(
+            "/api/enrollment/registrations/{registration_id}/project-policy",
+            post(set_project_registration_policy),
+        )
         .route("/api/access", get(access_log))
         .route("/api/enrollment", get(enrollment_snapshot))
         .route(
@@ -1564,13 +1568,16 @@ async fn maintenance_reviews(State(state): State<AppState>) -> Result<Json<Value
     Ok(Json(json!({"reviews": operator.routed_reviews().await?})))
 }
 
-async fn create_consolidation(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<ConsoleConsolidationRequest>,
-) -> Result<Json<Value>, ApiError> {
-    require_console_mutation(&headers)?;
-    let mut operator = maintenance_operator_for_console(&state).await?;
+// Every error from this phase precedes the consolidation RPC. The client must
+// still retain an earlier uncertain attempt when retrying the same plan.
+async fn prepare_consolidation(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: &ConsoleConsolidationRequest,
+) -> Result<MaintenanceOperator, ApiError> {
+    require_console_mutation(headers)?;
+    validate_console_consolidation(request)?;
+    let operator = maintenance_operator_for_console(state).await?;
     let review = operator
         .review_item(&request.review_candidate_id)
         .context("unknown PCP reconciliation review")?;
@@ -1622,6 +1629,40 @@ async fn create_consolidation(
             .into());
         }
     }
+    Ok(operator)
+}
+
+fn validate_console_consolidation(request: &ConsoleConsolidationRequest) -> Result<(), ApiError> {
+    if !request.coverage.iter().any(|decision| decision.complete) {
+        return Err(anyhow::anyhow!(
+            "Confirm full coverage for at least one source before publishing."
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn consolidation_not_applied(error: ApiError) -> Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({
+            "error": format!("{:#}", error.0),
+            "code": "consolidation_validation_failed",
+            "mutationOutcome": "not_applied",
+        })),
+    )
+        .into_response()
+}
+
+async fn create_consolidation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ConsoleConsolidationRequest>,
+) -> Result<Response, ApiError> {
+    let mut operator = match prepare_consolidation(&state, &headers, &request).await {
+        Ok(operator) => operator,
+        Err(error) => return Ok(consolidation_not_applied(error)),
+    };
     let principal = &state.client.access().principal;
     let result = state
         .client
@@ -1643,7 +1684,7 @@ async fn create_consolidation(
             MaintenanceReviewStatus::Rejected,
         )
         .await?;
-    Ok(Json(json!(result)))
+    Ok(Json(json!(result)).into_response())
 }
 
 #[derive(Default, Deserialize)]
@@ -2403,6 +2444,30 @@ async fn access_log(
     Ok(Json(state.client.query_access_log(query).await?))
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectRegistrationPolicyInput {
+    enabled: bool,
+}
+
+async fn set_project_registration_policy(
+    State(state): State<AppState>,
+    Path(registration_id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<ProjectRegistrationPolicyInput>,
+) -> Result<Json<EnrollmentAdminResponse>, ApiError> {
+    require_console_mutation(&headers)?;
+    Ok(Json(
+        state
+            .enrollment
+            .project_registration_policy(pcp_rpc::ProjectRegistrationPolicyParams {
+                registration_id,
+                enabled: input.enabled,
+            })
+            .await?,
+    ))
+}
+
 async fn enrollment_snapshot(
     State(state): State<AppState>,
 ) -> Result<Json<EnrollmentAdminResponse>, ApiError> {
@@ -2547,6 +2612,35 @@ fn retention_policy(query: &RetentionQuery) -> RetentionPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn consolidation_validation_rejection_is_distinct_from_unknown_write_outcomes() {
+        let mut request: ConsoleConsolidationRequest = serde_json::from_value(json!({
+            "reviewCandidateId":"review:test", "namespace":"project:test",
+            "sourcePages":[{"pageId":"pg_source", "revisionId":"rev_source"}],
+            "outputs":[{"title":"Combined", "content":"Complete", "sourceIndexes":[0]}],
+            "coverage":[{"sourceIndex":0,"outputIndexes":[0],"explanation":"Retained", "complete":false}]
+        })).unwrap();
+        let error = validate_console_consolidation(&request).unwrap_err();
+        let response = consolidation_not_applied(error);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["mutationOutcome"], "not_applied");
+        assert_eq!(body["code"], "consolidation_validation_failed");
+        request.coverage[0].complete = true;
+        assert!(validate_console_consolidation(&request).is_ok());
+
+        let response = ApiError(anyhow::anyhow!("response lost after dispatch")).into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert!(body.get("mutationOutcome").is_none());
+    }
 
     #[test]
     fn page_query_accepts_only_known_structural_roles() {

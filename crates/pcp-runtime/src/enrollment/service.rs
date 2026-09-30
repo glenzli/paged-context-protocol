@@ -30,6 +30,9 @@ use super::{
 };
 use crate::infra_socket::BoundInfraSocket;
 
+#[path = "projects.rs"]
+mod projects;
+
 const LOCAL_UNIX_SOCKET_BINDING: &str = "infra.local.unix-socket";
 const MAX_PENDING_REQUESTS: usize = 16;
 const MAX_ACTIVE_REGISTRATIONS: usize = 32;
@@ -171,6 +174,12 @@ impl EnrollmentHandler {
                     .decode_params::<EnrollmentStatusParams>("status")
                     .map_err(|_| ProtocolError::invalid("invalid status params"))?;
                 self.status(params).await
+            }
+            "ensure_project_scope" => {
+                let params = request
+                    .decode_params::<pcp_rpc::EnsureProjectScopeParams>("ensure_project_scope")
+                    .map_err(|_| ProtocolError::invalid("invalid project registration params"))?;
+                self.ensure_project_scope(params).await
             }
             "open_session" => {
                 let params = request
@@ -460,6 +469,18 @@ impl EnrollmentHandler {
                     EnrollmentAdminResult::Applied,
                 ))
             }
+            "project_registration_policy" => {
+                let params = request
+                    .decode_params::<pcp_rpc::ProjectRegistrationPolicyParams>(
+                        "project_registration_policy",
+                    )
+                    .map_err(|_| ProtocolError::invalid("invalid project registration policy"))?;
+                self.set_project_registration_policy(params).await?;
+                Ok(EnrollmentAdminResponse::new(
+                    "project_registration_policy",
+                    EnrollmentAdminResult::Applied,
+                ))
+            }
             "revoke" => {
                 let params = request
                     .decode_params::<EnrollmentRegistrationIdParams>("revoke")
@@ -504,6 +525,8 @@ impl EnrollmentHandler {
                 registration_id: registration.registration_id.clone(),
                 client: registration.client.clone(),
                 approved_access: registration.approved_access.clone(),
+                allow_project_registration: registration.allow_project_registration,
+                project_scopes: registration.project_scopes.clone(),
                 created_at: format_time(registration.created_at),
                 last_opened_at: registration.last_opened_at.map(format_time),
             })
@@ -542,6 +565,8 @@ impl EnrollmentHandler {
             registration_id: format!("reg_{}", Uuid::new_v4().simple()),
             client: next.requests[request_index].client.clone(),
             approved_access: next.requests[request_index].requested_access.clone(),
+            allow_project_registration: false,
+            project_scopes: Vec::new(),
             credential_hash: next.requests[request_index].credential_hash.clone(),
             created_at: Utc::now(),
             last_opened_at: None,
@@ -725,6 +750,20 @@ fn access_session(
         scopes,
         registration.approved_access.allow_cross_scope_derivation,
     );
+    for scope in &registration.project_scopes {
+        if !access.allows(scope, pcp_core::AccessPermission::Ingest) {
+            access.grants.extend(
+                AccessMode::Contribute
+                    .session(
+                        principal.clone(),
+                        session_id.clone(),
+                        vec![scope.clone()],
+                        false,
+                    )
+                    .grants,
+            );
+        }
+    }
     let primary_scopes = access
         .grants
         .iter()
@@ -791,6 +830,8 @@ fn validate_client_access(
 }
 
 fn validate_loaded_state(state: &EnrollmentState) -> Result<()> {
+    projects::validate_projects(state)?;
+
     let mut request_ids = HashSet::new();
     let mut registration_ids = HashSet::new();
     for registration in &state.registrations {

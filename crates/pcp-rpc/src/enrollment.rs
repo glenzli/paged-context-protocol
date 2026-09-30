@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use pcp_client::project_scope::{ProjectScopeRequest, ProjectScopeResult};
 use pcp_core::{AccessPrincipalType, AccessSession};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -85,6 +86,21 @@ pub struct OpenEnrollmentSessionParams {
     pub credential: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnsureProjectScopeParams {
+    pub registration_id: String,
+    pub credential: String,
+    pub project: ProjectScopeRequest,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectRegistrationPolicyParams {
+    pub registration_id: String,
+    pub enabled: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnrollmentRequest {
@@ -101,6 +117,10 @@ impl EnrollmentRequest {
 
     pub fn status(params: EnrollmentStatusParams) -> Result<Self> {
         Self::new("status", params)
+    }
+
+    pub fn ensure_project_scope(params: EnsureProjectScopeParams) -> Result<Self> {
+        Self::new("ensure_project_scope", params)
     }
 
     pub fn open_session(params: OpenEnrollmentSessionParams) -> Result<Self> {
@@ -160,6 +180,10 @@ pub enum EnrollmentResult {
     Active {
         session: EnrollmentSession,
     },
+    ProjectReady {
+        project: ProjectScopeResult,
+        session: EnrollmentSession,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -195,6 +219,10 @@ pub struct RegisteredClientView {
     pub registration_id: String,
     pub client: EnrollmentClientClaim,
     pub approved_access: RequestedAccess,
+    #[serde(default)]
+    pub allow_project_registration: bool,
+    #[serde(default)]
+    pub project_scopes: Vec<String>,
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_opened_at: Option<String>,
@@ -230,6 +258,10 @@ impl EnrollmentAdminRequest {
                 request_id: request_id.into(),
             },
         )
+    }
+
+    pub fn project_registration_policy(params: ProjectRegistrationPolicyParams) -> Result<Self> {
+        Self::new("project_registration_policy", params)
     }
 
     pub fn revoke(registration_id: impl Into<String>) -> Result<Self> {
@@ -356,6 +388,14 @@ impl EnrollmentClient {
         self.exchange(&EnrollmentRequest::status(params)?).await
     }
 
+    pub async fn ensure_project_scope(
+        &self,
+        params: EnsureProjectScopeParams,
+    ) -> Result<EnrollmentResponse> {
+        self.exchange(&EnrollmentRequest::ensure_project_scope(params)?)
+            .await
+    }
+
     pub async fn open_session(
         &self,
         params: OpenEnrollmentSessionParams,
@@ -400,6 +440,16 @@ impl EnrollmentAdminClient {
     pub async fn reject(&self, request_id: impl Into<String>) -> Result<EnrollmentAdminResponse> {
         self.exchange(&EnrollmentAdminRequest::reject(request_id)?)
             .await
+    }
+
+    pub async fn project_registration_policy(
+        &self,
+        params: ProjectRegistrationPolicyParams,
+    ) -> Result<EnrollmentAdminResponse> {
+        self.exchange(&EnrollmentAdminRequest::project_registration_policy(
+            params,
+        )?)
+        .await
     }
 
     pub async fn revoke(

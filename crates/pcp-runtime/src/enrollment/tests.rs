@@ -663,3 +663,6 @@ fn test_root(label: &str) -> std::path::PathBuf {
     fs::create_dir_all(&root).expect("create enrollment test root");
     root
 }
+
+#[path = "tests/projects.rs"]
+mod projects;

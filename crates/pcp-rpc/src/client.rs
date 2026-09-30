@@ -1,7 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -42,12 +42,22 @@ const INTENT_MATCH_RPC_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 #[async_trait]
 pub trait RuntimeSessionConnector: Send + Sync {
     async fn reconnect(&self) -> Result<RemotePcpClient>;
+    async fn ensure_project_scope(
+        &self,
+        _request: pcp_client::project_scope::ProjectScopeRequest,
+    ) -> Result<(
+        pcp_client::project_scope::ProjectScopeResult,
+        RemotePcpClient,
+    )> {
+        anyhow::bail!("project registration requires an enrolled PCP connection")
+    }
 }
 
 #[derive(Clone)]
 pub struct RemotePcpClient {
     socket_path: Arc<Mutex<PathBuf>>,
     descriptor: PcpDescriptor,
+    live_access: Arc<RwLock<AccessSession>>,
     next_request_id: Arc<AtomicU64>,
     session_connector: Option<Arc<dyn RuntimeSessionConnector>>,
 }
@@ -65,6 +75,7 @@ impl RemotePcpClient {
         );
         Ok(Self {
             socket_path: Arc::new(Mutex::new(socket_path)),
+            live_access: Arc::new(RwLock::new(descriptor.access.clone())),
             descriptor,
             next_request_id: Arc::new(AtomicU64::new(2)),
             session_connector: None,
@@ -94,17 +105,30 @@ impl RemotePcpClient {
     }
 
     fn validate_reconnected_descriptor(&self, descriptor: &PcpDescriptor) -> Result<()> {
-        // Synchronous metadata is pinned for the lifetime of this client. A new process
-        // session is expected; changing Store, access, or capabilities needs a host reload.
+        // Only an authenticated enrollment exchange can replace the access snapshot.
+        let expected = self.live_access.read().expect("access snapshot lock");
         let mut access = descriptor.access.clone();
-        access.session_id = self.descriptor.access.session_id.clone();
+        access.session_id = expected.session_id.clone();
         anyhow::ensure!(
             descriptor.identity_id == self.descriptor.identity_id
-                && access == self.descriptor.access
+                && access == *expected
                 && serde_json::to_value(&descriptor.capabilities)?
                     == serde_json::to_value(&self.descriptor.capabilities)?,
             "PCP Store identity, access, or capabilities changed; reload the MCP connection"
         );
+        Ok(())
+    }
+
+    fn adopt_enrolled_descriptor(&self, descriptor: &PcpDescriptor) -> Result<()> {
+        anyhow::ensure!(
+            descriptor.identity_id == self.descriptor.identity_id
+                && descriptor.access.principal == self.descriptor.access.principal
+                && descriptor.access.store_permissions == self.descriptor.access.store_permissions
+                && serde_json::to_value(&descriptor.capabilities)?
+                    == serde_json::to_value(&self.descriptor.capabilities)?,
+            "authenticated enrollment changed PCP identity or capabilities"
+        );
+        *self.live_access.write().expect("access snapshot lock") = descriptor.access.clone();
         Ok(())
     }
 
@@ -138,7 +162,7 @@ impl RemotePcpClient {
             .await
             .context("PCP session recovery timed out; retry when Runtime is available")?
             .context("reopen approved PCP session; request was not sent")?;
-            self.validate_reconnected_descriptor(&remote.descriptor)?;
+            self.adopt_enrolled_descriptor(&remote.descriptor)?;
             *path = remote.socket_path.lock().await.clone();
         }
         UnixStream::connect(&*path)
@@ -270,6 +294,31 @@ fn unexpected(operation: &str) -> anyhow::Error {
 
 #[async_trait]
 impl PcpTenantApi for RemotePcpClient {
+    async fn ensure_project_scope(
+        &self,
+        request: pcp_client::project_scope::ProjectScopeRequest,
+    ) -> Result<pcp_client::project_scope::ProjectScopeResult> {
+        let connector = self
+            .session_connector
+            .as_ref()
+            .context("project registration requires an enrolled PCP connection")?;
+        // Share the recovery lock with all cloned clients; no global active-project state.
+        let mut path = self.socket_path.lock().await;
+        let (project, remote) =
+            tokio::time::timeout(RPC_TIMEOUT, connector.ensure_project_scope(request))
+                .await
+                .context("project registration timed out; retry identical project identity")??;
+        anyhow::ensure!(
+            remote
+                .access()
+                .allows(&project.scope, pcp_core::AccessPermission::Ingest),
+            "project registration did not grant project ingestion"
+        );
+        self.adopt_enrolled_descriptor(&remote.descriptor)?;
+        *path = remote.socket_path.lock().await.clone();
+        Ok(project)
+    }
+
     async fn provider_build_info(&self) -> Result<Option<pcp_core::BuildInfo>> {
         match self.request(RpcOperation::Describe).await? {
             RpcValue::Descriptor(descriptor) => {

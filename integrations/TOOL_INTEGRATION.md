@@ -93,15 +93,15 @@ catalog for a server process:
 
 | Toolset | Tools | Intended use |
 | --- | ---: | --- |
-| `core` (default) | 5 | literal/semantic search, exact read, durable capture and feedback |
-| `context` | 8–11 | `core`, read-only discovery, plus candidate/activity tools when Runtime supports the inbox |
-| `standard` | 11–14 | compatibility surface with diagnostics, Scope listing and advanced retrieval |
+| `core` (default) | 6 | literal/semantic search, exact read, durable capture, project registration and feedback |
+| `context` | 9–12 | `core`, read-only discovery, plus candidate/activity tools when Runtime supports the inbox |
+| `standard` | 12–15 | compatibility surface with diagnostics, Scope listing and advanced retrieval |
 | `maintenance` | all available | trusted operator and development workflows |
 
-The bundled Codex and ChatGPT launchers select `context`; without the Runtime inbox extension it
-contracts to the same five tools as `core`. `standard` preserves the former ordinary catalog for
+The shared ChatGPT/Codex launcher select `context`; without the Runtime inbox extension it
+retains the six core tools and three read-only discovery tools. `standard` preserves the former ordinary catalog for
 integrations that explicitly need it. Backend permissions still apply to every call, and ordinary
-capture/feedback approval policy belongs to the host; check both write actions in the shared ChatGPT connection settings. Do not
+capture/feedback approval policy belongs to the host; review capture, feedback and project-registration actions in the shared ChatGPT connection settings. Do not
 treat discovery or a hidden tool as an authorization boundary.
 
 When exposed by `context`, `standard` or `maintenance`, `pcp_describe.capabilities` is the provider-backend
@@ -119,7 +119,10 @@ When Runtime advertises `runtime_context_inbox`, the `context`, `standard`, and 
 toolsets can expose three optional candidate/activity tools. They use a separate, bounded
 operational store and per-client opt-in. See [Runtime context](RUNTIME_CONTEXT.md) for API,
 permissions, retries and snapshot reads. They must not fall back to formal capture when disabled,
-and they create no per-turn write quota. Activity should be read when starting or resuming substantive topics and updated when useful topic state changes, including milestones and completion. This Runtime-local inbox is unrelated to Revision payload
+and they create no per-turn write quota. Read activity when missing recent context could affect a topic start/resume. Create its first
+snapshot once there is useful handoff state, including discussion-only progress, tentative
+understanding or open questions; update changed state, next steps, blockers, pause or completion.
+Do not wait for durable value or phase end. Preserve uncertainty and skip unchanged snapshots. This Runtime-local inbox is unrelated to Revision payload
 retention plans and leases.
 
 Recommended model flow:
@@ -137,8 +140,14 @@ Choose the write Scope by the subject's owner, not the MCP client or source labe
 preferences and constraints use the identity Scope; project decisions and useful project
 experience use that project's Scope. Candidate and activity writes follow the same ownership.
 Do not create a shared `experience` Scope solely to categorize a Page: the candidate organizer
-compares same-Scope evidence. When multiple write Scopes are granted, pass `scope` explicitly;
-inspect authorized Scopes when the destination is unknown and stop on denied access.
+compares same-Scope evidence. Before first project write, including activity-only continuation, call `pcp_ensure_project_scope` with a stable
+verified `projectKey`, `displayName`, and optional known `existingScope`. This requires
+the Console's per-client project-registration opt-in. Reuse the receipt across branches,
+worktrees and topics; pass `projectKey` on every project capture/candidate/activity.
+The current MCP connection refreshes its grants; an explicit `scope` must match.
+For user context, pass `scope` when multiple destinations are writable. Missing or
+denied registration defers that write, never routes it to the user Scope. See
+[project routing](../design/scope-routing.md).
 
 Retrieval tools accept `format=json` (default) or `format=text`. MCP returns **one text content
 block**, containing compact JSON or evidence text. It does not duplicate retrieval bodies in
@@ -165,7 +174,8 @@ model context by default.
 
 ## Compatibility and validation
 
-This layer adds no RPC method and changes no Store data. Existing applications keep their current
+Evidence projection changes no Store response. Project registration is an optional Runtime
+enrollment operation; embedded/static tenants reject it rather than obtaining operator access. Existing applications keep their current
 responses until they opt into projection. Non-Rust hosts may implement the same field policy above
 after their authorized API call; do not rely on JSON key deletion without checking semantics.
 

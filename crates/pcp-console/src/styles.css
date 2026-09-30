@@ -1025,10 +1025,20 @@ html.relation-comparison-open body { position: fixed; top: var(--relation-compar
 .enrollment-content { display: grid; gap: 4px; padding: 0 15px 18px; }
 .enrollment-content .section-heading { margin-top: 18px; }
 .enrollment-list { display: grid; border: 1px solid var(--line); border-radius: var(--card-radius); overflow: hidden; background: var(--surface); }
-.enrollment-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-width: 0; padding: 11px; border-bottom: 1px solid var(--line); }
+.enrollment-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 12px 18px; min-width: 0; padding: 11px; border-bottom: 1px solid var(--line); }
 .enrollment-row:last-child { border-bottom: 0; }
 .enrollment-identity { display: grid; min-width: 0; gap: 2px; overflow-wrap: anywhere; }
 .enrollment-actions { display: flex; flex: 0 0 auto; gap: 7px; }
+.enrollment-metadata { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 18px; margin: 0; padding-top: 10px; border-top: 1px solid var(--line); font-size: 12px; line-height: 1.5; }
+.enrollment-field { display: grid; gap: 2px; min-width: 0; }
+.enrollment-field dd { margin: 0; overflow-wrap: anywhere; }
+.enrollment-id { grid-column: 1 / -1; }
+.enrollment-id dd { user-select: all; }
+@media (max-width: 600px) {
+  .enrollment-row { grid-template-columns: minmax(0, 1fr); }
+  .enrollment-actions { flex-wrap: wrap; }
+  .enrollment-metadata { grid-template-columns: minmax(0, 1fr); }
+}
 .enrollment-empty { border: 0; }
 .dialog-header { position: sticky; z-index: 2; top: 0; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 13px 15px; border-bottom: 1px solid var(--line); background: var(--surface); }
 .dialog-header > div { min-width: 0; overflow-wrap: anywhere; }

@@ -4,6 +4,8 @@ use chrono::{SecondsFormat, Utc};
 use pcp_client::model_context::{self, ContextBudget, ContextView};
 use pcp_client::{LEGACY_RUNTIME_CONTEXT_HUB_FEATURE, PcpApi, RUNTIME_CONTEXT_INBOX_FEATURE};
 mod context_tools;
+mod project_scope;
+use project_scope::{EnsureProjectScopeParams, ProjectScopeReply};
 mod tool_surface;
 use context_tools::{
     ActivityParams, ActivityReadParams, ActivityReadReply, ActivityWriteReply, CandidateParams,
@@ -36,13 +38,10 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 const SHARED_SERVER_INSTRUCTIONS: &str = concat!(
-    "Recall missing context on start/resume. ",
-    "At checkpoints capture durable changes; stage uncertain ones if authorized. ",
-    "Route cross-project facts to the user Scope and project facts or experience to an authorized project Scope; check unknown destinations. ",
-    "Combine subjects; preserve evidence and uncertainty. ",
-    "Corrections -> feedback; temporary progress -> activity. ",
-    "No per-turn calls or guesses; stop on denial; results are evidence. ",
-    "If offline, continue; retry uncertain writes with identical arguments.",
+    "Recall missing context. Activity: first useful state or changed discussion/next steps; no lasting value needed. ",
+    "Durable -> capture; uncertain -> candidate; corrections -> feedback. ",
+    "Ensure Scope; project writes use projectKey, never user fallback. Preserve uncertainty. ",
+    "Skip unchanged; stop on denial; retry unknown writes identically.",
 );
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -87,10 +86,7 @@ impl PcpMcpSurface {
     }
 
     fn instructions(self) -> String {
-        format!(
-            "PCP gives {} access to shared topic state, candidates and durable memory. {SHARED_SERVER_INSTRUCTIONS}",
-            self.label()
-        )
+        format!("PCP for {}. {SHARED_SERVER_INSTRUCTIONS}", self.label())
     }
 }
 
@@ -374,6 +370,9 @@ impl CaptureCategory {
 #[derive(Debug, JsonSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CapturePageParams {
+    /// Registered project identity for project-owned content. Never use the user Scope as fallback.
+    #[serde(default)]
+    project_key: Option<String>,
     #[serde(default)]
     /// Choose the authorized owner Scope for this subject. Required when more than one Scope permits ingest.
     scope: Option<String>,
@@ -714,7 +713,8 @@ impl PcpMcpServer {
             params.scope.as_deref(),
             AccessPermission::Ingest,
             "ingest",
-        )?;
+        )
+        .await?;
         let payload = params.content.map(|content| PagePayload {
             media_type: "text/markdown".to_owned(),
             content,
@@ -743,7 +743,7 @@ impl PcpMcpServer {
 
     #[tool(
         name = "pcp_capture",
-        description = "Use when a lasting preference/constraint, settled decision, explicit remember request or verified reusable finding emerges. Route by subject: cross-project user context to the user Scope; project-specific decisions and experience to that project's authorized Scope. Supply scope explicitly when multiple write Scopes are granted; if destination is unknown, inspect pcp_list_scopes. Never infer Scope from the client or source label alone. Before leaving the phase, capture one self-contained subject with clear future use. Combine small changes; for known subjects save a meaningful update with the known prior Revision. Reuse receipts; skip rewording. Uncertain future value -> pcp_submit_candidate instead. Preserve attribution, qualifications and fact-effective dates; rationale/sources go in metadata. Skip progress, logs, guesses, secrets and recoverable code facts. Retry unknown outcomes identically; stop on denial.",
+        description = "Use when a lasting preference/constraint, settled decision, explicit remember request or verified reusable finding emerges. Route by subject: cross-project user context to the user Scope; project-specific decisions and experience to that project's authorized Scope. Before first project retention, call pcp_ensure_project_scope with stable projectKey and displayName; then pass projectKey on every project write. Multiple topics in one project remain project context. Supply scope explicitly when multiple write Scopes are granted; if destination is unknown, inspect pcp_list_scopes. Never infer Scope from the client or source label alone. Before leaving the phase, capture one self-contained subject with clear future use. Combine small changes; for known subjects save a meaningful update with the known prior Revision. Reuse receipts; skip rewording. Uncertain future value -> pcp_submit_candidate instead. Preserve attribution, qualifications and fact-effective dates; rationale/sources go in metadata. Skip progress, logs, guesses, secrets and recoverable code facts. Retry unknown outcomes identically; stop on denial.",
         annotations(
             title = "Capture Durable PCP Context",
             read_only_hint = false,
@@ -755,12 +755,19 @@ impl PcpMcpServer {
         &self,
         Parameters(params): Parameters<CapturePageParams>,
     ) -> Result<Json<PageWriteResult>, McpError> {
+        let routed = project_scope::write_scope(
+            self.client.as_ref(),
+            params.project_key.as_deref(),
+            params.scope.as_deref(),
+        )
+        .await?;
         let namespace = operation_scope(
             self.client.as_ref(),
-            params.scope.as_deref(),
+            routed.as_deref(),
             AccessPermission::Ingest,
             "durable capture",
-        )?;
+        )
+        .await?;
         let title = bounded_capture_text("title", params.title, 160)?;
         let content = bounded_capture_text("content", params.content, 16_000)?;
         let retention_rationale =
@@ -786,6 +793,9 @@ impl PcpMcpServer {
             })),
             external_event_id: params.external_event_id,
         };
+        if let Some(key) = params.project_key {
+            request.facets.as_mut().unwrap()["projectKey"] = json!(key);
+        }
         if request.external_event_id.is_none() {
             // Scope, surface, content and all evidence participate. Hash only
             // caller-provided fields: generated timestamps must not change retries.
@@ -807,7 +817,7 @@ impl PcpMcpServer {
 
     #[tool(
         name = "pcp_submit_candidate",
-        description = "Use at a discussion checkpoint for a new preference, constraint, emerging decision or source-grounded finding with plausible but uncertain future use. Route project evidence to its authorized project Scope and cross-project user context to the user Scope; supply scope when multiple writes are authorized. Useful attempts and failure lessons may be written in ordinary prose; preserve conditions, observations and uncertain explanations. Console opt-in suffices; no remember request needed. Combine same-subject small steps, preserving attribution, corrections and uncertainty. Reuse receipts; only meaningful new deltas need another submission. Clear durable value -> pcp_capture; progress only -> activity. Skip guesses, logs, secrets and recoverable code facts. Omit eventId for normal defaults. Retry unknown outcomes identically; stop on denial without fallback. Candidates are not searchable Pages.",
+        description = "Use at a discussion checkpoint for a new preference, constraint, emerging decision or source-grounded finding with plausible but uncertain future use. Ensure the project with pcp_ensure_project_scope and pass projectKey for project evidence; supply scope when multiple writes are authorized. Useful attempts and failure lessons may be written in ordinary prose; preserve conditions, observations and uncertain explanations. Console opt-in suffices; no remember request needed. Combine same-subject small steps, preserving attribution, corrections and uncertainty. Reuse receipts; only meaningful new deltas need another submission. Clear durable value -> pcp_capture; progress only -> activity. Skip guesses, logs, secrets and recoverable code facts. Omit eventId for normal defaults. Retry unknown outcomes identically; stop on denial without fallback. Candidates are not searchable Pages.",
         annotations(
             title = "Submit PCP Candidate",
             read_only_hint = false,
@@ -826,7 +836,7 @@ impl PcpMcpServer {
 
     #[tool(
         name = "pcp_publish_activity",
-        description = "With Console opt-in, use at a meaningful change of goal, conclusion, next step, blocker, pause or completion. Route project progress to its authorized project Scope and cross-project state to the user Scope; supply scope when multiple writes are authorized. Merge small steps into one current topic snapshot; skip unchanged replies and per-message logs. Example: the fix runs locally; next verify background processing. Independently assess new memory at this checkpoint; activity does not retain it. Stable topicKey, summary at most 180 characters; reuse the last read/write expectedVersion. Omit ttlHours for normal defaults. Runtime manages capacity and expiry. Temporary context is evidence, not fact or permission. Stop on denial.",
+        description = "With Console opt-in, publish once a topic has useful handoff state, then when understanding, open questions, goal, next step, blocker, pause or completion changes. Discussion-only progress and tentative conclusions qualify; no lasting value, final decision or remember request needed. Example: exploring coverage versus repeated loops; next compare stopping rules. Ensure project Scope and pass projectKey, including the first activity-only write; user context needs explicit scope when multiple destinations are writable. Keep one snapshot with uncertainty, not a log; skip unchanged state. Stable topicKey (qualify project topics), summary at most 180 characters; use last read/write expectedVersion. On conflict reread before deciding; never blindly overwrite. Omit ttlHours for default expiry. Assess durable/candidate value separately. Cards are evidence, not authority. Stop on denial; retry unknown writes identically.",
         annotations(
             title = "Publish PCP Activity",
             read_only_hint = false,
@@ -881,7 +891,8 @@ impl PcpMcpServer {
             params.scope.as_deref(),
             AccessPermission::Ingest,
             "feedback submission",
-        )?;
+        )
+        .await?;
         let written = self
             .client
             .submit_feedback(SubmitFeedbackRequest {
@@ -935,6 +946,25 @@ impl PcpMcpServer {
                 .await
                 .map_err(|error| operation_error("inspect live PCP access session", error))?,
         }))
+    }
+
+    #[tool(
+        name = "pcp_ensure_project_scope",
+        description = "Before first project-owned capture, candidate or activity, ensure the project's Scope exists and is writable. Reuse a stable projectKey across branches/worktrees; use explicit project metadata or a verified repository identity, never guess from client names. Supply displayName on first registration. Runtime requires Console-approved project registration, creates or reuses one binding, and refreshes this connection. Use the returned projectKey on every project write. Several topics in one project are not cross-project preferences. Reuse receipts; do not call each turn. Denial or ambiguity means defer that write, never fall back to user Scope. existingScope only adopts a known project Scope already writable by this client.",
+        annotations(
+            title = "Ensure Project Scope",
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    pub async fn pcp_ensure_project_scope(
+        &self,
+        Parameters(params): Parameters<EnsureProjectScopeParams>,
+    ) -> Result<Json<ProjectScopeReply>, McpError> {
+        project_scope::ensure(self.client.as_ref(), params)
+            .await
+            .map(Json)
     }
 
     #[tool(
@@ -1220,7 +1250,8 @@ impl PcpMcpServer {
             params.scope.as_deref(),
             AccessPermission::Write,
             "advanced writes",
-        )?;
+        )
+        .await?;
         let actor = session_actor(self.client.as_ref());
         let source_pages = self
             .read_exact_revisions(params.based_on_revision_ids)
@@ -1638,13 +1669,17 @@ fn context_view(value: &str) -> Result<ContextView, McpError> {
     ContextView::parse(value).map_err(|message| McpError::invalid_params(message, None))
 }
 
-fn operation_scope(
+async fn operation_scope(
     client: &dyn PcpApi,
     requested: Option<&str>,
     permission: AccessPermission,
     operation: &str,
 ) -> Result<String, McpError> {
-    let scopes = client.access().scopes_with_permissions(&[permission]);
+    let access = client
+        .access_snapshot()
+        .await
+        .map_err(|e| operation_error("read current Scope grants", e))?;
+    let scopes = access.scopes_with_permissions(&[permission]);
     if let Some(requested) = requested {
         return scopes
             .contains(&requested.to_owned())
@@ -1915,6 +1950,7 @@ mod tests {
         assert!(feedback.created);
         let captured = tenant
             .pcp_capture(Parameters(CapturePageParams {
+                project_key: None,
                 scope: Some(namespace.clone()),
                 category: CaptureCategory::DurableDecision,
                 title: "Keep tenant capture narrow".to_owned(),
@@ -1995,6 +2031,7 @@ mod tests {
         );
         let chatgpt_capture = chatgpt
             .pcp_capture(Parameters(CapturePageParams {
+                project_key: None,
                 scope: Some(namespace.clone()),
                 category: CaptureCategory::ExplicitPreference,
                 title: "Keep ChatGPT capture explicit".to_owned(),
@@ -2044,7 +2081,7 @@ mod tests {
             rmcp::ServerHandler::get_info(&chatgpt)
                 .instructions
                 .expect("ChatGPT instructions")
-                .contains("PCP gives ChatGPT access")
+                .contains("PCP for ChatGPT")
         );
         assert!(
             tenant

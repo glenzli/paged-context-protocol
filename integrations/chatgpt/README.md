@@ -35,7 +35,16 @@ PCP_HOME="$HOME/Library/Application Support/PCP"
 "$PCP_HOME/bin/pcp-chatgpt-mcp" enroll status
 ```
 
-The default requested policy contributes only to `user:self` and reads all current Scopes. Runtime resolves `user:self` to this Store's user Scope. To request project write access for a new enrollment, set `PCP_SHARED_WRITE_SCOPES` to an explicit comma-separated list such as `user:self,project:shadow`; each literal project Scope must already exist. An existing approved enrollment keeps its original grants: request and approve a new registration in a separate enrollment state file before switching the launcher to it. The launcher prefers `clients/chatgpt-pcp-projects.json` when that file exists; otherwise it uses `clients/chatgpt-pcp.json`. Set `PCP_CHATGPT_ENROLLMENT_FILE` to override either default. Place the project enrollment file at the preferred path only after approval, then reopen the MCP session. Reopen the session again after a new Scope is created if it should become readable.
+The default requested policy contributes to `user:self` and reads all current Scopes.
+For new project writes, enable **automatic project registration** on the approved client in
+Console, then use `pcp_ensure_project_scope` with a stable project key and display name.
+The same registration gains contribution to the created project Scope and the current MCP
+connection refreshes immediately. Existing bindings can explicitly adopt already writable
+project Scopes; no user-Scope fallback is permitted. Legacy fixed grants can still use
+`PCP_SHARED_WRITE_SCOPES` during enrollment, with literal Scopes created beforehand.
+The launcher prefers `clients/chatgpt-pcp-projects.json` when present, otherwise
+`clients/chatgpt-pcp.json`; `PCP_CHATGPT_ENROLLMENT_FILE` overrides the path.
+Keep the working approved credential instead of reenrolling merely to add a new project.
 
 ## 3. Configure Secure MCP Tunnel
 
@@ -54,7 +63,7 @@ tunnel-client run --profile pcp-chatgpt
 
 Keep the tunnel process running. In ChatGPT Developer Mode, create an app using **Tunnel** and select the same tunnel ID. Review the discovered tools and their action controls before enabling writes.
 
-The launcher selects the compact `context` toolset: five core retrieval/write tools, three
+The launcher selects the compact `context` toolset: six core retrieval/write/project-registration tools, three
 read-only discovery tools (`pcp_describe`, `pcp_whoami`, `pcp_list_scopes`), plus three
 candidate/activity tools when Runtime advertises that optional facility. Set
 `PCP_MCP_TOOLSET=standard` only for workflows that require graph expansion, index browsing,
@@ -130,14 +139,18 @@ For normal activity publication, provide `topicKey` and `summary`. For candidate
 staging, provide `title` and `content`, with real source references when available.
 Both tools can omit `scope` when a live session check identifies exactly one Scope
 with ingest access. Multiple writable Scopes, no writable Scope, or store-wide
-ingest permission require an explicit destination; the adapter never picks the
+ingest permission require an explicit `scope` or a resolved `projectKey`; the adapter never picks the
 first readable Scope. Runtime still checks Scope access and Console opt-in.
 
 Route writes by subject: cross-project user preferences and constraints to the user Scope;
 project decisions, project experience and project activity to the matching authorized project
 Scope. Keep useful experience beside its project evidence rather than in a generic experience
-Scope. With multiple writable Scopes, `scope` is required for capture, candidate and activity
-writes. Check the Scope inventory when ownership is unclear; never silently fall back to
+Scope. Before first project write, including activity-only continuation, call `pcp_ensure_project_scope`
+with stable `projectKey` and `displayName`; explicitly adopt a known writable project
+with `existingScope`. Reuse the returned identity across branches/worktrees and pass
+`projectKey` on project capture, candidate and activity writes. An explicit `scope`
+must match the binding. User-level writes still require `scope` with multiple destinations.
+Several educational topics in one project do not make its rules user-wide. Check the Scope inventory when ownership is unclear; never silently fall back to
 `user:self` or infer ownership from `captureSurface` or a SourceRef.
 
 Candidates can omit `eventId`: the adapter derives a stable identifier from the
@@ -161,6 +174,14 @@ conversation turn, or guarantee a model will call a tool. Symbiont additionally
 places these triggers in its own conversation developer instructions and prepares
 local evidence. The shared connector has no equivalent host hook controlled by
 this repository; parameter defaults reduce friction without changing that boundary.
+
+Hosts that own conversation lifecycle events can review changed handoff state before a topic
+switch, pause or completion; a bounded count of substantive turns can be a fallback reminder,
+not a forced write interval. Keep project identity and activity receipts local to the conversation;
+let the model decide whether state changed. Tool-call counts and idle time are not dialogue turns.
+This MCP integration does not implement such a host reminder. Validate spontaneous calls with
+the [blind conversation probes](../memory-trigger-eval/README.md), then observe real sessions;
+passing a prompted routing replay or seeing a nonempty card list is insufficient.
 
 For Codex, optionally append the [short AGENTS.md guidance](../../README-en.md#6-add-codex-guidance-optional)
 to the active global or project instructions. The README includes the copyable
@@ -231,7 +252,7 @@ stale address. Do not clean the live Infra Protocol runtime directory during use
 - `pcp_search_pages`, `pcp_semantic_search`, `pcp_read_pages`, and `pcp_read_activity` are read-only.
 - `pcp_capture` and `pcp_submit_feedback` are declared as write actions. Captures through this shared connection, including those called from Codex, use Page kind `chatgpt_capture` and facet `captureSurface: chatgpt`.
 - MCP server instructions and tool descriptions separate activity from selective memory for both clients. No separate Codex Skill is required. This guides tool selection; it does not guarantee invocation on every relevant task.
-- Assess memory and activity independently. Use formal capture for new content meeting its criteria and clear future use; with Console opt-in, stage evidence-backed preferences, constraints or emerging decisions when retention remains uncertain. Choose one memory route per item. Read activity on topic start/resume unless fresh, and coalesce substantive state changes, including discussion progress. No per-turn write or polling duty. Activity needs no lasting value; it does not replace memory. Same-client cards are included by default; `includeOwn=false` excludes the whole client. Scope grants and client opt-in still apply.
+- Assess memory and activity independently. Use formal capture for new content meeting its criteria and clear future use; with Console opt-in, stage evidence-backed preferences, constraints or emerging decisions when retention remains uncertain. Choose one memory route per item. Read activity on topic start/resume unless fresh, and create a first snapshot once there is useful handoff state and coalesce later changes to understanding, open questions, goals, next steps, blockers, pause or completion. Discussion-only progress and tentative conclusions qualify without a final decision or remember request; preserve uncertainty and skip unchanged state. No per-turn write or polling duty. Activity needs no lasting value; it does not replace memory. Same-client cards are included by default; `includeOwn=false` excludes the whole client. Scope grants and client opt-in still apply.
 - The tunnel does not grant PCP access. Runtime still requires the approved `chatgpt:pcp` enrollment on every MCP process start.
 - Do not put the PCP credential, Store, Runtime socket, tunnel runtime API key, or tunnel configuration in this repository.
 

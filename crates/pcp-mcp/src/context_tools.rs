@@ -67,6 +67,8 @@ struct ActivityCardReply {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CandidateParams {
+    #[serde(default)]
+    pub project_key: Option<String>,
     /// Omit when the session has exactly one Scope with ingest access; otherwise specify one.
     #[serde(default)]
     pub scope: Option<String>,
@@ -85,12 +87,14 @@ pub struct CandidateParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ActivityParams {
+    #[serde(default)]
+    pub project_key: Option<String>,
     /// Omit when the session has exactly one Scope with ingest access; otherwise specify one.
     #[serde(default)]
     pub scope: Option<String>,
-    /// Stable topic key within this client, not a new key per message.
+    /// Stable within the shared client; qualify project topics to avoid cross-window collisions. Not a new key per message.
     pub topic_key: String,
-    /// Current topic goal, meaningful progress, next step or status, at most 180 characters. No transcript or instructions.
+    /// Handoff state: current understanding, open question, progress or next step, at most 180 characters. Preserve uncertainty; no transcript or instructions.
     pub summary: String,
     /// Version returned by the last read/write; required to change an existing card.
     #[serde(default)]
@@ -119,7 +123,10 @@ pub struct ActivityReadParams {
 }
 
 pub async fn submit(client: &dyn PcpApi, p: CandidateParams) -> Result<CandidateReply, ErrorData> {
-    let scope = resolve_scope(client, p.scope).await?;
+    let routed =
+        super::project_scope::write_scope(client, p.project_key.as_deref(), p.scope.as_deref())
+            .await?;
+    let scope = resolve_scope(client, routed).await?;
     let mut input = CandidateInput {
         scope,
         event_id: String::new(),
@@ -143,7 +150,10 @@ pub async fn publish(
     client: &dyn PcpApi,
     p: ActivityParams,
 ) -> Result<ActivityWriteReply, ErrorData> {
-    let scope = resolve_scope(client, p.scope).await?;
+    let routed =
+        super::project_scope::write_scope(client, p.project_key.as_deref(), p.scope.as_deref())
+            .await?;
+    let scope = resolve_scope(client, routed).await?;
     invoke(
         client,
         ContextHubRequest::PublishActivity(ActivityInput {

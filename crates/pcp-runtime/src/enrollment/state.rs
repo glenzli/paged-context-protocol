@@ -20,6 +20,8 @@ pub(super) struct EnrollmentState {
     schema_version: String,
     pub requests: Vec<StoredRequest>,
     pub registrations: Vec<StoredRegistration>,
+    #[serde(default)]
+    pub projects: Vec<StoredProject>,
 }
 
 impl Default for EnrollmentState {
@@ -29,6 +31,7 @@ impl Default for EnrollmentState {
             schema_version: STATE_VERSION.to_owned(),
             requests: Vec::new(),
             registrations: Vec::new(),
+            projects: Vec::new(),
         }
     }
 }
@@ -57,10 +60,26 @@ pub(super) struct StoredRegistration {
     pub registration_id: String,
     pub client: EnrollmentClientClaim,
     pub approved_access: RequestedAccess,
+    #[serde(default)]
+    pub allow_project_registration: bool,
+    #[serde(default)]
+    pub project_scopes: Vec<String>,
     pub credential_hash: String,
     pub created_at: DateTime<Utc>,
     pub last_opened_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// A binding is persisted before Store creation so interrupted registration can resume.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(super) struct StoredProject {
+    pub project_key: String,
+    pub scope: String,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub ready: bool,
+    pub created_at: DateTime<Utc>,
+    pub registration_id: String,
 }
 
 pub(super) struct StateFile {

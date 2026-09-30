@@ -104,6 +104,48 @@ struct EnrolledSessionConnector {
 
 #[async_trait::async_trait]
 impl pcp_rpc::RuntimeSessionConnector for EnrolledSessionConnector {
+    async fn ensure_project_scope(
+        &self,
+        request: pcp_client::project_scope::ProjectScopeRequest,
+    ) -> Result<(
+        pcp_client::project_scope::ProjectScopeResult,
+        RemotePcpClient,
+    )> {
+        let state = read_state(&self.state_path)?;
+        anyhow::ensure!(
+            state.principal_id == self.expected_principal,
+            "PCP enrollment Principal mismatch"
+        );
+        let registration_id = state
+            .registration_id
+            .clone()
+            .context("PCP enrollment is pending approval")?;
+        let selected = select_endpoint(&state)?;
+        let response = EnrollmentClient::new(&selected.public_socket)
+            .ensure_project_scope(pcp_rpc::EnsureProjectScopeParams {
+                registration_id: registration_id.clone(),
+                credential: state.credential.clone(),
+                project: request.clone(),
+            })
+            .await?;
+        let (project, session) = match response.result {
+            EnrollmentResult::ProjectReady { project, session } => (project, session),
+            _ => anyhow::bail!("PCP project registration returned an unexpected response"),
+        };
+        anyhow::ensure!(
+            project.project_key == request.project_key,
+            "PCP project identity mismatch"
+        );
+        let remote = connect_session(
+            &selected,
+            &registration_id,
+            &self.expected_principal,
+            session,
+        )
+        .await?;
+        Ok((project, remote))
+    }
+
     async fn reconnect(&self) -> Result<RemotePcpClient> {
         // Re-read trusted enrollment and Discovery, then authenticate a new session.
         // Never reuse a vanished per-process endpoint or bypass revoked enrollment.
@@ -141,7 +183,17 @@ async fn open_session(state_path: &Path, expected_principal: &str) -> Result<Rem
         EnrollmentResult::Rejected { .. } => {
             anyhow::bail!("PCP enrollment was rejected or revoked")
         }
+        EnrollmentResult::ProjectReady { .. } => anyhow::bail!("unexpected project response"),
     };
+    connect_session(&selected, &registration_id, expected_principal, session).await
+}
+
+async fn connect_session(
+    selected: &SelectedEnrollmentEndpoint,
+    registration_id: &str,
+    expected_principal: &str,
+    session: pcp_rpc::EnrollmentSession,
+) -> Result<RemotePcpClient> {
     anyhow::ensure!(
         session.registration_id == registration_id,
         "PCP enrollment registration mismatch"
@@ -223,6 +275,7 @@ async fn advance_enrollment(state_path: &Path, state: &mut McpEnrollmentState) -
             write_state(state_path, state)?;
             println!("PCP enrollment {} is active", session.registration_id);
         }
+        EnrollmentResult::ProjectReady { .. } => anyhow::bail!("unexpected project response"),
         EnrollmentResult::Rejected { request_id } => {
             anyhow::bail!("PCP enrollment request {request_id} was rejected")
         }

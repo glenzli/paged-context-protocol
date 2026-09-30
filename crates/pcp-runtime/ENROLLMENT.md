@@ -66,8 +66,8 @@ RPC endpoint requires the peer effective UID to equal the Runtime UID. All
 sockets are mode `0600`.
 
 The client generates 32 random bytes and persists them as 64 lowercase
-hexadecimal characters. The credential is sent in `begin`, `status`, and
-`open_session`; Runtime persists only its SHA-256 digest. A credential is not a
+hexadecimal characters. The credential is sent in `begin`, `status`, `open_session`, and
+`ensure_project_scope`; Runtime persists only its SHA-256 digest. A credential is not a
 requested PCP Identity or permission. Runtime binds every approved registration
 to the Identity advertised by the selected PCP service and constructs the final
 `AccessSession` exclusively from a user-approved registration.
@@ -161,12 +161,11 @@ request contains 1-16 unique primary Scopes, each at
 most 128 UTF-8 bytes. Runtime retains at most 16 simultaneous pending requests and 32
 active registrations per Store.
 
-Each external agent surface uses its own Principal and credential even when two
-surfaces request the same Scope policy. For example, the Codex plugin uses
-`codex:pcp` while the ChatGPT tunnel integration uses `chatgpt:pcp`. This keeps
-Console approval, revocation, access audit, and captured Page provenance
-independent; a tunnel transports MCP messages but does not inherit another
-client's PCP registration.
+A dedicated Principal and credential distinguish independently managed clients.
+The maintained ChatGPT/Codex integration deliberately shares `chatgpt:pcp`;
+both hosts therefore share approval, revocation and grants. Historical
+`chatgpt_capture` metadata identifies that connection, not the originating
+application. Verified source references may identify a conversation separately.
 
 `begin` is idempotent for the same credential, client claim, and requested
 access. Before approval it returns `pending`; after approval it may return an
@@ -207,6 +206,53 @@ while their registration is active.
 Clients use `open_session` after every Runtime generation change. The returned
 endpoint is generation-specific and MUST NOT be used with a different selected
 discovery registration.
+
+### Ensure Project Scope
+
+```json
+{
+  "schema": "pcp.runtime.enrollment.request",
+  "schema_version": "20260810.1",
+  "operation": "ensure_project_scope",
+  "params": {
+    "registration_id": "reg_...",
+    "credential": "<same credential>",
+    "project": {
+      "projectKey": "github.com/owner/repository",
+      "displayName": "Project name"
+    }
+  }
+}
+```
+
+`projectKey` is a stable, non-secret identifier of 1–240 ASCII letters, digits,
+or `-._/:` characters. First registration requires `displayName`; optional
+`description` and display name contain 1–500 characters. Optional
+`existingScope` adopts a non-user Scope that already exists and is writable by
+this registration. A different key cannot adopt an already bound Scope.
+
+The operator must enable `allow_project_registration` for a contributing client;
+old registrations default to false. Read, audit and repair clients cannot enable it.
+This authorizes creation of project Scopes and contribution in those Scopes, not
+general Scope management. Already granted project bindings remain resolvable when
+the policy is disabled. Another registration needs a current write grant to reuse
+a project's binding; knowing its key is insufficient.
+
+Runtime bounds bindings to 1024 per Store and 256 per registration, serializes
+registration, and atomically persists a pending binding before Store provisioning.
+It persists readiness and the grant only after provisioning succeeds. Identical
+requests resume an interrupted intent without duplicate Scopes. Returned
+`result.status = "project_ready"` contains `project` (camelCase `projectKey`,
+`scope`, `displayName`, `created`) and `session` with the usual binding checks.
+`created` reports a newly allocated binding in this call; a recovered request
+reuses its existing binding. Lost replies must be retried identically.
+
+MCP adopts changed Scope grants only through a credential-authenticated enrollment
+response verified against discovery and the returned RPC descriptor. Store identity,
+Principal, store permissions and capabilities stay pinned. Ordinary RPC Describe
+responses cannot silently replace access. Existing enrolled clients can reauthenticate
+after their old endpoint is replaced; dispatched writes are never replayed automatically.
+There is no process-global active-project selection.
 
 ## Public Responses
 
@@ -297,11 +343,13 @@ Requests use `pcp.runtime.enrollment.admin.request@20260810.1`:
 {"schema":"pcp.runtime.enrollment.admin.request","schema_version":"20260810.1","operation":"approve","params":{"request_id":"req_..."}}
 {"schema":"pcp.runtime.enrollment.admin.request","schema_version":"20260810.1","operation":"reject","params":{"request_id":"req_..."}}
 {"schema":"pcp.runtime.enrollment.admin.request","schema_version":"20260810.1","operation":"revoke","params":{"registration_id":"reg_..."}}
+{"schema":"pcp.runtime.enrollment.admin.request","schema_version":"20260810.1","operation":"project_registration_policy","params":{"registration_id":"reg_...","enabled":true}}
 ```
 
 Responses use `pcp.runtime.enrollment.admin.response@20260810.1`. `snapshot`
 returns `result.status = "snapshot"` with `pending` and `registrations`; mutation
-responses return `result.status = "applied"`. Views contain client claims,
+responses return `result.status = "applied"`. Registration views also contain `allow_project_registration` and `project_scopes`.
+Views contain client claims,
 requested or approved access, IDs, and timestamps, but never credential hashes.
 Revocation closes an active dynamic endpoint and prevents later reopening.
 
@@ -320,7 +368,7 @@ Public errors use `pcp.runtime.enrollment.error`; administration errors use
 ```
 
 Stable public codes are `invalid_request`, `not_found`, `session_unavailable`,
-`capacity_exceeded`, `response_too_large`, and `internal_error`. `message` is
+`capacity_exceeded`, `response_too_large`, `project_registration_denied`, and `internal_error`. `message` is
 diagnostic and not a matching surface. A bad credential and an unknown or
 revoked ID both return `not_found`.
 
@@ -342,5 +390,5 @@ Symbiont can migrate without a coordinated flag day:
 
 Enrollment state defaults to `pcp-enrollments.json` beside the Store and can be
 overridden with `PCP_ENROLLMENT_STATE_PATH`. Runtime writes it atomically as mode
-`0600`; it contains credential digests, requests, decisions, and registrations,
+`0600`; it contains credential digests, requests, decisions, registrations, and project provisioning bindings,
 but no Page content or plaintext credential.

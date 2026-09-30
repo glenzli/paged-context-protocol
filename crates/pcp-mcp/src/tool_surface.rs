@@ -15,6 +15,7 @@ pub const CORE_TOOLS: &[&str] = &[
     "pcp_semantic_search",
     "pcp_read_pages",
     "pcp_capture",
+    "pcp_ensure_project_scope",
     "pcp_submit_feedback",
 ];
 
@@ -34,6 +35,7 @@ pub const STANDARD_TOOLS: &[&str] = &[
     "pcp_browse_index",
     "pcp_read_pages",
     "pcp_capture",
+    "pcp_ensure_project_scope",
     "pcp_submit_feedback",
 ];
 

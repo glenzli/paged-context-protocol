@@ -343,7 +343,23 @@ const ZH_MESSAGES = {
   "Current Pages": "当前页面",
   "Appearance and language": "外观与语言",
   "Applications requesting access to this PCP Store": "正在请求访问此 PCP Store 的应用",
+  "Writable projects": "可写项目",
+  "Project registration enabled": "已允许自动登记项目",
+  "Project registration disabled": "未允许自动登记项目",
+  "Enable project registration": "允许自动登记项目",
+  "Disable project registration": "停止登记新项目",
   "Approved clients": "已批准客户端",
+  "Registered at": "登记时间",
+  "Last connected": "最近连接",
+  "Registration ID": "授权编号",
+  "Not connected yet": "尚未连接",
+  "Last connection time does not indicate whether this client is currently online.": "最近连接时间不代表客户端当前在线。",
+  "Requested at": "申请时间",
+  "Expires at": "到期时间",
+  "Request ID": "申请编号",
+  "Revoke": "撤销授权",
+  "No pending requests": "暂无待批准请求",
+  "No approved clients": "暂无已批准客户端",
   "Auto": "自动",
   "Back": "返回",
   "Candidates": "候选项",
@@ -1498,8 +1514,14 @@ async function api(path, options = {}) {
   });
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
-    try { message = (await response.json()).error || message; } catch (_) {}
-    throw new Error(message);
+    let payload;
+    try { payload = await response.json(); message = payload.error || message; } catch (_) {}
+    const error = new Error(message);
+    // Only this explicit pre-write response proves this attempt made no change.
+    // Generic HTTP errors and broken/lost responses remain ambiguous.
+    if (response.status === 422 && payload?.code === "consolidation_validation_failed"
+        && payload?.mutationOutcome === "not_applied") error.mutationOutcome = "not_applied";
+    throw error;
   }
   return response.status === 204 ? null : response.json();
 }
@@ -1548,7 +1570,7 @@ function enrollmentRow(item, pending) {
   );
   const actions = element("div", "enrollment-actions");
   if (pending) {
-    const reject = element("button", "secondary-button", "Reject");
+    const reject = element("button", "secondary-button", t("Reject"));
     reject.type = "button";
     reject.addEventListener("click", async () => {
       reject.disabled = true;
@@ -1560,7 +1582,7 @@ function enrollmentRow(item, pending) {
         showError(error);
       }
     });
-    const approve = element("button", "primary-button", "Approve");
+    const approve = element("button", "primary-button", t("Approve"));
     approve.type = "button";
     approve.addEventListener("click", async () => {
       approve.disabled = true;
@@ -1574,7 +1596,7 @@ function enrollmentRow(item, pending) {
     });
     actions.append(reject, approve);
   } else {
-    const revoke = element("button", "danger-button", "Revoke");
+    const revoke = element("button", "danger-button", t("Revoke"));
     revoke.type = "button";
     revoke.addEventListener("click", async () => {
       revoke.disabled = true;
@@ -1586,9 +1608,42 @@ function enrollmentRow(item, pending) {
         showError(error);
       }
     });
+    const projectEnabled = item.allow_project_registration === true;
+    identity.append(element("span", "muted", t(projectEnabled ? "Project registration enabled" : "Project registration disabled")));
+    if (item.project_scopes?.length) {
+      identity.append(element("span", "muted", t("Writable projects") + ": " + item.project_scopes.map(scopeName).join(", ")));
+    }
+    if (["contribute", "write", "admin"].includes(item.approved_access.mode)) {
+      const projectPolicy = element("button", "secondary-button", t(projectEnabled ? "Disable project registration" : "Enable project registration"));
+      projectPolicy.type = "button";
+      projectPolicy.addEventListener("click", async () => {
+        projectPolicy.disabled = true;
+        try {
+          await maintenanceMutation("/api/enrollment/registrations/" + encodeURIComponent(item.registration_id) + "/project-policy", { enabled: !projectEnabled });
+          await loadEnrollment({ autoOpen: false });
+        } catch (error) {
+          projectPolicy.disabled = false;
+          showError(error);
+        }
+      });
+      actions.append(projectPolicy);
+    }
     actions.append(revoke);
   }
-  row.append(identity, actions);
+  const metadata = element("dl", "enrollment-metadata");
+  const timestamp = (value) => formatTimestamp(value, currentLocale(), { timeZoneName: "short" });
+  const fields = pending
+    ? [["Requested at", timestamp(item.requested_at)], ["Expires at", timestamp(item.expires_at)], ["Request ID", item.request_id]]
+    : [["Registered at", timestamp(item.created_at)], ["Last connected", item.last_opened_at ? timestamp(item.last_opened_at) : t("Not connected yet")], ["Registration ID", item.registration_id]];
+  for (const [label, value] of fields) {
+    const field = element("div", "enrollment-field");
+    const isId = label === "Registration ID" || label === "Request ID";
+    if (isId) field.classList.add("enrollment-id");
+    if (label === "Last connected") field.title = t("Last connection time does not indicate whether this client is currently online.");
+    field.append(element("dt", "muted", t(label)), element("dd", isId ? "mono" : "", value));
+    metadata.append(field);
+  }
+  row.append(identity, actions, metadata);
   return row;
 }
 
@@ -1605,10 +1660,10 @@ function renderEnrollment(data, autoOpen) {
 
   const pendingList = byId("enrollment-pending");
   pendingList.replaceChildren(...pending.map((item) => enrollmentRow(item, true)));
-  if (pending.length === 0) pendingList.append(element("div", "empty enrollment-empty", "No pending requests"));
+  if (pending.length === 0) pendingList.append(element("div", "empty enrollment-empty", t("No pending requests")));
   const registeredList = byId("enrollment-registered");
   registeredList.replaceChildren(...registered.map((item) => enrollmentRow(item, false)));
-  if (registered.length === 0) registeredList.append(element("div", "empty enrollment-empty", "No approved clients"));
+  if (registered.length === 0) registeredList.append(element("div", "empty enrollment-empty", t("No approved clients")));
 
   const unseen = pending.filter((item) => !state.enrollment.seenPending.has(item.request_id));
   if (autoOpen && unseen.length > 0 && !document.querySelector("dialog[open]")) {
@@ -3853,6 +3908,7 @@ function consolidationReviewEditor(review) {
     })),
     submitted: false,
     failed: false,
+    uncertain: false,
     busy: false,
     error: "",
   };
@@ -3872,8 +3928,9 @@ function consolidationReviewEditor(review) {
   function rerender() {
     body.replaceChildren();
     body.append(element("p", "muted", zh
-      ? "每个新页面写完整的同一话题；混合话题可拆成多个页面。只有确认该来源的事实、时间、转折和限定均已覆盖，才勾选退出默认召回。原修订仍可按 ID 读取。"
-      : "Write a complete Page for each subject. Split mixed subjects into several Pages. Remove a source from default recall only after its claims, timing, changes, and limits are fully covered. Its exact Revision remains readable."));
+      ? "每个新页面写完整的同一话题；混合话题可拆成多个页面。只有确认该来源的事实、时间、转折和限定均已覆盖，才勾选退出默认召回；发布前至少确认一个来源完整覆盖。「此页取自」仅表示使用了哪些材料。原修订仍可按 ID 读取。"
+      : "Write a complete Page for each subject. Split mixed subjects into several Pages. Remove a source from default recall only after its claims, timing, changes, and limits are fully covered. Confirm full coverage for at least one source before publishing. “Sources for this Page” only identifies the materials used. Its exact Revision remains readable."));
+    const coverageChecks = [];
     const sourceList = element("div", "maintenance-consolidation-sources");
     sources.forEach((source, index) => {
       const section = element("section", "maintenance-consolidation-source");
@@ -3894,6 +3951,7 @@ function consolidationReviewEditor(review) {
       const retirement = element("label", "maintenance-consolidation-check");
       const checkbox = element("input", ""); checkbox.type = "checkbox";
       checkbox.checked = draft.coverage[index].complete;
+      coverageChecks.push(checkbox);
       checkbox.disabled = draft.submitted;
       checkbox.addEventListener("change", () => { draft.coverage[index].complete = checkbox.checked; });
       retirement.append(checkbox, element("span", "", zh ? "已完整覆盖，旧页仅作来源，不参与默认召回" : "Fully covered; retain old Page as provenance only"));
@@ -3959,6 +4017,7 @@ function consolidationReviewEditor(review) {
     publish.type = "button";
     publish.disabled = draft.busy || (draft.submitted && !draft.failed);
     publish.addEventListener("click", async () => {
+      if (draft.busy || (draft.submitted && !draft.failed)) return;
       const outputs = draft.outputs.map((output) => ({
         title: output.title.trim(), content: output.content.trim(), sourceIndexes: [...output.sourceIndexes],
       }));
@@ -3972,6 +4031,13 @@ function consolidationReviewEditor(review) {
           || coverage.some((decision) => !decision.explanation || !decision.outputIndexes.length)) {
         draft.error = zh ? "填写每个新页的标题、完整内容、来源，以及每个旧页的覆盖说明。" : "Complete each new Page and every source coverage explanation.";
         error.textContent = draft.error;
+        return;
+      }
+      if (!coverage.some((decision) => decision.complete)) {
+        draft.error = zh ? "请先核对来源，并至少勾选一项「已完整覆盖」。下方「此页取自」不代表完整覆盖。"
+          : "Confirm full coverage for at least one source. “Sources for this Page” does not confirm coverage.";
+        error.textContent = draft.error;
+        coverageChecks[0]?.focus();
         return;
       }
       draft.busy = true; draft.submitted = true; draft.failed = false; draft.error = "";
@@ -3989,14 +4055,22 @@ function consolidationReviewEditor(review) {
         catch (refreshFailure) { showError(refreshFailure); }
         if (result.outputs?.[0]?.pageId) pageInspector.open(result.outputs[0].pageId);
       } catch (failure) {
-        draft.failed = true;
         draft.error = failure.message || String(failure);
-        error.textContent = draft.error;
-        // Keep the exact submitted plan and key for a safe replay after an
-        // ambiguous transport error. A new plan needs a fresh review.
-        publish.textContent = zh ? "重试同一方案" : "Retry same plan";
-        publish.disabled = false;
-      } finally { draft.busy = false; }
+        if (failure.mutationOutcome === "not_applied" && !draft.uncertain) {
+          draft.submitted = false;
+          draft.failed = false;
+          draft.error = (zh ? "方案未发布，可修改后重新提交。" : "Nothing was published; edit and submit again. ") + draft.error;
+        } else {
+          // A later rejected retry cannot prove an earlier lost write failed.
+          // Keep the exact plan frozen until its outcome is recovered.
+          draft.uncertain = true;
+          draft.failed = true;
+          draft.error = (zh ? "发布结果尚未确认，请重试同一方案。" : "Publication outcome is unconfirmed; retry the same plan. ") + draft.error;
+        }
+      } finally {
+        draft.busy = false;
+        if (state.maintenance.consolidationDrafts.get(review.candidateId) === draft) rerender();
+      }
     });
     controls.append(add, publish);
     const error = element("p", "notice warning", draft.error);

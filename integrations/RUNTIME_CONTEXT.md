@@ -33,9 +33,9 @@ require Store-wide `ManageScope` and `Write`; a tenant cannot approve itself.
 MCP exposes three additional tools when the Runtime advertises this extension:
 `pcp_submit_candidate`, `pcp_publish_activity`, `pcp_read_activity`. They produce one compact JSON
 receipt with a stable output schema. The shared ChatGPT/Codex launcher selects the `context`
-toolset: eleven tools with this extension and eight without it. Three read-only discovery tools stay
+toolset: twelve tools with this extension and nine without it. Three read-only discovery tools stay
 available in both cases so cached MCP catalogs can still inspect identity, grants and Scopes. The
-compatibility `standard` toolset has 14 or 11 respectively. Hosts may further restrict tools;
+compatibility `standard` toolset has 15 or 12 respectively. Hosts may further restrict tools;
 discovery is not permission.
 
 Non-MCP applications should use the same client API, not read the operational file directly:
@@ -49,6 +49,21 @@ async fn recent_context(client: &dyn PcpTenantApi, cursor: Option<String>) -> an
     })).await
 }
 ```
+
+## Project ownership at the MCP boundary
+
+Before first project write, including activity-only continuation, call `pcp_ensure_project_scope` with a
+stable verified project identity and display name. Console must first enable project
+registration for that client; the operation creates/reuses the project Scope and
+refreshes the same MCP session. Candidate/activity opt-ins remain independent.
+
+MCP capture, candidate and activity accept `projectKey`; they resolve it through
+enrollment before constructing the ordinary Scope-based Runtime request. An explicit
+`scope` must match. Multiple topics inside one project still belong to that project.
+No shared current-project setting exists. Reuse registration receipts, and defer
+writes on ambiguous ownership or unavailable/denied registration instead of routing
+them to user context. Existing native callers continue to use explicit authorized
+Scopes. See [Scope routing](../design/scope-routing.md).
 
 ## Candidate lifecycle
 
@@ -107,8 +122,14 @@ ChatGPT and Codex share that allowance when using the same connection. Updating 
 `topicKey` replaces its snapshot without consuming another slot; a thirteenth topic evicts the oldest.
 The storage allowance is independent of the five-card read limit. An existing card needs its exact version for changed content;
 the same content is a no-op and does not renew TTL. Preserve the last receipt in host state or
-read own cards before updating. Update useful topic state at meaningful milestones, including
-pause and completion; no per-message log or periodic model summary is required. There are at most 192 live cards overall.
+read own cards before updating. The key is client-wide, not Scope-local: qualify it by project
+and topic so unrelated windows do not overwrite one another. On conflict, reread and decide
+whether the new information still belongs in that snapshot; do not blindly overwrite.
+Create the first card as soon as there is useful handoff state, including discussion-only
+progress, tentative understanding or an open question. Update when that state, next step,
+blocker, pause or completion changes. No lasting value, final conclusion or remember request
+is required. Preserve uncertainty; skip unchanged state and per-message logs. This is separate
+from candidate/durable retention. There are at most 192 live cards overall.
 
 `ReadActivity` accepts optional `scopes`, literal topic `query` (120 characters), `limit` (1–5),
 `includeOwn` (default true), and a query-local `cursor`. The default empty scopes means all

@@ -261,3 +261,27 @@ fn legacy_descriptors_do_not_invent_a_provider_build() {
     let decoded: PcpDescriptor = serde_json::from_value(value).unwrap();
     assert_eq!(decoded.build_info, None);
 }
+
+#[tokio::test]
+async fn ordinary_descriptors_cannot_adopt_new_scope_grants() {
+    let original = endpoint(descriptor("old"), false, false);
+    let client = RemotePcpClient::connect(&original.path).await.unwrap();
+    let mut changed = descriptor("new");
+    changed.access.grants = pcp_client::AccessMode::Contribute
+        .session(
+            changed.access.principal.clone(),
+            "new",
+            vec!["project:new".into()],
+            false,
+        )
+        .grants;
+    assert!(client.validate_reconnected_descriptor(&changed).is_err());
+    // Only the connector's authenticated path may install this descriptor.
+    client.adopt_enrolled_descriptor(&changed).unwrap();
+    assert!(client.validate_reconnected_descriptor(&changed).is_ok());
+    assert!(
+        client
+            .validate_reconnected_descriptor(&descriptor("old"))
+            .is_err()
+    );
+}
