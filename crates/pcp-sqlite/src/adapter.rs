@@ -516,6 +516,20 @@ impl PcpStore for SqlitePcpStore {
             }
         };
         let result = SqlitePcpStore::read_pages(self, request, scopes.clone()).await;
+        // Record the Scopes actually read, rather than repeating every grant on
+        // each exact Page read. Keep the attempted authorization set on failure.
+        let scopes = match &result {
+            Ok(pages) => {
+                let mut read_scopes = pages
+                    .iter()
+                    .map(|page| page.revision.namespace.clone())
+                    .collect::<Vec<_>>();
+                read_scopes.sort();
+                read_scopes.dedup();
+                read_scopes
+            }
+            Err(_) => scopes,
+        };
         complete(
             self,
             access,
@@ -2204,6 +2218,17 @@ where
         AccessDecision::Failed => Some("operation failed"),
         AccessDecision::Allowed => None,
     };
+    if !crate::access::records_access(access, operation, &decision) {
+        // Keep the transport request's cheap counters without serializing a
+        // whole inventory or Page payload merely to discard its audit row.
+        let _ = pcp_store::request_audit::observe(
+            &scopes,
+            operation,
+            &decision,
+            Some(&observation.finish::<()>(None)),
+        );
+        return result;
+    }
     let telemetry = observation.finish(result.as_ref().ok());
     let audit = store
         .record_access(

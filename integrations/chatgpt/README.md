@@ -74,6 +74,7 @@ or intent reranking. Maintenance tools are not part of the shared ChatGPT/Codex 
 After the foreground connection works, install a per-user LaunchAgent:
 
 ```bash
+cargo build --release -p pcp-console
 python3 integrations/chatgpt/install-service.py
 ```
 
@@ -110,7 +111,13 @@ launchctl bootout "gui/$(id -u)/com.glenzli.pcp-chatgpt-tunnel"
 launchctl disable "gui/$(id -u)/com.glenzli.pcp-chatgpt-tunnel"
 ```
 
-Logs are in `~/Library/Application Support/PCP/chatgpt-tunnel/logs`. Login startup
+Logs are in `~/Library/Application Support/PCP/chatgpt-tunnel/logs`: `pcp-tunnel.log`
+plus two rotated files, each at most 2 MiB. The existing PCP Console binary wraps
+the tunnel process solely to bound output, coalesce duplicate errors and truncate
+long lines; it forwards termination and retains the tunnel's exit status. Override
+its installed path with `--log-wrapper`. The key, profile and tunnel command are
+unchanged. launchd stdout/stderr go to `/dev/null`, avoiding an unbounded side log.
+Login startup
 does not keep the Mac awake: ChatGPT cannot reach this local MCP while the machine
 is asleep, offline, or powered off. `doctor` validates configuration; it does not
 start the long-lived service. Installing a Codex plugin is not required for ChatGPT.

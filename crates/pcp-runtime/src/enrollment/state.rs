@@ -64,6 +64,8 @@ pub(super) struct StoredRegistration {
     pub allow_project_registration: bool,
     #[serde(default)]
     pub project_scopes: Vec<String>,
+    #[serde(default)]
+    pub historical_project_scopes: Vec<String>,
     pub credential_hash: String,
     pub created_at: DateTime<Utc>,
     pub last_opened_at: Option<DateTime<Utc>>,
@@ -74,6 +76,10 @@ pub(super) struct StoredRegistration {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct StoredProject {
     pub project_key: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub historical_scopes: Vec<String>,
     pub scope: String,
     pub display_name: String,
     pub description: Option<String>,

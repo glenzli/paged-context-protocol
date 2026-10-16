@@ -40,6 +40,79 @@ mod page_actions;
 mod reconciliation;
 
 #[tokio::test]
+async fn exact_page_read_audits_returned_scope_instead_of_the_whole_grant_list() {
+    let root = std::env::temp_dir().join(format!(
+        "pcp-read-audit-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("context.sqlite3"))
+            .await
+            .unwrap(),
+    );
+    let access = AccessSession::full_control(
+        principal("client:read-audit", AccessPrincipalType::ModelClient),
+        "audit-test",
+        ["a".to_owned(), "b".to_owned()],
+    );
+    let client = pcp_client(store.clone(), access);
+    for namespace in ["a", "b"] {
+        client
+            .create_scope(CreateScopeRequest {
+                namespace: namespace.into(),
+                display_name: namespace.into(),
+                description: None,
+                parent_namespace: None,
+            })
+            .await
+            .unwrap();
+    }
+    let written = client
+        .write_page(write_request(
+            store.identity_id(),
+            "a",
+            Actor {
+                actor_type: ActorType::Model,
+                actor_id: "client:read-audit".into(),
+            },
+            "exact read target",
+            "target",
+        ))
+        .await
+        .unwrap();
+    client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![written.page_id],
+            revision_ids: vec![],
+            projections: vec![Projection::Payload],
+            max_chars: 1000,
+        })
+        .await
+        .unwrap();
+    store.flush_access_audit().await.unwrap();
+    let scopes: String = store
+        .run("inspect read audit", |connection| {
+            Ok(connection.query_row(
+                "SELECT scopes_json FROM pcp_access_log WHERE operation='read_pages'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Vec<String>>(&scopes).unwrap(),
+        vec!["a"]
+    );
+    drop(client);
+    drop(store);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn store_wide_operator_dynamically_resolves_current_and_future_scopes() {
     let root = std::env::temp_dir().join(format!(
         "pcp-sqlite-store-wide-{}",
@@ -962,7 +1035,7 @@ async fn migrates_clean_association_store_to_topic_extraction_schema() {
             |row| row.get(0),
         )
         .expect("read topic Store schema version");
-    assert_eq!(version, "0.8.0-clean.5");
+    assert_eq!(version, "0.8.0-clean.6");
     let table_count: u32 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master
@@ -1107,7 +1180,7 @@ async fn migrates_draft_store_to_minimal_clean_schema() {
             |row| row.get(0),
         )
         .expect("read migrated version");
-    assert_eq!(version, "0.8.0-clean.5");
+    assert_eq!(version, "0.8.0-clean.6");
     for (table, removed_column) in [
         ("pcp_relations", "from_revision_id"),
         ("pcp_summaries", "content"),
@@ -1350,7 +1423,7 @@ async fn migrates_clean_store_associations_without_erasing_exact_inputs() {
                 |row| row.get::<_, String>(0),
             )
             .expect("read cleaned Store version"),
-        "0.8.0-clean.5"
+        "0.8.0-clean.6"
     );
     assert_eq!(
         connection

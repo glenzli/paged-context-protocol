@@ -4,10 +4,53 @@ use crate::{SqlitePcpStore, audit_writer::AccessAuditRecord};
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
 use pcp_core::{
-    AccessAuditEvent, AccessDecision, AccessPermission, AccessSession, OperationTelemetry,
+    AccessAuditEvent, AccessDecision, AccessPermission, AccessPrincipalType, AccessSession,
+    OperationTelemetry,
 };
 
 const MAX_AUDIT_DETAIL_CHARS: usize = 320;
+
+// Background inventory and operator polling are derived observations, not
+// memory changes. Logging every successful read makes maintenance audit itself.
+const SERVICE_READ_OPERATIONS: &[&str] = &[
+    "access_log",
+    "active_revision_retention_leases",
+    "browse_content_pages",
+    "browse_index",
+    "browse_retrieval_pages",
+    "content_char_count",
+    "content_library_summary",
+    "current_revision",
+    "current_revision_id",
+    "describe",
+    "durable_inventory",
+    "durable_page_inventory",
+    "expand_graph",
+    "health_snapshot",
+    "integrity_check",
+    "inspect_context_inbox",
+    "list_scopes",
+    "next_summary_candidate",
+    "page_count",
+    "pending_feedback",
+    "plan_revision_retention",
+    "query_audit_summary",
+    "query_access_log",
+    "read_pages",
+    "read_activity",
+    "revision_retention_leases",
+    "search_pages",
+];
+
+pub(crate) fn records_access(
+    access: &AccessSession,
+    operation: &str,
+    decision: &AccessDecision,
+) -> bool {
+    !(*decision == AccessDecision::Allowed
+        && access.principal.principal_type == AccessPrincipalType::Service
+        && SERVICE_READ_OPERATIONS.contains(&operation))
+}
 
 pub(crate) async fn authorize_scopes(
     store: &SqlitePcpStore,
@@ -180,12 +223,15 @@ impl SqlitePcpStore {
         detail: Option<&str>,
         telemetry: Option<&OperationTelemetry>,
     ) -> Result<()> {
+        let telemetry = pcp_store::request_audit::observe(scopes, operation, decision, telemetry);
+        if !records_access(access, operation, decision) {
+            return Ok(());
+        }
         let occurred_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
         let principal_json = serde_json::to_string(&access.principal)?;
         let scopes_json = serde_json::to_string(scopes)?;
         let session_id = access.session_id.clone();
         let operation = operation.to_owned();
-        let telemetry = pcp_store::request_audit::observe(scopes, &operation, decision, telemetry);
         let decision = decision.as_str().to_owned();
         let detail = detail.map(bound_detail);
         let telemetry_json = telemetry.as_ref().map(serde_json::to_string).transpose()?;

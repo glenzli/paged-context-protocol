@@ -6,12 +6,11 @@ use pcp_core::{AccessDecision, QueryAuditEvent, QueryAuditMethod, RouterTokenUsa
 use pcp_store::{QueryAuditMethodHealth, QueryAuditSummary};
 use rusqlite::params;
 
-use crate::SqlitePcpStore;
+use crate::{SqlitePcpStore, log_retention};
 
 const MIN_WINDOW_HOURS: u32 = 1;
 const MAX_WINDOW_HOURS: u32 = 24 * 90;
 const RECENT_EVENT_LIMIT: usize = 12;
-const QUERY_AUDIT_RETENTION_DAYS: i64 = 90;
 
 #[derive(Default)]
 struct MethodAccumulator {
@@ -51,16 +50,9 @@ impl MethodAccumulator {
 
 impl SqlitePcpStore {
     pub(crate) async fn record_runtime_query_audit(&self, event: QueryAuditEvent) -> Result<()> {
-        let retention_cutoff = (Utc::now() - Duration::days(QUERY_AUDIT_RETENTION_DAYS))
-            .to_rfc3339_opts(SecondsFormat::Millis, true);
-        self.run("record Runtime query audit", move |connection| {
-            connection
-                .execute(
-                    "DELETE FROM pcp_query_audit WHERE occurred_at < ?1",
-                    [retention_cutoff],
-                )
-                .context("prune expired Runtime query audit")?;
-            connection
+        self.run("record Runtime query audit", move |mut connection| {
+            let transaction = connection.transaction()?;
+            transaction
                 .execute(
                     "
                     INSERT INTO pcp_query_audit (
@@ -102,6 +94,8 @@ impl SqlitePcpStore {
                     ],
                 )
                 .context("insert Runtime query audit")?;
+            log_retention::prune_after_append(&transaction, log_retention::QUERY)?;
+            transaction.commit()?;
             Ok(())
         })
         .await

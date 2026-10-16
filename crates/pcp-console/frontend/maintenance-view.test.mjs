@@ -65,6 +65,15 @@ test("diagnostic polling preserves open disclosures and keyboard focus, and hist
   assert.equal(container.hidden, true);
 });
 
+test("exhausted automatic failures wait for new evidence instead of showing another retry", () => {
+  const { context, container } = diagnosticView();
+  context.renderMaintenanceJobIssues(container, { jobIssues: [{ operation: "topic", reason: "deadline elapsed", sourceRevisionIds: ["rev_1"], attempts: 3, retryAt: "obsolete", automaticRetryExhausted: true }] });
+  const active = container.children[0];
+  assert.match(active.children[0].textContent, /等待重试 0 项.*等待新证据 1 项/);
+  assert.match(active.children[1].children[1].children[2].textContent, /自动重试已停止，等待新证据/);
+  assert.doesNotMatch(active.children[1].children[1].children[2].textContent, /obsolete|下次重试/);
+});
+
 test("maintenance work is separated into two accessible sub-tabs", () => {
   assert.match(INDEX_HTML, /class="maintenance-workspace-tabs" role="tablist"/);
   for (const [tab, panel] of [

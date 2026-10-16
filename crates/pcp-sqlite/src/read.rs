@@ -1,4 +1,7 @@
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
 use pcp_core::{Projection, ReadPage, ReadPagesRequest, Relation, Scope};
@@ -10,6 +13,14 @@ use crate::{
     summary::current_summary,
     validity::{current_validity, validity_history},
 };
+
+pub(crate) struct IntegrityObservation {
+    pub(crate) checked_at: Instant,
+    pub(crate) result: std::result::Result<String, String>,
+}
+
+const INTEGRITY_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const INTEGRITY_ERROR_TTL: Duration = Duration::from_secs(30);
 
 impl SqlitePcpStore {
     pub async fn local_scope_names(&self) -> Result<Vec<String>> {
@@ -33,12 +44,37 @@ impl SqlitePcpStore {
     }
 
     pub async fn integrity_check(&self) -> Result<String> {
-        self.run("integrity check", move |connection| {
-            connection
-                .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-                .context("run PCP integrity check")
+        let mut observation = self.integrity.clone().lock_owned().await;
+        if let Some(cached) = observation.as_ref() {
+            let ttl = if cached.result.is_ok() {
+                INTEGRITY_CACHE_TTL
+            } else {
+                INTEGRITY_ERROR_TTL
+            };
+            if cached.checked_at.elapsed() < ttl {
+                return cached.result.clone().map_err(anyhow::Error::msg);
+            }
+        }
+        let store = self.clone();
+        // The task owns the single-flight guard. A disconnected/timeout caller
+        // cannot release it and start another copy of the same SQLite scan.
+        tokio::spawn(async move {
+            let result = store
+                .run("integrity check", move |connection| {
+                    connection
+                        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+                        .context("run PCP integrity check")
+                })
+                .await
+                .map_err(|error| format!("{error:#}"));
+            *observation = Some(IntegrityObservation {
+                checked_at: Instant::now(),
+                result: result.clone(),
+            });
+            result.map_err(anyhow::Error::msg)
         })
         .await
+        .context("join shared PCP integrity check")?
     }
 
     pub async fn list_scopes(
@@ -62,6 +98,7 @@ impl SqlitePcpStore {
                     FROM pcp_scopes s
                     LEFT JOIN pcp_revisions r ON r.namespace = s.namespace
                     LEFT JOIN pcp_pages p ON p.current_revision_id = r.revision_id
+                    WHERE NOT EXISTS (SELECT 1 FROM pcp_scope_aliases alias WHERE alias.namespace = s.namespace)
                     GROUP BY s.namespace
                     ORDER BY s.updated_at DESC, s.namespace
                     ",

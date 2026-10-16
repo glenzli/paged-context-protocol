@@ -9,6 +9,9 @@ mod query;
 mod semantic_search;
 
 pub use config::{IntentMatchConfig, RuntimeConfig, RuntimeEndpointConfig, SemanticSearchConfig};
+pub use enrollment::reconcile::{
+    PreparedProjectReconciliation, ProjectReconciliationGroup, ProjectScopeMerge,
+};
 pub use enrollment::{EnrollmentConfig, EnrollmentManager};
 pub use maintenance::{
     AnalyzeMaintenanceArchiveRequest, AnalyzeMaintenancePacksRequest,

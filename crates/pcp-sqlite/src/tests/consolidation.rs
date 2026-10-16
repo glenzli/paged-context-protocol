@@ -328,7 +328,7 @@ async fn clean_four_store_adds_consolidation_tables_without_changing_pages() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, "0.8.0-clean.5");
+    assert_eq!(version, "0.8.0-clean.6");
     let count: i64 = connection.query_row(
         "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name LIKE 'pcp_consolidation%'",
         [], |row| row.get(0),

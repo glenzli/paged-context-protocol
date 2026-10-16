@@ -13,18 +13,21 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
 use rusqlite::{Connection, params};
 use tokio::{sync::oneshot, task};
 
-use crate::store::open_connection;
+use crate::{
+    log_retention::{self, ACCESS_FAILURE, ACCESS_SUCCESS, LogPolicy},
+    store::open_connection,
+};
 
 const DEFAULT_QUEUE_CAPACITY: usize = 2_048;
 const DEFAULT_BATCH_SIZE: usize = 512;
 const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_MIN_COMMIT_INTERVAL: Duration = Duration::from_millis(500);
 const DEFAULT_SECURITY_FLUSH_WINDOW: Duration = Duration::from_millis(100);
-const DEFAULT_ALLOWED_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const DEFAULT_ALLOWED_RETENTION: Duration = ACCESS_SUCCESS.retention;
+const DEFAULT_ALLOWED_MAX_EVENTS: usize = ACCESS_SUCCESS.max_events;
 const RETENTION_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const RETENTION_BACKLOG_INTERVAL: Duration = Duration::from_secs(60);
 const RETENTION_DELETE_BATCH: usize = 5_000;
@@ -37,6 +40,9 @@ pub(crate) struct AccessAuditPolicy {
     min_commit_interval: Duration,
     security_flush_window: Duration,
     allowed_retention: Duration,
+    allowed_max_events: usize,
+    allowed_max_bytes: u64,
+    failure_policy: LogPolicy,
 }
 
 impl Default for AccessAuditPolicy {
@@ -48,6 +54,9 @@ impl Default for AccessAuditPolicy {
             min_commit_interval: DEFAULT_MIN_COMMIT_INTERVAL,
             security_flush_window: DEFAULT_SECURITY_FLUSH_WINDOW,
             allowed_retention: DEFAULT_ALLOWED_RETENTION,
+            allowed_max_events: DEFAULT_ALLOWED_MAX_EVENTS,
+            allowed_max_bytes: ACCESS_SUCCESS.max_bytes,
+            failure_policy: ACCESS_FAILURE,
         }
     }
 }
@@ -62,6 +71,9 @@ impl AccessAuditPolicy {
             min_commit_interval: Duration::ZERO,
             security_flush_window: Duration::ZERO,
             allowed_retention,
+            allowed_max_events: DEFAULT_ALLOWED_MAX_EVENTS,
+            allowed_max_bytes: ACCESS_SUCCESS.max_bytes,
+            failure_policy: ACCESS_FAILURE,
         }
     }
 
@@ -109,6 +121,10 @@ impl AccessAuditWriter {
         );
         anyhow::ensure!(policy.batch_size > 0, "audit batch size must be positive");
         anyhow::ensure!(
+            policy.allowed_max_events > 0,
+            "audit retention cap must be positive"
+        );
+        anyhow::ensure!(
             !policy.flush_interval.is_zero(),
             "audit flush interval must be positive"
         );
@@ -124,14 +140,13 @@ impl AccessAuditWriter {
                         return;
                     }
                 };
-                let initial_pruned =
-                    match prune_allowed_events(&connection, policy.allowed_retention) {
-                        Ok(pruned) => pruned,
-                        Err(error) => {
-                            let _ = startup_sender.send(Err(error));
-                            return;
-                        }
-                    };
+                let initial_pruned = match prune_operational_events(&connection, &policy) {
+                    Ok(pruned) => pruned,
+                    Err(error) => {
+                        let _ = startup_sender.send(Err(error));
+                        return;
+                    }
+                };
                 if startup_sender.send(Ok(())).is_err() {
                     return;
                 }
@@ -218,7 +233,7 @@ fn run_worker(
     let mut pending_since = None;
     let mut last_commit = None;
     let mut next_retention_check = Instant::now()
-        + if initial_pruned == RETENTION_DELETE_BATCH {
+        + if initial_pruned >= RETENTION_DELETE_BATCH {
             RETENTION_BACKLOG_INTERVAL
         } else {
             RETENTION_CHECK_INTERVAL
@@ -229,7 +244,7 @@ fn run_worker(
                 last_commit,
                 policy.min_commit_interval,
             ));
-            match flush_pending(connection, &mut pending) {
+            match flush_pending(connection, &mut pending, &policy) {
                 Ok(committed) => {
                     if committed > 0 {
                         last_commit = Some(Instant::now());
@@ -288,7 +303,7 @@ fn run_worker(
                 if !explicit_barrier && !disconnected {
                     thread::sleep(deadline.saturating_duration_since(Instant::now()));
                 }
-                let result = flush_pending(connection, &mut pending);
+                let result = flush_pending(connection, &mut pending, &policy);
                 if let Ok(committed) = result.as_ref() {
                     if *committed > 0 {
                         last_commit = Some(Instant::now());
@@ -304,7 +319,7 @@ fn run_worker(
                 }
             }
             Ok(Command::Flush(reply)) => {
-                let result = flush_pending(connection, &mut pending);
+                let result = flush_pending(connection, &mut pending, &policy);
                 if let Ok(committed) = result.as_ref() {
                     if *committed > 0 {
                         last_commit = Some(Instant::now());
@@ -321,7 +336,7 @@ fn run_worker(
                         && commit_rate_limit_remaining(last_commit, policy.min_commit_interval)
                             .is_zero()
                 }) {
-                    match flush_pending(connection, &mut pending) {
+                    match flush_pending(connection, &mut pending, &policy) {
                         Ok(committed) => {
                             if committed > 0 {
                                 last_commit = Some(Instant::now());
@@ -336,7 +351,7 @@ fn run_worker(
                 }
             }
             Err(RecvTimeoutError::Disconnected) => {
-                if let Err(error) = flush_pending(connection, &mut pending) {
+                if let Err(error) = flush_pending(connection, &mut pending, &policy) {
                     eprintln!("PCP access audit shutdown flush failed: {error:#}");
                 }
                 return;
@@ -384,6 +399,7 @@ fn send_flush_result(replies: Vec<oneshot::Sender<Result<(), String>>>, result: 
 fn flush_pending(
     connection: &mut Connection,
     pending: &mut Vec<AccessAuditRecord>,
+    policy: &AccessAuditPolicy,
 ) -> Result<usize> {
     if pending.is_empty() {
         return Ok(0);
@@ -420,6 +436,8 @@ fn flush_pending(
                 .context("record PCP access event")?;
         }
     }
+    log_retention::prune_after_append(&transaction, allowed_policy(policy))?;
+    log_retention::prune_after_append(&transaction, policy.failure_policy)?;
     transaction
         .commit()
         .context("commit PCP access audit batch")?;
@@ -435,10 +453,10 @@ fn maybe_prune(
     if Instant::now() < *next_retention_check {
         return;
     }
-    match prune_allowed_events(connection, policy.allowed_retention) {
+    match prune_operational_events(connection, policy) {
         Ok(pruned) => {
             *next_retention_check = Instant::now()
-                + if pruned == RETENTION_DELETE_BATCH {
+                + if pruned >= RETENTION_DELETE_BATCH {
                     RETENTION_BACKLOG_INTERVAL
                 } else {
                     RETENTION_CHECK_INTERVAL
@@ -451,34 +469,44 @@ fn maybe_prune(
     }
 }
 
-fn prune_allowed_events(connection: &Connection, retention: Duration) -> Result<usize> {
-    prune_allowed_events_with_limit(connection, retention, RETENTION_DELETE_BATCH)
+fn allowed_policy(policy: &AccessAuditPolicy) -> LogPolicy {
+    LogPolicy {
+        retention: policy.allowed_retention,
+        max_events: policy.allowed_max_events,
+        max_bytes: policy.allowed_max_bytes,
+        ..ACCESS_SUCCESS
+    }
 }
 
+fn prune_operational_events(connection: &Connection, policy: &AccessAuditPolicy) -> Result<usize> {
+    [
+        allowed_policy(policy),
+        policy.failure_policy,
+        log_retention::QUERY,
+        log_retention::MODEL_USAGE,
+    ]
+    .into_iter()
+    .try_fold(0, |total, policy| {
+        Ok(total + log_retention::prune(connection, policy, RETENTION_DELETE_BATCH)?)
+    })
+}
+
+#[cfg(test)]
 fn prune_allowed_events_with_limit(
     connection: &Connection,
     retention: Duration,
+    max_events: usize,
     delete_batch: usize,
 ) -> Result<usize> {
-    let delete_batch = i64::try_from(delete_batch).context("bound access audit delete batch")?;
-    let retention =
-        ChronoDuration::from_std(retention).context("convert access audit retention")?;
-    let cutoff = (Utc::now() - retention).to_rfc3339_opts(SecondsFormat::Millis, true);
-    connection
-        .execute(
-            "
-            DELETE FROM pcp_access_log
-            WHERE rowid IN (
-                SELECT rowid
-                FROM pcp_access_log
-                WHERE decision = 'allowed' AND occurred_at < ?1
-                ORDER BY occurred_at ASC, event_id ASC
-                LIMIT ?2
-            )
-            ",
-            params![cutoff, delete_batch],
-        )
-        .context("prune expired allowed PCP access events")
+    log_retention::prune(
+        connection,
+        LogPolicy {
+            retention,
+            max_events,
+            ..ACCESS_SUCCESS
+        },
+        delete_batch,
+    )
 }
 
 #[cfg(test)]
@@ -542,6 +570,217 @@ mod tests {
             .expect("record denied access event");
 
         assert_eq!(row_count(&store).await, 1);
+    }
+
+    #[tokio::test]
+    async fn internal_successful_reads_are_quiet_but_writes_and_failures_remain_audited() {
+        let store = open_store("internal-reads", AccessAuditPolicy::default()).await;
+        let mut service = access();
+        service.principal.principal_type = AccessPrincipalType::Service;
+        let scopes = ["project:audit".to_owned()];
+        for operation in [
+            "read_pages",
+            "durable_inventory",
+            "durable_page_inventory",
+            "health_snapshot",
+            "integrity_check",
+            "inspect_context_inbox",
+            "read_activity",
+            "query_access_log",
+            "current_revision_id",
+            "browse_retrieval_pages",
+            "next_summary_candidate",
+            "pending_feedback",
+            "plan_revision_retention",
+        ] {
+            store
+                .record_access(
+                    &service,
+                    operation,
+                    &scopes,
+                    &AccessDecision::Allowed,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        store.flush_access_audit().await.unwrap();
+        assert_eq!(row_count(&store).await, 0);
+        store
+            .record_access(
+                &service,
+                "write_page",
+                &scopes,
+                &AccessDecision::Allowed,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .record_access(
+                &service,
+                "read_pages",
+                &scopes,
+                &AccessDecision::Denied,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .record_access(
+                &service,
+                "read_pages",
+                &scopes,
+                &AccessDecision::Failed,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        store.flush_access_audit().await.unwrap();
+        assert_eq!(row_count(&store).await, 3);
+    }
+
+    #[tokio::test]
+    async fn event_cap_applies_to_recent_successes_without_pruning_security_events() {
+        let mut policy =
+            AccessAuditPolicy::for_test(Duration::from_secs(10), Duration::from_secs(86_400));
+        policy.allowed_max_events = 3;
+        let store = open_store("event-cap", policy).await;
+        for _ in 0..12 {
+            store
+                .record_access(
+                    &access(),
+                    "read_pages",
+                    &["project:audit".into()],
+                    &AccessDecision::Allowed,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .record_access(
+                &access(),
+                "read_pages",
+                &["project:audit".into()],
+                &AccessDecision::Denied,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .record_access(
+                &access(),
+                "read_pages",
+                &["project:audit".into()],
+                &AccessDecision::Failed,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        store.flush_access_audit().await.unwrap();
+        let counts = store.run("audit cap verification", |connection| {
+            let mut statement = connection.prepare("SELECT decision,count(*) FROM pcp_access_log GROUP BY decision ORDER BY decision")?;
+            Ok(statement.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)
+        }).await.unwrap();
+        assert_eq!(
+            counts,
+            vec![
+                ("allowed".into(), 3),
+                ("denied".into(), 1),
+                ("failed".into(), 1)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_integrity_reads_share_a_cached_check_and_expiry_refreshes_it() {
+        let store = open_store("integrity-cache", AccessAuditPolicy::default()).await;
+        let (one, two, three) = tokio::join!(
+            store.integrity_check(),
+            store.integrity_check(),
+            store.integrity_check()
+        );
+        assert_eq!(one.unwrap(), "ok");
+        assert_eq!(two.unwrap(), "ok");
+        assert_eq!(three.unwrap(), "ok");
+        let first = store.integrity.lock().await.as_ref().unwrap().checked_at;
+        assert_eq!(store.integrity_check().await.unwrap(), "ok");
+        assert_eq!(
+            store.integrity.lock().await.as_ref().unwrap().checked_at,
+            first
+        );
+        store.integrity.lock().await.as_mut().unwrap().checked_at =
+            Instant::now() - Duration::from_secs(601);
+        assert_eq!(store.integrity_check().await.unwrap(), "ok");
+        assert!(store.integrity.lock().await.as_ref().unwrap().checked_at > first);
+    }
+
+    #[tokio::test]
+    async fn repeated_failures_cannot_overflow_or_evict_the_success_partition() {
+        let mut policy =
+            AccessAuditPolicy::for_test(Duration::from_secs(10), Duration::from_secs(86_400));
+        policy.failure_policy.max_events = 3;
+        let store = open_store("error-storm", policy).await;
+        store
+            .record_access(
+                &access(),
+                "write_page",
+                &["project:audit".into()],
+                &AccessDecision::Allowed,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        for n in 0..25 {
+            let decision = if n % 2 == 0 {
+                AccessDecision::Denied
+            } else {
+                AccessDecision::Failed
+            };
+            store
+                .record_access(
+                    &access(),
+                    "read_pages",
+                    &["project:audit".into()],
+                    &decision,
+                    Some("temporarily unavailable"),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        store.flush_access_audit().await.unwrap();
+        store
+            .run("verify failure flood", |c| {
+                assert_eq!(
+                    c.query_row(
+                        "SELECT count(*) FROM pcp_access_log WHERE decision='allowed'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )?,
+                    1
+                );
+                assert_eq!(
+                    c.query_row(
+                        "SELECT count(*) FROM pcp_access_log WHERE decision<>'allowed'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )?,
+                    3
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -681,7 +920,7 @@ mod tests {
                 .expect("seed expired access event");
         }
         assert_eq!(
-            prune_allowed_events_with_limit(&connection, Duration::from_secs(86_400), 1,)
+            prune_allowed_events_with_limit(&connection, Duration::from_secs(86_400), 10_000, 1,)
                 .expect("prune one retention batch"),
             1
         );
@@ -725,7 +964,7 @@ mod tests {
         AccessSession::full_control(
             AccessPrincipal {
                 principal_id: "client:audit-test".to_owned(),
-                principal_type: AccessPrincipalType::Service,
+                principal_type: AccessPrincipalType::ModelClient,
                 display_name: None,
             },
             "session:audit-test",

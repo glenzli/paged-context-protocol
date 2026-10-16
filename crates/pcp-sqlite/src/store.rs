@@ -24,6 +24,7 @@ pub struct SqlitePcpStore {
     pub(crate) path: PathBuf,
     identity_id: String,
     pub(crate) audit_writer: Arc<AccessAuditWriter>,
+    pub(crate) integrity: Arc<tokio::sync::Mutex<Option<crate::read::IntegrityObservation>>>,
 }
 
 impl SqlitePcpStore {
@@ -55,6 +56,7 @@ impl SqlitePcpStore {
             path,
             identity_id,
             audit_writer,
+            integrity: Arc::default(),
         })
     }
 

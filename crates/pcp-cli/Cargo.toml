@@ -13,6 +13,7 @@ anyhow = "1.0"
 pcp-client = { path = "../pcp-client" }
 pcp-core = { path = "../pcp-core" }
 pcp-rpc = { path = "../pcp-rpc" }
+pcp-runtime = { path = "../pcp-runtime" }
 pcp-sqlite = { path = "../pcp-sqlite" }
 pcp-store = { path = "../pcp-store" }
 serde = { version = "1.0", features = ["derive"] }

@@ -13,6 +13,7 @@ use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 use serde_json::json;
 mod experience;
+mod project_reconcile;
 mod scope_transfer;
 
 #[tokio::main]
@@ -29,7 +30,7 @@ async fn main() -> Result<()> {
     if experience::local_command(&command, &mut arguments)? {
         return Ok(());
     }
-    if command == "scope-transfer" {
+    if command == "scope-transfer" || command == "project-reconcile" {
         anyhow::ensure!(
             env::var_os("PCP_RUNTIME_SOCKET").is_none(),
             "scope-transfer uses the exact local Store path, not a tenant Runtime socket"
@@ -38,6 +39,9 @@ async fn main() -> Result<()> {
             env::var_os("PCP_STORE_PATH").is_some() && path.is_absolute(),
             "scope-transfer requires an explicit absolute PCP_STORE_PATH"
         );
+        if command == "project-reconcile" {
+            return project_reconcile::run(&mut arguments, &path, operator_actor()?).await;
+        }
         return scope_transfer::run(&mut arguments, &path, operator_actor()?).await;
     }
     if command == "experience-flush" {
@@ -477,6 +481,6 @@ fn operator_tool_or_model() -> Option<String> {
 
 fn print_help() {
     println!(
-        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <page-id>\n  export\n  doctor\n  scope-transfer <manifest.json> [--confirm]\n  experience-receipt <infer|dev-mesh> [archive-locator] < receipt.json\n  experience-stage <private-outbox> <identity> <principal> < experience.json\n  experience-flush <private-outbox> <identity> <principal>\n  retention-plan [minimum-age-days] [keep-recent-per-page] [sample-limit]\n  retention-collect --confirm [minimum-age-days] [keep-recent-per-page] [sample-limit]\n  revise --confirm <page-id> < revised.md\n  summary-revise --confirm <target-page-id> < summary.md\n  tombstone --confirm <current-revision-id>\n\nSet PCP_RUNTIME_SOCKET to use a running local runtime, or PCP_STORE_PATH for embedded SQLite. PCP_OPERATOR_ACTOR_TYPE, PCP_OPERATOR_ACTOR_ID, and PCP_OPERATOR_TOOL_OR_MODEL can attribute operator writes."
+        "pcp commands:\n  describe\n  scopes [query]\n  search <query> [auto|exact|text|graph|temporal]\n  read <page-id>\n  export\n  doctor\n  scope-transfer <manifest.json> [--confirm]\n  project-reconcile <manifest.json> [--confirm]\n  experience-receipt <infer|dev-mesh> [archive-locator] < receipt.json\n  experience-stage <private-outbox> <identity> <principal> < experience.json\n  experience-flush <private-outbox> <identity> <principal>\n  retention-plan [minimum-age-days] [keep-recent-per-page] [sample-limit]\n  retention-collect --confirm [minimum-age-days] [keep-recent-per-page] [sample-limit]\n  revise --confirm <page-id> < revised.md\n  summary-revise --confirm <target-page-id> < summary.md\n  tombstone --confirm <current-revision-id>\n\nSet PCP_RUNTIME_SOCKET to use a running local runtime, or PCP_STORE_PATH for embedded SQLite. PCP_OPERATOR_ACTOR_TYPE, PCP_OPERATOR_ACTOR_ID, and PCP_OPERATOR_TOOL_OR_MODEL can attribute operator writes."
     );
 }

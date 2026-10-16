@@ -55,6 +55,7 @@ const MAX_RETENTION_SAMPLE_LIMIT: u32 = 100;
 const CONSOLE_STATIC_CACHE_CONTROL: &str = "no-store";
 
 mod context_hub;
+mod diagnostic_log;
 mod graph_view;
 mod managed;
 mod page_actions;
@@ -307,8 +308,31 @@ async fn main() -> Result<()> {
         println!("pcp-console {}", pcp_core::BuildInfo::current().label());
         return Ok(());
     }
-    let runtime = match managed::ManagedOptions::parse(env::args_os().skip(1))? {
-        Some(options) => Some(managed::ManagedRuntime::start(options).await?),
+    if env::args().nth(1).as_deref() == Some("--tunnel-service") {
+        let code = diagnostic_log::run_service(env::args_os().skip(2)).await?;
+        std::process::exit(code);
+    }
+    let options = managed::ManagedOptions::parse(env::args_os().skip(1))?;
+    let _capture = options
+        .as_ref()
+        .map(|options| diagnostic_log::install(&options.home))
+        .transpose()?;
+    let result = run_console(options).await;
+    if let Err(error) = &result {
+        eprintln!("PCP Console stopped: {error:#}");
+    }
+    result
+}
+
+async fn run_console(options: Option<managed::ManagedOptions>) -> Result<()> {
+    let runtime = match options {
+        Some(options) => {
+            eprintln!(
+                "PCP managed Console {}",
+                pcp_core::BuildInfo::current().label()
+            );
+            Some(managed::ManagedRuntime::start(options).await?)
+        }
         None => None,
     };
     let socket_path = runtime
@@ -388,6 +412,15 @@ fn router(state: AppState) -> Router {
         .route("/page-inspector.js", get(page_inspector_js))
         .route("/page-editor.js", get(page_editor_js))
         .route("/page-list.js", get(page_list_js))
+        .route(
+            "/scope-metadata.js",
+            get(|| async {
+                static_asset(
+                    "application/javascript; charset=utf-8",
+                    include_str!("scope-metadata.js"),
+                )
+            }),
+        )
         .route("/time-format.js", get(time_format_js))
         .route(
             "/maintenance-diagnostics.js",
@@ -450,6 +483,7 @@ fn router(state: AppState) -> Router {
         .route("/api/runtime", get(runtime_status))
         .route("/api/runtime/restart", post(restart_runtime))
         .route("/api/overview", get(overview))
+        .route("/api/scopes", get(scope_metadata))
         .route("/api/pages", get(pages))
         .route("/api/governance/pages", get(governance_pages))
         .route("/api/governance/archive", post(archive_governance_page))
@@ -845,10 +879,32 @@ async fn restart_runtime(
     })))
 }
 
+async fn scope_metadata(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let scopes = all_scopes(&state.client).await?;
+    Ok(Json(json!({"scopes":scopes})))
+}
+
+async fn all_scopes(client: &RemotePcpClient) -> Result<Vec<pcp_core::Scope>> {
+    let mut scopes = Vec::new();
+    let mut cursor = None;
+    loop {
+        let (items, next) = client
+            .list_scopes(Vec::new(), None, 100, cursor.clone())
+            .await?;
+        scopes.extend(items);
+        anyhow::ensure!(scopes.len() <= 10_000, "too many Console Scopes");
+        if next.is_none() {
+            return Ok(scopes);
+        }
+        anyhow::ensure!(next != cursor, "Scope cursor did not advance");
+        cursor = next;
+    }
+}
+
 async fn overview(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let (integrity, scopes, content_library, runtime_build) = tokio::try_join!(
         state.client.integrity_check(),
-        state.client.list_scopes(Vec::new(), None, 10_000, None),
+        all_scopes(&state.client),
         state.client.content_library_summary(Vec::new()),
         state.client.provider_build_info(),
     )?;
@@ -863,7 +919,6 @@ async fn overview(State(state): State<AppState>) -> Result<Json<Value>, ApiError
         })
         .collect::<HashMap<_, _>>();
     let scopes = scopes
-        .0
         .into_iter()
         .map(|scope| {
             let (page_count, content_chars) = content_by_scope

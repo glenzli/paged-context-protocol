@@ -3,7 +3,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -14,7 +14,7 @@ use pcp_store::{
     RuntimeModelUsageHealth, StorageHealth,
 };
 use serde_json::{Value, json};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use super::contract::{
     IssueSeverity, MetricKind, ObserverExtensions, ObserverIssue, ObserverLinks, ObserverMetric,
@@ -25,6 +25,7 @@ use super::contract::{
 const SERVICE_KIND: &str = "pcp";
 const SNAPSHOT_WINDOW_HOURS: u32 = 24;
 const SNAPSHOT_WINDOW_SECONDS: u64 = 24 * 60 * 60;
+const HEALTH_CACHE_TTL: Duration = Duration::from_secs(30);
 
 pub(super) struct SnapshotSource {
     store: Arc<dyn PcpStore>,
@@ -34,6 +35,7 @@ pub(super) struct SnapshotSource {
     started: Instant,
     sequence: AtomicU64,
     integrity: RwLock<IntegrityObservation>,
+    health: Mutex<Option<(Instant, Vec<String>, HealthSnapshot)>>,
 }
 
 impl SnapshotSource {
@@ -51,6 +53,7 @@ impl SnapshotSource {
             started: Instant::now(),
             sequence: AtomicU64::new(1),
             integrity: RwLock::new(IntegrityObservation::default()),
+            health: Mutex::new(None),
         }
     }
 
@@ -74,15 +77,31 @@ impl SnapshotSource {
         let (scope_count, health) = match scopes {
             Ok(scopes) if scopes.is_empty() => (0, Some(empty_health_snapshot())),
             Ok(scopes) => {
-                let access = observer_access(&self.generation, &scopes);
                 let scope_count = scopes.len().try_into().unwrap_or(u64::MAX);
-                (
-                    scope_count,
-                    self.store
-                        .health_snapshot(&access, scopes, SNAPSHOT_WINDOW_HOURS)
-                        .await
-                        .ok(),
-                )
+                // Multiple Discovery consumers share one recent aggregation.
+                // Hold the gate through collection so slow readers cannot fan
+                // out another copy of an expensive history query.
+                let mut cached = self.health.lock().await;
+                let health = match cached.as_ref() {
+                    Some((at, previous_scopes, health))
+                        if at.elapsed() < HEALTH_CACHE_TTL && *previous_scopes == scopes =>
+                    {
+                        Some(health.clone())
+                    }
+                    _ => {
+                        let access = observer_access(&self.generation, &scopes);
+                        let result = self
+                            .store
+                            .health_snapshot(&access, scopes.clone(), SNAPSHOT_WINDOW_HOURS)
+                            .await
+                            .ok();
+                        if let Some(health) = result.as_ref() {
+                            *cached = Some((Instant::now(), scopes, health.clone()));
+                        }
+                        result
+                    }
+                };
+                (scope_count, health)
             }
             Err(_) => (0, None),
         };

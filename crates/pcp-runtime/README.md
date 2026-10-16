@@ -74,7 +74,8 @@ explicitly after the worker has been observed against the target Identity.
 Observe mode skips explicit feedback reconciliation because that queue requires
 the write-only `Assess` permission; other eligible semantic jobs remain available.
 `initial_delay_seconds` optionally delays the first inventory heartbeat after
-process start. Successful content writes through a Runtime endpoint wake the
+process start. Successful content writes through a Runtime endpoint, including
+dynamically enrolled client sessions, wake the
 maintainer immediately and break any idle backoff; the wake only refreshes the
 inventory watermark and does not itself authorize a model call. Runtime
 persists changed regions, groups source-backed Pages by stream, and runs
@@ -88,8 +89,8 @@ With no dirty regions, empty cycles back off exponentially from
 for writes outside Runtime's observable endpoint path. Productive cycles that
 leave follow-up work retry after 30 seconds; failures use an independent bounded
 30-second exponential retry. The first heartbeat establishes a write baseline. Separately,
-`periodic_review` revisits unchanged Pages once per day by default, including
-an initial bounded review of an existing Store. Each batch uses the same
+`periodic_review` is disabled by default. An explicit opt-in can explore an
+existing Store on its configured cadence. Each batch uses the same
 `max_jobs_per_cycle` limit and bounded candidate windows. A full periodic batch
 does not start a rapid sweep. Never-reviewed windows precede previously reviewed
 windows; eligible old windows are ordered by their last review time, so early
@@ -110,7 +111,7 @@ max_interval_seconds = 86400
 max_jobs_per_cycle = 3
 
 [maintenance.periodic_review]
-enabled = true
+enabled = false
 interval_seconds = 86400
 
 [maintenance.topic]
@@ -158,6 +159,9 @@ quiet_period_seconds = 600
 max_wait_seconds = 3600
 ```
 
+Withdrawn source Pages and reconciled Scope aliases retire their obsolete dirty
+markers; an expired deadline with no remaining source never triggers an idle loop.
+
 ## Maintenance Cycle
 
 One cycle is bounded by `max_jobs_per_cycle`:
@@ -200,6 +204,61 @@ may later absorb adjacent leaves through a new Revision without changing its Pag
 A `no_candidate` response also cools down
 the exact routing-window Page ID set, so an unchanged Store does not repeatedly
 consume semantic-worker tokens.
+
+Negative Topic/Relation decisions are receipts for exact source Revisions, not
+timers: unchanged evidence does not become eligible again after a day or a
+restart. Receipts are retired when their source heads change. Failed automatic
+jobs stop after three model attempts against the same evidence; their diagnostics
+remain available. Legacy failures without a bounded retry ledger are parked on
+upgrade, with their original attempt counts and reasons retained. Candidate-inbox safety polling checks for actionable inbox work
+without forcing another full Store maintenance cycle for activity-only traffic.
+
+Successful internal service reads, integrity checks and polling do not create
+per-call access records. External exact reads audit only the Scopes actually
+returned. Operational histories use independent retention budgets:
+
+| History | Maximum age | Maximum events | Metadata byte budget |
+| --- | --- | --- | --- |
+| Successful access | 7 days | 10,000 | 8 MiB |
+| Denied / failed access | 30 days | 2,000 | 4 MiB |
+| Retrieval diagnostics | 7 days | 2,000 | 4 MiB |
+| Model usage | 90 days | 50,000 | 32 MiB |
+
+Each append transaction retires the oldest excess records before commit. Count
+and UTF-8 metadata byte limits both apply; a requested time window never implies
+complete history beyond these caps. Query and model records contain counts and
+usage, never query text, prompts, model responses or Page content. Denied/failed
+records still reach durable storage before acknowledgement; durability does not
+mean permanent retention. Startup and daily idle sweeps retire old histories too,
+using bounded batches for legacy backlogs. SQLite reuses freed pages; the byte
+budgets bound stored metadata rather than promise an exact total database size.
+
+Managed Console and its child Runtime share `logs/pcp-console.log` with two
+rotated files (`.1`, `.2`), each at most 2 MiB. Consecutive duplicate lines become
+repeat counts, emitted at most once a minute during a continuous repetition; a
+different diagnostic flushes the count immediately. Lines are capped at 4 KiB,
+including unterminated streams. Fixed read buffers keep output storms bounded.
+The launchd template sends bootstrap stdout/stderr to `/dev/null` so no inherited
+file bypasses rotation. CLI/stdio MCP output is not redirected. Only a bounded
+tail of the old error log is adopted, then the two old unrotated files are removed.
+The PCP ChatGPT tunnel LaunchAgent uses the same writer in a separate log
+directory, with the same three-file / 6 MiB total limit. Its supervised command,
+environment, credentials and profile retain their existing values. Shutdown is
+forwarded to that owned child and its exit status is preserved.
+
+Page history, provenance, human review decisions, current maintenance receipts
+and model-budget admission state are application evidence, not disposable logs;
+these retention policies do not touch them. Integrity readers
+share a ten-minute cached full check, and Observer consumers share one recent
+health aggregation instead of starting parallel history scans.
+
+For an existing bloated audit, stop the managed Runtime and use
+`scripts/compact-access-audit.py` with `--source`, a new `--output`, `--report`,
+and `--confirm-identity`. It prepares a separate database, preserves every
+non-audit table byte-for-byte at the logical row level, retains security failures,
+and verifies ordinary, foreign-key and full-text indexes. It never replaces the
+source. Install the verified output only while Runtime remains stopped and after
+retaining a recoverable backup of the source and configuration.
 
 ### Correcting content across clients
 

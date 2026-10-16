@@ -3,6 +3,7 @@ pub(crate) mod automatic_review;
 mod automatic_review_undo;
 mod experience;
 mod persistence;
+mod reconcile;
 mod review;
 pub(crate) mod synthesis;
 mod synthesis_review;
@@ -16,6 +17,7 @@ use pcp_client::{EmbeddedPcpClient, PcpTenantApi, context_hub::*};
 use pcp_core::{AccessPermission, AccessSession, Projection, ReadPagesRequest};
 use pcp_store::PcpStore;
 use persistence::{ActivityCard, Candidate, LockedState};
+pub use reconcile::PreparedContextProjectReconciliation;
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -45,6 +47,77 @@ impl ContextHub {
 
     pub fn state_path(store_path: &Path) -> PathBuf {
         store_path.with_extension("context.json")
+    }
+
+    /// Inbox polling must not turn activity-only traffic or a settled inbox
+    /// into another full Store maintenance cycle.
+    pub(crate) async fn automatic_work_due(&self, access: &AccessSession) -> Result<bool> {
+        let db = LockedState::open(&self.path, self.store.identity_id()).await?;
+        let now = timestamp(Utc::now());
+        let settled = timestamp(Utc::now() - Duration::minutes(5));
+        let quiet = timestamp(Utc::now() - Duration::seconds(120));
+        let can_read =
+            |scope: &str| permission(access, scope, AccessPermission::ReadDetail).is_ok();
+        let organization_due = db
+            .state
+            .organization
+            .next_attempt_at
+            .as_deref()
+            .is_none_or(|at| at <= now.as_str());
+        if organization_due
+            && db.state.candidates.iter().any(|candidate| {
+                synthesis::active(candidate)
+                    && candidate.organized_version != candidate.version
+                    && can_read(&candidate.input.scope)
+                    && candidate
+                        .snoozed_until
+                        .as_deref()
+                        .is_none_or(|until| until <= now.as_str())
+            })
+        {
+            return Ok(true);
+        }
+        Ok(self
+            .automatic_review_available
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && db.state.organization.automatic_review_enabled == Some(true)
+            && db.state.syntheses.iter().any(|group| {
+                matches!(group.status.as_str(), "pending" | "promoting")
+                    && can_read(&group.scope)
+                    && permission(access, &group.scope, AccessPermission::Ingest).is_ok()
+                    && !group.outputs.is_empty()
+                    && (group.automatic_review.as_ref().is_some_and(|review| {
+                        review.authorized
+                            && matches!(review.state.as_str(), "approved" | "applying")
+                    }) || (group.created_at <= settled
+                        && group.candidates.iter().all(|source| {
+                            db.state.candidates.iter().any(|candidate| {
+                                candidate.candidate_id == source.candidate_id
+                                    && candidate.version == source.version
+                                    && synthesis::active(candidate)
+                            })
+                        })
+                        && !db.state.candidates.iter().any(|candidate| {
+                            synthesis::active(candidate)
+                                && candidate.input.scope == group.scope
+                                && (candidate.created_at > quiet
+                                    || (group.candidates.iter().any(|source| {
+                                        source.candidate_id == candidate.candidate_id
+                                    }) && candidate
+                                        .snoozed_until
+                                        .as_deref()
+                                        .is_some_and(|until| until > now.as_str())))
+                        })))
+                    && group.automatic_review.as_ref().is_none_or(|review| {
+                        (review.authorized
+                            && matches!(review.state.as_str(), "approved" | "applying"))
+                            || (matches!(review.state.as_str(), "running" | "waiting_budget")
+                                && review
+                                    .next_attempt_at
+                                    .as_deref()
+                                    .is_some_and(|at| at <= now.as_str()))
+                    })
+            }))
     }
 
     async fn validate_basis(&self, access: &AccessSession, input: &CandidateInput) -> Result<()> {

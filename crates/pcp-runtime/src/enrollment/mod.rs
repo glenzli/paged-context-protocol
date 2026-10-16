@@ -1,4 +1,5 @@
 mod config;
+pub(crate) mod reconcile;
 pub(crate) mod service;
 mod state;
 mod transport;

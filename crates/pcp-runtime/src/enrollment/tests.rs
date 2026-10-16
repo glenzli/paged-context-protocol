@@ -1,7 +1,10 @@
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -58,7 +61,7 @@ impl pcp_rpc::RuntimeQueryService for TenantQueryProbe {
 }
 
 #[tokio::test]
-async fn enrolled_endpoints_share_query_service_with_tenant_authority() {
+async fn enrolled_endpoints_share_runtime_services_with_tenant_authority() {
     let root = test_root("enrolled-query");
     let store: Arc<dyn PcpStore> = Arc::new(
         SqlitePcpStore::open(root.join("context.sqlite3"))
@@ -69,11 +72,16 @@ async fn enrolled_endpoints_share_query_service_with_tenant_authority() {
     let config = ObserverConfig::for_test(root.clone(), identity.clone());
     let enrollment = EnrollmentConfig::for_test(root.clone());
     let admin = EnrollmentAdminClient::new(&enrollment.admin_socket_path);
-    let mut observer = ObserverService::start_with_query(
+    let writes = Arc::new(AtomicUsize::new(0));
+    let observed_writes = Arc::clone(&writes);
+    let mut observer = ObserverService::start_with_query_and_write_observer(
         config,
         enrollment,
         store,
         Some(Arc::new(TenantQueryProbe)),
+        Some(Arc::new(move || {
+            observed_writes.fetch_add(1, Ordering::SeqCst);
+        })),
     )
     .await
     .unwrap()
@@ -136,6 +144,33 @@ async fn enrolled_endpoints_share_query_service_with_tenant_authority() {
             .await
             .is_err()
     );
+    assert_eq!(writes.load(Ordering::SeqCst), 0);
+    let ingested = IngestPageRequest {
+        namespace: format!("user:{identity}"),
+        kind: "conversation_event".to_owned(),
+        observed_at: None,
+        source_span: None,
+        payload: Some(PagePayload {
+            media_type: "text/plain".to_owned(),
+            content: "New enrolled-client evidence wakes maintenance.".to_owned(),
+        }),
+        source_refs: Vec::new(),
+        based_on_revision_ids: Vec::new(),
+        facets: None,
+        external_event_id: None,
+    };
+    client.ingest_page(ingested.clone()).await.unwrap();
+    assert_eq!(writes.load(Ordering::SeqCst), 1);
+    assert!(
+        client
+            .ingest_page(IngestPageRequest {
+                namespace: "private:ungranted".to_owned(),
+                ..ingested
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(writes.load(Ordering::SeqCst), 1);
     assert!(
         client
             .capabilities()

@@ -21,9 +21,9 @@
   <key>WorkingDirectory</key>
   <string>@PCP_PROJECT_ROOT@</string>
   <key>StandardOutPath</key>
-  <string>@LOG_DIR@/pcp-console-stdout.log</string>
+  <string>/dev/null</string>
   <key>StandardErrorPath</key>
-  <string>@LOG_DIR@/pcp-console-stderr.log</string>
+  <string>/dev/null</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

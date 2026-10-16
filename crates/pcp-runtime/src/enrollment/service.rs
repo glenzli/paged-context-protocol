@@ -59,6 +59,25 @@ impl EnrollmentManager {
         generation: String,
         query_service: Option<Arc<dyn pcp_rpc::RuntimeQueryService>>,
     ) -> Result<Option<Self>> {
+        Self::start_with_query_and_write_observer(
+            config,
+            store,
+            instance_id,
+            generation,
+            query_service,
+            None,
+        )
+        .await
+    }
+
+    pub async fn start_with_query_and_write_observer(
+        config: EnrollmentConfig,
+        store: Arc<dyn PcpStore>,
+        instance_id: String,
+        generation: String,
+        query_service: Option<Arc<dyn pcp_rpc::RuntimeQueryService>>,
+        successful_write_observer: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Result<Option<Self>> {
         if !config.enabled {
             return Ok(None);
         }
@@ -74,6 +93,7 @@ impl EnrollmentManager {
                 )),
                 store,
                 query_service,
+                successful_write_observer,
                 identity_id: instance_id.clone(),
                 service: EnrollmentServiceIdentity {
                     kind: "pcp".to_owned(),
@@ -119,6 +139,7 @@ struct EnrollmentInner {
     context_hub: Arc<crate::context_hub::ContextHub>,
     store: Arc<dyn PcpStore>,
     query_service: Option<Arc<dyn pcp_rpc::RuntimeQueryService>>,
+    successful_write_observer: Option<Arc<dyn Fn() + Send + Sync>>,
     identity_id: String,
     service: EnrollmentServiceIdentity,
     runtime_root: PathBuf,
@@ -361,10 +382,12 @@ impl EnrollmentHandler {
         let bound = BoundInfraSocket::bind(&self.inner.runtime_root)
             .map_err(|_| ProtocolError::unavailable())?;
         let (endpoint, socket_path, listener) = bound.into_parts();
-        let client = Arc::new(
-            EmbeddedPcpClient::new(Arc::clone(&self.inner.store), access.clone())
-                .with_context_hub(self.inner.context_hub.clone()),
-        );
+        let mut client = EmbeddedPcpClient::new(Arc::clone(&self.inner.store), access.clone())
+            .with_context_hub(self.inner.context_hub.clone());
+        if let Some(observer) = self.inner.successful_write_observer.as_ref() {
+            client = client.with_successful_write_observer(Arc::clone(observer));
+        }
+        let client = Arc::new(client);
         // Reuse the broker's query implementation, but always execute against
         // this enrolled tenant's client and ACL, never an operator client.
         let running = RunningRuntimeEndpoint::from_bound_listener_with_query(
@@ -567,6 +590,7 @@ impl EnrollmentHandler {
             approved_access: next.requests[request_index].requested_access.clone(),
             allow_project_registration: false,
             project_scopes: Vec::new(),
+            historical_project_scopes: Vec::new(),
             credential_hash: next.requests[request_index].credential_hash.clone(),
             created_at: Utc::now(),
             last_opened_at: None,
@@ -769,10 +793,13 @@ fn access_session(
         .iter()
         .map(|grant| grant.namespace.as_str())
         .collect::<HashSet<_>>();
-    let read_scopes = read_scopes
+    let mut read_scopes = read_scopes
         .into_iter()
+        .chain(registration.historical_project_scopes.iter().cloned())
         .filter(|scope| !primary_scopes.contains(scope.as_str()))
-        .collect();
+        .collect::<Vec<_>>();
+    read_scopes.sort();
+    read_scopes.dedup();
     access.grants.extend(
         AccessMode::Read
             .session(principal, session_id, read_scopes, false)
@@ -829,7 +856,7 @@ fn validate_client_access(
     Ok(())
 }
 
-fn validate_loaded_state(state: &EnrollmentState) -> Result<()> {
+pub(super) fn validate_loaded_state(state: &EnrollmentState) -> Result<()> {
     projects::validate_projects(state)?;
 
     let mut request_ids = HashSet::new();

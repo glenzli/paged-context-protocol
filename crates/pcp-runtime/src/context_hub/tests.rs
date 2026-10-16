@@ -100,6 +100,36 @@ fn activity(topic: &str, summary: &str) -> ActivityInput {
         ttl_hours: None,
     }
 }
+
+#[tokio::test]
+async fn activity_only_inbox_does_not_wake_maintenance_but_new_candidate_does() {
+    let rig = Rig::new().await;
+    rig.enable("client:test").await;
+    let client = rig.client("client:test", &["a"]);
+    let operator = access("operator:test", &[], true);
+    assert!(!rig.hub.automatic_work_due(&operator).await.unwrap());
+    client
+        .context_hub(ContextHubRequest::PublishActivity(activity(
+            "progress",
+            "讨论进展",
+        )))
+        .await
+        .unwrap();
+    assert!(!rig.hub.automatic_work_due(&operator).await.unwrap());
+    client
+        .context_hub(ContextHubRequest::SubmitCandidate(candidate(
+            "new-evidence",
+        )))
+        .await
+        .unwrap();
+    assert!(rig.hub.automatic_work_due(&operator).await.unwrap());
+    assert!(
+        !rig.hub
+            .automatic_work_due(&access("other", &["b"], false))
+            .await
+            .unwrap()
+    );
+}
 fn promote(receipt: &Value) -> CandidateReview {
     CandidateReview {
         candidates: vec![CandidateVersion {

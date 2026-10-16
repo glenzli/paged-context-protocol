@@ -250,7 +250,7 @@ mod tests {
         AccessSession::new(
             AccessPrincipal {
                 principal_id: "test:auditor".into(),
-                principal_type: AccessPrincipalType::Service,
+                principal_type: AccessPrincipalType::ModelClient,
                 display_name: None,
             },
             "test:session",
@@ -345,8 +345,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn internal_read_rows_can_be_quiet_without_losing_request_counters() {
+        let (store, path) = fixture().await;
+        let mut session = access(true);
+        session.principal.principal_type = AccessPrincipalType::Service;
+        let (result, event) =
+            pcp_store::request_audit::capture(&session, "semantic_search".into(), async {
+                store
+                    .record_access(
+                        &session,
+                        "read_pages",
+                        &["a".into()],
+                        &AccessDecision::Allowed,
+                        None,
+                        Some(&pcp_core::OperationTelemetry {
+                            input_count: Some(8),
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+            })
+            .await;
+        result.unwrap();
+        let counters = event.telemetry.request.as_ref().unwrap();
+        assert_eq!(counters.internal_operations, 1);
+        assert_eq!(counters.page_visits, 8);
+        store.record_runtime_request_audit(event).await.unwrap();
+        let roots = store
+            .query_access_log(
+                &session,
+                AccessLogQuery {
+                    view: Some("requests".into()),
+                    operation: Some("semantic_search".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(roots.total_events, 1);
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn request_audit_keeps_concurrent_calls_separate_and_filters_aggregates() {
         let (store, path) = fixture().await;
+        // This test combines new request writes with retained legacy rows.
+        // Keep those fixture rows inside the real successful-audit age limit.
+        store
+            .run("refresh retained audit fixture", |connection| {
+                connection.execute(
+                    "UPDATE pcp_access_log SET occurred_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
         let session = access(true);
         let run = |count, scopes: Vec<String>| {
             let store = &store;

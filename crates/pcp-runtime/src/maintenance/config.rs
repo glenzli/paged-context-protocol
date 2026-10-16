@@ -497,7 +497,7 @@ pub struct PeriodicReviewConfig {
 impl Default for PeriodicReviewConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             interval_seconds: 86_400,
         }
     }

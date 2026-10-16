@@ -22,6 +22,7 @@ use super::{
 const LEDGER_RETENTION_MILLIS: u64 = 30 * 24 * 60 * 60 * 1_000;
 const ACTIVE_RETRY_SECONDS: u64 = 30;
 const ERROR_RETRY_MAX_SECONDS: u64 = 30 * 60;
+const MAX_AUTOMATIC_JOB_ATTEMPTS: u32 = 3;
 
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,6 +56,8 @@ pub struct MaintenanceJobIssue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_kind: Option<String>,
     pub attempts: u32,
+    #[serde(default)]
+    pub automatic_retry_exhausted: bool,
     pub retry_at: String,
     #[serde(default)]
     pub deferred_checks: u32,
@@ -249,6 +252,32 @@ struct MaintenanceLedgerEntry {
     outcome: String,
     updated_at_unix_ms: u64,
     retry_after_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "zero_attempts")]
+    automatic_attempts: u32,
+    #[serde(default)]
+    automatic_retry_exhausted: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    source_revision_ids: Vec<String>,
+}
+
+fn zero_attempts(value: &u32) -> bool {
+    *value == 0
+}
+
+// These keys include exact source Revisions. A lack of useful evidence does
+// not become new evidence just because a cooldown or a day has elapsed.
+fn completed_evidence(key: &str, entry: &MaintenanceLedgerEntry) -> bool {
+    (key.starts_with("topic_window:") || key.starts_with("relation_window:"))
+        && matches!(
+            entry.outcome.as_str(),
+            "no_topic_increment"
+                | "topic_waiting_accumulation"
+                | "topic_evidence_already_reviewed"
+                | "topic_deferred"
+                | "no_candidate"
+                | "all_pairs_excluded"
+                | "deferred"
+        )
 }
 
 impl MaintenanceLedger {
@@ -302,8 +331,32 @@ impl MaintenanceLedger {
 
     pub(crate) async fn load(path: &Path) -> Result<Self> {
         match tokio::fs::read(path).await {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .with_context(|| format!("decode PCP maintenance state {}", path.display())),
+            Ok(bytes) => {
+                let mut ledger: Self = serde_json::from_slice(&bytes)
+                    .with_context(|| format!("decode PCP maintenance state {}", path.display()))?;
+                // Old ledgers did not bound retry attempts. Preserve their
+                // actual diagnostics, but do not replay historical failures
+                // merely because this Runtime was upgraded or restarted.
+                for (key, entry) in &mut ledger.entries {
+                    if entry.outcome == "isolated_job" && entry.automatic_attempts == 0 {
+                        let revisions = ledger
+                            .job_issues
+                            .get(key)
+                            .map(|issue| issue.source_revision_ids.clone())
+                            .or_else(|| {
+                                key.strip_prefix("topic_window:")
+                                    .or_else(|| key.strip_prefix("relation_window:"))
+                                    .map(|ids| ids.split(',').map(str::to_owned).collect())
+                            })
+                            .unwrap_or_default();
+                        if !revisions.is_empty() {
+                            entry.source_revision_ids = revisions;
+                            entry.automatic_retry_exhausted = true;
+                        }
+                    }
+                }
+                Ok(ledger)
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(error) => {
                 Err(error).with_context(|| format!("read PCP maintenance state {}", path.display()))
@@ -313,11 +366,14 @@ impl MaintenanceLedger {
 
     pub(crate) async fn save(&mut self, path: &Path) -> Result<()> {
         let now = now_unix_ms();
-        self.entries.retain(|_, entry| {
-            entry
-                .retry_after_unix_ms
-                .saturating_add(LEDGER_RETENTION_MILLIS)
-                >= now
+        self.entries.retain(|key, entry| {
+            completed_evidence(key, entry)
+                || entry.automatic_retry_exhausted
+                || entry.automatic_attempts >= MAX_AUTOMATIC_JOB_ATTEMPTS
+                || entry
+                    .retry_after_unix_ms
+                    .saturating_add(LEDGER_RETENTION_MILLIS)
+                    >= now
         });
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.with_context(|| {
@@ -422,9 +478,21 @@ impl MaintenanceLedger {
     }
 
     pub(crate) fn eligible(&self, key: &str) -> bool {
-        self.entries
+        !self.automatic_retry_exhausted(key)
+            && self.entries.get(key).is_none_or(|entry| {
+                !completed_evidence(key, entry) && entry.retry_after_unix_ms <= now_unix_ms()
+            })
+    }
+
+    fn automatic_retry_exhausted(&self, key: &str) -> bool {
+        self.job_issues
             .get(key)
-            .is_none_or(|entry| entry.retry_after_unix_ms <= now_unix_ms())
+            .is_some_and(|issue| issue.attempts >= MAX_AUTOMATIC_JOB_ATTEMPTS)
+            || self.entries.get(key).is_some_and(|entry| {
+                entry.outcome == "isolated_job"
+                    && (entry.automatic_retry_exhausted
+                        || entry.automatic_attempts >= MAX_AUTOMATIC_JOB_ATTEMPTS)
+            })
     }
 
     pub(crate) fn last_reviewed(&self, key: &str) -> u64 {
@@ -471,6 +539,9 @@ impl MaintenanceLedger {
                 outcome: outcome.to_owned(),
                 updated_at_unix_ms: now,
                 retry_after_unix_ms: now.saturating_add(retry_after_seconds.saturating_mul(1_000)),
+                automatic_attempts: 0,
+                automatic_retry_exhausted: false,
+                source_revision_ids: Vec::new(),
             },
         );
     }
@@ -946,11 +1017,20 @@ impl MaintenanceLedger {
         attempts: u32,
         retry_seconds: u64,
     ) {
+        let previous_attempts = self
+            .entries
+            .get(&key)
+            .map_or(0, |entry| entry.automatic_attempts);
         let attempts = self
             .job_issues
             .get(&key)
-            .map_or(attempts, |issue| issue.attempts.saturating_add(attempts));
+            .map_or(previous_attempts, |issue| {
+                previous_attempts.max(issue.attempts)
+            })
+            .saturating_add(attempts);
         self.record(key.clone(), "isolated_job", retry_seconds.max(60));
+        self.entries.get_mut(&key).unwrap().automatic_attempts = attempts;
+        self.entries.get_mut(&key).unwrap().source_revision_ids = revisions.clone();
         self.job_issues.insert(
             key,
             MaintenanceJobIssue {
@@ -963,6 +1043,7 @@ impl MaintenanceLedger {
                 ),
                 reason: reason.chars().take(1200).collect(),
                 attempts,
+                automatic_retry_exhausted: attempts >= MAX_AUTOMATIC_JOB_ATTEMPTS,
                 retry_at: timestamp_string(
                     now_unix_ms().saturating_add(retry_seconds.max(60) * 1000),
                 ),
@@ -1013,6 +1094,7 @@ impl MaintenanceLedger {
     pub(crate) fn job_retry_delay(&self, inventory: &[DurablePageInventoryItem]) -> Option<u64> {
         self.job_issues
             .iter()
+            .filter(|(key, _)| !self.automatic_retry_exhausted(key))
             .filter(|(_, issue)| {
                 inventory
                     .iter()
@@ -1118,6 +1200,9 @@ impl MaintenanceLedger {
                     outcome: "isolated_job".into(),
                     updated_at_unix_ms: now,
                     retry_after_unix_ms: retry_at,
+                    automatic_attempts: issue.attempts,
+                    automatic_retry_exhausted: false,
+                    source_revision_ids: issue.source_revision_ids.clone(),
                 },
             );
         }
@@ -1516,7 +1601,15 @@ impl MaintenanceLedger {
                 .len()
                 .saturating_add(self.relation_reviews().len()),
             dirty_regions,
-            job_issues: self.job_issues.values().cloned().collect(),
+            job_issues: self
+                .job_issues
+                .iter()
+                .map(|(key, issue)| {
+                    let mut issue = issue.clone();
+                    issue.automatic_retry_exhausted = self.automatic_retry_exhausted(key);
+                    issue
+                })
+                .collect(),
             job_issue_history: self.job_issue_history.iter().rev().cloned().collect(),
             archived_job_issue_count: self.archived_job_issue_count,
         }
@@ -1535,10 +1628,23 @@ impl MaintenanceLedger {
             .iter()
             .map(|page| (page.page_id.clone(), page.revision_id.clone()))
             .collect::<BTreeMap<_, _>>();
-        if self.write_trigger.observed_revisions.is_empty() {
-            self.write_trigger.observed_revisions = current;
-            return BTreeSet::new();
-        }
+        let current_revisions = current
+            .values()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        self.entries.retain(|key, entry| {
+            let current_issue = entry
+                .source_revision_ids
+                .iter()
+                .all(|revision| current_revisions.contains(revision.as_str()));
+            current_issue
+                && (!completed_evidence(key, entry)
+                    || key.split_once(':').is_some_and(|(_, revisions)| {
+                        revisions
+                            .split(',')
+                            .all(|revision| current_revisions.contains(revision))
+                    }))
+        });
         // Migrate legacy per-page triggers without resetting their oldest
         // deadline. Scope aggregation changes scheduling only, not data ACLs.
         for page in inventory.iter().filter(|p| p.source_span.is_none()) {
@@ -1563,6 +1669,31 @@ impl MaintenanceLedger {
                     })
                     .or_insert(old);
             }
+        }
+        let mut current_regions = BTreeMap::<String, BTreeSet<&str>>::new();
+        for page in inventory {
+            current_regions
+                .entry(maintenance_region_key(page))
+                .or_default()
+                .insert(page.page_id.as_str());
+        }
+        // Withdrawn Pages and reconciled Scope aliases can remove a region
+        // without a discovery pass. Their expired deadlines must not keep
+        // waking the scheduler when there is no remaining evidence to inspect.
+        self.write_trigger.dirty_regions.retain(|region, dirty| {
+            let Some(pages) = current_regions.get(region) else {
+                return false;
+            };
+            let tracked = !dirty.new_page_ids.is_empty() || !dirty.changed_page_ids.is_empty();
+            dirty.new_page_ids.retain(|id| pages.contains(id.as_str()));
+            dirty
+                .changed_page_ids
+                .retain(|id| pages.contains(id.as_str()));
+            !tracked || !dirty.new_page_ids.is_empty() || !dirty.changed_page_ids.is_empty()
+        });
+        if self.write_trigger.observed_revisions.is_empty() {
+            self.write_trigger.observed_revisions = current;
+            return BTreeSet::new();
         }
         for page in inventory.iter().filter(|page| {
             self.write_trigger.observed_revisions.get(&page.page_id) != Some(&page.revision_id)
@@ -2226,6 +2357,81 @@ mod tests {
     }
 
     #[test]
+    fn negative_evidence_receipt_survives_time_and_restart_until_revisions_change() {
+        let mut ledger = MaintenanceLedger::default();
+        let key = "topic_window:rev_1,rev_2";
+        ledger.record(key.into(), "no_topic_increment", 0);
+        let mut ledger: MaintenanceLedger =
+            serde_json::from_slice(&serde_json::to_vec(&ledger).unwrap()).unwrap();
+        assert!(!ledger.eligible(key));
+        let inventory = vec![page("1", "rev_1"), page("2", "rev_2")];
+        ledger.observe_writes(&inventory, &WriteTriggeredMaintenanceConfig::default());
+        assert!(!ledger.eligible(key));
+        ledger.observe_writes(
+            &[page("1", "rev_new"), page("2", "rev_2")],
+            &WriteTriggeredMaintenanceConfig::default(),
+        );
+        assert!(!ledger.entries.contains_key(key));
+        assert!(ledger.eligible("topic_window:rev_2,rev_new"));
+    }
+
+    #[test]
+    fn automatic_failures_stop_after_three_attempts_and_new_evidence_can_retry() {
+        let mut ledger = MaintenanceLedger::default();
+        let inventory = vec![page("1", "rev_1")];
+        for _ in 0..3 {
+            ledger.isolate_job(
+                "topic_window:rev_1".into(),
+                "extract_topic",
+                vec!["rev_1".into()],
+                "provider unavailable".into(),
+                1,
+                60,
+            );
+            ledger
+                .entries
+                .get_mut("topic_window:rev_1")
+                .unwrap()
+                .retry_after_unix_ms = 0;
+        }
+        let mut ledger: MaintenanceLedger =
+            serde_json::from_slice(&serde_json::to_vec(&ledger).unwrap()).unwrap();
+        assert!(!ledger.eligible("topic_window:rev_1"));
+        assert!(ledger.due_job_regions(&inventory).is_empty());
+        assert_eq!(ledger.job_retry_delay(&inventory), None);
+        let fresh = vec![page("1", "rev_new")];
+        ledger.observe_writes(&fresh, &WriteTriggeredMaintenanceConfig::default());
+        ledger.reconcile_job_issues(&fresh);
+        assert!(ledger.eligible("topic_window:rev_new"));
+    }
+
+    #[tokio::test]
+    async fn loading_legacy_failures_parks_retries_without_fabricating_attempts() {
+        let root =
+            std::env::temp_dir().join(format!("pcp-legacy-retries-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let path = root.join("state.json");
+        tokio::fs::write(&path,serde_json::to_vec(&serde_json::json!({
+            "entries":{"topic_window:rev_1":{"outcome":"isolated_job","updatedAtUnixMs":0,"retryAfterUnixMs":0}},
+            "jobIssues":{"topic_window:rev_1":{"operation":"extract_topic","sourceRevisionIds":["rev_1"],"reason":"provider unavailable","attempts":1,"retryAt":"2026-01-01T00:00:00Z"}}
+        })).unwrap()).await.unwrap();
+        let mut ledger = MaintenanceLedger::load(&path).await.unwrap();
+        assert!(!ledger.eligible("topic_window:rev_1"));
+        assert_eq!(ledger.job_issues["topic_window:rev_1"].attempts, 1);
+        assert_eq!(ledger.job_retry_delay(&[page("1", "rev_1")]), None);
+        ledger.record("topic_window:rev_1,rev_2".into(), "no_topic_increment", 0);
+        ledger
+            .entries
+            .get_mut("topic_window:rev_1,rev_2")
+            .unwrap()
+            .retry_after_unix_ms = 0;
+        ledger.save(&path).await.unwrap();
+        let ledger = MaintenanceLedger::load(&path).await.unwrap();
+        assert!(!ledger.eligible("topic_window:rev_1,rev_2"));
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[test]
     fn isolated_jobs_wake_without_new_writes_after_their_cooldown() {
         let mut ledger = MaintenanceLedger::default();
         let inventory = vec![page("1", "rev_1")];
@@ -2418,6 +2624,32 @@ mod tests {
         assert_eq!(ledger.schedule_after_success(&config, &report), 80);
         assert_eq!(ledger.scheduler.idle_cycles, 5);
         assert!(ledger.scheduler.next_wake_at_unix_ms.is_some());
+    }
+
+    #[test]
+    fn vanished_dirty_evidence_cannot_keep_an_expired_deadline_alive() {
+        let mut config = scheduler_config();
+        config.write_trigger.max_wait_seconds = 0;
+        for keep_sibling in [false, true] {
+            let mut ledger = MaintenanceLedger::default();
+            let mut first = page("1", "rev_1");
+            first.source_span = None;
+            let mut sibling = page("2", "rev_2");
+            sibling.source_span = None;
+            ledger.observe_writes(&[first.clone(), sibling.clone()], &config.write_trigger);
+            first.revision_id = "rev_1_changed".into();
+            ledger.observe_writes(&[first, sibling.clone()], &config.write_trigger);
+            assert_eq!(ledger.ready_regions(&config.write_trigger).len(), 1);
+            let mut ledger: MaintenanceLedger =
+                serde_json::from_slice(&serde_json::to_vec(&ledger).unwrap()).unwrap();
+            let remaining = if keep_sibling { vec![sibling] } else { vec![] };
+            ledger.observe_writes(&remaining, &config.write_trigger);
+            assert!(!ledger.has_dirty_regions());
+            assert_eq!(
+                ledger.schedule_after_success(&config, &MaintenanceCycleReport::default()),
+                config.interval_seconds
+            );
+        }
     }
 
     #[test]

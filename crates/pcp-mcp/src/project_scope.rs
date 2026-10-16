@@ -37,7 +37,7 @@ pub async fn ensure(
         .await
         .map_err(|e| ErrorData::invalid_request(format!("ensure project Scope: {e:#}"), None))?;
     Ok(ProjectScopeReply {
-        project_key: r.project_key,
+        project_key: r.canonical_project_key.unwrap_or(r.project_key),
         scope: r.scope,
         display_name: r.display_name,
         created: r.created,

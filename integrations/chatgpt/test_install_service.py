@@ -64,10 +64,15 @@ mcp:
     def test_plist_uses_file_reference_and_loopback_without_a_shell(self):
         root = Path("/Users/example/Library/Application Support/PCP")
         config = service.service_plist(root / "tunnel-client", root / "profile.yaml",
-                                       root / "runtime-api-key", root / "logs", 4319)
+                                       root / "runtime-api-key", root / "logs", 4319,
+                                       root / "pcp-console")
         self.assertEqual(plistlib.loads(plistlib.dumps(config)), config)
         argv = config["ProgramArguments"]
-        self.assertEqual(argv[0], str(root / "tunnel-client"))
+        self.assertEqual(argv[:5], [str(root / "pcp-console"), "--tunnel-service",
+                                  "--log-dir", str(root / "logs"), "--"])
+        self.assertEqual(argv[5], str(root / "tunnel-client"))
+        self.assertEqual(config["StandardOutPath"], "/dev/null")
+        self.assertEqual(config["StandardErrorPath"], "/dev/null")
         self.assertIn(f"file:{root}/runtime-api-key", argv)
         self.assertIn("127.0.0.1:4319", argv)
         self.assertNotIn("CONTROL_PLANE_API_KEY", config["EnvironmentVariables"])

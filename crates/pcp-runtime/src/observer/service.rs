@@ -62,10 +62,27 @@ impl ObserverService {
     }
 
     pub async fn start_with_query(
+        config: ObserverConfig,
+        enrollment_config: EnrollmentConfig,
+        store: Arc<dyn PcpStore>,
+        query_service: Option<Arc<dyn pcp_rpc::RuntimeQueryService>>,
+    ) -> Result<Option<Self>> {
+        Self::start_with_query_and_write_observer(
+            config,
+            enrollment_config,
+            store,
+            query_service,
+            None,
+        )
+        .await
+    }
+
+    pub async fn start_with_query_and_write_observer(
         mut config: ObserverConfig,
         enrollment_config: EnrollmentConfig,
         store: Arc<dyn PcpStore>,
         query_service: Option<Arc<dyn pcp_rpc::RuntimeQueryService>>,
+        successful_write_observer: Option<Arc<dyn Fn() + Send + Sync>>,
     ) -> Result<Option<Self>> {
         if !config.enabled {
             return Ok(None);
@@ -74,12 +91,13 @@ impl ObserverService {
         let authority = PublicationAuthority::acquire(&config)?;
         let generation_id = Uuid::new_v4();
         let generation = format!("proc_{}", generation_id.simple());
-        let enrollment = EnrollmentManager::start_with_query(
+        let enrollment = EnrollmentManager::start_with_query_and_write_observer(
             enrollment_config,
             Arc::clone(&store),
             config.instance_id.clone(),
             generation.clone(),
             query_service,
+            successful_write_observer,
         )
         .await?;
         config.enrollment_enabled = enrollment.is_some();

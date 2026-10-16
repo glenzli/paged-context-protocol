@@ -354,11 +354,12 @@ async fn run_broker(config_path: PathBuf) -> Result<()> {
         store_path,
         runtime_socket_hint,
     )?;
-    let mut observer = ObserverService::start_with_query(
+    let mut observer = ObserverService::start_with_query_and_write_observer(
         observer_config,
         enrollment_config,
         Arc::clone(&store),
         Some(query_service),
+        successful_write_observer,
     )
     .await?;
     let result =

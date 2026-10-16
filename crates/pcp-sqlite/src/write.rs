@@ -17,6 +17,7 @@ impl SqlitePcpStore {
     pub async fn create_scope(&self, request: CreateScopeRequest) -> Result<()> {
         validate_scope(&request)?;
         self.run("scope write", move |connection| {
+            crate::scope_alias::ensure_scope_writable(&connection, &request.namespace)?;
             let now = now();
             connection
                 .execute(
@@ -530,6 +531,7 @@ pub(crate) fn insert_revision(
     facets: Option<&serde_json::Value>,
     provenance: &[ProvenanceEvent],
 ) -> Result<()> {
+    crate::scope_alias::ensure_scope_writable(transaction, namespace)?;
     let source_refs_json = serde_json::to_string(source_refs).context("encode PCP source refs")?;
     let source_span_json = source_span
         .map(serde_json::to_string)

@@ -13,19 +13,19 @@ use serde_json::json;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Manifest {
-    schema_version: u32,
-    scopes: Vec<CreateScopeRequest>,
-    transfers: Vec<Transfer>,
+pub(crate) struct Manifest {
+    pub schema_version: u32,
+    pub scopes: Vec<CreateScopeRequest>,
+    pub transfers: Vec<Transfer>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Transfer {
-    page_id: String,
-    expected_revision_id: String,
-    source_scope: String,
-    target_scope: String,
+pub(crate) struct Transfer {
+    pub page_id: String,
+    pub expected_revision_id: String,
+    pub source_scope: String,
+    pub target_scope: String,
 }
 
 pub async fn run(
@@ -45,10 +45,21 @@ pub async fn run(
         arguments.next().is_none(),
         "scope-transfer has too many arguments"
     );
-    let manifest: Manifest = serde_json::from_slice(
-        &fs::read(&manifest_path)
-            .with_context(|| format!("read Scope transfer manifest {manifest_path}"))?,
-    )?;
+    let report = execute(Path::new(&manifest_path), store_path, actor, confirm).await?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+pub(crate) async fn execute(
+    manifest_path: &Path,
+    store_path: &Path,
+    actor: Actor,
+    confirm: bool,
+) -> Result<serde_json::Value> {
+    let manifest: Manifest =
+        serde_json::from_slice(&fs::read(manifest_path).with_context(|| {
+            format!("read Scope transfer manifest {}", manifest_path.display())
+        })?)?;
     anyhow::ensure!(
         manifest.schema_version == 1,
         "unsupported Scope transfer manifest version"
@@ -140,22 +151,23 @@ pub async fn run(
         })
         .collect::<Vec<_>>();
     if !confirm {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "store": store_path,
-                "createScopes": manifest.scopes,
-                "transfers": preview,
-                "applied": false,
-            }))?
-        );
-        return Ok(());
+        return Ok(json!({
+            "store": store_path,
+            "createScopes": manifest.scopes,
+            "transfers": preview,
+            "applied": false,
+        }));
     }
 
     anyhow::ensure!(
         env::var_os("PCP_SCOPE_TRANSFER_BACKUP").is_some_and(|path| Path::new(&path).is_file()),
         "scope-transfer --confirm requires PCP_SCOPE_TRANSFER_BACKUP pointing to an existing backup file"
     );
+    store
+        .verify_scope_transfer_backup(Path::new(
+            &env::var_os("PCP_SCOPE_TRANSFER_BACKUP").unwrap(),
+        ))
+        .await?;
     for scope in manifest.scopes {
         if !existing_scopes.contains(&scope.namespace) {
             store.create_scope(scope).await?;
@@ -202,11 +214,7 @@ pub async fn run(
             "scope": current.page.namespace, "status": "transferred"}),
         );
     }
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({"applied": true, "receipts": receipts}))?
-    );
-    Ok(())
+    Ok(json!({"applied": true, "receipts": receipts}))
 }
 
 async fn read_one(store: &SqlitePcpStore, page_id: &str, scopes: &[String]) -> Result<ReadPage> {

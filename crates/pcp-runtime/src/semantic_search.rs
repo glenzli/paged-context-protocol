@@ -434,13 +434,14 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let access = AccessSession::store_wide_full_control(
+        let access = AccessSession::full_control(
             AccessPrincipal {
                 principal_id: "test:semantic".into(),
-                principal_type: AccessPrincipalType::Service,
+                principal_type: AccessPrincipalType::ModelClient,
                 display_name: None,
             },
             "test:semantic",
+            ["cache-test".to_owned()],
         );
         let client = EmbeddedPcpClient::new(store.clone(), access.clone());
         client

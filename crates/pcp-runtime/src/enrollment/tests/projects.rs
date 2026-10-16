@@ -29,6 +29,7 @@ impl RuntimeSessionConnector for ProjectConnector {
         &self,
         project: ProjectScopeRequest,
     ) -> anyhow::Result<(ProjectScopeResult, RemotePcpClient)> {
+        let requested_key = project.project_key.clone();
         let reply = self
             .public
             .ensure_project_scope(EnsureProjectScopeParams {
@@ -40,6 +41,11 @@ impl RuntimeSessionConnector for ProjectConnector {
         let EnrollmentResult::ProjectReady { project, session } = reply.result else {
             anyhow::bail!("not ready")
         };
+        // Existing MCP connectors compare this field byte-for-byte before reconnecting.
+        anyhow::ensure!(
+            project.project_key == requested_key,
+            "legacy receipt mismatch"
+        );
         Ok((
             project,
             RemotePcpClient::connect(self.root.join(session.endpoint)).await?,
@@ -174,6 +180,52 @@ async fn project_registration_refreshes_live_clients_and_preserves_authority() {
     let access = sibling.access_snapshot().await.unwrap();
     assert!(access.allows(&a.scope, AccessPermission::Ingest));
     assert!(access.allows(&second.scope, AccessPermission::Ingest));
+    let (repo, variant) = tokio::join!(
+        client.ensure_project_scope(project("github.com/Owner/Repository")),
+        client.ensure_project_scope(project("https://github.com/owner/repository.git/"))
+    );
+    let repo = repo.unwrap();
+    let variant = variant.unwrap();
+    assert_eq!(repo.project_key, "github.com/Owner/Repository");
+    assert_eq!(
+        repo.canonical_project_key.as_deref(),
+        Some("github.com/owner/repository")
+    );
+    assert_eq!(
+        variant.project_key,
+        "https://github.com/owner/repository.git/"
+    );
+    assert_eq!(variant.canonical_project_key, repo.canonical_project_key);
+    assert_eq!(repo.scope, variant.scope);
+    assert_ne!(repo.created, variant.created);
+    let ssh = client
+        .ensure_project_scope(project("git@github.com:owner/repository.git"))
+        .await
+        .unwrap();
+    assert_eq!(ssh.scope, repo.scope);
+    assert!(!ssh.created);
+    let mut unverified_short = project("repository");
+    unverified_short.display_name = Some(repo.display_name.clone());
+    assert!(
+        client
+            .ensure_project_scope(unverified_short.clone())
+            .await
+            .is_err()
+    );
+    unverified_short.existing_scope = Some(repo.scope.clone());
+    let adopted = client.ensure_project_scope(unverified_short).await.unwrap();
+    assert_eq!(adopted.project_key, "repository");
+    assert_eq!(adopted.canonical_project_key, repo.canonical_project_key);
+    assert_eq!(adopted.scope, repo.scope);
+    assert!(!adopted.created);
+    assert_eq!(
+        client
+            .ensure_project_scope(project("repository"))
+            .await
+            .unwrap()
+            .scope,
+        repo.scope
+    );
     let mut mismatch = project("example.test/wiki");
     mismatch.existing_scope = Some(second.scope.clone());
     assert!(client.ensure_project_scope(mismatch).await.is_err());
@@ -231,6 +283,13 @@ async fn project_registration_refreshes_live_clients_and_preserves_authority() {
             .ensure_project_scope(project("example.test/wiki"))
             .await
             .is_ok()
+    );
+    assert!(
+        !client
+            .ensure_project_scope(project("https://github.com/owner/repository"))
+            .await
+            .unwrap()
+            .created
     );
     assert!(
         client

@@ -35,6 +35,84 @@ use super::{
 };
 use crate::EnrollmentConfig;
 
+#[tokio::test]
+async fn observers_share_recent_health_but_scope_changes_invalidate_the_cache() {
+    let root = test_root("health-cache");
+    let (store, _, namespace, _, _) = fixture(&root).await;
+    let source = super::snapshot::SnapshotSource::new(
+        store.clone(),
+        "cache-test".into(),
+        "generation".into(),
+        None,
+    );
+    let first = source.capture().await.unwrap();
+    let access = AccessMode::Admin.store_wide_session(
+        AccessPrincipal {
+            principal_id: "operator:test".into(),
+            principal_type: AccessPrincipalType::Service,
+            display_name: None,
+        },
+        "cache-test",
+        vec![],
+        true,
+    );
+    let client = EmbeddedPcpClient::new(store.clone(), access);
+    client
+        .write_page(WritePageRequest {
+            namespace: namespace.clone(),
+            lifecycle_status: LifecycleStatus::Active,
+            kind: "note".into(),
+            mutability: PageMutability::Revisioned,
+            created_by: Actor {
+                actor_type: ActorType::Tool,
+                actor_id: "operator:test".into(),
+            },
+            observed_at: None,
+            source_span: None,
+            valid_from: None,
+            valid_to: None,
+            payload: Some(PagePayload {
+                media_type: "text/plain".into(),
+                content: "new cache evidence".into(),
+            }),
+            source_refs: vec![],
+            facets: None,
+            provenance: vec![],
+            initial_relations: vec![],
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    let (second, third) = tokio::join!(source.capture(), source.capture());
+    let count = |snapshot: &SnapshotEnvelope| {
+        snapshot
+            .metrics
+            .iter()
+            .find(|m| m.id == "pcp.pages.current")
+            .unwrap()
+            .value
+            .clone()
+    };
+    assert_eq!(count(&second.unwrap()), count(&first));
+    assert_eq!(count(&third.unwrap()), count(&first));
+    client
+        .create_scope(CreateScopeRequest {
+            namespace: "extra".into(),
+            display_name: "Extra".into(),
+            description: None,
+            parent_namespace: None,
+        })
+        .await
+        .unwrap();
+    let refreshed = source.capture().await.unwrap();
+    assert_eq!(count(&refreshed), serde_json::json!(2));
+    assert_eq!(refreshed.extensions.pcp.scope_count, 2);
+    drop(client);
+    drop(source);
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn issue_severity_serializes_to_the_pcp_protocol_enum() {
     assert_eq!(

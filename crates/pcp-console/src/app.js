@@ -1,6 +1,7 @@
 import { maintenanceFailureKind, maintenanceFailureLabel } from "/maintenance-diagnostics.js";
 import { kindLabel, technicalDetails, scopeLabel, refreshScopeLabels } from "/console-presentation.js";
 import { createConsoleNavigation } from "/console-navigation.js";
+import { createScopeMetadataRefresh } from "/scope-metadata.js";
 import { createAccessView } from "/access-view.js";
 import { createPageInspector } from "/page-inspector.js?v=20260823.1";
 import { pageListPreview, pageCount, pageJump, pageRecallBreakdown, PAGE_ROLE_LABELS, pageRoleBadge, appendPageFilters, pageBrowseOrder, pageTimeFields, pageListSnapshotKey } from "/page-list.js";
@@ -1799,6 +1800,7 @@ function buildLabel(build) {
 
 function renderOverview(data) {
   state.overview = data;
+  scopeMetadata.markFresh();
   const counts = pageRecallBreakdown(data);
   refreshScopeLabels(document, scopeName);
   queryView.setScopes(data.scopes || []);
@@ -2104,6 +2106,22 @@ async function loadOverview() {
   renderOverview(await api("/api/overview"));
 }
 
+const scopeMetadata = createScopeMetadataRefresh({
+  load: async () => (await api("/api/scopes")).scopes,
+  getScopes: () => state.overview?.scopes || [],
+  apply: scopes => {
+    if (!state.overview) return;
+    const names = new Set(scopes.map(scope => scope.namespace));
+    if (state.pages.scope && !names.has(state.pages.scope)) {
+      state.pages.scope = "";
+      state.pages.pendingRefresh = true;
+      state.pages.pendingPage = 1;
+    }
+    if (state.governance.scope && !names.has(state.governance.scope)) state.governance.scope = "";
+    renderOverview({ ...state.overview, scopes });
+  },
+});
+
 function resetPages() {
   state.pages.page = 1;
   state.pages.count = 0;
@@ -2143,6 +2161,8 @@ async function loadPages({ page = state.pages.page, refresh = false, quiet = fal
     params.set("order", pageOrderValue());
     if (scope) params.set("scope", scope);
     const result = await api(`/api/pages?${params}`);
+    // A long-lived page can receive new project content before its initial name table knows that project.
+    await scopeMetadata.refresh(result.hits.map(hit => hit.namespace)).catch(() => {});
     if (generation === state.pages.previewGeneration) {
       const resultPage = result.pageNumber ?? page;
       if (refresh) state.pages.pageCache.clear();
@@ -3070,6 +3090,8 @@ function renderMaintenanceJobIssues(container, automation) {
         item.append(element("p", "", issue.reason || ""));
         item.append(element("p", "", issue.closedAt
           ? `${zh ? "归档时间" : "Archived"}: ${formatTime(issue.closedAt)} · ${issue.disposition || ""}`
+          : issue.automaticRetryExhausted
+            ? (zh ? "自动重试已停止，等待新证据。" : "Automatic retries stopped; waiting for new evidence.")
           : `${zh ? "下次重试检查" : "Next retry check"}: ${formatTime(issue.retryAt)}${issue.deferredChecks ? (zh ? " · 暂未选中，已延长检查间隔" : " · Not selected yet; checks backed off") : ""}`));
         const sources = element("p", "", ids.join(", "));
         sources.style.overflowWrap = "anywhere";
@@ -3083,9 +3105,12 @@ function renderMaintenanceJobIssues(container, automation) {
   const nodes = [];
   if (active.length) {
     const counts = groupMaintenanceJobIssues(active).map(([kind, issues]) => `${label(kind)} ${issues.length}`).join(" · ");
-    nodes.push(section(active, "active", zh
+    const stopped = active.filter(issue => issue.automaticRetryExhausted).length;
+    nodes.push(section(active, "active", stopped ? (zh
+      ? `等待重试 ${active.length - stopped} 项 · 等待新证据 ${stopped} 项 · ${counts}`
+      : `${active.length - stopped} awaiting retry · ${stopped} waiting for new evidence · ${counts}`) : (zh
       ? `等待重试 ${active.length} 项 · ${counts}`
-      : `${active.length} awaiting retry · ${counts}`));
+      : `${active.length} awaiting retry · ${counts}`)));
   }
   if (history.length) {
     const total = automation.archivedJobIssueCount || history.length;
@@ -6407,4 +6432,7 @@ byId("health-window").addEventListener("change", () => healthView.load({ reload:
 setMaintenanceWorkspaceTab(state.maintenance.workspaceTab);
 refresh();
 loadEnrollment();
-window.setInterval(() => loadEnrollment(), 3000);
+window.setInterval(() => {
+  loadEnrollment();
+  if (!document.hidden) scopeMetadata.refresh().catch(() => {});
+}, 3000);

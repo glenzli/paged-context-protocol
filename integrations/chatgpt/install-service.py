@@ -75,10 +75,11 @@ def service_profile(source, key_file, port):
     return "".join(lines)
 
 
-def service_plist(binary, profile, key_file, log_dir, port):
+def service_plist(binary, profile, key_file, log_dir, port, log_wrapper):
     return {
         "Label": LABEL,
-        "ProgramArguments": [str(binary), "run", "--profile-file", str(profile),
+        "ProgramArguments": [str(log_wrapper), "--tunnel-service", "--log-dir", str(log_dir),
+                             "--", str(binary), "run", "--profile-file", str(profile),
                              "--control-plane.api-key", f"file:{key_file}",
                              "--health.listen-addr", f"127.0.0.1:{port}"],
         "RunAtLoad": True,
@@ -87,8 +88,8 @@ def service_plist(binary, profile, key_file, log_dir, port):
         "ExitTimeOut": 15,
         "Umask": 0o077,
         "EnvironmentVariables": {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
-        "StandardOutPath": str(log_dir / "stdout.log"),
-        "StandardErrorPath": str(log_dir / "stderr.log"),
+        "StandardOutPath": "/dev/null",
+        "StandardErrorPath": "/dev/null",
     }
 
 
@@ -117,6 +118,8 @@ def main():
                         default=home / ".config/tunnel-client/pcp-chatgpt.yaml")
     parser.add_argument("--binary", type=Path,
                         default=home / "Applications/tunnel-client/tunnel-client")
+    parser.add_argument("--log-wrapper", type=Path,
+                        default=Path(__file__).resolve().parents[2] / "target/release/pcp-console")
     parser.add_argument("--replace-key", action="store_true",
                         help="Read a replacement key from the environment or a hidden prompt")
     args = parser.parse_args()
@@ -127,6 +130,9 @@ def main():
     binary, profile = args.binary.expanduser().resolve(), args.profile.expanduser().resolve()
     if not binary.is_file() or not os.access(binary, os.X_OK) or not profile.is_file():
         parser.error("Install tunnel-client and initialize the pcp-chatgpt profile first.")
+    log_wrapper = args.log_wrapper.expanduser().resolve()
+    if not log_wrapper.is_file() or not os.access(log_wrapper, os.X_OK):
+        parser.error("Build pcp-console in release mode first; it provides bounded service logging.")
 
     domain = f"gui/{os.getuid()}"
     target = f"{domain}/{LABEL}"
@@ -164,7 +170,7 @@ def main():
     plist_dir = home / "Library/LaunchAgents"
     plist_dir.mkdir(parents=True, exist_ok=True)
     plist_path = plist_dir / f"{LABEL}.plist"
-    payload = plistlib.dumps(service_plist(binary, service_config, key_file, log_dir, args.port))
+    payload = plistlib.dumps(service_plist(binary, service_config, key_file, log_dir, args.port, log_wrapper))
     # Lint before disrupting a currently loaded service.
     with tempfile.NamedTemporaryFile(suffix=".plist") as candidate:
         candidate.write(payload)

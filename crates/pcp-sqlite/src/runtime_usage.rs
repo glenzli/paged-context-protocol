@@ -1,27 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
-use chrono::{Duration, SecondsFormat, Utc};
 use pcp_core::{ModelTokenUsage, RuntimeUsageEvent};
 use pcp_store::{RuntimeModelUsageHealth, RuntimeModelUsageSourceHealth};
 use rusqlite::params;
 
-use crate::SqlitePcpStore;
-
-const RUNTIME_USAGE_RETENTION_DAYS: i64 = 90;
+use crate::{SqlitePcpStore, log_retention};
 
 impl SqlitePcpStore {
     pub(crate) async fn record_runtime_usage(&self, event: RuntimeUsageEvent) -> Result<()> {
-        let retention_cutoff = (Utc::now() - Duration::days(RUNTIME_USAGE_RETENTION_DAYS))
-            .to_rfc3339_opts(SecondsFormat::Millis, true);
-        self.run("record Runtime model usage", move |connection| {
-            connection
-                .execute(
-                    "DELETE FROM pcp_runtime_usage WHERE occurred_at < ?1",
-                    [retention_cutoff],
-                )
-                .context("prune expired Runtime model usage")?;
-            connection
+        self.run("record Runtime model usage", move |mut connection| {
+            let transaction = connection.transaction()?;
+            transaction
                 .execute(
                     "
                     INSERT INTO pcp_runtime_usage (
@@ -46,6 +36,8 @@ impl SqlitePcpStore {
                     ],
                 )
                 .context("insert Runtime model usage")?;
+            log_retention::prune_after_append(&transaction, log_retention::MODEL_USAGE)?;
+            transaction.commit()?;
             Ok(())
         })
         .await

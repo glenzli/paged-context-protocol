@@ -873,6 +873,7 @@ dependencies = [
  "pcp-client",
  "pcp-core",
  "pcp-rpc",
+ "pcp-runtime",
  "pcp-sqlite",
  "pcp-store",
  "serde",

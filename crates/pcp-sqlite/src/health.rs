@@ -472,28 +472,40 @@ fn operation_events(
     allowed_scopes: &BTreeSet<String>,
     window_started_at: &str,
 ) -> Result<Vec<HealthEvent>> {
-    let mut statement = connection
-        .prepare(
+    let excluded = OBSERVABILITY_OPERATIONS
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
             "
             SELECT occurred_at, principal_json, operation, scopes_json,
                    decision, telemetry_json
             FROM pcp_access_log
             WHERE occurred_at >= ?1 AND COALESCE(json_extract(telemetry_json, '$.request.root'), 0) = 0
+              AND operation NOT IN ({excluded})
             ORDER BY occurred_at, event_id
-            ",
-        )
+            "
+    );
+    let mut statement = connection
+        .prepare(&sql)
         .context("prepare PCP health event query")?;
     let rows = statement
-        .query_map([window_started_at], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, Option<String>>(5)?,
-            ))
-        })
+        .query_map(
+            params_from_iter(
+                std::iter::once(window_started_at).chain(OBSERVABILITY_OPERATIONS.iter().copied()),
+            ),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            },
+        )
         .context("query PCP health events")?
         .collect::<rusqlite::Result<Vec<_>>>()
         .context("collect PCP health events")?;

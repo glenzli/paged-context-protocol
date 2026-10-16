@@ -230,7 +230,7 @@ mod tests {
         let store = SqlitePcpStore::open(root.join("pcp.sqlite3"))
             .await
             .unwrap();
-        let source = "user:transfer-test".to_owned();
+        let source = "project:duplicate-transfer-test".to_owned();
         let target = "project:transfer-test".to_owned();
         for namespace in [&source, &target] {
             store
@@ -281,6 +281,12 @@ mod tests {
         let scopes = vec![source.clone(), target.clone()];
         assert!(
             store
+                .retire_project_scope(source.clone(), target.clone())
+                .await
+                .is_err()
+        );
+        assert!(
+            store
                 .transfer_page_scope(
                     original.page_id.clone(),
                     "rev_wrong".into(),
@@ -311,13 +317,74 @@ mod tests {
                 original.revision_id.clone(),
                 source.clone(),
                 target.clone(),
-                actor,
+                actor.clone(),
                 "migration:1".into(),
                 scopes.clone(),
             )
             .await
             .unwrap();
         assert_eq!(result.revision_id, repeated.revision_id);
+        // Retirement hides the duplicate namespace without removing historical evidence.
+        assert!(
+            store
+                .retire_project_scope(source.clone(), target.clone())
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .retire_project_scope(source.clone(), target.clone())
+                .await
+                .unwrap()
+        );
+        let listed = store
+            .list_scopes(scopes.clone(), None, 100, None)
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(
+            listed
+                .iter()
+                .map(|s| s.namespace.as_str())
+                .collect::<Vec<_>>(),
+            vec![target.as_str()]
+        );
+        assert!(
+            store
+                .create_scope(CreateScopeRequest {
+                    namespace: source.clone(),
+                    display_name: "Recreate duplicate".into(),
+                    description: None,
+                    parent_namespace: None
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .write_page(
+                    WritePageRequest {
+                        namespace: source.clone(),
+                        kind: "document".into(),
+                        mutability: PageMutability::Sealed,
+                        lifecycle_status: LifecycleStatus::Active,
+                        observed_at: None,
+                        source_span: None,
+                        valid_from: None,
+                        valid_to: None,
+                        created_by: actor,
+                        payload: None,
+                        source_refs: vec![],
+                        facets: None,
+                        provenance: vec![],
+                        initial_relations: vec![],
+                        idempotency_key: None,
+                    },
+                    scopes.clone()
+                )
+                .await
+                .is_err()
+        );
         let current = store
             .read_pages(
                 ReadPagesRequest {

@@ -820,11 +820,6 @@ impl RuntimeMaintainer {
                 })
             })
             .min();
-        let normal_delay = if self.context_hub.is_some() {
-            normal_delay.min(60)
-        } else {
-            normal_delay
-        };
         Ok(review_delay
             .into_iter()
             .chain(self.ledger.job_retry_delay(&inventory))
@@ -907,7 +902,29 @@ impl RuntimeMaintainer {
         delay_seconds: u64,
         timer_reason: MaintenanceWakeReason,
     ) -> MaintenanceWakeReason {
-        wait_for_scheduler_wakeup(&mut self.write_wakeup, delay_seconds, timer_reason).await
+        let Some(hub) = self.context_hub.clone() else {
+            return wait_for_scheduler_wakeup(&mut self.write_wakeup, delay_seconds, timer_reason)
+                .await;
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(delay_seconds);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return timer_reason;
+            }
+            let step = remaining.as_secs().clamp(1, 60);
+            let reason =
+                wait_for_scheduler_wakeup(&mut self.write_wakeup, step, timer_reason).await;
+            if reason == MaintenanceWakeReason::ExternalWrite
+                || tokio::time::Instant::now() >= deadline
+                || hub
+                    .automatic_work_due(self.client.access())
+                    .await
+                    .unwrap_or(false)
+            {
+                return reason;
+            }
+        }
     }
 
     pub async fn automation_status(
@@ -3875,7 +3892,24 @@ impl RuntimeMaintainer {
                 retained_topics.push(c.clone());
             }
         }
-        for proposal in self.ledger.relation_reviews() {
+        let proposals = self.ledger.relation_reviews();
+        let source_ids = proposals
+            .iter()
+            .flat_map(|proposal| proposal.pages.iter().map(|page| page.page_id.as_str()))
+            .collect::<BTreeSet<_>>();
+        let sources = inventory
+            .iter()
+            .filter(|page| source_ids.contains(page.page_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        // Read relation projections once in bounded batches, rather than issue
+        // one two-Page RPC per old pending proposal on every reconciliation.
+        let existing_pairs = self
+            .existing_related_pairs(&sources)
+            .await?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        for proposal in proposals {
             let current = proposal.pages.iter().all(|source| {
                 inventory.iter().any(|p| {
                     p.page_id == source.page_id
@@ -3886,17 +3920,13 @@ impl RuntimeMaintainer {
             let status = if !current {
                 Some(MaintenanceRelationReviewStatus::Stale)
             } else {
-                let pair = [
+                let mut pair = [
                     proposal.pages[0].page_id.clone(),
                     proposal.pages[1].page_id.clone(),
                 ];
-                let revisions = proposal
-                    .pages
-                    .iter()
-                    .map(|p| p.revision_id.clone())
-                    .collect::<Vec<_>>();
-                self.related_pair_exists(&pair, &revisions)
-                    .await?
+                pair.sort();
+                existing_pairs
+                    .contains(&pair)
                     .then_some(MaintenanceRelationReviewStatus::Accepted)
             };
             if let Some(status) = status {

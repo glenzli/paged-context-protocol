@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 
-const STORE_SCHEMA_VERSION: &str = "0.8.0-clean.5";
+const STORE_SCHEMA_VERSION: &str = "0.8.0-clean.6";
+const LEGACY_CLEAN_CONSOLIDATION_SCHEMA_VERSION: &str = "0.8.0-clean.5";
 const LEGACY_CLEAN_RECONCILIATION_SCHEMA_VERSION: &str = "0.8.0-clean.4";
 const LEGACY_DRAFT_SCHEMA_VERSION: &str = "0.8.0-draft";
 const LEGACY_CLEAN_SCHEMA_VERSION: &str = "0.8.0-clean";
@@ -30,10 +31,14 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
         )
         .optional()
         .context("read PCP Store schema version")?;
-    let needs_consolidation_migration =
-        stored_version.is_some() && stored_version.as_deref() != Some(STORE_SCHEMA_VERSION);
+    let needs_consolidation_migration = stored_version.is_some()
+        && !matches!(
+            stored_version.as_deref(),
+            Some(STORE_SCHEMA_VERSION | LEGACY_CLEAN_CONSOLIDATION_SCHEMA_VERSION)
+        );
     match stored_version {
         Some(version) if version == STORE_SCHEMA_VERSION => {}
+        Some(version) if version == LEGACY_CLEAN_CONSOLIDATION_SCHEMA_VERSION => {}
         Some(version) if version == LEGACY_CLEAN_RECONCILIATION_SCHEMA_VERSION => {}
         Some(version) if version == LEGACY_DRAFT_SCHEMA_VERSION => {
             crate::migration::migrate_draft_to_clean(
@@ -115,6 +120,13 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
                 parent_namespace TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS pcp_scope_aliases (
+                namespace TEXT PRIMARY KEY REFERENCES pcp_scopes(namespace),
+                canonical_namespace TEXT NOT NULL REFERENCES pcp_scopes(namespace),
+                created_at TEXT NOT NULL,
+                CHECK (namespace != canonical_namespace)
             );
 
             CREATE TABLE IF NOT EXISTS pcp_pages (
@@ -471,6 +483,11 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
             "#,
         )
         .context("initialize PCP schema")?;
+
+    connection.execute(
+        "UPDATE pcp_metadata SET value = ?1 WHERE key = 'schema_version'",
+        [STORE_SCHEMA_VERSION],
+    )?;
 
     connection
         .execute(
