@@ -319,6 +319,10 @@ impl MaintenanceLedger {
                 .verification
                 .as_ref()
                 .is_some_and(|v| !v.review_steps.is_empty()),
+            MaintenanceReviewPayload::Reconciliation(c) => c
+                .verification
+                .as_ref()
+                .is_some_and(|v| !v.review_steps.is_empty()),
             _ => false,
         };
         updated.updated_at = chrono::Utc::now().to_rfc3339();

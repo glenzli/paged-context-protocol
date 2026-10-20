@@ -42,6 +42,11 @@ impl SqlitePcpStore {
                 return Ok(result);
             }
 
+            if request.require_uncontested_sources {
+                ensure!(request.namespace.starts_with("project:") && request.coverage.iter().all(|c| c.complete),
+                    "automatic fusion requires complete same-project coverage");
+            }
+
             for source in &request.source_pages {
                 let current: Option<(String, String, String)> = transaction
                     .query_row(
@@ -69,6 +74,16 @@ impl SqlitePcpStore {
                     active == "active",
                     "consolidation source Revision is not active"
                 );
+                if request.require_uncontested_sources {
+                    let validity = crate::validity::current_validity(&transaction, &source.revision_id)?;
+                    let contested: bool = transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pcp_feedback_targets WHERE target_revision_id = ?1 AND target_role = 'challenged' AND status = 'pending')
+                         OR EXISTS(SELECT 1 FROM pcp_relations r WHERE r.relation_type = 'supersedes' AND r.to_page_id = ?2
+                         AND NOT EXISTS(SELECT 1 FROM pcp_relation_retractions x WHERE x.relation_id = r.relation_id))",
+                        params![source.revision_id, source.page_id], |row| row.get(0))?;
+                    ensure!(!contested && validity.is_none_or(|v| v.standing == pcp_core::ValidityStanding::Live),
+                        "automatic fusion source is contested; explicit manual review required");
+                }
             }
             ensure_no_active_duplicate(&transaction, &request)?;
 

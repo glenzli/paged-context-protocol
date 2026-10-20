@@ -545,6 +545,7 @@ async fn covered_source_skips_own_output_but_remains_available_for_new_evidence(
         .await
         .unwrap();
     let published = f.client.consolidate_pages(pcp_core::ConsolidatePagesRequest {
+        require_uncontested_sources: false,
         namespace: f.namespace.clone(),
         source_pages: vec![
             pcp_core::PageRevisionRef { page_id: old.page_id.clone(), revision_id: old.revision_id.clone() },
@@ -583,6 +584,7 @@ async fn covered_source_skips_own_output_but_remains_available_for_new_evidence(
     let independent = f.client.write_page(independent).await.unwrap();
 
     let partial = f.client.consolidate_pages(pcp_core::ConsolidatePagesRequest {
+        require_uncontested_sources: false,
         namespace: f.namespace.clone(),
         source_pages: vec![
             pcp_core::PageRevisionRef { page_id: old.page_id.clone(), revision_id: old.revision_id.clone() },

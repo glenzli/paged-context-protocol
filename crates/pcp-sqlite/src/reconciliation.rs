@@ -308,7 +308,14 @@ impl SqlitePcpStore {
             );
             }
             ensure_revision_access(&transaction, &request.target.revision_id, &allowed_scopes)?;
-            ensure_current_page_revision(&transaction, &request.target)?;
+            if request.disposition == ReconciliationDisposition::NoSourceChange {
+                // Closing a historical challenge must not require changing its
+                // source or the current validity head. Still bind the exact pair.
+                let page_id: String = transaction.query_row("SELECT page_id FROM pcp_revisions WHERE revision_id = ?1", [&request.target.revision_id], |row| row.get(0))?;
+                anyhow::ensure!(page_id == request.target.page_id, "feedback target Revision belongs to a different Page");
+            } else {
+                ensure_current_page_revision(&transaction, &request.target)?;
+            }
             for revision_id in &request.basis_revision_ids {
                 ensure_revision_access(&transaction, revision_id, &allowed_scopes)?;
             }
@@ -320,7 +327,7 @@ impl SqlitePcpStore {
                 [&request.target.revision_id], |row| row.get(0),
             ).optional()?.flatten();
             let replay = is_identical_reconciliation_replay(&transaction, &request)?;
-            anyhow::ensure!(replay || current_assessment == request.expected_assessment_revision_id,
+            anyhow::ensure!(request.disposition == ReconciliationDisposition::NoSourceChange || replay || current_assessment == request.expected_assessment_revision_id,
                 "reconciliation review is stale: validity assessment changed; review again");
 
             let standing = match request.disposition {

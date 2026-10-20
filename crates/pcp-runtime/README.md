@@ -1,5 +1,18 @@
 # PCP Runtime
 
+The Console maintenance model picker reads Infer Runtime's application-scoped
+`infer.model-catalog@20261016.1` capability using the maintenance credential.
+Opening settings refreshes the list; it refreshes once per minute while settings
+remain open, with a separate refresh button. Models and supported reasoning
+efforts come from the same catalog. Summary and reasoning choices respect their
+separate Intent grants, and refresh preserves unsaved choices and custom IDs.
+The backend coalesces reads, caches successful results for 60 seconds, bounds
+failed/manual refresh attempts to one per 10 seconds, and marks stale results.
+It never reads an Infer operator credential, creates inference Jobs, changes
+saved maintenance routes, or automatically authorizes provider-native models.
+New deployments appear after the Infer operator registers and grants them;
+older/unreachable Infer versions retain current selections and custom entry.
+
 `pcp-runtime` composes one Identity-bound Store, local RPC endpoints,
 user-approved client enrollment, and optional background maintenance. It is the
 project-maintained multi-client service implementation and one deployment profile,
@@ -36,6 +49,36 @@ That composition does not grant access outside the Host's Scopes or make Runtime
 control-plane and maintenance behavior part of protocol conformance.
 
 ## Local operator access
+
+Automatic review and automatic publication are separate. Turning off
+`topic.auto_apply` or `relation.auto_apply_verified` holds approved writes while
+full-source review continues; disabling the corresponding maintenance feature
+stops both. Automatic Topic discovery stays within one Scope, preserves that
+Scope even when a user destination fallback is configured, and sends mixed-Scope
+ownership to operator review. Manual cross-Scope analysis still requires its
+explicit destination and derivation permission.
+
+`maintenance.reconciliation.auto_apply_project_consolidation = true` opts in to
+same-project fusion. Every offered source must have complete coverage, checked
+independently against the actual outputs and full source text. Repairs, partial
+coverage, unresolved conflicts and validity changes remain in manual review.
+The Store transaction rechecks exact source heads, live validity and pending
+challenges. Sources retain their content and history. A persisted publication
+intent replays the identical native idempotency key after interruption, and the
+exact result is retained in the review ledger. The Console operator endpoint
+`POST /api/maintenance/reviews/{candidate_id}/rollback-consolidation` archives
+unchanged generated outputs and restores original sources to default recall;
+it refuses edited outputs and supports retry after a partial rollback.
+
+Rejecting an explicit-feedback proposal closes its native feedback target with
+`no_source_change` before resolving the review ledger. A rejected proposal does
+not reappear merely because its retry delay expired. New feedback evidence is a
+new review. Only independently verified `no_source_change` may apply automatically;
+qualification, dispute, replacement and retraction require an operator decision.
+Legacy ledger-only rejections are completed on load, including historical
+challenged Revisions; this changes neither the current source nor its validity.
+Sealed-Page packing remains a separate destructive opt-in; keep it disabled for
+the low-risk automation policy.
 
 A same-user local administration surface such as managed PCP Console may use a
 Store-wide static endpoint:

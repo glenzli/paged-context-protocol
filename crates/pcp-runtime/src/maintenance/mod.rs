@@ -1,6 +1,7 @@
 mod audit;
 mod candidate_review;
 mod config;
+mod consolidation;
 mod coordinator;
 mod discovery;
 pub(crate) mod failure;

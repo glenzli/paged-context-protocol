@@ -7,6 +7,7 @@ import { createPageInspector } from "/page-inspector.js?v=20260823.1";
 import { pageListPreview, pageCount, pageJump, pageRecallBreakdown, PAGE_ROLE_LABELS, pageRoleBadge, appendPageFilters, pageBrowseOrder, pageTimeFields, pageListSnapshotKey } from "/page-list.js";
 import { compactQuantity } from "/quantity-format.js";
 import { MODEL_ROUTE_GROUPS, modelEffortsForDeployment, summarizeModelRouteGroups } from "/model-route-groups.js";
+import { createModelCatalog, modelDeploymentOptions, modelDeploymentLabel } from "/model-catalog.js";
 import { formatTimestamp } from "/time-format.js";
 import { reconciliationView } from "/maintenance-reconciliation.js";
 import { describePagePayload, pagePayloadPreviewText } from "/page-content.js?v=20260822.1";
@@ -65,6 +66,8 @@ const PAGE_LIMIT_STORAGE_KEY = "pcp-console.pages-per-page";
 const REVIEW_SESSION_STORAGE_KEY = "pcp-console.maintenance-review-session.v1";
 const MAINTENANCE_WORKSPACE_STORAGE_KEY = "pcp-console.maintenance-workspace.v1";
 let maintenanceStatusPoll = null;
+let modelCatalogPoll = null;
+const maintenanceModelCatalog = createModelCatalog({ request: api, changed: refreshModelPickers });
 let pagesPoll = null;
 const PAGES_POLL_INTERVAL_MS = 15_000;
 let maintenanceConvergenceActive = false;
@@ -93,6 +96,7 @@ const ZH_MESSAGES = {
   "Counts cover all matching records, not only loaded events.": "统计覆盖全部匹配记录，不受已加载条数限制。",
 
   "Access audit": "访问审计",
+  "Refresh models": "刷新模型列表",
   "active": "活跃",
   "Activity trend": "活动趋势",
   "A read-only dry run over historical Revisions. Current Page heads and sealed evidence cannot become candidates.": "对历史修订进行只读试算。当前页面头版本和已封存证据不会成为候选项。",
@@ -1207,6 +1211,8 @@ function initializeConsolePreferences() {
   applyPreferences();
   byId("preferences-open").addEventListener("click", () => openPreferences().catch(showError));
   byId("preferences-close").addEventListener("click", () => byId("preferences-dialog").close());
+  byId("preferences-dialog").addEventListener("close", () => { clearInterval(modelCatalogPoll); modelCatalogPoll = null; });
+  byId("model-catalog-refresh").addEventListener("click", () => refreshModelCatalog(true));
   document.querySelectorAll("[data-preferences-tab]").forEach((button) => {
     button.addEventListener("click", () => {
       activePreferencesTab = button.dataset.preferencesTab;
@@ -3178,6 +3184,7 @@ function renderModelRoutingSettings(routing) {
     heading.append(element("small", "muted", group.operations.map(modelOperationLabel).join(" · ")));
     const deployment = document.createElement("select");
     deployment.className = "model-route-group-deployment";
+    deployment.dataset.modelIntent = group.id === "summary" ? "language.respond" : "reasoning.solve";
     deployment.setAttribute("aria-label", `${modelRouteGroupLabel(group.id)} ${currentLanguage === "zh" ? "默认部署" : "default deployment"}`);
     const effort = modelEffortSelect(group.defaultRoute.effort, group.defaultRoute.deployment_id);
     const deploymentPicker = modelDeploymentPicker(deployment, group.defaultRoute.deployment_id,
@@ -3205,6 +3212,7 @@ function renderModelRoutingSettings(routing) {
       toggleLabel.append(toggle, document.createTextNode(modelOperationLabel(operation)));
       const input = document.createElement("select");
       input.className = "model-route-override-deployment";
+      input.dataset.modelIntent = group.id === "summary" ? "language.respond" : "reasoning.solve";
       input.setAttribute("aria-label", `${modelOperationLabel(operation)} ${currentLanguage === "zh" ? "部署" : "deployment"}`);
       const select = modelEffortSelect(route.effort, route.deployment_id);
       const picker = modelDeploymentPicker(input, route.deployment_id,
@@ -3273,7 +3281,7 @@ function modelEffortSelect(value, deploymentId) {
 }
 
 function populateModelEffortSelect(select, deploymentId, value = select.value) {
-  const { efforts, verified } = modelEffortsForDeployment(deploymentId);
+  const { efforts, verified } = modelEffortsForDeployment(deploymentId, maintenanceModelCatalog.snapshot);
   select.replaceChildren();
   for (const effort of efforts) {
     const option = document.createElement("option");
@@ -3291,31 +3299,11 @@ function populateModelEffortSelect(select, deploymentId, value = select.value) {
   select.setCustomValidity(unsupported
     ? (currentLanguage === "zh" ? "请选择当前部署支持的推理强度" : "Choose an effort supported by this deployment")
     : "");
-  select.title = verified ? "" : (currentLanguage === "zh" ? "自定义部署：请核对 Infer Runtime 支持的推理强度" : "Custom deployment: confirm supported efforts in Infer Runtime");
+  select.title = verified ? "" : (currentLanguage === "zh" ? "此部署的推理强度尚未通过最新目录确认" : "Supported efforts have not been confirmed by a current model catalog");
   select.onchange = () => populateModelEffortSelect(select, deploymentId);
 }
 
 const CUSTOM_MODEL_DEPLOYMENT = "__custom_deployment__";
-
-function modelDeploymentChoices() {
-  const routing = state.maintenance.status?.modelRouting || {};
-  const configured = [
-    ...Object.values(routing.routes || {}),
-    ...Object.values(routing.route_groups || {}),
-    ...Object.values(routing.operation_overrides || {}),
-  ].map((route) => route?.deployment_id);
-  return [...new Set([
-    "codex_gpt_6_luna", "codex_gpt_6_sol",
-    ...configured,
-  ].filter(Boolean))];
-}
-
-function modelDeploymentLabel(id) {
-  const match = /^codex_gpt_(\d+(?:_\d+)?)_(luna|sol|terra|astra)$/.exec(id);
-  if (!match) return id;
-  const version = match[1].replace("_", ".");
-  return `GPT-${version} ${match[2][0].toUpperCase()}${match[2].slice(1)}`;
-}
 
 function modelDeploymentPicker(select, value, onDeploymentChange = null) {
   const picker = element("span", "model-deployment-picker");
@@ -3328,13 +3316,18 @@ function modelDeploymentPicker(select, value, onDeploymentChange = null) {
 }
 
 function populateModelDeploymentPicker(select, value, onDeploymentChange = null) {
-  const choices = new Set(modelDeploymentChoices());
-  if (value) choices.add(value);
+  const choices = modelDeploymentOptions(maintenanceModelCatalog.snapshot, select.dataset.modelIntent || "reasoning.solve", value);
+  select.modelDeploymentChanged = onDeploymentChange;
   select.replaceChildren();
-  for (const id of choices) {
+  for (const choice of choices) {
+    const id = choice.id;
     const option = document.createElement("option");
     option.value = id;
-    option.textContent = `${modelDeploymentLabel(id)}${id === "codex_gpt_6_luna" || id === "codex_gpt_6_sol" ? "" : currentLanguage === "zh" ? "（当前配置）" : " (configured)"}`;
+    const suffix = choice.configured ? (currentLanguage === "zh" ? "（当前配置，未确认）" : " (configured, unconfirmed)")
+      : choice.unavailable ? (currentLanguage === "zh" ? "（暂不可用）" : " (unavailable)")
+      : choice.stale ? (currentLanguage === "zh" ? "（上次结果）" : " (last known)") : "";
+    option.textContent = `${modelDeploymentLabel(id)}${suffix}`;
+    option.disabled = choice.unavailable && id !== value;
     option.title = id;
     select.append(option);
   }
@@ -3416,6 +3409,7 @@ function renderReviewBudgetSettings(budget) {
   byId("review-budget-astra-enabled").checked = c.astra_enabled;
   for (const tier of ["sol", "astra"]) {
     const deployment = byId(`review-budget-${tier}-deployment`);
+    deployment.dataset.modelIntent = "reasoning.solve";
     const effort = byId(`review-budget-${tier}-effort`);
     populateModelEffortSelect(effort, c[`${tier}_deployment_id`], c[`${tier}_effort`]);
     populateModelDeploymentPicker(deployment, c[`${tier}_deployment_id`],
@@ -3483,6 +3477,32 @@ async function openPreferences() {
   activePreferencesTab = "general";
   renderPreferencesTabs();
   byId("preferences-dialog").showModal();
+  refreshModelCatalog();
+  clearInterval(modelCatalogPoll);
+  modelCatalogPoll = setInterval(() => refreshModelCatalog(), 60_000);
+}
+
+async function refreshModelCatalog(force = false) {
+  const button = byId("model-catalog-refresh");
+  button.disabled = true;
+  byId("model-catalog-status").textContent = currentLanguage === "zh" ? "正在更新模型列表…" : "Updating model list…";
+  try { await maintenanceModelCatalog.refresh({ force }); }
+  finally { button.disabled = false; }
+}
+
+function refreshModelPickers(catalog) {
+  if (!byId("preferences-dialog").open) return;
+  for (const select of byId("preferences-dialog").querySelectorAll(".model-deployment-picker select")) {
+    const value = select.value === CUSTOM_MODEL_DEPLOYMENT ? "" : select.value;
+    const changed = select.modelDeploymentChanged;
+    populateModelDeploymentPicker(select, value, changed);
+    changed?.();
+  }
+  const zh = currentLanguage === "zh";
+  byId("model-catalog-status").textContent = catalog.available && !catalog.stale
+    ? (zh ? `已从 Infer Runtime 获取 ${catalog.models.length} 个模型 · 自动更新` : `${catalog.models.length} models from Infer Runtime · updates automatically`)
+    : catalog.stale ? (zh ? "模型列表暂时无法更新，显示上次结果；当前选择已保留" : "Model list could not update; showing last results and preserving selections")
+    : (zh ? "暂时无法获取模型列表；当前选择和自定义入口仍可使用" : "Model list is unavailable; current selections and custom entry remain available");
 }
 
 async function saveMaintenanceSettings(event) {

@@ -64,6 +64,7 @@ pub struct MaintenanceCycleReport {
     pub archives_proposed: u32,
     pub reconciliations_committed: u32,
     pub reconciliations_proposed: u32,
+    pub consolidations_written: u32,
     pub review_items_proposed: u32,
     pub escalated_decisions: u32,
     pub deferred: u32,
@@ -76,9 +77,10 @@ impl MaintenanceCycleReport {
             .saturating_add(self.relations_committed)
             .saturating_add(self.topics_written)
             .saturating_add(self.reconciliations_committed)
+            .saturating_add(self.consolidations_written)
     }
 
-    fn merge(&mut self, report: Self) {
+    pub fn merge(&mut self, report: Self) {
         self.periodic_review |= report.periodic_review;
         self.duplicate_topics_skipped += report.duplicate_topics_skipped;
         self.unchanged_topics_skipped += report.unchanged_topics_skipped;
@@ -118,6 +120,9 @@ impl MaintenanceCycleReport {
         self.reconciliations_proposed = self
             .reconciliations_proposed
             .saturating_add(report.reconciliations_proposed);
+        self.consolidations_written = self
+            .consolidations_written
+            .saturating_add(report.consolidations_written);
         self.review_items_proposed = self
             .review_items_proposed
             .saturating_add(report.review_items_proposed);
@@ -849,6 +854,7 @@ impl RuntimeMaintainer {
                         || report.relations_proposed > 0
                         || report.topics_proposed > 0
                         || report.topics_written > 0
+                        || report.consolidations_written > 0
                         || report.archives_proposed > 0
                         || report.review_items_proposed > 0
                         || report.retention_leases_written > 0
@@ -1390,6 +1396,10 @@ impl RuntimeMaintainer {
                     .verification
                     .as_ref()
                     .is_some_and(|v| !v.review_steps.is_empty()),
+                MaintenanceReviewPayload::Reconciliation(c) => c
+                    .verification
+                    .as_ref()
+                    .is_some_and(|v| !v.review_steps.is_empty()),
                 _ => false,
             };
         }
@@ -1420,14 +1430,48 @@ impl RuntimeMaintainer {
         let _decision = MaintenanceLedger::decision_lock(&self.config.state_path).await?;
         let fresh = MaintenanceLedger::load(&self.config.state_path).await?;
         if let Some(item) = fresh.review_item(candidate_id) {
-            if item.status == MaintenanceReviewStatus::Accepted && status == item.status {
+            if status == item.status && status == MaintenanceReviewStatus::Accepted {
                 return Ok(());
             }
             anyhow::ensure!(
-                item.status == MaintenanceReviewStatus::Pending,
+                item.status == MaintenanceReviewStatus::Pending
+                    || (status == MaintenanceReviewStatus::Rejected && item.status == status),
                 "review is no longer pending"
             );
             self.ledger = fresh;
+        }
+        // Finish the Store work index before the local ledger. A lost ledger
+        // acknowledgement can replay the same native reconciliation receipt.
+        if status == MaintenanceReviewStatus::Rejected {
+            if let Some(item) = self.ledger.review_item(candidate_id) {
+                if let MaintenanceReviewPayload::Reconciliation(mut candidate) = item.payload {
+                    if candidate.signal.is_some() {
+                        anyhow::ensure!(
+                            self.config.applies_changes(),
+                            "closing feedback requires apply mode"
+                        );
+                        candidate.disposition = ReconciliationDisposition::NoSourceChange;
+                        candidate.replacement = None;
+                        candidate.scope = None;
+                        self.client
+                            .apply_reconciliation(reconciliation_request(
+                                &candidate,
+                                self.config.worker_actor(),
+                                Some(format!("maintenance:close:{candidate_id}")),
+                                Some("PCP reviewed feedback closure".into()),
+                            ))
+                            .await?;
+                    }
+                }
+            }
+        }
+        if status == MaintenanceReviewStatus::Rejected
+            && self
+                .ledger
+                .review_item(candidate_id)
+                .is_some_and(|i| i.status == status)
+        {
+            return Ok(());
         }
         if status == MaintenanceReviewStatus::Deferred {
             self.ledger
@@ -2577,10 +2621,10 @@ impl RuntimeMaintainer {
                 .context("Topic refresh target is unavailable")?
                 .namespace
                 .clone()
-        } else if let Some(first) = selected.first().filter(|first| {
-            first.namespace.starts_with("project:")
-                && selected.iter().all(|p| p.namespace == first.namespace)
-        }) {
+        } else if let Some(first) = selected
+            .first()
+            .filter(|first| selected.iter().all(|p| p.namespace == first.namespace))
+        {
             first.namespace.clone()
         } else if let Some(scope) = &self.config.topic.target_scope {
             scope.replace("{identity_id}", self.client.identity_id())
@@ -2931,9 +2975,7 @@ impl RuntimeMaintainer {
                 )) && self.ledger.review_item(&candidate_id).is_none_or(|item| {
                     matches!(
                         item.status,
-                        MaintenanceReviewStatus::Deferred
-                            | MaintenanceReviewStatus::Rejected
-                            | MaintenanceReviewStatus::Stale
+                        MaintenanceReviewStatus::Deferred | MaintenanceReviewStatus::Stale
                     )
                 })
             });
@@ -3111,8 +3153,10 @@ impl RuntimeMaintainer {
             replacement,
             basis_revision_ids,
             suggested_consolidation: None,
+            verification: None,
+            consolidation_result: None,
         };
-        let safe_to_auto_apply = self.config.applies_changes()
+        let mut safe_to_auto_apply = self.config.applies_changes()
             && !cross_scope
             && matches!(
                 authority,
@@ -3121,9 +3165,24 @@ impl RuntimeMaintainer {
             && matches!(
                 candidate.disposition,
                 ReconciliationDisposition::NoSourceChange
-                    | ReconciliationDisposition::Qualified
-                    | ReconciliationDisposition::Disputed
             );
+        if safe_to_auto_apply {
+            let review = self
+                .verify_maintenance_candidate(
+                    "feedback_closure",
+                    candidate.basis_revision_ids.clone(),
+                    "Feedback closure".into(),
+                    serde_json::to_string(&candidate)?,
+                    Vec::new(),
+                    None,
+                    None,
+                    report,
+                )
+                .await?;
+            safe_to_auto_apply = matches!(review.verdict, super::VerificationVerdict::Approve)
+                && review.revision.is_none()
+                && !review.requires_user_input;
+        }
         if safe_to_auto_apply {
             self.client
                 .apply_reconciliation(reconciliation_request(
@@ -3705,7 +3764,7 @@ impl RuntimeMaintainer {
         build_topic_candidate(&selected, title, content, Some(reason), target, namespace)
     }
 
-    async fn verify_maintenance_candidate(
+    pub(super) async fn verify_maintenance_candidate(
         &self,
         kind: &str,
         revisions: Vec<String>,
@@ -4134,7 +4193,7 @@ impl RuntimeMaintainer {
             })
             .min_by(|a, b| a.proposed_at.cmp(&b.proposed_at))
         else {
-            return Ok(false);
+            return self.resume_consolidation_review(inventory, report).await;
         };
         let before = report.worker_calls;
         let assessment = if proposal
@@ -4246,7 +4305,8 @@ impl RuntimeMaintainer {
             inventory,
             &self.config.relation,
             &self.config.topic,
-            self.config.allow_cross_scope_derivation,
+            self.config.allow_cross_scope_derivation
+                && review_origin == MaintenanceReviewOrigin::Manual,
             &active_packing_page_ids,
         )
         .into_iter()
@@ -4475,6 +4535,7 @@ impl RuntimeMaintainer {
             if approved
                 && self.config.applies_changes()
                 && self.config.topic.auto_apply
+                && selected.iter().all(|p| p.namespace == candidate.namespace)
                 && super::discovery::accumulated(&selected, &self.config.topic)
             {
                 self.apply_topic_candidate(ApplyMaintenanceTopicRequest {

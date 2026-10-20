@@ -220,6 +220,20 @@ impl MaintenanceOperator {
         self.maintainer.resolve_review(candidate_id, status).await
     }
 
+    pub async fn rollback_consolidation_review(
+        &mut self,
+        candidate_id: &str,
+        operator: &dyn PcpApi,
+    ) -> Result<Vec<pcp_core::PageRevisionRef>> {
+        anyhow::ensure!(
+            operator.identity_id() == self.identity_id,
+            "rollback operator points to a different Store identity"
+        );
+        self.maintainer
+            .rollback_consolidation_review(candidate_id, operator)
+            .await
+    }
+
     pub async fn snooze_review_until(
         &mut self,
         candidate_id: &str,

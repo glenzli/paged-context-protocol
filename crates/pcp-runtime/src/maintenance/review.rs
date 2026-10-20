@@ -115,6 +115,9 @@ pub(super) fn review_queue(
     };
     let (verification, automatic) = match &item.payload {
         MaintenanceReviewPayload::Topic(candidate) => {
+            if !config.topic.enabled {
+                return route("paused", "Topic maintenance is disabled.".into());
+            }
             let selected = candidate
                 .pages
                 .iter()
@@ -140,6 +143,9 @@ pub(super) fn review_queue(
                     "Source or target revisions changed; the old proposal will be retired.".into(),
                 );
             }
+            if selected.iter().any(|p| p.namespace != candidate.namespace) {
+                return route("human", "Topic ownership spans Scopes; resolve the destination explicitly before publication.".into());
+            }
             if candidate
                 .verification
                 .as_ref()
@@ -158,6 +164,30 @@ pub(super) fn review_queue(
             (candidate.verification.as_ref(), config.topic.auto_apply)
         }
         MaintenanceReviewPayload::Reconciliation(candidate) if candidate.signal.is_none() => {
+            if !config.reconciliation.enabled {
+                return route("paused", "Reconciliation maintenance is disabled.".into());
+            }
+            if candidate
+                .verification
+                .as_ref()
+                .and_then(|v| v.review_state.as_deref())
+                == Some("publishing")
+            {
+                return if config.enabled
+                    && config.applies_changes()
+                    && config.reconciliation.auto_apply_project_consolidation
+                {
+                    route(
+                        "automatic",
+                        "Recover the exact idempotent consolidation publication receipt.".into(),
+                    )
+                } else {
+                    route(
+                        "paused",
+                        "Consolidation publication recovery awaits apply permission.".into(),
+                    )
+                };
+            }
             // Discovered updates compare current active heads. Explicit feedback
             // can challenge historical revisions and has its own validation path.
             let current = std::iter::once(&candidate.target)
@@ -178,28 +208,33 @@ pub(super) fn review_queue(
                             .iter()
                             .find(|p| p.revision_id == source.revision_id)
                             .is_some_and(|evidence| {
-                                super::update_discovery::is_covered_source_output_pair(
-                                    target, evidence,
-                                )
+                                super::update_discovery::update_pair_is_covered(target, evidence)
                             })
                     })
                 });
-            return if current && !covered_output_pair {
-                route(
-                    "human",
-                    "This operation requires an explicit review decision.".into(),
-                )
-            } else {
-                route(
+            if !current || covered_output_pair {
+                return route(
                     "stale",
                     "Update sources changed or this source/output pair is already covered.".into(),
-                )
-            };
+                );
+            }
+            if !super::consolidation::automatic_project_fusion(candidate) {
+                return route("human", "Validity changes, partial coverage and non-project fusion require an explicit review decision.".into());
+            }
+            (
+                candidate.verification.as_ref(),
+                config.reconciliation.auto_apply_project_consolidation,
+            )
         }
-        MaintenanceReviewPayload::Relation(candidate) => (
-            candidate.verification.as_ref(),
-            config.relation.auto_apply_verified,
-        ),
+        MaintenanceReviewPayload::Relation(candidate) => {
+            if !config.relation.enabled {
+                return route("paused", "Relation maintenance is disabled.".into());
+            }
+            (
+                candidate.verification.as_ref(),
+                config.relation.auto_apply_verified,
+            )
+        }
         _ => {
             return route(
                 "human",
@@ -207,21 +242,23 @@ pub(super) fn review_queue(
             );
         }
     };
-    if !config.enabled || !config.applies_changes() || !automatic {
+    if !config.enabled {
         return route(
             "paused",
-            "Automatic application is disabled; the proposal remains available for manual review."
-                .into(),
+            "Maintenance is disabled; the proposal remains available for manual review.".into(),
         );
     }
     match verification {
         Some(v) if v.review_state.as_deref() == Some("missing_evidence") => {
             route("human", v.reason.clone())
         }
-        Some(v) if matches!(v.verdict, super::VerificationVerdict::Approve) => route(
-            "automatic",
-            "Model review passed; awaiting current-evidence checks and application.".into(),
-        ),
+        Some(v) if matches!(v.verdict, super::VerificationVerdict::Approve) => {
+            if automatic && config.applies_changes() {
+                route("automatic", "Model review passed; awaiting current-evidence checks and application.".into())
+            } else {
+                route("paused", "Model review passed; automatic application is disabled.".into())
+            }
+        }
         Some(v) if needs_automatic_review(v) && upgrade_enabled(config) => {
             if v.review_state.as_deref() == Some("waiting_budget") {
                 route("waiting_budget", v.reason.clone())
@@ -234,10 +271,7 @@ pub(super) fn review_queue(
             "Upgraded review is disabled; baseline uncertainty has not been resolved.".into(),
         ),
         Some(v) => route("human", v.reason.clone()),
-        None => route(
-            "human",
-            "No automatic verification is recorded for this proposal.".into(),
-        ),
+        None => route("automatic", "Awaiting independent full-source verification; application permission is checked separately.".into()),
     }
 }
 

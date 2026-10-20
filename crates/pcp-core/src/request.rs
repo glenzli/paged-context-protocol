@@ -305,6 +305,10 @@ pub struct ExtractTopicRequest {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConsolidatePagesRequest {
+    /// Automatic maintenance may publish only complete same-project coverage
+    /// while every source remains live and free of unresolved challenges.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_uncontested_sources: bool,
     pub namespace: String,
     /// Current, active source heads in the same Scope, in review order.
     pub source_pages: Vec<PageRevisionRef>,

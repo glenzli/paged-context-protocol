@@ -225,3 +225,117 @@ async fn feedback_inbox_refresh_preserves_concurrent_scheduler_state() {
     assert_eq!(after["reviewItems"][&candidate_id]["status"], "stale");
     f.close().await;
 }
+
+#[tokio::test]
+async fn rejection_finishes_native_feedback_and_ledger_without_reopening_or_changing_validity() {
+    let f = Fixture::open("feedback-rejection-closure").await;
+    let (signal, response) = feedback(&f).await;
+    let worker = Arc::new(FakeWorker::new(vec![response]));
+    let c = config(&f);
+    let mut m = RuntimeMaintainer::for_test(f.client.clone(), worker.clone(), c.clone());
+    m.run_once().await.unwrap();
+    let id = m.pending_reviews()[0].candidate_id.clone();
+    m.resolve_review(&id, MaintenanceReviewStatus::Rejected)
+        .await
+        .unwrap();
+    m.resolve_review(&id, MaintenanceReviewStatus::Rejected)
+        .await
+        .unwrap();
+    assert!(
+        f.client
+            .pending_feedback(vec![], 32)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let target = f
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![],
+            revision_ids: signal.challenged_revision_ids,
+            projections: vec![Projection::Validity],
+            max_chars: 0,
+        })
+        .await
+        .unwrap();
+    assert!(target[0].validity.is_none());
+    let mut restarted = RuntimeMaintainer::load(f.client.clone(), worker.clone(), c)
+        .await
+        .unwrap();
+    assert!(restarted.pending_reviews().is_empty());
+    restarted.run_once().await.unwrap();
+    assert_eq!(worker.request_count(), 1);
+    assert_eq!(
+        restarted.review_item(&id).unwrap().status,
+        MaintenanceReviewStatus::Rejected
+    );
+    f.close().await;
+}
+
+#[tokio::test]
+async fn legacy_rejection_closes_historical_feedback_without_touching_the_new_source_head() {
+    let f = Fixture::open("legacy-feedback-rejection").await;
+    let (signal, response) = feedback(&f).await;
+    let worker = Arc::new(FakeWorker::new(vec![response]));
+    let c = config(&f);
+    let mut m = RuntimeMaintainer::for_test(f.client.clone(), worker.clone(), c.clone());
+    m.run_once().await.unwrap();
+    let id = m.pending_reviews()[0].candidate_id.clone();
+    // Reproduce the old ledger-only rejection, then a later source correction.
+    m.ledger
+        .resolve_review(&id, MaintenanceReviewStatus::Rejected)
+        .unwrap();
+    m.ledger.save(&c.state_path).await.unwrap();
+    let old = f
+        .client
+        .read_pages(ReadPagesRequest {
+            page_ids: vec![],
+            revision_ids: signal.challenged_revision_ids.clone(),
+            projections: vec![Projection::Manifest],
+            max_chars: 0,
+        })
+        .await
+        .unwrap()
+        .remove(0);
+    let changed = f
+        .client
+        .repair_page(RepairPageRequest {
+            page_id: old.page.page_id.clone(),
+            expected_revision_id: old.revision.revision_id,
+            payload: Some(PagePayload {
+                media_type: "text/plain".into(),
+                content: "A later corrected source head.".into(),
+            }),
+            source_refs: vec![],
+            facets: None,
+            based_on_revision_ids: vec![],
+            reason: "New source evidence".into(),
+            tool_or_model: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    let restarted = RuntimeMaintainer::load(f.client.clone(), worker.clone(), c)
+        .await
+        .unwrap();
+    assert!(
+        f.client
+            .pending_feedback(vec![], 32)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        f.client
+            .current_revision_id(old.page.page_id)
+            .await
+            .unwrap(),
+        changed.revision_id
+    );
+    assert_eq!(
+        restarted.review_item(&id).unwrap().status,
+        MaintenanceReviewStatus::Rejected
+    );
+    assert_eq!(worker.request_count(), 1);
+    f.close().await;
+}

@@ -58,6 +58,7 @@ mod context_hub;
 mod diagnostic_log;
 mod graph_view;
 mod managed;
+mod model_catalog;
 mod page_actions;
 
 #[derive(Clone)]
@@ -66,6 +67,7 @@ struct AppState {
     enrollment: EnrollmentAdminClient,
     runtime: Option<Arc<managed::ManagedRuntime>>,
     runtime_config: Option<PathBuf>,
+    model_catalog: Arc<model_catalog::ModelCatalog>,
 }
 
 #[derive(Deserialize)]
@@ -278,6 +280,14 @@ struct MaintenanceSettingsRequest {
     model_routing: Option<managed::MaintenanceModelRouting>,
     #[serde(default)]
     review_budget: Option<pcp_runtime::ReviewBudgetConfig>,
+    #[serde(default)]
+    topic_auto_apply: Option<bool>,
+    #[serde(default)]
+    relation_auto_apply_verified: Option<bool>,
+    #[serde(default)]
+    project_fusion_auto_apply: Option<bool>,
+    #[serde(default)]
+    packing_enabled: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -372,6 +382,7 @@ async fn run_console(options: Option<managed::ManagedOptions>) -> Result<()> {
             enrollment: EnrollmentAdminClient::new(enrollment_socket),
             runtime: runtime.clone(),
             runtime_config,
+            model_catalog: Arc::default(),
         }),
     )
     .with_graceful_shutdown(shutdown_signal())
@@ -407,6 +418,16 @@ fn router(state: AppState) -> Router {
         .route("/", get(index))
         .route("/app.js", get(app_js))
         .route("/model-route-groups.js", get(model_route_groups_js))
+        .route(
+            "/model-catalog.js",
+            get(|| async {
+                static_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("model-catalog.js"),
+                )
+            }),
+        )
+        .route("/api/maintenance/models", get(maintenance_model_catalog))
         .route("/access-view.js", get(access_view_js))
         .route("/ui-icons.js", get(ui_icons_js))
         .route("/page-inspector.js", get(page_inspector_js))
@@ -518,6 +539,10 @@ fn router(state: AppState) -> Router {
         .route(
             "/api/maintenance/consolidations",
             post(create_consolidation),
+        )
+        .route(
+            "/api/maintenance/reviews/{candidate_id}/rollback-consolidation",
+            post(rollback_maintenance_consolidation),
         )
         .route(
             "/api/maintenance/reviews/{candidate_id}/accept",
@@ -1476,6 +1501,7 @@ async fn maintenance_status(State(state): State<AppState>) -> Result<Json<Value>
         "allowedScopes": maintenance.allowed_scopes,
         "crossScopeDerivation": maintenance.allow_cross_scope_derivation,
         "relation": { "autoApplyVerified": maintenance.relation.auto_apply_verified },
+        "reconciliation": { "autoApplyProjectConsolidation": maintenance.reconciliation.auto_apply_project_consolidation },
         "periodicReview": { "enabled": maintenance.periodic_review.enabled, "intervalSeconds": maintenance.periodic_review.interval_seconds },
         "topic": {
             "enabled": maintenance.topic.enabled,
@@ -1504,6 +1530,24 @@ async fn maintenance_status(State(state): State<AppState>) -> Result<Json<Value>
     })))
 }
 
+#[derive(Default, Deserialize)]
+struct ModelCatalogQuery {
+    #[serde(default)]
+    refresh: bool,
+}
+
+async fn maintenance_model_catalog(
+    State(state): State<AppState>,
+    Query(query): Query<ModelCatalogQuery>,
+) -> Json<model_catalog::Snapshot> {
+    Json(
+        state
+            .model_catalog
+            .snapshot(state.runtime_config.as_deref(), query.refresh)
+            .await,
+    )
+}
+
 async fn update_maintenance_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1523,6 +1567,10 @@ async fn update_maintenance_settings(
             max_wait_seconds: request.max_wait_seconds,
             model_routing: request.model_routing,
             review_budget: request.review_budget,
+            topic_auto_apply: request.topic_auto_apply,
+            relation_auto_apply_verified: request.relation_auto_apply_verified,
+            project_fusion_auto_apply: request.project_fusion_auto_apply,
+            packing_enabled: request.packing_enabled,
         })
         .await?;
     Ok(Json(json!({
@@ -1722,6 +1770,7 @@ async fn create_consolidation(
     let result = state
         .client
         .consolidate_pages(ConsolidatePagesRequest {
+            require_uncontested_sources: false,
             namespace: request.namespace,
             source_pages: request.source_pages,
             outputs: request.outputs,
@@ -1740,6 +1789,21 @@ async fn create_consolidation(
         )
         .await?;
     Ok(Json(json!(result)).into_response())
+}
+
+async fn rollback_maintenance_consolidation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(candidate_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    require_console_mutation(&headers)?;
+    let mut operator = maintenance_operator_for_console(&state).await?;
+    let outputs = operator
+        .rollback_consolidation_review(&candidate_id, state.client.as_ref())
+        .await?;
+    Ok(Json(
+        json!({"candidateId":candidate_id,"rolledBack":true,"outputs":outputs}),
+    ))
 }
 
 #[derive(Default, Deserialize)]

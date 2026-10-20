@@ -981,6 +981,8 @@ html.relation-comparison-open body { position: fixed; top: var(--relation-compar
 .model-route-group-heading strong { font-size: 12px; }
 .model-route-group-heading small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
 .model-deployment-picker { display: grid; min-width: 0; gap: 4px; }
+.model-catalog-status { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+.model-catalog-status small { flex: 1; }
 .model-deployment-picker select, .model-deployment-picker input { width: 100%; min-width: 0; }
 .model-deployment-picker .model-deployment-custom[hidden] { display: none; }
 .model-route-overrides { border-top: 1px solid var(--line); }

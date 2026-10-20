@@ -14,8 +14,10 @@ pcp-client = { path = "../pcp-client" }
 pcp-core = { path = "../pcp-core" }
 pcp-rpc = { path = "../pcp-rpc" }
 pcp-runtime = { path = "../pcp-runtime" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 tokio = { version = "1.0", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 [[bin]]

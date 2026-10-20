@@ -378,6 +378,8 @@ pub struct ReconciliationMaintenanceConfig {
     /// Compare new ordinary content with bounded same-subject or provenance
     /// candidates; never apply the resulting validity decision automatically.
     pub discover_updates: bool,
+    /// Publish same-project fusion only after an independent full-coverage review.
+    pub auto_apply_project_consolidation: bool,
     pub max_input_chars: u32,
     pub retry_after_seconds: u64,
 }
@@ -387,6 +389,7 @@ impl Default for ReconciliationMaintenanceConfig {
         Self {
             enabled: true,
             discover_updates: true,
+            auto_apply_project_consolidation: false,
             max_input_chars: 32_000,
             retry_after_seconds: 3_600,
         }
@@ -791,6 +794,19 @@ impl MaintenanceConfig {
             }
             for grant in &mut session.grants {
                 grant.permissions.push(AccessPermission::Collect);
+            }
+        }
+        // Native consolidation changes source recall roles and requires the
+        // lifecycle grant. Only the explicit apply-mode fusion opt-in grants it;
+        // the worker still has no direct Store mutation authority.
+        if self.reconciliation.auto_apply_project_consolidation && self.applies_changes() {
+            if self.store_wide {
+                session
+                    .store_permissions
+                    .push(AccessPermission::ManageLifecycle);
+            }
+            for grant in &mut session.grants {
+                grant.permissions.push(AccessPermission::ManageLifecycle);
             }
         }
         session

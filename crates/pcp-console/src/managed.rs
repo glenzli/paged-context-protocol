@@ -105,6 +105,10 @@ pub(super) struct MaintenanceSettings {
     pub max_wait_seconds: u64,
     pub model_routing: Option<MaintenanceModelRouting>,
     pub review_budget: Option<pcp_runtime::ReviewBudgetConfig>,
+    pub topic_auto_apply: Option<bool>,
+    pub relation_auto_apply_verified: Option<bool>,
+    pub project_fusion_auto_apply: Option<bool>,
+    pub packing_enabled: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -407,6 +411,24 @@ fn rewrite_maintenance_settings(path: &Path, settings: &MaintenanceSettings) -> 
         &settings.max_wait_seconds.to_string(),
     )?;
     let mut rewritten = rewritten;
+    for (section, key, value) in [
+        ("maintenance.topic", "auto_apply", settings.topic_auto_apply),
+        (
+            "maintenance.relation",
+            "auto_apply_verified",
+            settings.relation_auto_apply_verified,
+        ),
+        (
+            "maintenance.reconciliation",
+            "auto_apply_project_consolidation",
+            settings.project_fusion_auto_apply,
+        ),
+        ("maintenance.packing", "enabled", settings.packing_enabled),
+    ] {
+        if let Some(value) = value {
+            rewritten = rewrite_toml_key(&rewritten, section, key, &value.to_string())?;
+        }
+    }
     if let Some(routing) = &settings.model_routing {
         let section = "maintenance.worker";
         rewritten = rewrite_toml_key(
@@ -893,6 +915,10 @@ allowed_scopes = ["symbiont-d"]
             max_wait_seconds: 3600,
             model_routing: None,
             review_budget: None,
+            topic_auto_apply: None,
+            relation_auto_apply_verified: None,
+            project_fusion_auto_apply: None,
+            packing_enabled: None,
         };
         let rewritten =
             rewrite_toml_key(source, "maintenance", "enabled", "true").expect("rewrite enabled");
@@ -963,11 +989,20 @@ allowed_scopes = ["symbiont-d"]
                 timeout_seconds: 180,
             }),
             review_budget: Some(budget),
+            topic_auto_apply: Some(true),
+            relation_auto_apply_verified: Some(true),
+            project_fusion_auto_apply: Some(true),
+            packing_enabled: Some(false),
         };
         rewrite_maintenance_settings(&path, &settings).unwrap();
         rewrite_maintenance_settings(&path, &settings).unwrap();
         let config = RuntimeConfig::load(&path).unwrap();
-        let worker = config.maintenance.unwrap().worker;
+        let maintenance = config.maintenance.unwrap();
+        assert!(maintenance.topic.auto_apply);
+        assert!(maintenance.relation.auto_apply_verified);
+        assert!(maintenance.reconciliation.auto_apply_project_consolidation);
+        assert!(!maintenance.packing.enabled);
+        let worker = maintenance.worker;
         let effective = worker.effective_model_routes().unwrap();
         let pcp_runtime::MaintenanceWorkerConfig::InferRuntime {
             summary_deployment_id,

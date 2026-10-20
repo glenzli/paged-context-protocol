@@ -85,6 +85,7 @@ async fn reviewed_split_is_atomic_and_only_complete_sources_leave_recall() {
         .await
         .unwrap();
     let request = ConsolidatePagesRequest {
+        require_uncontested_sources: false,
         namespace: namespace.into(),
         source_pages: vec![source(&first), source(&second)],
         outputs: vec![

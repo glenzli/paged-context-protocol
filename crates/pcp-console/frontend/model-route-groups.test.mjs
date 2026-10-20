@@ -2,13 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { MODEL_ROUTE_GROUPS, modelEffortsForDeployment, resolveModelRouteGroups, summarizeModelRouteGroups } from "../src/model-route-groups.js";
 
-test("known Infer deployments expose only their configured efforts", () => {
-  const luna = modelEffortsForDeployment("codex_gpt_6_luna");
+test("Infer model metadata supplies efforts without a static model table", () => {
+  const catalog = { available: true, models: [
+    { deployment_id: "codex_gpt_6_luna", supported_efforts: ["low", "medium", "high", "xhigh", "max"] },
+    { deployment_id: "codex_gpt_6_1_sol", supported_efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] },
+  ] };
+  const luna = modelEffortsForDeployment("codex_gpt_6_luna", catalog);
   assert.deepEqual(luna, { efforts: ["low", "medium", "high", "xhigh", "max"], verified: true });
   assert.equal(luna.efforts.includes("ultra"), false);
   assert.equal(luna.efforts.includes("none"), false);
-  assert.equal(modelEffortsForDeployment("codex_gpt_6_sol").efforts.includes("ultra"), true);
-  assert.equal(modelEffortsForDeployment("codex_gpt_5_6_luna").efforts.includes("ultra"), false);
+  assert.equal(modelEffortsForDeployment("codex_gpt_6_1_sol", catalog).efforts.includes("ultra"), true);
   assert.deepEqual(modelEffortsForDeployment("custom_provider"), {
     efforts: ["none", "low", "medium", "high", "xhigh", "max", "ultra"], verified: false,
   });

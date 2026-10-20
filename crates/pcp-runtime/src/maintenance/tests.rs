@@ -39,6 +39,8 @@ struct FakeWorker {
     requests: Mutex<Vec<MaintenanceWorkerRequest>>,
 }
 
+#[path = "tests/automation.rs"]
+mod automation;
 #[path = "tests/feedback_edit.rs"]
 mod feedback_edit;
 #[path = "tests/periodic_review.rs"]
@@ -304,7 +306,16 @@ async fn reconciliation_resolves_each_challenged_revision_without_promoting_cont
         .await
         .expect("reconcile both targets");
 
-    assert_eq!(report.reconciliations_committed, 2);
+    assert_eq!(report.reconciliations_committed, 0);
+    assert_eq!(report.reconciliations_proposed, 2);
+    // Qualifications and disputes are validity decisions, even when the
+    // feedback claims subject-owner or tenant authority.
+    for item in maintainer.pending_reviews() {
+        maintainer
+            .approve_reconciliation_review(&item.candidate_id)
+            .await
+            .unwrap();
+    }
     assert!(
         fixture
             .client
@@ -479,7 +490,44 @@ async fn high_impact_reconciliation_waits_for_review_and_applies_atomically_on_a
         .run_once()
         .await
         .expect("re-run rejected reconciliation proposal");
-    assert_eq!(retry.reconciliations_proposed, 1);
+    assert_eq!(retry.reconciliations_proposed, 0);
+    assert!(
+        fixture
+            .client
+            .pending_feedback(vec![], 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // A real new feedback event, rather than a cooldown, permits a new review.
+    fixture
+        .client
+        .submit_feedback(SubmitFeedbackRequest {
+            namespace: fixture.namespace.clone(),
+            kind: FeedbackKind::Correction,
+            authority: FeedbackAuthority::SubjectOwner,
+            payload: PagePayload {
+                media_type: "text/plain".into(),
+                content: "I confirm withdrawal after reviewing the rejected proposal.".into(),
+            },
+            observed_at: None,
+            source_refs: vec![],
+            challenged_revision_ids: vec![challenged.revision_id.clone()],
+            used_revision_ids: vec![],
+            evidence_revision_ids: vec![],
+            response_ref: None,
+            external_event_id: Some("feedback:reviewed-retraction:2".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        maintainer
+            .run_once()
+            .await
+            .unwrap()
+            .reconciliations_proposed,
+        1
+    );
     let reviews = maintainer.pending_reviews();
     assert_eq!(reviews.len(), 1);
     let result = maintainer
@@ -2482,10 +2530,13 @@ async fn relation_discovery_stops_when_pending_review_capacity_is_full() {
         .write_page(fixture.page("Second related document.", "relation-review-capacity:2"))
         .await
         .expect("write second document");
-    let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::Relate {
-        page_ids: [first.page_id, second.page_id],
-        reason: "Both documents describe the same durable subject.".to_owned(),
-    }]));
+    let worker = Arc::new(FakeWorker::new(vec![
+        MaintenanceWorkerResponse::Relate {
+            page_ids: [first.page_id, second.page_id],
+            reason: "Both documents describe the same durable subject.".to_owned(),
+        },
+        topic_convergence::verification(super::VerificationVerdict::Approve),
+    ]));
     let mut config = fixture.config();
     config.summary.enabled = false;
     config.packing.enabled = false;
@@ -2505,7 +2556,11 @@ async fn relation_discovery_stops_when_pending_review_capacity_is_full() {
         .await
         .expect("respect full relation queue");
     assert_eq!(second_report.relations_proposed, 0);
-    assert_eq!(worker.request_count(), calls);
+    assert_eq!(worker.request_count(), calls + 1);
+    assert_eq!(second_report.relations_committed, 0);
+    assert_eq!(maintainer.pending_relation_reviews().len(), 1);
+    maintainer.run_once().await.unwrap();
+    assert_eq!(worker.request_count(), calls + 1);
     fixture.close().await;
 }
 
@@ -4231,6 +4286,8 @@ async fn discovered_update_retires_archived_target_without_model_calls() {
         }),
         basis_revision_ids: vec![],
         suggested_consolidation: None,
+        verification: None,
+        consolidation_result: None,
     };
     let id = m.ledger.enqueue_review(
         MaintenanceReviewPayload::Reconciliation(candidate),

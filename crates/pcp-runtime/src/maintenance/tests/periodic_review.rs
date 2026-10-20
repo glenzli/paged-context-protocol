@@ -18,7 +18,7 @@ fn operator(f: &Fixture) -> Arc<dyn PcpApi> {
 }
 
 #[tokio::test]
-async fn periodic_review_synthesizes_short_pages_across_existing_and_future_scopes() {
+async fn periodic_review_keeps_new_project_ownership_despite_user_destination_fallback() {
     let f = Fixture::open("periodic-all-scopes").await;
     let operator = operator(&f);
     let mut config = f.config();
@@ -37,7 +37,7 @@ async fn periodic_review_synthesizes_short_pages_across_existing_and_future_scop
     let client = EmbeddedPcpClient::shared(f.store.clone(), access);
     let personal = format!("user:{}", f.identity_id);
     // Scopes created after the maintenance client are included without a reload.
-    for namespace in ["scope:created-later", &personal] {
+    for namespace in ["project:created-later", &personal] {
         operator
             .create_scope(CreateScopeRequest {
                 namespace: namespace.into(),
@@ -56,9 +56,7 @@ async fn periodic_review_synthesizes_short_pages_across_existing_and_future_scop
             ),
             &format!("source:{i}"),
         );
-        if i % 2 == 1 {
-            page.namespace = "scope:created-later".into();
-        }
+        page.namespace = "project:created-later".into();
         sources.push(operator.write_page(page).await.unwrap());
     }
     let worker = Arc::new(FakeWorker::new(vec![MaintenanceWorkerResponse::ExtractTopic {
@@ -80,7 +78,7 @@ async fn periodic_review_synthesizes_short_pages_across_existing_and_future_scop
         .iter()
         .find(|page| page.kind == "topic_summary")
         .unwrap();
-    assert_eq!(topic.namespace, personal);
+    assert_eq!(topic.namespace, "project:created-later");
     assert_eq!(topic.topic_source_page_ids.len(), 4);
     for page in sources {
         assert_eq!(

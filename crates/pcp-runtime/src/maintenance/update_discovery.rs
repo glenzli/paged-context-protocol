@@ -206,6 +206,8 @@ impl RuntimeMaintainer {
             }),
             basis_revision_ids: vec![target.revision_id.clone(), evidence.revision_id.clone()],
             suggested_consolidation: suggested_consolidation.clone(),
+            verification: None,
+            consolidation_result: None,
         };
         self.ledger.enqueue_review(MaintenanceReviewPayload::Reconciliation(candidate), origin,
             if suggested_consolidation.is_some() {
@@ -229,7 +231,7 @@ fn pair_key(target: &DurablePageInventoryItem, evidence: &DurablePageInventoryIt
     format!("update:{}:{}", target.revision_id, evidence.revision_id)
 }
 
-fn validate_consolidation_suggestion(
+pub(super) fn validate_consolidation_suggestion(
     outputs: &[pcp_core::ConsolidatedPageOutput],
     coverage: &[pcp_core::ConsolidationCoverage],
 ) -> Result<()> {
@@ -328,7 +330,7 @@ pub(super) fn candidate_pairs(
         for revision in new.provenance_input_revision_ids.iter().take(8) {
             if let Some(old) = by_revision.get(revision.as_str()) {
                 if old.page_id != new.page_id
-                    && !is_covered_source_output_pair(old, new)
+                    && !update_pair_is_covered(old, new)
                     && seen.insert(pair_key(old, new))
                 {
                     pairs.push((*old, *new));
@@ -339,7 +341,7 @@ pub(super) fn candidate_pairs(
         let mut matches: Vec<_> = pages
             .iter()
             .filter(|old| old.page_id != new.page_id && old.created_at < new.created_at)
-            .filter(|old| !is_covered_source_output_pair(old, new))
+            .filter(|old| !update_pair_is_covered(old, new))
             .filter_map(|old| {
                 let old_terms = &terms[old.page_id.as_str()];
                 let shared = new_terms.intersection(old_terms).count();
@@ -374,6 +376,19 @@ pub(super) fn is_covered_source_output_pair(
                 .consolidation_covering_revision_ids
                 .contains(&output.revision_id)
         })
+}
+
+/// Only this exact pair is redundant. Both sources must be completely covered
+/// by the same currently usable output; other evidence remains eligible.
+pub(super) fn update_pair_is_covered(
+    left: &DurablePageInventoryItem,
+    right: &DurablePageInventoryItem,
+) -> bool {
+    is_covered_source_output_pair(left, right)
+        || left
+            .consolidation_covering_revision_ids
+            .iter()
+            .any(|id| right.consolidation_covering_revision_ids.contains(id))
 }
 
 fn subject_terms(text: &str) -> BTreeSet<String> {

@@ -33,6 +33,11 @@ pub struct MaintenanceReconciliationCandidate {
     pub basis_revision_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggested_consolidation: Option<SuggestedConsolidation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<super::MaintenanceVerification>,
+    /// Exact publication receipt, retained for idempotent recovery and rollback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consolidation_result: Option<pcp_core::ConsolidationResult>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -136,6 +141,30 @@ impl RuntimeMaintainer {
     /// Refresh the persisted inbox on load and before analysis. Store repeats
     /// the head check atomically on apply, including edits racing with this read.
     pub(super) async fn refresh_feedback_reviews(&mut self) -> Result<()> {
+        // Migrate legacy rejections as well: the old Console only closed the
+        // ledger, so the native work index could rediscover the same feedback.
+        if self.config.applies_changes() {
+            let pending = self
+                .client
+                .pending_feedback(self.config.query_scopes(self.client.identity_id()), 32)
+                .await?;
+            for signal in pending {
+                for revision in &signal.challenged_revision_ids {
+                    let id = MaintenanceReconciliationCandidate::candidate_id(
+                        &signal.feedback_revision_id,
+                        revision,
+                    );
+                    if self
+                        .ledger
+                        .review_item(&id)
+                        .is_some_and(|i| i.status == MaintenanceReviewStatus::Rejected)
+                    {
+                        self.resolve_review(&id, MaintenanceReviewStatus::Rejected)
+                            .await?;
+                    }
+                }
+            }
+        }
         let bindings = self.ledger.pending_feedback_reviews();
         let mut stale = Vec::new();
         for chunk in bindings.chunks(64) {

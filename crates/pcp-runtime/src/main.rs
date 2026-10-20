@@ -242,33 +242,7 @@ fn merge_maintenance_report(
     aggregate: &mut pcp_runtime::MaintenanceCycleReport,
     report: pcp_runtime::MaintenanceCycleReport,
 ) {
-    aggregate.inspected_pages = aggregate.inspected_pages.max(report.inspected_pages);
-    aggregate.worker_calls = aggregate.worker_calls.saturating_add(report.worker_calls);
-    aggregate.summaries_written = aggregate
-        .summaries_written
-        .saturating_add(report.summaries_written);
-    aggregate.summaries_proposed = aggregate
-        .summaries_proposed
-        .saturating_add(report.summaries_proposed);
-    aggregate.packs_committed = aggregate
-        .packs_committed
-        .saturating_add(report.packs_committed);
-    aggregate.packs_proposed = aggregate
-        .packs_proposed
-        .saturating_add(report.packs_proposed);
-    aggregate.relations_committed = aggregate
-        .relations_committed
-        .saturating_add(report.relations_committed);
-    aggregate.relations_proposed = aggregate
-        .relations_proposed
-        .saturating_add(report.relations_proposed);
-    aggregate.retention_leases_written = aggregate
-        .retention_leases_written
-        .saturating_add(report.retention_leases_written);
-    aggregate.retention_leases_proposed = aggregate
-        .retention_leases_proposed
-        .saturating_add(report.retention_leases_proposed);
-    aggregate.deferred = aggregate.deferred.saturating_add(report.deferred);
+    aggregate.merge(report);
 }
 
 fn set_option<T>(slot: &mut Option<T>, value: T, name: &str) -> Result<()> {
