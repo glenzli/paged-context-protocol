@@ -4,6 +4,8 @@ export function createAccessView({ api, byId, element, t, formatTime, formatNumb
   let loaded = false, generation = 0, cursor = null, events = [], current = null;
   let scopeNames = {};
   let principalId = "", since = "";
+  const knownOperations = new Set(), clientNames = new Map();
+  let moreOperationsOpen = false;
   function filters() {
     const params = new URLSearchParams({ limit: "50", view: byId("access-view").value || "requests", includeHealthChecks: String(byId("access-health").checked) });
     if (principalId) params.set("principalId", principalId);
@@ -13,23 +15,24 @@ export function createAccessView({ api, byId, element, t, formatTime, formatNumb
     return params;
   }
   function unit() { return t((byId("access-view").value || "requests") === "requests" ? "requests" : "events"); }
-  function scopeCell(scopes) {
+  function scopeDetails(event) {
+    const scopes = event.scopes;
     const names = Object.fromEntries(scopes.map(scope => [scope, scopeNames[scope] || t("Unknown scope")]));
     const label = (values, tag = "span", className = "") => scopeLabel(element, values, scopeName, tag, className, names);
-    if (scopes.length <= 2) return label(scopes, "td", "access-scopes");
-    const cell = element("td", "access-scopes");
+    const sessionScopes = event.telemetry?.request?.root && event.telemetry.request.internalOperations === 0;
     const details = element("details", "access-scope-details");
-    const summary = element("summary");
-    summary.append(label(scopes.slice(0, 2), "span", "access-scope-preview"),
+    const summary = element("summary", "", t(sessionScopes ? "Session scopes" : "Recorded request scopes"));
+    summary.append(element("span", "muted", " · "),
       element("span", "access-scope-count", t("{count} scopes in total").replace("{count}", formatNumber(scopes.length))));
+    if (sessionScopes) details.append(element("p", "muted", t("No per-scope storage operations were recorded. These are session permissions, not evidence that every project was read.")));
     const list = element("ul", "access-scope-list");
     for (const scope of scopes) {
       const item = element("li");
       item.append(label([scope]), element("code", "", scope));
       list.append(item);
     }
-    details.append(summary, list); cell.append(details);
-    return cell;
+    details.prepend(summary); details.append(list);
+    return details;
   }
   function attachOperations(details, request) {
     const summary = element("div", "muted", `${t("Internal operations")}: ${request.internalOperations} · ${t("Batch reads")}: ${request.batchReads} · ${t("Single reads")}: ${request.singleReads} · ${t("Page visits")}: ${request.pageVisits}`);
@@ -44,7 +47,15 @@ export function createAccessView({ api, byId, element, t, formatTime, formatNumb
         const params = new URLSearchParams({ view: "operations", requestId: request.id, limit: "25", includeHealthChecks: "true" });
         if (next) params.set("cursor", next);
         const result = await api(`/api/access?${params}`);
-        result.events.forEach(event => list.append(element("div", "mono", `${event.occurredAt} · ${event.operation} · ${event.decision} · ${event.telemetry?.durationMs ?? "—"} ms · ${t("Input")}: ${event.telemetry?.inputCount ?? "—"} · ${event.telemetry?.projections?.join(", ") || ""}`)));
+        for (const event of result.events) {
+          const item = element("div");
+          item.append(element("div", "", `${formatTime(event.occurredAt)} · ${operationLabel(event.operation, t)} · ${t(({allowed:"Allowed",denied:"Denied",failed:"Failed"})[event.decision] || event.decision)} · ${event.telemetry?.durationMs ?? "—"} ms · ${t("Input")}: ${event.telemetry?.inputCount ?? "—"}`),
+            technicalDetails(element, t("Identifiers and implementation"), [
+              [t("Operation identifier"), event.operation], [t("Occurred"), event.occurredAt],
+              [t("Read projections"), event.telemetry?.projections?.join(", ")],
+            ]));
+          list.append(item);
+        }
         if (!started && !result.events.length) list.append(element("div", "muted", t("No retained internal operations")));
         started = true; next = result.nextCursor; more.hidden = !next;
       } catch (error) { showError(error); } finally { busy = false; more.disabled = false; }
@@ -52,14 +63,16 @@ export function createAccessView({ api, byId, element, t, formatTime, formatNumb
     more.onclick = () => void loadChildren();
     return () => { if (!started) void loadChildren(); };
   }
-  function render() {
+  function render({ appendFrom = 0 } = {}) {
     if (!current) return;
     const clients = byId("access-clients");
     const all = element("button", "access-client", t("All clients"));
     all.type = "button"; all.setAttribute("aria-pressed", String(!principalId));
     all.onclick = () => selectClient("");
+    all.append(element("span", "", `${formatNumber(current.clients.reduce((sum, client) => sum + client.eventCount, 0))} ${unit()}`));
     clients.replaceChildren(all, ...current.clients.map(client => {
       const id = client.principal.principalId;
+      clientNames.set(id, client.principal.displayName || id);
       const button = element("button", "access-client"); button.type = "button";
       button.setAttribute("aria-pressed", String(principalId === id));
       button.append(element("strong", "", client.principal.displayName || id));
@@ -68,23 +81,41 @@ export function createAccessView({ api, byId, element, t, formatTime, formatNumb
         element("span", "muted", `${t("Last access")}: ${formatTime(client.lastAccessAt)}`));
       button.onclick = () => selectClient(id); return button;
     }));
-    byId("access-selected").textContent = current.clients.find(client => client.principal.principalId === principalId)?.principal.displayName || principalId || t("All clients");
-    byId("access-summary").replaceChildren(...current.operations.map(item => {
+    byId("access-selected").textContent = clientNames.get(principalId) || (principalId ? t("Selected client") : t("All clients"));
+    const selectedOperation = byId("access-operation").value;
+    current.operations.forEach(item => knownOperations.add(item.operation));
+    if (selectedOperation) knownOperations.add(selectedOperation);
+    const choices = [element("option", "", t("All operations")), ...[...knownOperations].sort((a, b) => operationLabel(a, t).localeCompare(operationLabel(b, t))).map(value => {
+      const option = element("option", "", operationLabel(value, t)); option.value = value; return option;
+    })];
+    choices[0].value = "";
+    byId("access-operation").replaceChildren(...choices); byId("access-operation").value = selectedOperation;
+    byId("access-reset").hidden = !principalId && !since && !selectedOperation && !byId("access-health").checked && (byId("access-view").value || "requests") === "requests";
+    const operationButtons = current.operations.map(item => {
       const button = element("button", "compact-button secondary-button", `${operationLabel(item.operation, t)} · ${formatNumber(item.eventCount)}`);
+      button.setAttribute("aria-pressed", String(selectedOperation === item.operation));
       button.type = "button"; button.onclick = () => { byId("access-operation").value = item.operation; void load().catch(showError); }; return button;
-    }));
-    const rows = events.flatMap(event => {
+    });
+    const summary = byId("access-summary"); summary.replaceChildren(...operationButtons.slice(0, 5));
+    if (operationButtons.length > 5) {
+      const more = element("details", "access-more-operations"); more.open = moreOperationsOpen;
+      more.append(element("summary", "", t("More operations ({count})").replace("{count}", formatNumber(operationButtons.length - 5))));
+      const remaining = element("div", "access-operations"); remaining.append(...operationButtons.slice(5)); more.append(remaining);
+      more.addEventListener("toggle", () => { moreOperationsOpen = more.open; }); summary.append(more);
+    }
+    const rows = events.slice(appendFrom).flatMap(event => {
       const row = document.createElement("tr");
       const client = element("td", "");
       client.append(element("div", "", event.principal.displayName || event.principal.principalId));
 
       const details = element("details", "access-event-details");
       const expandedRow = element("tr", "access-expanded-row"); expandedRow.hidden = true;
-      const panel = element("td", "access-expanded-panel"); panel.colSpan = 6;
+      const panel = element("td", "access-expanded-panel"); panel.colSpan = 5;
       expandedRow.append(panel);
-      const summary = element("summary", "", event.telemetry?.request?.root ? `${event.telemetry.durationMs} ms · ${event.telemetry.request.batchReads + event.telemetry.request.singleReads} ${t("reads")}` : t("Details"));
+      const summary = element("summary", "", event.telemetry ? `${t("Details")} · ${event.telemetry.durationMs} ms` : t("Details"));
       panel.id = `access-detail-${event.eventId}`; summary.setAttribute("aria-controls", panel.id);
       details.append(summary);
+      panel.append(scopeDetails(event));
       panel.append(technicalDetails(element, t("Identifiers and implementation"), [
         [t("Client"), event.principal.principalId], [t("Session"), event.sessionId],
         [t("Operation identifier"), event.operation], [t("Scope identifier"), event.scopes.join(", ")],
@@ -101,11 +132,12 @@ export function createAccessView({ api, byId, element, t, formatTime, formatNumb
       details.addEventListener("toggle", () => { expandedRow.hidden = !details.open; if (details.open) expand(); });
       const detailCell = element("td", ""); detailCell.append(details);
       row.append(element("td", "", formatTime(event.occurredAt)), client, element("td", "", operationLabel(event.operation, t)),
-        scopeCell(event.scopes), element("td", event.decision === "allowed" ? "decision-allowed" : "decision-denied", t(({allowed:"Allowed",denied:"Denied",failed:"Failed"})[event.decision] || event.decision)), detailCell);
+        element("td", event.decision === "allowed" ? "decision-allowed" : "decision-denied", t(({allowed:"Allowed",denied:"Denied",failed:"Failed"})[event.decision] || event.decision)), detailCell);
       return [row, expandedRow];
     });
-    if (!rows.length) { const row = document.createElement("tr"), cell = element("td", "empty", t("No matching access events")); cell.colSpan = 6; row.append(cell); rows.push(row); }
-    byId("access-rows").replaceChildren(...rows);
+    if (!rows.length) { const row = document.createElement("tr"), cell = element("td", "empty", t("No matching access events")); cell.colSpan = 5; row.append(cell); rows.push(row); }
+    if (appendFrom) byId("access-rows").append(...rows);
+    else byId("access-rows").replaceChildren(...rows);
     byId("access-loaded").textContent = `${formatNumber(events.length)} / ${formatNumber(current.totalEvents)} ${unit()}`;
     byId("access-more").hidden = !cursor;
   }
@@ -120,8 +152,9 @@ export function createAccessView({ api, byId, element, t, formatTime, formatNumb
       const result = await api(`/api/access?${params}`);
       if (request !== generation) return;
       scopeNames = append ? { ...scopeNames, ...result.scopeNames } : result.scopeNames || {};
+      const appendFrom = append ? events.length : 0;
       current = result; cursor = result.nextCursor; events = append ? events.concat(result.events) : result.events;
-      loaded = true; render(); byId("access-status").textContent = t("Audit timeline");
+      loaded = true; render({ appendFrom }); byId("access-status").textContent = t("Audit timeline");
     } catch (error) {
       if (request !== generation) return;
       byId("access-status").textContent = t("Load failed"); throw error;
@@ -135,7 +168,14 @@ export function createAccessView({ api, byId, element, t, formatTime, formatNumb
     const hours = Number(byId("access-period").value); since = hours ? new Date(Date.now() - hours * 3600000).toISOString() : "";
     void load().catch(showError);
   });
-  byId("access-view").addEventListener("change", () => { byId("access-operation").value = ""; void load().catch(showError); });
+  byId("access-view").addEventListener("change", () => { knownOperations.clear(); byId("access-operation").value = ""; void load().catch(showError); });
+  byId("access-operation").addEventListener("change", () => { void load().catch(showError); });
+  byId("access-reset").addEventListener("click", () => {
+    principalId = ""; since = ""; knownOperations.clear(); moreOperationsOpen = false;
+    byId("access-period").value = "0"; byId("access-view").value = "requests";
+    byId("access-operation").value = ""; byId("access-health").checked = false;
+    void load().catch(showError);
+  });
   byId("access-health").addEventListener("change", () => { void load().catch(showError); });
   byId("access-more").addEventListener("click", () => { void load({ append: true }).catch(showError); });
   return { load, render, get loaded() { return loaded; } };

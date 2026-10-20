@@ -192,7 +192,7 @@ export function createHealthView({ request, showError, formatNumber, t, scopeNam
     const workflows = panel(t("By workflow"), "", []);
     workflows.classList.add("usage-workflows");
     const columns = element("div", "usage-workflow-row usage-column-labels");
-    columns.append(element("span", "", t("By workflow")), element("span", "", t("Reported tokens")), element("span", "", t("Reported / total calls")));
+    columns.append(element("span", "", t("Operation")), element("span", "", t("Reported tokens")), element("span", "", t("Reported / total calls")));
     workflows.append(columns);
     for (const source of sources) {
       const row = element("div", "usage-workflow-row");
@@ -207,7 +207,7 @@ export function createHealthView({ request, showError, formatNumber, t, scopeNam
     }
     if (!sources.length) workflows.append(element("div", "empty", t("No model usage was observed in this window")));
     byId("health-model-usage").replaceChildren(
-      panel(t("Model usage"), "", [
+      panel(t("Usage totals"), "", [
         [t("Model calls"), quantity(totalCalls)],
         [t("Reported tokens"), reportedCalls ? quantity(totalTokens) : "—"],
         [t("Token reporting"), `${formatNumber(reportedCalls)}/${formatNumber(totalCalls)} · ${percentage(reportedCalls, totalCalls)}`],

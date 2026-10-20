@@ -3,6 +3,7 @@ import { kindLabel, technicalDetails, scopeLabel, refreshScopeLabels } from "/co
 import { createConsoleNavigation } from "/console-navigation.js";
 import { createScopeMetadataRefresh } from "/scope-metadata.js";
 import { createAccessView } from "/access-view.js";
+import { createClientAccessView } from "/client-access-view.js";
 import { createPageInspector } from "/page-inspector.js?v=20260823.1";
 import { pageListPreview, pageCount, pageJump, pageRecallBreakdown, PAGE_ROLE_LABELS, pageRoleBadge, appendPageFilters, pageBrowseOrder, pageTimeFields, pageListSnapshotKey } from "/page-list.js";
 import { compactQuantity } from "/quantity-format.js";
@@ -98,6 +99,58 @@ const ZH_MESSAGES = {
   "Access audit": "访问审计",
   "{count} scopes in total": "共 {count} 个范围",
   "Unknown scope": "未知范围",
+  "Client permissions": "客户端权限",
+  "Result": "结果",
+  "All operations": "所有操作",
+  "Clear filters": "清除筛选",
+  "Selected client": "所选客户端",
+  "More operations ({count})": "更多操作（{count}）",
+  "Session scopes": "会话授权范围",
+  "Recorded request scopes": "请求记录的范围",
+  "Read projections": "读取的内容字段",
+  "No per-scope storage operations were recorded. These are session permissions, not evidence that every project was read.": "此请求没有逐范围的存储访问记录。这里保留的是会话授权范围，不表示本次读取了每个项目。",
+  "Manage client permissions and approved scopes here.": "在这里查看客户端权限和已批准的范围。",
+  "Permissions and scopes": "权限与范围",
+  "Requested permissions": "请求的权限",
+  "Access mode": "访问方式",
+  "Scope policy": "范围规则",
+  "Read all scopes; other permissions remain scoped": "可读取所有当前与未来范围；其他权限仍受指定范围限制",
+  "Permissions apply to listed scopes": "权限仅用于下列范围",
+  "Configured scopes": "指定范围",
+  "Personal memory": "个人记忆",
+  "Reads all scopes": "可读取所有范围",
+  "{count} configured scopes": "{count} 个指定范围",
+  "{count} writable projects": "{count} 个可写项目",
+  "Cross-scope derivation": "跨范围派生",
+  "Register new projects": "登记新项目",
+  "Not allowed": "未允许",
+  "None": "无",
+  "Observe service": "查看服务状态",
+  "Inspect access records": "查看审计记录",
+  "Contribute memories": "提交线索与记忆",
+  "Write and revise memories": "写入与修订记忆",
+  "Repair memories": "修复记忆",
+  "Full administration": "完全管理",
+  "Connection and identifiers": "连接信息与标识",
+  "Revoke client access?": "撤销此客户端的访问权限？",
+  "This client will lose its approved connection. Stored memories are retained.": "此客户端将无法再使用已批准的连接；已有记忆会保留。",
+  "Candidate and activity permissions": "候选与近况权限",
+  "Find a project or scope": "搜索项目或范围",
+  "{shown} of {total} scopes": "{shown} / {total} 个范围",
+  "No matching scopes": "没有匹配的范围",
+  "Query activity and diagnostics": "查询活动与诊断",
+  "Usage totals": "用量汇总",
+  "Dismiss error": "关闭错误提示",
+  "Review items that need your judgment and follow automatic maintenance.": "处理需要你判断的事项，查看自动维护进展。",
+  "Run maintenance now, or review each stage manually.": "立即运行维护，或按阶段手动审阅。",
+  "Changes restart the Runtime. Automatic writes follow the enabled review policies.": "保存设置会重启服务；自动写入遵循当前启用的审核规则。",
+  "Consolidate memories": "融合记忆",
+  "Apply feedback review": "应用反馈审核",
+  "Submit memory feedback": "提交记忆反馈",
+  "Review memory feedback": "审核记忆反馈",
+  "Review candidate memories": "审阅候选记忆",
+  "Register project scope": "登记项目范围",
+  "Consolidated memory": "融合记忆",
   "Refresh models": "刷新模型列表",
   "active": "活跃",
   "Activity trend": "活动趋势",
@@ -1339,7 +1392,6 @@ const state = {
     completedAt: null,
     issue: null,
   },
-  enrollment: { available: false, seenPending: new Set() },
 };
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -1535,13 +1587,6 @@ async function api(path, options = {}) {
   return response.status === 204 ? null : response.json();
 }
 
-async function enrollmentMutation(path) {
-  return api(path, {
-    method: "POST",
-    headers: { "X-PCP-Console": "1" },
-  });
-}
-
 async function maintenanceMutation(path, body) {
   return api(path, {
     method: "POST",
@@ -1558,144 +1603,10 @@ async function governanceMutation(path, body) {
   });
 }
 
-function enrollmentAccessLabel(access) {
-  const scopes = access.scopes.join(", ");
-  const readAll = access.read_all_scopes ? " · read / all scopes" : "";
-  return `${access.mode} / ${scopes}${readAll}${access.allow_cross_scope_derivation ? " / cross-scope derivation" : ""}`;
-}
-
-function enrollmentIdentity(client) {
-  const principal = client.principal;
-  return principal.displayName || principal.principalId;
-}
-
-function enrollmentRow(item, pending) {
-  const row = element("article", "enrollment-row");
-  const identity = element("div", "enrollment-identity");
-  identity.append(
-    element("strong", "", enrollmentIdentity(item.client)),
-    element("span", "mono muted", item.client.principal.principalId),
-    element("span", "muted", enrollmentAccessLabel(pending ? item.requested_access : item.approved_access)),
-  );
-  const actions = element("div", "enrollment-actions");
-  if (pending) {
-    const reject = element("button", "secondary-button", t("Reject"));
-    reject.type = "button";
-    reject.addEventListener("click", async () => {
-      reject.disabled = true;
-      try {
-        await enrollmentMutation(`/api/enrollment/requests/${encodeURIComponent(item.request_id)}/reject`);
-        await loadEnrollment({ autoOpen: false });
-      } catch (error) {
-        reject.disabled = false;
-        showError(error);
-      }
-    });
-    const approve = element("button", "primary-button", t("Approve"));
-    approve.type = "button";
-    approve.addEventListener("click", async () => {
-      approve.disabled = true;
-      try {
-        await enrollmentMutation(`/api/enrollment/requests/${encodeURIComponent(item.request_id)}/approve`);
-        await loadEnrollment({ autoOpen: false });
-      } catch (error) {
-        approve.disabled = false;
-        showError(error);
-      }
-    });
-    actions.append(reject, approve);
-  } else {
-    const revoke = element("button", "danger-button", t("Revoke"));
-    revoke.type = "button";
-    revoke.addEventListener("click", async () => {
-      revoke.disabled = true;
-      try {
-        await enrollmentMutation(`/api/enrollment/registrations/${encodeURIComponent(item.registration_id)}/revoke`);
-        await loadEnrollment({ autoOpen: false });
-      } catch (error) {
-        revoke.disabled = false;
-        showError(error);
-      }
-    });
-    const projectEnabled = item.allow_project_registration === true;
-    identity.append(element("span", "muted", t(projectEnabled ? "Project registration enabled" : "Project registration disabled")));
-    if (item.project_scopes?.length) {
-      identity.append(element("span", "muted", t("Writable projects") + ": " + item.project_scopes.map(scopeName).join(", ")));
-    }
-    if (["contribute", "write", "admin"].includes(item.approved_access.mode)) {
-      const projectPolicy = element("button", "secondary-button", t(projectEnabled ? "Disable project registration" : "Enable project registration"));
-      projectPolicy.type = "button";
-      projectPolicy.addEventListener("click", async () => {
-        projectPolicy.disabled = true;
-        try {
-          await maintenanceMutation("/api/enrollment/registrations/" + encodeURIComponent(item.registration_id) + "/project-policy", { enabled: !projectEnabled });
-          await loadEnrollment({ autoOpen: false });
-        } catch (error) {
-          projectPolicy.disabled = false;
-          showError(error);
-        }
-      });
-      actions.append(projectPolicy);
-    }
-    actions.append(revoke);
-  }
-  const metadata = element("dl", "enrollment-metadata");
-  const timestamp = (value) => formatTimestamp(value, currentLocale(), { timeZoneName: "short" });
-  const fields = pending
-    ? [["Requested at", timestamp(item.requested_at)], ["Expires at", timestamp(item.expires_at)], ["Request ID", item.request_id]]
-    : [["Registered at", timestamp(item.created_at)], ["Last connected", item.last_opened_at ? timestamp(item.last_opened_at) : t("Not connected yet")], ["Registration ID", item.registration_id]];
-  for (const [label, value] of fields) {
-    const field = element("div", "enrollment-field");
-    const isId = label === "Registration ID" || label === "Request ID";
-    if (isId) field.classList.add("enrollment-id");
-    if (label === "Last connected") field.title = t("Last connection time does not indicate whether this client is currently online.");
-    field.append(element("dt", "muted", t(label)), element("dd", isId ? "mono" : "", value));
-    metadata.append(field);
-  }
-  row.append(identity, actions, metadata);
-  return row;
-}
-
-function renderEnrollment(data, autoOpen) {
-  const snapshot = data.result;
-  if (snapshot.status !== "snapshot") throw new Error("Unexpected enrollment response");
-  state.enrollment.available = true;
-  byId("enrollment-open").hidden = false;
-  const pending = snapshot.pending || [];
-  const registered = snapshot.registrations || [];
-  const badge = byId("enrollment-badge");
-  badge.textContent = String(pending.length);
-  badge.hidden = pending.length === 0;
-
-  const pendingList = byId("enrollment-pending");
-  pendingList.replaceChildren(...pending.map((item) => enrollmentRow(item, true)));
-  if (pending.length === 0) pendingList.append(element("div", "empty enrollment-empty", t("No pending requests")));
-  const registeredList = byId("enrollment-registered");
-  registeredList.replaceChildren(...registered.map((item) => enrollmentRow(item, false)));
-  if (registered.length === 0) registeredList.append(element("div", "empty enrollment-empty", t("No approved clients")));
-
-  const unseen = pending.filter((item) => !state.enrollment.seenPending.has(item.request_id));
-  if (autoOpen && unseen.length > 0 && !document.querySelector("dialog[open]")) {
-    byId("enrollment-dialog").showModal();
-  }
-  if (byId("enrollment-dialog").open) {
-    pending.forEach((item) => state.enrollment.seenPending.add(item.request_id));
-  }
-}
-
-async function loadEnrollment({ autoOpen = true } = {}) {
-  try {
-    renderEnrollment(await api("/api/enrollment"), autoOpen);
-  } catch (_) {
-    if (!state.enrollment.available) byId("enrollment-open").hidden = true;
-  }
-}
-
 function showError(error) {
   const box = byId("error");
-  box.textContent = error.message || String(error);
+  byId("error-message").textContent = error.message || String(error);
   box.hidden = false;
-  window.setTimeout(() => { box.hidden = true; }, 7000);
 }
 
 const pageInspector = createPageInspector({
@@ -1724,6 +1635,7 @@ const healthView = createHealthView({ request: api, showError, formatNumber, t, 
 const contextHub = createContextHub({ root: byId("view-context-hub"), request: api, mutate: maintenanceMutation,
   confirmAction, icon, formatTime, scopeName, onCommitted: loadOverview,
   language: () => currentLanguage, openPage: (id) => pageInspector.open(id) });
+const clientAccessView = createClientAccessView({ api, mutate: maintenanceMutation, byId, element, t, scopeName, formatTime, showError, confirmAction });
 const retentionView = createRetentionView({
   request: api,
   showError,
@@ -1806,28 +1718,13 @@ function buildLabel(build) {
   return `${build.version} · ${build.gitRevision?.slice(0, 12) || "?"} · ${state} · ${build.sourceDigest?.slice(0, 12) || "?"}`;
 }
 
-function renderOverview(data) {
-  state.overview = data;
-  scopeMetadata.markFresh();
-  const counts = pageRecallBreakdown(data);
-  refreshScopeLabels(document, scopeName);
-  queryView.setScopes(data.scopes || []);
-  const connected = data.integrity === "ok";
-  byId("connection").textContent = connected ? t("Connected") : t("Degraded");
-  byId("connection").classList.toggle("ready", connected);
-  byId("connection").classList.toggle("degraded", !connected);
-  byId("headline-pages").textContent = formatNumber(counts.defaultRecall ?? counts.current ?? 0);
-  byId("headline-pages-label").textContent = t(counts.defaultRecall === null ? "current content Pages" : "default recall Pages");
-  byId("headline-content").textContent = formatSize(data.contentChars);
-
-  byId("metrics").replaceChildren(
-    metric(t("Current content Pages"), formatNumber(counts.current ?? 0), "", t("Includes active source Pages routed behind condensed Pages.")),
-    metric(t("Default recall Pages"), counts.defaultRecall === null ? t("Unavailable") : formatNumber(counts.defaultRecall), "", t("Eligible for default recall, not necessarily returned by every query.")),
-    metric(t("Secondary search sources"), counts.secondarySearch === null ? t("Unavailable") : formatNumber(counts.secondarySearch), "", t("Active Pages reachable through relations or exact search and available to maintenance.")),
-    metric(t("Condensed Pages"), counts.condensed === null ? t("Unavailable") : formatNumber(counts.condensed), "", t("Topic and consolidation outputs eligible for default recall.")),
-  );
-
-  byId("scope-rows").replaceChildren(...orderedScopes([...data.scopes]).map(({ scope, depth }) => {
+function renderScopeRows() {
+  if (!state.overview) return;
+  const scopes = state.overview.scopes;
+  const query = byId("scope-query").value.trim().toLocaleLowerCase();
+  const visible = orderedScopes([...scopes]).filter(({scope}) => !query || [scope.displayName, scope.namespace].some(value => value?.toLocaleLowerCase().includes(query)));
+  byId("scope-count").textContent = t("{shown} of {total} scopes").replace("{shown}", formatNumber(visible.length)).replace("{total}", formatNumber(scopes.length));
+  const rows = visible.map(({ scope, depth }) => {
     const row = document.createElement("tr");
     const open = element("button", "icon-button");
     open.type = "button";
@@ -1857,7 +1754,33 @@ function renderOverview(data) {
       action,
     );
     return row;
-  }));
+  });
+  if (!rows.length) { const row = element("tr"), cell = element("td", "empty", t("No matching scopes")); cell.colSpan = 4; row.append(cell); rows.push(row); }
+  byId("scope-rows").replaceChildren(...rows);
+}
+
+function renderOverview(data) {
+  state.overview = data;
+  scopeMetadata.markFresh();
+  const counts = pageRecallBreakdown(data);
+  refreshScopeLabels(document, scopeName);
+  queryView.setScopes(data.scopes || []);
+  const connected = data.integrity === "ok";
+  byId("connection").textContent = connected ? t("Connected") : t("Degraded");
+  byId("connection").classList.toggle("ready", connected);
+  byId("connection").classList.toggle("degraded", !connected);
+  byId("headline-pages").textContent = formatNumber(counts.defaultRecall ?? counts.current ?? 0);
+  byId("headline-pages-label").textContent = t(counts.defaultRecall === null ? "current content Pages" : "default recall Pages");
+  byId("headline-content").textContent = formatSize(data.contentChars);
+
+  byId("metrics").replaceChildren(
+    metric(t("Current content Pages"), formatNumber(counts.current ?? 0), "", t("Includes active source Pages routed behind condensed Pages.")),
+    metric(t("Default recall Pages"), counts.defaultRecall === null ? t("Unavailable") : formatNumber(counts.defaultRecall), "", t("Eligible for default recall, not necessarily returned by every query.")),
+    metric(t("Secondary search sources"), counts.secondarySearch === null ? t("Unavailable") : formatNumber(counts.secondarySearch), "", t("Active Pages reachable through relations or exact search and available to maintenance.")),
+    metric(t("Condensed Pages"), counts.condensed === null ? t("Unavailable") : formatNumber(counts.condensed), "", t("Topic and consolidation outputs eligible for default recall.")),
+  );
+
+  renderScopeRows();
 
   const storeWide = (data.storePermissions || []).length > 0;
   const endpointRows = [
@@ -6244,6 +6167,7 @@ async function refresh() {
 }
 
 function rerenderForLocale() {
+  clientAccessView.rerender();
   accessView.render();
   contextHub.render();
   if (state.overview) renderOverview(state.overview);
@@ -6346,10 +6270,15 @@ document.querySelectorAll("[data-maintenance-workspace]").forEach((tab) => {
 });
 byId("refresh").addEventListener("click", () => refreshFromControl().catch(showError));
 byId("runtime-restart").addEventListener("click", restartRuntime);
-byId("enrollment-open").addEventListener("click", () => {
-  byId("enrollment-dialog").showModal();
-  loadEnrollment({ autoOpen: false });
+byId("enrollment-open").addEventListener("click", () => clientAccessView.open());
+byId("access-client-settings").addEventListener("click", () => clientAccessView.open());
+byId("client-context-permissions").addEventListener("click", async () => {
+  byId("enrollment-dialog").close();
+  await activateView("context-hub");
+  contextHub.openPolicies();
 });
+byId("scope-query").addEventListener("input", renderScopeRows);
+byId("error-dismiss").addEventListener("click", () => { byId("error").hidden = true; });
 byId("enrollment-close").addEventListener("click", () => byId("enrollment-dialog").close());
 byId("page-search").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -6453,8 +6382,8 @@ const accessView = createAccessView({ api, byId, element, t, formatTime, formatN
 byId("health-window").addEventListener("change", () => healthView.load({ reload: true }).catch(showError));
 setMaintenanceWorkspaceTab(state.maintenance.workspaceTab);
 refresh();
-loadEnrollment();
+clientAccessView.load();
 window.setInterval(() => {
-  loadEnrollment();
+  clientAccessView.load();
   if (!document.hidden) scopeMetadata.refresh().catch(() => {});
 }, 3000);

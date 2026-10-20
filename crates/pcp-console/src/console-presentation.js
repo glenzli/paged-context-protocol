@@ -18,11 +18,15 @@ const OPERATIONS = {
   summarize: "Summarize content", pack: "Pack source content", reconcile: "Reconcile feedback",
   review_summary: "Review summaries", review_topic: "Review topics",
   publish_activity: "Publish activity", read_activity: "Read activity", archive_page: "Archive memory",
+  consolidate_pages: "Consolidate memories", apply_reconciliation: "Apply feedback review",
+  submit_feedback: "Submit memory feedback", reconcile_feedback: "Review memory feedback",
+  review_candidates: "Review candidate memories", ensure_project_scope: "Register project scope",
 };
 const KINDS = {
   reviewed_capture: "Reviewed memory", chatgpt_capture: "Conversation memory",
   topic_summary: "Topic summary", summary_projection: "Attached summary",
   document: "Document", conversation: "Conversation", source_bundle: "Source pack",
+  consolidated: "Consolidated memory",
 };
 
 export const operationLabel = (value, t = value => value) => OPERATIONS[value] ? t(OPERATIONS[value]) : value;

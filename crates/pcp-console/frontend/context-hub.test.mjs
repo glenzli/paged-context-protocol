@@ -163,7 +163,7 @@ test("organization shows the failure category and retry time while preserving ra
 });
 
 test("permission edits survive refresh and locale rerenders until explicitly saved",async()=>{
-  const f=hubFixture();await f.view.load();await f.find("BUTTON","客户端权限").fire("click");
+  const f=hubFixture();await f.view.load();f.view.openPolicies();
   const submit=f.root.all().find(n=>n.tagName==="LABEL"&&n.textContent==="提交候选").firstChild;
   submit.checked=true;await submit.fire("change");
   assert.equal(f.view.hasUnsavedChanges(),true);

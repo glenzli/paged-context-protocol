@@ -429,6 +429,15 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/maintenance/models", get(maintenance_model_catalog))
         .route("/access-view.js", get(access_view_js))
+        .route(
+            "/client-access-view.js",
+            get(|| async {
+                static_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("client-access-view.js"),
+                )
+            }),
+        )
         .route("/ui-icons.js", get(ui_icons_js))
         .route("/page-inspector.js", get(page_inspector_js))
         .route("/page-editor.js", get(page_editor_js))

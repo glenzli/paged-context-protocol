@@ -308,7 +308,7 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
     if (!result) return;
     const visibility = result.visibility === "all_authorized"
       ? t("All authorized scopes")
-      : (result.scopes || []).join(" · ");
+      : (result.scopes || []).map(scopeName).join(" · ");
     const semantic = result.semanticIndexedCount == null ? "" : ` · ${formatNumber(result.semanticIndexedCount)} ${t("vector documents")} (${formatNumber(result.semanticEmbeddedCount || 0)} ${t("new")})`;
     const related = Number(result.relatedCount || 0);
     const relationStatus = related ? ` + ${formatNumber(related)} ${t("related")}` : "";

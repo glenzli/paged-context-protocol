@@ -39,7 +39,7 @@ function editor(replies = [], language = "zh") {
     loadRelationReviews: async () => {}, loadOverview: async () => {},
     showError: () => {}, pageInspector: { open: () => {} },
   };
-  runInNewContext(code("async function api(", "async function enrollmentMutation("), context);
+  runInNewContext(code("async function api(", "async function maintenanceMutation("), context);
   runInNewContext(code("async function maintenanceMutation(", "async function governanceMutation("), context);
   runInNewContext(code("function consolidationReviewEditor(", "function maintenanceReviewCard("), context);
   const review = { candidateId: "review:example", proposedAt: "2026-09-29", payload: { candidate: {

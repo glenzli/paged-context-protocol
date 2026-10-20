@@ -199,7 +199,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
   }
   function renderCandidates() {
     const box = node("div");
-    box.append(node("p", "context-note", text("后台会把相关候选整理为连续的记忆草案，保留演变、分歧和来源。成熟草案可由 Sol 审核写入；你也可以编辑或手动审阅。未解决的候选继续积累，不要求逐条处理。", "Background organization connects related evidence while preserving its evolution, disagreements and sources. Sol can review and write mature drafts; you can also edit or review them manually. Unresolved candidates continue accumulating without requiring individual action.")));
+    box.append(node("p", "context-note", text("先查看需要跟进的候选；积累中的证据和已完成记录可按需展开。审阅决定暂存后，统一确认写入。", "Start with candidates that need attention. Expand accumulating evidence or completed history when needed. Staged decisions are written only after confirmation.")));
     const flow = node("div", "context-flow");
     box.append(flow, renderOrganization());
     const current = node("div", "context-current");
@@ -209,6 +209,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
       if (items.length) startEditor(items);
     }, "pack");
     combine.disabled = busy || loading || !selected.size;
+    combine.hidden = !snapshot.candidates.some(pendingCandidate) && !selected.size;
     actions.append(combine);
     if (selected.size) actions.append(button(text("清除选择", "Clear selection"), () => { selected.clear(); render(); }));
     box.append(actions);
@@ -483,9 +484,10 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     if (!snapshot.activity.length) box.append(node("div","context-empty",text("当前没有共享近况","No current activity cards")));
     for (const item of snapshot.activity) {
       const card=node("article","context-card"), meta=node("p","context-meta");
-      meta.append(node("span","",`${clientName(item.clientId)} · `),scopeLabel(node,[item.scope],scopeName),node("span","",` · ${text("更新","Updated")} ${formatTime(item.updatedAt)} · ${text("过期","Expires")} ${formatTime(item.expiresAt)}`));
-      card.append(node("h3","",item.topicKey),node("p","",item.summary),meta);
-      card.append(technicalDetails(node,text("来源与标识", "Sources and identifiers"),[[text("客户端", "Client"),item.clientId],[text("范围标识", "Scope identifier"),item.scope]]));
+      meta.append(node("span","",`${clientName(item.clientId)} · ${text("更新","Updated")} ${formatTime(item.updatedAt)} · ${text("过期","Expires")} ${formatTime(item.expiresAt)}`));
+      const title=node("h3");title.append(scopeLabel(node,[item.scope],scopeName));
+      card.append(title,node("p","",item.summary),meta);
+      card.append(technicalDetails(node,text("来源与标识", "Sources and identifiers"),[[text("主题标识", "Topic key"),item.topicKey],[text("客户端", "Client"),item.clientId],[text("范围标识", "Scope identifier"),item.scope]]));
       const actions=node("div","context-actions");actions.append(button(text("移除近况","Remove activity"),async()=>{
         if (!await confirmAction({title:text("移除这条近况？","Remove this activity card?"),description:text("不会删除任何正式 Page。","No durable Page is deleted."),confirmLabel:text("移除","Remove")})) return;
         busy=true;render();try { await operation("remove_activity",{card_id:item.cardId,version:item.version}); } finally {busy=false;} await load();
@@ -502,7 +504,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     form.addEventListener("submit",(event)=>{event.preventDefault();if(!input.value.trim()||busy)return;savePolicy({clientId:input.value.trim()}).catch(fail);});box.append(form);
     for(const [id,name] of identities){
       const p=policyDrafts.get(id) || {clientId:id,submitCandidates:false,publishActivity:false,readActivity:false,...snapshot.policies.find((p)=>p.clientId===id)};
-      const card=node("section","context-card");card.append(node("h3","",name||id),node("p","context-meta",id));
+      const card=node("section","context-card");card.append(node("h3","",name||id),technicalDetails(node,text("客户端标识", "Client identifier"),[[text("客户端", "Client"),id]]));
       const own = snapshot.candidates.filter((candidate) => candidate.clientId === id);
       const intake = own.filter(candidateUsesIntakeSlot).length;
       const organized = own.filter((candidate) => pendingCandidate(candidate) && !candidateUsesIntakeSlot(candidate)).length;
@@ -532,7 +534,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     if(loading)root.append(node("p","context-note",text("正在读取…","Loading…")));
     if(!snapshot)return;
     const tabs=node("div","context-subtabs");tabs.setAttribute("role","tablist");
-    for(const [key,label] of [["candidates",text("候选记忆","Candidates")],["activity",text("当前近况","Activity")],["policies",text("客户端权限","Client permissions")]]){
+    for(const [key,label] of [["candidates",text("候选记忆","Candidates")],["activity",text("当前近况","Activity")],["policies",text("候选与近况权限","Candidate and activity permissions")]]){
       const b=button(label,()=>{tab=key;render();root.querySelector(`#context-tab-${key}`)?.focus();});
       b.id=`context-tab-${key}`;b.setAttribute("role","tab");b.setAttribute("aria-selected",String(tab===key));b.setAttribute("aria-controls", "context-panel");b.tabIndex=tab===key?0:-1;
       b.addEventListener("keydown",event=>{
@@ -546,5 +548,5 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     for(const detail of root.querySelectorAll("details[data-disclosure]")) detail.open=openDisclosures.has(detail.dataset.disclosure);
     if(focusedKey) for(const input of root.querySelectorAll("[data-focus-key]")) if(input.dataset.focusKey===focusedKey) input.focus({preventScroll:true});
   }
-  return {load,render,hasUnsavedChanges:()=>Boolean(busy || drafts.size || editor || policyDrafts.size || newClientId.trim())};
+  return {load,render,openPolicies:()=>{tab="policies";render();},hasUnsavedChanges:()=>Boolean(busy || drafts.size || editor || policyDrafts.size || newClientId.trim())};
 }
