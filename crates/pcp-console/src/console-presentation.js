@@ -41,14 +41,23 @@ export function technicalDetails(element, label, rows) {
 }
 
 // Update only label text when scope metadata arrives; keep editors and open details intact.
-export function scopeLabel(element, namespaces, resolve, tag = "span", className = "") {
-  const node = element(tag, className, namespaces.map(resolve).join(", "));
+function resolvedScopeName(namespace, resolve, fallbacks) {
+  const name = resolve(namespace);
+  return name && name !== namespace ? name : Object.hasOwn(fallbacks, namespace) && fallbacks[namespace] || name;
+}
+
+export function scopeLabel(element, namespaces, resolve, tag = "span", className = "", fallbacks = {}) {
+  const node = element(tag, className, namespaces.map(namespace => resolvedScopeName(namespace, resolve, fallbacks)).join(", "));
   node.setAttribute("data-scope-names", JSON.stringify(namespaces));
+  const retained = Object.fromEntries(namespaces.filter(namespace => Object.hasOwn(fallbacks, namespace)).map(namespace => [namespace, fallbacks[namespace]]));
+  if (Object.keys(retained).length) node.setAttribute("data-scope-fallback-names", JSON.stringify(retained));
   return node;
 }
 
 export function refreshScopeLabels(root, resolve) {
   for (const node of root.querySelectorAll("[data-scope-names]")) {
-    node.textContent = JSON.parse(node.getAttribute("data-scope-names")).map(resolve).join(", ");
+    const fallbacks = JSON.parse(node.getAttribute("data-scope-fallback-names") || "{}");
+    node.textContent = JSON.parse(node.getAttribute("data-scope-names"))
+      .map(namespace => resolvedScopeName(namespace, resolve, fallbacks)).join(", ");
   }
 }

@@ -1341,6 +1341,12 @@ pre { margin: 0; max-height: 420px; overflow: auto; padding: 11px; border: 1px s
 .access-internal-operations { max-height: 22rem; overflow: auto; margin: 10px 0; line-height: 1.7; }
 .access-internal-operations > div { padding: 4px 0; border-bottom: 1px solid var(--line); }
 .access-event-details summary { cursor: pointer; color: var(--accent); }
+.access-scope-details > summary { cursor: pointer; color: var(--accent); }
+.access-scope-details > summary:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 3px; border-radius: 4px; }
+.access-scope-preview { display: inline-block; max-width: calc(100% - 16px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: top; }
+.access-scope-count { display: block; padding-left: 16px; color: var(--muted); font-size: 12px; }
+.access-scope-list { display: grid; gap: 8px; max-height: 18rem; overflow-y: auto; padding-left: 16px; margin: 10px 0 0; }
+.access-scope-list code { display: block; color: var(--muted); font-size: 11px; }
 #view-access td { vertical-align: top; }
 
 .maintenance-review-topic-group { border: 1px solid var(--border); border-radius: 10px; padding: 12px; }

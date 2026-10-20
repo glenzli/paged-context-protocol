@@ -2,6 +2,7 @@ import { operationLabel, technicalDetails, scopeLabel } from "./console-presenta
 // The audit view owns its filters, request generation, pagination and rendering.
 export function createAccessView({ api, byId, element, t, formatTime, formatNumber, showError, scopeName = value => value }) {
   let loaded = false, generation = 0, cursor = null, events = [], current = null;
+  let scopeNames = {};
   let principalId = "", since = "";
   function filters() {
     const params = new URLSearchParams({ limit: "50", view: byId("access-view").value || "requests", includeHealthChecks: String(byId("access-health").checked) });
@@ -12,6 +13,24 @@ export function createAccessView({ api, byId, element, t, formatTime, formatNumb
     return params;
   }
   function unit() { return t((byId("access-view").value || "requests") === "requests" ? "requests" : "events"); }
+  function scopeCell(scopes) {
+    const names = Object.fromEntries(scopes.map(scope => [scope, scopeNames[scope] || t("Unknown scope")]));
+    const label = (values, tag = "span", className = "") => scopeLabel(element, values, scopeName, tag, className, names);
+    if (scopes.length <= 2) return label(scopes, "td", "access-scopes");
+    const cell = element("td", "access-scopes");
+    const details = element("details", "access-scope-details");
+    const summary = element("summary");
+    summary.append(label(scopes.slice(0, 2), "span", "access-scope-preview"),
+      element("span", "access-scope-count", t("{count} scopes in total").replace("{count}", formatNumber(scopes.length))));
+    const list = element("ul", "access-scope-list");
+    for (const scope of scopes) {
+      const item = element("li");
+      item.append(label([scope]), element("code", "", scope));
+      list.append(item);
+    }
+    details.append(summary, list); cell.append(details);
+    return cell;
+  }
   function attachOperations(details, request) {
     const summary = element("div", "muted", `${t("Internal operations")}: ${request.internalOperations} · ${t("Batch reads")}: ${request.batchReads} · ${t("Single reads")}: ${request.singleReads} · ${t("Page visits")}: ${request.pageVisits}`);
     const list = element("div", "access-internal-operations");
@@ -82,7 +101,7 @@ export function createAccessView({ api, byId, element, t, formatTime, formatNumb
       details.addEventListener("toggle", () => { expandedRow.hidden = !details.open; if (details.open) expand(); });
       const detailCell = element("td", ""); detailCell.append(details);
       row.append(element("td", "", formatTime(event.occurredAt)), client, element("td", "", operationLabel(event.operation, t)),
-        scopeLabel(element, event.scopes, scopeName, "td"), element("td", event.decision === "allowed" ? "decision-allowed" : "decision-denied", t(({allowed:"Allowed",denied:"Denied",failed:"Failed"})[event.decision] || event.decision)), detailCell);
+        scopeCell(event.scopes), element("td", event.decision === "allowed" ? "decision-allowed" : "decision-denied", t(({allowed:"Allowed",denied:"Denied",failed:"Failed"})[event.decision] || event.decision)), detailCell);
       return [row, expandedRow];
     });
     if (!rows.length) { const row = document.createElement("tr"), cell = element("td", "empty", t("No matching access events")); cell.colSpan = 6; row.append(cell); rows.push(row); }
@@ -100,6 +119,7 @@ export function createAccessView({ api, byId, element, t, formatTime, formatNumb
     try {
       const result = await api(`/api/access?${params}`);
       if (request !== generation) return;
+      scopeNames = append ? { ...scopeNames, ...result.scopeNames } : result.scopeNames || {};
       current = result; cursor = result.nextCursor; events = append ? events.concat(result.events) : result.events;
       loaded = true; render(); byId("access-status").textContent = t("Audit timeline");
     } catch (error) {

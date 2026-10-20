@@ -29,3 +29,20 @@ test('late scope names update only label text and preserve unresolved identifier
   assert.equal(label.textContent,'Personal memory, scope:unknown');
   assert.equal(label.getAttribute('data-scope-names'),'["scope:known","scope:unknown"]');
 });
+
+test('refreshing active scope names preserves historical audit names and the open disclosure', async()=>{
+  const {scopeLabel,refreshScopeLabels}=await import('../src/console-presentation.js');
+  const node=(tag,cls,text)=>({tag,className:cls,textContent:text,attributes:{},setAttribute(k,v){this.attributes[k]=v;},getAttribute(k){return this.attributes[k];}});
+  const label=scopeLabel(node,['project:retired','project:current'],value=>value,'span','',{
+    'project:retired':'Historical project','project:current':'Original current name','project:other':'Not displayed',
+  });
+  assert.equal(label.textContent,'Historical project, Original current name');
+  assert.deepEqual(JSON.parse(label.getAttribute('data-scope-fallback-names')),{
+    'project:retired':'Historical project','project:current':'Original current name',
+  });
+  const details={open:true,children:[label]};
+  refreshScopeLabels({querySelectorAll:()=>[label]},value=>value==='project:current'?'Updated current name':value);
+  assert.equal(label.textContent,'Historical project, Updated current name');
+  assert.equal(details.open,true);
+  assert.equal(details.children[0],label);
+});

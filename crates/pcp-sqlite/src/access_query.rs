@@ -184,6 +184,23 @@ fn query_audit(
     }
     let more = events.len() > limit;
     events.truncate(limit);
+    // Name only returned, authorized Scopes. Unlike the active Scope picker,
+    // retained audit records also need the names of retired project aliases.
+    let visible_scopes = events
+        .iter()
+        .flat_map(|event| &event.scopes)
+        .collect::<std::collections::BTreeSet<_>>();
+    let scope_names = {
+        let mut statement = tx.prepare(
+            "SELECT namespace, display_name FROM pcp_scopes
+             WHERE namespace IN (SELECT value FROM json_each(?1))",
+        )?;
+        statement
+            .query_map([serde_json::to_string(&visible_scopes)?], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?
+    };
     let next_cursor = if more {
         events
             .last()
@@ -199,6 +216,7 @@ fn query_audit(
     };
     Ok(AccessLogResult {
         events,
+        scope_names,
         next_cursor,
         total_events,
         clients,
@@ -553,6 +571,74 @@ mod tests {
                 .request
                 .is_none()
         );
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn audit_scope_names_include_retired_aliases_only_for_returned_authorized_scopes() {
+        let (store, path) = fixture().await;
+        store
+            .run("seed historical Scope names", |connection| {
+                for (namespace, name) in [
+                    ("a", "Historical project"),
+                    ("b", "Private project"),
+                    ("canonical", "Current project"),
+                ] {
+                    connection.execute(
+                        "INSERT INTO pcp_scopes(namespace, display_name, created_at, updated_at)
+                         VALUES (?1, ?2, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')",
+                        [namespace, name],
+                    )?;
+                }
+                connection.execute(
+                    "INSERT INTO pcp_scope_aliases(namespace, canonical_namespace, created_at)
+                     VALUES ('a', 'canonical', '2026-09-02T00:00:00Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let (active, _) = store
+            .list_scopes(vec!["a".into(), "canonical".into()], None, 100, None)
+            .await
+            .unwrap();
+        assert!(active.iter().all(|scope| scope.namespace != "a"));
+
+        let result = store
+            .query_access_log(&access(true), AccessLogQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(result.events.len(), 3);
+        assert_eq!(
+            result.scope_names,
+            [("a".to_owned(), "Historical project".to_owned())]
+                .into_iter()
+                .collect()
+        );
+        // Neither an unauthorized name nor an unreturned canonical Scope leaks.
+        let empty = store
+            .query_access_log(
+                &access(true),
+                AccessLogQuery {
+                    operation: Some("unknown".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(empty.scope_names.is_empty());
+        let mut legacy = serde_json::to_value(&result).unwrap();
+        assert!(
+            legacy
+                .as_object_mut()
+                .unwrap()
+                .remove("scopeNames")
+                .is_some()
+        );
+        let decoded: AccessLogResult = serde_json::from_value(legacy).unwrap();
+        assert!(decoded.scope_names.is_empty());
         drop(store);
         let _ = std::fs::remove_file(path);
     }

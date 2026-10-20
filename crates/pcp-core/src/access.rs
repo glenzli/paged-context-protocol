@@ -356,6 +356,9 @@ pub struct AccessOperationSummary {
 #[serde(rename_all = "camelCase")]
 pub struct AccessLogResult {
     pub events: Vec<AccessAuditEvent>,
+    /// Names for Scopes present in these authorized events, including retired aliases.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub scope_names: std::collections::BTreeMap<String, String>,
     pub next_cursor: Option<String>,
     pub total_events: u64,
     /// All clients matching time/operation filters, independent of selected client.

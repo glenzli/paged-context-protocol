@@ -96,6 +96,8 @@ const ZH_MESSAGES = {
   "Counts cover all matching records, not only loaded events.": "统计覆盖全部匹配记录，不受已加载条数限制。",
 
   "Access audit": "访问审计",
+  "{count} scopes in total": "共 {count} 个范围",
+  "Unknown scope": "未知范围",
   "Refresh models": "刷新模型列表",
   "active": "活跃",
   "Activity trend": "活动趋势",
