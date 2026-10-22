@@ -41,6 +41,8 @@ struct FakeWorker {
 
 #[path = "tests/automation.rs"]
 mod automation;
+#[path = "tests/budget_diagnostics.rs"]
+mod budget_diagnostics;
 #[path = "tests/feedback_edit.rs"]
 mod feedback_edit;
 #[path = "tests/periodic_review.rs"]

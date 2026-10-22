@@ -1,7 +1,9 @@
 //! Opt-in candidate inbox and bounded activity snapshots, separate from Page recall.
+mod activity;
 pub(crate) mod automatic_review;
 mod automatic_review_undo;
 mod experience;
+mod inspection;
 mod persistence;
 mod reconcile;
 mod review;
@@ -16,7 +18,7 @@ use chrono::{Duration, SecondsFormat, Utc};
 use pcp_client::{EmbeddedPcpClient, PcpTenantApi, context_hub::*};
 use pcp_core::{AccessPermission, AccessSession, Projection, ReadPagesRequest};
 use pcp_store::PcpStore;
-use persistence::{ActivityCard, Candidate, LockedState};
+use persistence::{Candidate, LockedState};
 pub use reconcile::PreparedContextProjectReconciliation;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -25,8 +27,6 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-
-const MAX_ACTIVITY_TOPICS_PER_CLIENT: usize = 12;
 
 pub struct ContextHub {
     store: Arc<dyn PcpStore>,
@@ -233,137 +233,6 @@ impl ContextHub {
         db.save()?;
         Ok(json!({"candidateId":id, "status":"pending", "created":true, "version":1}))
     }
-
-    fn publish(
-        &self,
-        access: &AccessSession,
-        db: &mut LockedState,
-        input: ActivityInput,
-        now: &str,
-    ) -> Result<Value> {
-        permission(access, &input.scope, AccessPermission::Ingest)?;
-        text_limit("topicKey", &input.topic_key, 64)?;
-        text_limit("summary", &input.summary, 180)?;
-        let ttl = input.ttl_hours.unwrap_or(48);
-        ensure!((1..=168).contains(&ttl), "activity ttlHours must be 1..168");
-        let client = &access.principal.principal_id;
-        let id = format!("act_{}", digest(&(client, &input.topic_key))?);
-        if let Some(card) = db.state.activity.iter().find(|c| c.card_id == id) {
-            if card.scope == input.scope && card.summary == input.summary {
-                return Ok(
-                    json!({"cardId":id, "version":card.version, "changed":false, "expiresAt":card.expires_at}),
-                );
-            }
-            ensure!(
-                input.expected_version == Some(card.version),
-                "activity card changed; read your current card before updating it"
-            );
-        } else {
-            ensure!(
-                input.expected_version.is_none(),
-                "activity card expired or was removed; publish a fresh snapshot"
-            );
-        }
-        db.state.activity.retain(|c| c.card_id != id);
-        let own: Vec<_> = db
-            .state
-            .activity
-            .iter()
-            .filter(|c| &c.client_id == client)
-            .collect();
-        if own.len() >= MAX_ACTIVITY_TOPICS_PER_CLIENT {
-            let oldest = own
-                .iter()
-                .min_by_key(|c| &c.updated_at)
-                .unwrap()
-                .card_id
-                .clone();
-            db.state.activity.retain(|c| c.card_id != oldest);
-        }
-        ensure!(db.state.activity.len() < 192, "activity capacity reached");
-        db.state.sequence += 1;
-        let version = db.state.sequence;
-        let expires = timestamp(Utc::now() + Duration::hours(ttl.into()));
-        db.state.activity.push(ActivityCard {
-            card_id: id.clone(),
-            client_id: client.clone(),
-            scope: input.scope,
-            topic_key: input.topic_key,
-            summary: input.summary,
-            version,
-            updated_at: now.into(),
-            expires_at: expires.clone(),
-        });
-        db.save()?;
-        Ok(json!({"cardId":id,"version":version,"changed":true,"expiresAt":expires}))
-    }
-
-    fn activity(
-        &self,
-        access: &AccessSession,
-        db: &LockedState,
-        query: ActivityQuery,
-    ) -> Result<Value> {
-        ensure!(query.scopes.len() <= 32, "too many activity scopes");
-        for scope in &query.scopes {
-            permission(access, scope, AccessPermission::ReadDetail)?;
-        }
-        let limit = query.limit.unwrap_or(5);
-        ensure!((1..=5).contains(&limit), "activity limit must be 1..5");
-        if let Some(q) = &query.query {
-            text_limit("query", q, 120)?;
-        }
-        let terms: Vec<_> = query
-            .query
-            .as_deref()
-            .unwrap_or("")
-            .split_whitespace()
-            .map(str::to_lowercase)
-            .collect();
-        let mut visible: Vec<_> = db
-            .state
-            .activity
-            .iter()
-            .filter(|card| {
-                access.allows(&card.scope, AccessPermission::ReadDetail)
-                    && (query.scopes.is_empty() || query.scopes.contains(&card.scope))
-                    && (query.include_own || card.client_id != access.principal.principal_id)
-                    && db
-                        .state
-                        .policies
-                        .iter()
-                        .any(|p| p.client_id == card.client_id && p.publish_activity)
-                    && (terms.is_empty()
-                        || terms.iter().any(|term| {
-                            format!("{} {}", card.topic_key, card.summary)
-                                .to_lowercase()
-                                .contains(term)
-                        }))
-            })
-            .collect();
-        visible.sort_by(|a, b| {
-            b.updated_at
-                .cmp(&a.updated_at)
-                .then_with(|| a.card_id.cmp(&b.card_id))
-        });
-        let truncated = visible.len() > limit as usize;
-        visible.truncate(limit as usize);
-        let cursor = digest(&(
-            &access.principal.principal_id,
-            &query.scopes,
-            &query.query,
-            query.include_own,
-            limit,
-            &visible,
-            truncated,
-        ))?;
-        let unchanged = query.cursor.as_deref() == Some(cursor.as_str());
-        Ok(if unchanged {
-            json!({"items":[],"cursor":cursor,"unchanged":true})
-        } else {
-            json!({"items":visible,"cursor":cursor,"unchanged":false,"replace":true,"truncated":truncated})
-        })
-    }
 }
 
 #[async_trait]
@@ -419,20 +288,31 @@ impl ContextHubService for ContextHub {
                 }
                 Ok(result)
             }
-            ContextHubRequest::Inspect => {
+            ContextHubRequest::Inspect => self.inspect(access, &mut db),
+            ContextHubRequest::InspectActivity => {
+                let result = self.inspect_activity(access, &db)?;
+                if pruned {
+                    db.save()?;
+                }
+                Ok(result)
+            }
+            ContextHubRequest::InspectPolicies => {
                 require_operator(access)?;
-                db.state.organization.available = self
-                    .organization_available
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                db.state.organization.automatic_review_available = self
-                    .automatic_review_available
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                synthesis::invalidate_stale(&mut db.state);
-                let suggestions = review::similar_candidates(&db.state.candidates);
-                db.save()?; // Prune resolved receipts and persist stale proposal state.
-                Ok(
-                    json!({"policies":db.state.policies,"candidates":db.state.candidates,"activity":db.state.activity,"similarCandidates":suggestions,"syntheses":db.state.syntheses,"synthesisContexts":db.state.synthesis_contexts,"organization":db.state.organization}),
-                )
+                if pruned {
+                    db.save()?;
+                }
+                Ok(json!({"policies":db.state.policies}))
+            }
+            ContextHubRequest::InspectInbox => self.inspect_inbox(access, &mut db),
+            ContextHubRequest::InspectCandidate { candidate_id } => {
+                let result = self.inspect_candidate(access, &db, &candidate_id)?;
+                if pruned {
+                    db.save()?;
+                }
+                Ok(result)
+            }
+            ContextHubRequest::InspectSynthesis { synthesis_id } => {
+                self.inspect_synthesis(access, &mut db, &synthesis_id)
             }
             ContextHubRequest::SetPolicy(policy) => {
                 require_operator(access)?;

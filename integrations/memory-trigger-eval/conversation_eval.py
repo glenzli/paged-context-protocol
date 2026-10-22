@@ -12,6 +12,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 LOCAL_FIXTURES = HERE / "conversations.json"
+SYNTHETIC_FIXTURES = HERE / "synthetic_conversations.json"
 WRITES = {"pcp_capture", "pcp_submit_candidate", "pcp_publish_activity",
           "pcp_submit_feedback", "pcp_ensure_project_scope"}
 
@@ -29,7 +30,13 @@ def fixtures(path=LOCAL_FIXTURES):
             "See integrations/memory-trigger-eval/README.md."
         )
     cases = json.loads(path.read_text())
-    if not cases or len({c["id"] for c in cases}) != len(cases):
+    if not isinstance(cases, list) or not cases or any(
+        not isinstance(c, dict) or not isinstance(c.get("id"), str) or not c["id"]
+        or not isinstance(c.get("session"), dict) or not isinstance(c.get("input"), list)
+        or not isinstance(c.get("expect"), dict) for c in cases
+    ):
+        raise ValueError("Fixtures must be nonempty conversations with id, session, input and expect")
+    if len({c["id"] for c in cases}) != len(cases):
         raise ValueError("Fixture IDs must be unique and nonempty")
     return cases
 
@@ -37,7 +44,8 @@ def fixtures(path=LOCAL_FIXTURES):
 def prepare(cases, catalog, agents):
     # The catalog is the actual wire representation, not a second schema copy.
     names = {t["name"] for t in catalog["tools"]}
-    if not WRITES | {"pcp_read_activity", "pcp_whoami", "pcp_list_scopes"} <= names:
+    if not WRITES | {"pcp_read_activity", "pcp_semantic_search", "pcp_search_pages",
+                     "pcp_read_pages", "pcp_whoami", "pcp_list_scopes"} <= names:
         raise ValueError("A context toolset catalog with project registration is required")
     tools = [{"type": "function", "name": t["name"],
               "description": t.get("description", ""), "parameters": t["inputSchema"]}
@@ -81,6 +89,7 @@ def score(cases, prepared, results):
         raise ValueError("Each prepared probe must have exactly one response")
     responses = {r["id"]: r["response"] for r in rows}
     report = {"probes": len(cases), "activityOpportunities": 0, "activityCaptured": 0,
+              "opportunitiesByRoute": {}, "capturedByRoute": {},
               "unexpectedWrites": 0, "argumentFailures": 0, "passed": 0, "failures": []}
     for case, probe in zip(cases, prepared["probes"], strict=True):
         calls = tool_calls(responses[probe["id"]])
@@ -89,6 +98,10 @@ def score(cases, prepared, results):
         allowed = expected.get("allowed", [])
         required = expected.get("required")
         errors = []
+        route = required or "no_call"
+        report["opportunitiesByRoute"][route] = report["opportunitiesByRoute"].get(route, 0) + 1
+        captured = names.count(required) == 1 if required else not names
+        report["capturedByRoute"][route] = report["capturedByRoute"].get(route, 0) + captured
         if required == "pcp_publish_activity":
             report["activityOpportunities"] += 1
             report["activityCaptured"] += names.count(required) == 1
@@ -99,16 +112,20 @@ def score(cases, prepared, results):
             if name != required and name not in allowed:
                 errors.append(f"unexpected call: {name}")
                 report["unexpectedWrites"] += name in WRITES
-            if name != required:
+            if name != required and name != "pcp_publish_activity":
                 continue
             argument_errors = []
-            for key, value in expected.get("arguments", {}).items():
+            for key, value in (expected.get("arguments", {}) if name == required else {}).items():
                 if args.get(key) != value:
                     argument_errors.append(f"{key} differs from known session state")
-            for key in expected.get("absent", []):
+            for key in expected.get("absent", []) if name == required else []:
                 if args.get(key) is not None:
                     argument_errors.append(f"{key} must be omitted")
             if name == "pcp_publish_activity":
+                if (case["session"].get("projectKey")
+                        and (name != required or "projectKey" not in expected.get("arguments", {}))
+                        and args.get("projectKey") != case["session"]["projectKey"]):
+                    argument_errors.append("projectKey differs from known session state")
                 summary, topic = args.get("summary"), args.get("topicKey")
                 if not isinstance(summary, str) or not 1 <= len(summary.strip()) <= 180:
                     argument_errors.append("summary must be 1..180 characters")

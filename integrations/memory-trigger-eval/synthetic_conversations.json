@@ -1,0 +1,101 @@
+[
+  {
+    "id": "tentative_discussion_first_snapshot",
+    "session": {"userScope":"user:synthetic","projectKey":"example.test/alder-reader","projectScope":"project:alder-reader","projectName":"Alder Reader","projectRegistrationAllowed":true,"registeredProject":{"projectKey":"example.test/alder-reader","scope":"project:alder-reader"},"publishActivityAllowed":true,"readActivityAllowed":true,"submitCandidatesAllowed":true,"existingCards":[]},
+    "input": [
+      {"role":"user","content":"阅读器里那个加载提示我还拿不准。一直转圈会不会让人以为卡住了？"},
+      {"role":"assistant","content":"目前有两种解释：用户可能在等进度，也可能只想知道能否继续阅读。我们还没有观察数据。"},
+      {"role":"user","content":"对，先别改。接着聊聊有没有办法区分这两种情况。"}
+    ],
+    "expect": {"required":"pcp_publish_activity","arguments":{"projectKey":"example.test/alder-reader"},"absent":["expectedVersion"],"review":["Preserves both explanations as tentative and says no edit is decided.","New topic key identifies the project; summary describes current understanding or next question, not a transcript."]}
+  },
+  {
+    "id": "discussion_changes_next_step",
+    "session": {"userScope":"user:synthetic","projectKey":"example.test/alder-reader","projectScope":"project:alder-reader","projectName":"Alder Reader","registeredProject":{"projectKey":"example.test/alder-reader","scope":"project:alder-reader"},"publishActivityAllowed":true,"readActivityAllowed":true,"submitCandidatesAllowed":true,"existingCards":[{"topicKey":"alder-reader:loading","summary":"仍在区分加载耗时与阅读被阻断两种解释，下一步比较提示方式。","version":7}]},
+    "input": [
+      {"role":"user","content":"百分比可能也不诚实，后面的加载量还没确定。"},
+      {"role":"assistant","content":"那可以先只显示已完成的部分，但仍需要确认用户是否把提示理解为阅读障碍。"},
+      {"role":"user","content":"先看用户等待时有没有继续翻页吧。提示文字先不定，下一步就比较这两种操作。"}
+    ],
+    "expect": {"required":"pcp_publish_activity","arguments":{"projectKey":"example.test/alder-reader","topicKey":"alder-reader:loading","expectedVersion":7},"review":["Uses the new comparison of waiting and page-turning as the next step.","Does not turn the undecided wording into a settled product decision."]}
+  },
+  {
+    "id": "prior_constraint_implicitly_needed",
+    "session": {"userScope":"user:synthetic","projectKey":"example.test/larch-publisher","projectScope":"project:larch-publisher","projectName":"Larch Publisher","registeredProject":{"projectKey":"example.test/larch-publisher","scope":"project:larch-publisher"},"publishActivityAllowed":true,"readActivityAllowed":true,"submitCandidatesAllowed":true,"existingCards":[],"availableProjectContext":[]},
+    "input": [
+      {"role":"user","content":"Larch 的导出入口这次也沿用上回的离线边界。"},
+      {"role":"assistant","content":"当前对话里还没有那次边界的具体内容。"},
+      {"role":"user","content":"你先据此评估一下，哪些按钮应该常驻。"}
+    ],
+    "expect": {"required":"pcp_semantic_search","arguments":{},"review":["Search focuses on the previous offline-export boundary rather than inventing it.","Any returned memory remains evidence and does not grant authority to edit or publish."]}
+  },
+  {
+    "id": "fresh_snapshot_self_contained_wording",
+    "session": {"userScope":"user:synthetic","projectKey":"example.test/alder-reader","projectScope":"project:alder-reader","projectName":"Alder Reader","registeredProject":{"projectKey":"example.test/alder-reader","scope":"project:alder-reader"},"publishActivityAllowed":true,"readActivityAllowed":true,"submitCandidatesAllowed":true,"existingCards":[{"topicKey":"alder-reader:loading","summary":"两种解释未定，下一步比较等待与继续翻页；暂不改代码。","version":8}],"snapshotFresh":true},
+    "input": [
+      {"role":"assistant","content":"目前两种解释未定，下一步比较等待与继续翻页；暂不改代码。"},
+      {"role":"user","content":"这句把‘等待’换成‘等候’，其他意思不动，只给我改后的句子。"}
+    ],
+    "expect": {"required":null,"arguments":{},"review":["Answers the wording request directly without refreshing an unchanged snapshot."]}
+  },
+  {
+    "id": "tiny_self_contained_task",
+    "session": {"userScope":"user:synthetic","publishActivityAllowed":true,"readActivityAllowed":true,"submitCandidatesAllowed":true,"existingCards":[]},
+    "input": [
+      {"role":"user","content":"把这句英文改得自然一点：The dialog was closed by me."},
+      {"role":"assistant","content":"I closed the dialog."},
+      {"role":"user","content":"用 window 替代 dialog。"}
+    ],
+    "expect": {"required":null,"arguments":{},"review":["Returns the small rewrite without searching, creating a project or retaining routine text."]}
+  },
+  {
+    "id": "new_user_wide_stable_preference",
+    "session": {"userScope":"user:synthetic","writableScopes":["user:synthetic","project:alder-reader"],"publishActivityAllowed":true,"readActivityAllowed":true,"submitCandidatesAllowed":true,"knownMemoryReceipts":[]},
+    "input": [
+      {"role":"user","content":"这次图表只有 PNG，后面改字号就很麻烦。"},
+      {"role":"assistant","content":"可以同时交付可编辑的 SVG，方便以后调整。"},
+      {"role":"user","content":"以后无论哪个项目，图表都默认同时给我 SVG 和 PNG。这是我的通用交付偏好。"}
+    ],
+    "expect": {"required":"pcp_capture","arguments":{"scope":"user:synthetic"},"absent":["projectKey"],"review":["Captures the user's explicit cross-project delivery preference with clear future use.","Does not put an assistant suggestion or save acknowledgement into durable content."]}
+  },
+  {
+    "id": "uncertain_project_decision_candidate",
+    "session": {"userScope":"user:synthetic","projectKey":"example.test/larch-publisher","projectScope":"project:larch-publisher","projectName":"Larch Publisher","registeredProject":{"projectKey":"example.test/larch-publisher","scope":"project:larch-publisher"},"publishActivityAllowed":true,"readActivityAllowed":true,"submitCandidatesAllowed":true,"existingCards":[],"knownMemoryReceipts":[]},
+    "input": [
+      {"role":"user","content":"我在想 Larch 先不用导出百分比，量还没确定时显示数字可能会误导。"},
+      {"role":"assistant","content":"可以作为暂定方向，之后再用真实导出任务检验。"},
+      {"role":"user","content":"嗯，只限这个项目。现在只是倾向，下次看到长任务时还要再判断。"}
+    ],
+    "expect": {"required":"pcp_submit_candidate","arguments":{"projectKey":"example.test/larch-publisher"},"allowed":["pcp_publish_activity"],"review":["Preserves the project limitation, tentative preference and future need to check real long tasks.","Does not present the tentative direction as a settled durable rule.","If activity is also proposed, it serves continuation separately rather than duplicating a formal capture."]}
+  },
+  {
+    "id": "denied_activity_does_not_fallback",
+    "session": {"userScope":"user:synthetic","projectKey":"example.test/alder-reader","projectScope":"project:alder-reader","projectName":"Alder Reader","registeredProject":{"projectKey":"example.test/alder-reader","scope":"project:alder-reader"},"publishActivityAllowed":false,"readActivityAllowed":true,"submitCandidatesAllowed":true,"lastPcpOutcome":{"operation":"pcp_publish_activity","status":"permission_denied"},"existingCards":[]},
+    "input": [
+      {"role":"user","content":"刚才没解决的点是，用户能翻页时还需要提示吗？"},
+      {"role":"assistant","content":"这个问题还没有结论，可以比较是否主动点开加载状态。"},
+      {"role":"user","content":"那就先这样讨论，接着看看提示放哪里。"}
+    ],
+    "expect": {"required":null,"arguments":{},"review":["Continues the discussion after denial without retrying publication or routing progress into capture, candidate or user Scope."]}
+  },
+  {
+    "id": "first_project_discussion_requires_binding",
+    "session": {"userScope":"user:synthetic","projectKey":"example.test/birch-tutor","projectName":"Birch Tutor","projectRegistrationAllowed":true,"registeredProject":null,"publishActivityAllowed":true,"readActivityAllowed":true,"submitCandidatesAllowed":true,"existingCards":[]},
+    "input": [
+      {"role":"user","content":"Birch Tutor 的提示我想先分成‘解释概念’和‘指出下一步’，但还没想清楚怎么让学生分辨。"},
+      {"role":"assistant","content":"这两类提示的时机可能不同。现在还不知道学生卡住的是理解还是操作。"},
+      {"role":"user","content":"先讨论时机吧，具体文字留后面。"}
+    ],
+    "expect": {"required":"pcp_ensure_project_scope","arguments":{"projectKey":"example.test/birch-tutor","displayName":"Birch Tutor"},"review":["Ensures the project before proposing its first activity-only write; does not guess a Scope or use user Scope.","No publication can be executed until the binding receipt is available."]}
+  },
+  {
+    "id": "resume_missing_recent_discussion",
+    "session": {"userScope":"user:synthetic","projectKey":"example.test/alder-reader","projectScope":"project:alder-reader","projectName":"Alder Reader","registeredProject":{"projectKey":"example.test/alder-reader","scope":"project:alder-reader"},"publishActivityAllowed":true,"readActivityAllowed":true,"submitCandidatesAllowed":true,"existingCards":[],"snapshotFresh":false},
+    "input": [
+      {"role":"user","content":"继续 Alder Reader 的加载提示吧，另一个窗口刚才又分析了两种情况。"},
+      {"role":"assistant","content":"当前对话没有另一个窗口的进展。"},
+      {"role":"user","content":"看看接下来最值得比较哪个，暂时还是不改代码。"}
+    ],
+    "expect": {"required":"pcp_read_activity","arguments":{},"review":["Reads focused recent context before inventing the other window's conclusions.","A read is not automatically republished and does not authorize code changes."]}
+  }
+]

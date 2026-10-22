@@ -1,7 +1,9 @@
 //! Thin MCP adapters for optional Runtime staging; no direct Store fallback.
 use pcp_client::{
     PcpApi,
-    context_hub::{ActivityInput, ActivityQuery, CandidateInput, ContextHubRequest},
+    context_hub::{
+        ActivityInput, ActivityQuery, ActivityStatus, CandidateInput, ContextHubRequest,
+    },
 };
 use pcp_core::{AccessPermission, AccessSession, SourceRef};
 use rmcp::ErrorData;
@@ -37,6 +39,8 @@ pub struct ActivityWriteReply {
     version: u64,
     changed: bool,
     expires_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reclaimed_completed_count: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
@@ -44,6 +48,8 @@ pub struct ActivityWriteReply {
 pub struct ActivityReadReply {
     items: Vec<ActivityCardReply>,
     cursor: String,
+    #[serde(default)]
+    next_cursor: Option<String>,
     unchanged: bool,
     #[serde(default)]
     replace: bool,
@@ -59,9 +65,39 @@ struct ActivityCardReply {
     scope: String,
     topic_key: String,
     summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status: Option<ActivityStatusParam>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    next_step: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_topic_key: Option<String>,
     version: u64,
     updated_at: String,
     expires_at: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityStatusParam {
+    Discussing,
+    InProgress,
+    WaitingUser,
+    WaitingDependency,
+    Completed,
+}
+
+impl From<ActivityStatusParam> for ActivityStatus {
+    fn from(status: ActivityStatusParam) -> Self {
+        match status {
+            ActivityStatusParam::Discussing => Self::Discussing,
+            ActivityStatusParam::InProgress => Self::InProgress,
+            ActivityStatusParam::WaitingUser => Self::WaitingUser,
+            ActivityStatusParam::WaitingDependency => Self::WaitingDependency,
+            ActivityStatusParam::Completed => Self::Completed,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -96,6 +132,18 @@ pub struct ActivityParams {
     pub topic_key: String,
     /// Handoff state: current understanding, open question, progress or next step, at most 180 characters. Preserve uncertainty; no transcript or instructions.
     pub summary: String,
+    /// Optional topic title, at most 120 characters. Omission/null preserves the stored title.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Publisher-declared state. Mark completed only when the topic is explicitly finished; omission/null preserves the stored state.
+    #[serde(default)]
+    pub status: Option<ActivityStatusParam>,
+    /// Optional concrete next step, at most 180 characters. Omission/null preserves the stored value.
+    #[serde(default)]
+    pub next_step: Option<String>,
+    /// Optional parent topic within the same client and Scope, at most 64 characters; cannot be this topic. Grouping does not merge evidence. Omission/null preserves it.
+    #[serde(default)]
+    pub parent_topic_key: Option<String>,
     /// Version returned by the last read/write; required to change an existing card.
     #[serde(default)]
     pub expected_version: Option<u64>,
@@ -111,9 +159,12 @@ pub struct ActivityReadParams {
     /// Optional literal topic terms, not a model-powered search.
     #[serde(default)]
     pub query: Option<String>,
-    /// Reuse only within this conversation and query. Not a global client watermark.
+    /// Query-local change token from cursor. Not a pagination token; omit when using pageCursor.
     #[serde(default)]
     pub cursor: Option<String>,
+    /// For the next bounded page, pass nextCursor with identical scopes/query/includeOwn/limit and no cursor. Stale pages require a fresh first read.
+    #[serde(default)]
+    pub page_cursor: Option<String>,
     /// At most five cards. Defaults to five.
     #[serde(default)]
     pub limit: Option<u32>,
@@ -160,6 +211,10 @@ pub async fn publish(
             scope,
             topic_key: p.topic_key,
             summary: p.summary,
+            title: p.title,
+            status: p.status.map(Into::into),
+            next_step: p.next_step,
+            parent_topic_key: p.parent_topic_key,
             expected_version: p.expected_version,
             ttl_hours: p.ttl_hours,
         }),
@@ -225,6 +280,7 @@ impl From<ActivityReadParams> for ActivityQuery {
             scopes: p.scopes,
             query: p.query,
             cursor: p.cursor,
+            page_cursor: p.page_cursor,
             limit: p.limit,
             include_own: p.include_own.unwrap_or_else(|| Self::default().include_own),
         }
@@ -304,6 +360,8 @@ mod tests {
         .unwrap();
         assert!(activity.scope.is_none());
         assert_eq!(activity.expected_version, Some(4));
+        assert!(activity.title.is_none() && activity.status.is_none());
+        assert!(activity.next_step.is_none() && activity.parent_topic_key.is_none());
         for (schema, expected) in [
             (
                 serde_json::to_value(schemars::schema_for!(CandidateParams)).unwrap(),
@@ -370,7 +428,21 @@ mod tests {
             publish(
                 &client,
                 serde_json::from_value(json!({
-                    "topicKey":"fix", "summary":"Testing", "expectedVersion":4
+                    "topicKey":"fix", "summary":"Testing", "expectedVersion":4,
+                    "title":"Reader loading", "status":"waiting_dependency",
+                    "nextStep":"Compare observed actions", "parentTopicKey":"reader"
+                }))
+                .unwrap()
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            read(
+                &client,
+                serde_json::from_value(json!({
+                    "scopes":["user:one"], "query":"reader", "pageCursor":"page:2",
+                    "limit":3, "includeOwn":false
                 }))
                 .unwrap()
             )
@@ -387,7 +459,7 @@ mod tests {
         let requests = recorder.0.lock().unwrap();
         assert_eq!(
             requests.len(),
-            4,
+            5,
             "one dispatch per call; ambiguity must not dispatch"
         );
         let ContextHubRequest::SubmitCandidate(first) = &requests[0] else {
@@ -424,6 +496,22 @@ mod tests {
         assert_eq!(activity.scope, "user:one");
         assert_eq!(activity.expected_version, Some(4));
         assert!(activity.ttl_hours.is_none());
+        assert_eq!(activity.title.as_deref(), Some("Reader loading"));
+        assert_eq!(activity.status, Some(ActivityStatus::WaitingDependency));
+        assert_eq!(
+            activity.next_step.as_deref(),
+            Some("Compare observed actions")
+        );
+        assert_eq!(activity.parent_topic_key.as_deref(), Some("reader"));
+        let ContextHubRequest::ReadActivity(query) = &requests[4] else {
+            panic!()
+        };
+        assert_eq!(query.scopes, ["user:one"]);
+        assert_eq!(query.query.as_deref(), Some("reader"));
+        assert_eq!(query.page_cursor.as_deref(), Some("page:2"));
+        assert!(query.cursor.is_none());
+        assert_eq!(query.limit, Some(3));
+        assert!(!query.include_own);
         drop(requests);
         drop(client);
         drop(ambiguous);
@@ -446,6 +534,13 @@ mod tests {
         let mcp_default: ActivityQuery = ActivityReadParams::default().into();
         assert!(mcp_default.include_own);
         assert!(ActivityQuery::default().include_own);
+        let old: ActivityQuery = serde_json::from_value::<ActivityReadParams>(json!({
+            "cursor":"snapshot:one"
+        }))
+        .unwrap()
+        .into();
+        assert_eq!(old.cursor.as_deref(), Some("snapshot:one"));
+        assert!(old.page_cursor.is_none());
     }
 
     #[test]
@@ -473,5 +568,49 @@ mod tests {
         let stable = serde_json::to_value(unchanged).unwrap();
         assert_eq!(stable["replace"], false);
         assert_eq!(stable["truncated"], false);
+        assert_eq!(stable["nextCursor"], json!(null));
+
+        let paged: ActivityReadReply = serde_json::from_value(json!({
+            "items":[{
+                "cardId":"act_1", "clientId":"test", "scope":"project:reader",
+                "topicKey":"reader:loading", "summary":"Still comparing two explanations",
+                "title":"Loading behavior", "status":"discussing",
+                "nextStep":"Observe whether reading continues", "parentTopicKey":"reader",
+                "version":2, "updatedAt":"2026-10-22T00:00:00Z",
+                "expiresAt":"2026-10-24T00:00:00Z"
+            }], "cursor":"snapshot:all", "nextCursor":"page:two",
+            "unchanged":false, "replace":true, "truncated":true
+        }))
+        .unwrap();
+        let value = serde_json::to_value(paged).unwrap();
+        assert_eq!(value["nextCursor"], "page:two");
+        assert_eq!(value["items"][0]["title"], "Loading behavior");
+        assert_eq!(value["items"][0]["status"], "discussing");
+        assert_eq!(
+            value["items"][0]["nextStep"],
+            "Observe whether reading continues"
+        );
+        assert_eq!(value["items"][0]["parentTopicKey"], "reader");
+
+        let legacy: ActivityCardReply = serde_json::from_value(json!({
+            "cardId":"act_legacy", "clientId":"test", "scope":"project:reader",
+            "topicKey":"reader:legacy", "summary":"Older card, state unknown",
+            "version":1, "updatedAt":"2026-10-22T00:00:00Z",
+            "expiresAt":"2026-10-24T00:00:00Z"
+        }))
+        .unwrap();
+        let legacy = serde_json::to_value(legacy).unwrap();
+        for field in ["title", "status", "nextStep", "parentTopicKey"] {
+            assert!(legacy.get(field).is_none(), "legacy card invented {field}");
+        }
+        let reclaimed: ActivityWriteReply = serde_json::from_value(json!({
+            "cardId":"act_2", "version":1, "changed":true,
+            "expiresAt":"2026-10-24T00:00:00Z", "reclaimedCompletedCount":2
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(reclaimed).unwrap()["reclaimedCompletedCount"],
+            2
+        );
     }
 }

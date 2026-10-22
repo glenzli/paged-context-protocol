@@ -6,22 +6,19 @@ import sys
 import tempfile
 import unittest
 
-from conversation_eval import LOCAL_FIXTURES, digest, fixtures, prepare, score
+from conversation_eval import SYNTHETIC_FIXTURES, digest, fixtures, prepare, score
 from evaluate import surface
 
 
-@unittest.skipUnless(
-    LOCAL_FIXTURES.is_file(),
-    "Local conversations.json is not bundled; see memory-trigger-eval/README.md",
-)
 class ConversationReplayTests(unittest.TestCase):
     def setUp(self):
-        self.cases = fixtures()
+        self.cases = fixtures(SYNTHETIC_FIXTURES)
         self.catalog = {"instructions": "fixture policy", "tools": [
             {"name": name, "inputSchema": {"type": "object"}}
             for name in ["pcp_capture", "pcp_submit_candidate", "pcp_publish_activity",
                          "pcp_read_activity", "pcp_submit_feedback", "pcp_ensure_project_scope",
-                         "pcp_whoami", "pcp_list_scopes"]]}
+                         "pcp_whoami", "pcp_list_scopes", "pcp_semantic_search",
+                         "pcp_search_pages", "pcp_read_pages"]]}
         self.prepared = prepare(self.cases, self.catalog, "fixture AGENTS")
         self.results = {"preparedSha256": digest(self.prepared), "responses": []}
         for case, probe in zip(self.cases, self.prepared["probes"]):
@@ -43,7 +40,7 @@ class ConversationReplayTests(unittest.TestCase):
             self.assertNotIn('"expect"', text)
             self.assertNotIn(case["id"], text)
             self.assertEqual(probe["request"]["input"][1:], case["input"])
-        self.assertNotIn("checkpoint", json.dumps([c["input"] for c in self.cases]))
+            self.assertEqual(json.loads(probe["request"]["input"][0]["content"]), case["session"])
 
     def test_correct_calls_and_nonwrite_continuations_pass(self):
         result = score(self.cases, self.prepared, self.results)
@@ -85,6 +82,16 @@ class ConversationReplayTests(unittest.TestCase):
         args.update(expectedVersion=1, summary="字" * 181)
         call["arguments"] = json.dumps(args)
         result = score(self.cases, self.prepared, self.results)
+        self.assertEqual(len(result["failures"][0]["errors"]), 2)
+
+    def test_optional_activity_still_checks_project_ownership(self):
+        row = self.results["responses"][6]["response"]["output"]
+        row.append({"type":"function_call", "name":"pcp_publish_activity", "arguments":json.dumps({
+            "projectKey":"example.test/wrong", "scope":"user:synthetic",
+            "topicKey":"larch:export", "summary":"The direction remains tentative."
+        })})
+        result = score(self.cases, self.prepared, self.results)
+        self.assertEqual(result["argumentFailures"], 1)
         self.assertEqual(len(result["failures"][0]["errors"]), 2)
 
 

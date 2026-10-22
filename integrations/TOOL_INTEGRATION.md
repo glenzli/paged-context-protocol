@@ -127,14 +127,21 @@ retention plans and leases.
 
 Recommended model flow:
 
-1. `pcp_semantic_search` for prior decisions/preferences/constraints; `pcp_search_pages` for literal
-   text or known IDs. Do not query when supplied evidence already settles a self-contained task.
+1. When missing prior decisions/preferences/constraints could change the reply or next step, use
+   `pcp_semantic_search`; use `pcp_search_pages` for literal text or known IDs. No explicit recall
+   request is needed. Reuse fresh context; skip self-contained tasks already settled by supplied evidence.
 2. `pcp_read_pages` on selected `revisionIds`. Use `view` to request only the follow-up needed.
 3. On a `standard` surface, use `pcp_expand_graph` only from relevant anchors and
    `pcp_match_intent` for a material unresolved retrieval question, initially at low effort. Do not
    require these specialist tools for ordinary recall; stop searching when results add no value.
 4. `pcp_capture` only for confirmed reusable context or requested retention. Use
    `pcp_submit_feedback` for explicit corrections; feedback remains pending Console review.
+
+Assess continuation independently of that memory flow. A discussion with two tentative
+explanations and an open next question can already need its first activity snapshot. A new
+stable user preference can need memory even with no ongoing activity topic. A tiny rewrite,
+fresh context with no state change, or a denied publication needs no replacement write.
+Neither a fixed turn count nor a final decision is a trigger requirement.
 
 Choose the write Scope by the subject's owner, not the MCP client or source label. User-wide
 preferences and constraints use the identity Scope; project decisions and useful project

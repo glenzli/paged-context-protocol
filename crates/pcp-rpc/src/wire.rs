@@ -172,6 +172,11 @@ impl RpcOperation {
                 ContextHubRequest::PublishActivity(..) => "publish_activity",
                 ContextHubRequest::ReadActivity(..) => "read_activity",
                 ContextHubRequest::Inspect => "inspect_context_inbox",
+                ContextHubRequest::InspectActivity => "inspect_activity",
+                ContextHubRequest::InspectPolicies => "inspect_context_policies",
+                ContextHubRequest::InspectInbox => "inspect_context_inbox_summary",
+                ContextHubRequest::InspectCandidate { .. } => "inspect_candidate",
+                ContextHubRequest::InspectSynthesis { .. } => "inspect_candidate_synthesis",
                 ContextHubRequest::SetPolicy(..) => "set_context_policy",
                 ContextHubRequest::Review(..) => "review_candidates",
                 ContextHubRequest::OrganizeCandidates => "organize_candidates",
@@ -375,6 +380,26 @@ mod tests {
             (
                 serde_json::json!({"operation":"inspect"}),
                 "inspect_context_inbox",
+            ),
+            (
+                serde_json::json!({"operation":"inspect_activity"}),
+                "inspect_activity",
+            ),
+            (
+                serde_json::json!({"operation":"inspect_policies"}),
+                "inspect_context_policies",
+            ),
+            (
+                serde_json::json!({"operation":"inspect_inbox"}),
+                "inspect_context_inbox_summary",
+            ),
+            (
+                serde_json::json!({"operation":"inspect_candidate","params":{"candidate_id":"private-candidate"}}),
+                "inspect_candidate",
+            ),
+            (
+                serde_json::json!({"operation":"inspect_synthesis","params":{"synthesis_id":"private-synthesis"}}),
+                "inspect_candidate_synthesis",
             ),
         ] {
             let wire = serde_json::json!({"type":"context_hub", "params":request});

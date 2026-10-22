@@ -128,6 +128,155 @@ async fn context_wire_advertises_and_dispatches_discovery_tools() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[tokio::test]
+async fn activity_wire_preserves_metadata_and_independent_page_tokens() {
+    use pcp_client::{
+        EmbeddedPcpClient,
+        context_hub::{ContextHubRequest, ContextHubService},
+    };
+    use pcp_core::{AccessPrincipal, AccessPrincipalType, ScopeGrant};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Inbox(Mutex<Vec<ContextHubRequest>>);
+    #[async_trait::async_trait]
+    impl ContextHubService for Inbox {
+        async fn execute(
+            &self,
+            _: &AccessSession,
+            request: ContextHubRequest,
+        ) -> anyhow::Result<serde_json::Value> {
+            let result = match &request {
+                ContextHubRequest::PublishActivity(_) => json!({
+                    "cardId":"act_wire", "version":5, "changed":true,
+                    "expiresAt":"2026-10-24T00:00:00Z", "reclaimedCompletedCount":1
+                }),
+                ContextHubRequest::ReadActivity(_) => json!({
+                    "items":[{"cardId":"act_wire", "clientId":"wire:test", "scope":"project:wire",
+                        "topicKey":"wire:loading", "summary":"Two explanations remain open",
+                        "title":"Loading", "status":"discussing", "nextStep":"Compare actions",
+                        "parentTopicKey":"wire", "version":5, "updatedAt":"2026-10-22T00:00:00Z",
+                        "expiresAt":"2026-10-24T00:00:00Z"}],
+                    "cursor":"snapshot:all", "nextCursor":"page:three",
+                    "unchanged":false, "replace":false, "truncated":true
+                }),
+                _ => anyhow::bail!("unexpected test request"),
+            };
+            self.0.lock().unwrap().push(request);
+            Ok(result)
+        }
+    }
+    let root = std::env::temp_dir().join(format!(
+        "pcp-activity-wire-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store = Arc::new(
+        SqlitePcpStore::open(root.join("store.sqlite3"))
+            .await
+            .unwrap(),
+    );
+    let inbox = Arc::new(Inbox::default());
+    let access = AccessSession::new(
+        AccessPrincipal {
+            principal_id: "wire:test".into(),
+            principal_type: AccessPrincipalType::ModelClient,
+            display_name: None,
+        },
+        "wire-session",
+        vec![ScopeGrant {
+            namespace: "project:wire".into(),
+            permissions: vec![AccessPermission::Ingest],
+        }],
+    );
+    let backend = Arc::new(EmbeddedPcpClient::new(store, access).with_context_hub(inbox.clone()));
+    let server = PcpMcpServer::new(backend).with_toolset(PcpMcpToolset::Context);
+    let (server_io, client_io) = tokio::io::duplex(128 * 1024);
+    let task = tokio::spawn(async move {
+        server
+            .serve(server_io)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+            .unwrap();
+    });
+    let client = ().serve(client_io).await.unwrap();
+    let tools = client.list_all_tools().await.unwrap();
+    let publish = tools
+        .iter()
+        .find(|tool| tool.name == "pcp_publish_activity")
+        .unwrap();
+    for field in ["title", "status", "nextStep", "parentTopicKey"] {
+        assert!(
+            publish.input_schema["properties"].get(field).is_some(),
+            "missing {field}"
+        );
+    }
+    assert_eq!(
+        publish.input_schema["$defs"]["ActivityStatusParam"]["enum"],
+        json!([
+            "discussing",
+            "in_progress",
+            "waiting_user",
+            "waiting_dependency",
+            "completed"
+        ])
+    );
+    let read = tools
+        .iter()
+        .find(|tool| tool.name == "pcp_read_activity")
+        .unwrap();
+    assert!(read.input_schema["properties"].get("cursor").is_some());
+    assert!(read.input_schema["properties"].get("pageCursor").is_some());
+    let published = client.call_tool(CallToolRequestParams::new("pcp_publish_activity").with_arguments(json!({
+        "scope":"project:wire", "topicKey":"wire:loading", "summary":"Two explanations remain open",
+        "title":"Loading", "status":"discussing", "nextStep":"Compare actions", "parentTopicKey":"wire", "expectedVersion":4
+    }).as_object().unwrap().clone())).await.unwrap();
+    assert_eq!(
+        published.structured_content.unwrap()["reclaimedCompletedCount"],
+        1
+    );
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("pcp_read_activity").with_arguments(
+                json!({
+                    "scopes":["project:wire"], "query":"loading", "pageCursor":"page:two", "limit":2
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .unwrap()
+        .structured_content
+        .unwrap();
+    assert_eq!(result["cursor"], "snapshot:all");
+    assert_eq!(result["nextCursor"], "page:three");
+    assert_eq!(result["replace"], false);
+    assert_eq!(result["items"][0]["status"], "discussing");
+    assert_eq!(result["items"][0]["nextStep"], "Compare actions");
+    let requests = inbox.0.lock().unwrap();
+    let ContextHubRequest::PublishActivity(input) = &requests[0] else {
+        panic!()
+    };
+    assert_eq!(input.title.as_deref(), Some("Loading"));
+    assert_eq!(input.parent_topic_key.as_deref(), Some("wire"));
+    let ContextHubRequest::ReadActivity(query) = &requests[1] else {
+        panic!()
+    };
+    assert_eq!(query.page_cursor.as_deref(), Some("page:two"));
+    assert!(query.cursor.is_none());
+    assert!(query.include_own);
+    drop(requests);
+    drop(client);
+    task.await.unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn toolset_names_are_explicit_and_backward_compatible() {
     for (name, expected) in [

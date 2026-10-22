@@ -702,17 +702,19 @@ impl RuntimeMaintainer {
                 Some(outcome)
             }
             Err(error) => {
+                let attempts = super::failure::model_attempts_on_error(&error);
                 self.ledger.isolate_job(
                     key.to_owned(),
                     &operation,
                     revisions,
                     format!("Waiting for maintenance worker: {error:#}"),
-                    1,
+                    attempts,
                     300,
                 );
-                // A failed call is still an attempt, never an idle scan.
-                report.worker_calls += 1;
-                report.isolated_jobs += 1;
+                // A local pre-admission denial submitted no model call. Real
+                // failures and unknown execution outcomes still count.
+                report.worker_calls += attempts;
+                report.isolated_jobs += attempts;
                 report.deferred += 1;
                 None
             }
@@ -736,6 +738,13 @@ impl RuntimeMaintainer {
             None => self.worker.evaluate_with_usage(request).await,
         };
         let duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+        if outcome
+            .as_ref()
+            .err()
+            .is_some_and(|error| super::failure::model_attempts_on_error(error) == 0)
+        {
+            return outcome;
+        }
         let (usage, failure_kind) = match &outcome {
             Ok(outcome) => (outcome.usage.clone(), None),
             Err(error) => (
@@ -781,6 +790,13 @@ impl RuntimeMaintainer {
             .repair_packing_analysis_overlap_with_usage(request)
             .await;
         let duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+        if outcome
+            .as_ref()
+            .err()
+            .is_some_and(|error| super::failure::model_attempts_on_error(error) == 0)
+        {
+            return outcome;
+        }
         let (usage, failure_kind) = match &outcome {
             Ok(outcome) => (outcome.usage.clone(), None),
             Err(error) => (
@@ -1129,7 +1145,8 @@ impl RuntimeMaintainer {
                             }
                         }
                         Err(error) => {
-                            aggregate.worker_calls += 1;
+                            aggregate.worker_calls +=
+                                super::failure::model_attempts_on_error(&error);
                             Err(error)
                         }
                     };
@@ -2077,7 +2094,9 @@ impl RuntimeMaintainer {
                     }
                 }
                 Err(error) => {
-                    analysis.worker_calls = analysis.worker_calls.saturating_add(1);
+                    analysis.worker_calls = analysis
+                        .worker_calls
+                        .saturating_add(super::failure::model_attempts_on_error(&error));
                     analysis.deferred_pages = analysis.deferred_pages.saturating_add(1);
                     analysis.issues.push(MaintenanceSummaryAnalysisIssue {
                         batch_index: page_index,
@@ -3028,18 +3047,19 @@ impl RuntimeMaintainer {
                 outcome
             }
             Err(error) => {
+                let attempts = super::failure::model_attempts_on_error(&error);
                 for revision in &signal.challenged_revision_ids {
                     self.ledger.isolate_job(
                         feedback_reconciliation_key(&signal.feedback_revision_id, revision),
                         "maintenance_reconcile",
                         vec![revision.clone()],
                         format!("Waiting for maintenance worker: {error:#}"),
-                        1,
+                        attempts,
                         300,
                     );
                 }
-                report.worker_calls += 1;
-                report.isolated_jobs += 1;
+                report.worker_calls += attempts;
+                report.isolated_jobs += attempts;
                 report.deferred += 1;
                 return Ok(true);
             }
@@ -3849,7 +3869,8 @@ impl RuntimeMaintainer {
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
-                report.worker_calls += 1;
+                let attempts = super::failure::model_attempts_on_error(&error);
+                report.worker_calls += attempts;
                 report.deferred += 1;
                 return Ok(super::MaintenanceVerification {
                     verdict: super::VerificationVerdict::NeedsReview,
@@ -3862,7 +3883,14 @@ impl RuntimeMaintainer {
                     concerns: Vec::new(),
                     revision: None,
                     requires_user_input: false,
-                    review_state: Some("waiting_provider".into()),
+                    review_state: Some(
+                        if attempts == 0 {
+                            "waiting_budget"
+                        } else {
+                            "waiting_provider"
+                        }
+                        .into(),
+                    ),
                     review_steps: Vec::new(),
                 });
             }

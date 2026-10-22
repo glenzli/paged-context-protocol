@@ -342,6 +342,22 @@ impl MaintenanceLedger {
                 // actual diagnostics, but do not replay historical failures
                 // merely because this Runtime was upgraded or restarted.
                 for (key, entry) in &mut ledger.entries {
+                    if let Some(issue) = ledger.job_issues.get_mut(key)
+                        && matches!(entry.outcome.as_str(), "isolated_job" | "waiting_budget")
+                        && matches!(
+                            issue.failure_kind.as_deref(),
+                            None | Some("worker_failed") | Some("waiting_budget")
+                        )
+                        && super::failure::FailureKind::from_message(&issue.reason)
+                            == super::failure::FailureKind::BudgetWait
+                    {
+                        // Retain historical attempt counts and any exhausted
+                        // guard. A known admission wait is not an unknown call.
+                        issue.failure_kind = Some("waiting_budget".into());
+                        entry.outcome = "waiting_budget".into();
+                        entry.automatic_attempts = entry.automatic_attempts.max(issue.attempts);
+                        entry.source_revision_ids = issue.source_revision_ids.clone();
+                    }
                     if entry.outcome == "isolated_job" && entry.automatic_attempts == 0 {
                         let revisions = ledger
                             .job_issues
@@ -493,7 +509,7 @@ impl MaintenanceLedger {
             .get(key)
             .is_some_and(|issue| issue.attempts >= MAX_AUTOMATIC_JOB_ATTEMPTS)
             || self.entries.get(key).is_some_and(|entry| {
-                entry.outcome == "isolated_job"
+                matches!(entry.outcome.as_str(), "isolated_job" | "waiting_budget")
                     && (entry.automatic_retry_exhausted
                         || entry.automatic_attempts >= MAX_AUTOMATIC_JOB_ATTEMPTS)
             })
@@ -533,7 +549,7 @@ impl MaintenanceLedger {
     }
 
     pub(crate) fn record(&mut self, key: String, outcome: &str, retry_after_seconds: u64) {
-        if outcome != "isolated_job" {
+        if !matches!(outcome, "isolated_job" | "waiting_budget") {
             self.archive_job_issue(&key, outcome);
         }
         let now = now_unix_ms();
@@ -1021,6 +1037,12 @@ impl MaintenanceLedger {
         attempts: u32,
         retry_seconds: u64,
     ) {
+        let kind = super::failure::FailureKind::from_message(&reason);
+        let waiting_budget = kind == super::failure::FailureKind::BudgetWait;
+        let previously_exhausted = self
+            .entries
+            .get(&key)
+            .is_some_and(|e| e.automatic_retry_exhausted);
         let previous_attempts = self
             .entries
             .get(&key)
@@ -1032,22 +1054,31 @@ impl MaintenanceLedger {
                 previous_attempts.max(issue.attempts)
             })
             .saturating_add(attempts);
-        self.record(key.clone(), "isolated_job", retry_seconds.max(60));
+        self.record(
+            key.clone(),
+            if waiting_budget {
+                "waiting_budget"
+            } else {
+                "isolated_job"
+            },
+            retry_seconds.max(60),
+        );
         self.entries.get_mut(&key).unwrap().automatic_attempts = attempts;
+        self.entries
+            .get_mut(&key)
+            .unwrap()
+            .automatic_retry_exhausted = previously_exhausted;
         self.entries.get_mut(&key).unwrap().source_revision_ids = revisions.clone();
         self.job_issues.insert(
             key,
             MaintenanceJobIssue {
                 operation: operation.to_owned(),
                 source_revision_ids: revisions,
-                failure_kind: Some(
-                    super::failure::FailureKind::from_message(&reason)
-                        .code()
-                        .to_owned(),
-                ),
+                failure_kind: Some(kind.code().to_owned()),
                 reason: reason.chars().take(1200).collect(),
                 attempts,
-                automatic_retry_exhausted: attempts >= MAX_AUTOMATIC_JOB_ATTEMPTS,
+                automatic_retry_exhausted: previously_exhausted
+                    || attempts >= MAX_AUTOMATIC_JOB_ATTEMPTS,
                 retry_at: timestamp_string(
                     now_unix_ms().saturating_add(retry_seconds.max(60) * 1000),
                 ),
@@ -1152,7 +1183,9 @@ impl MaintenanceLedger {
             .filter_map(|key| {
                 self.entries
                     .get(key)
-                    .filter(|entry| entry.outcome != "isolated_job")
+                    .filter(|entry| {
+                        !matches!(entry.outcome.as_str(), "isolated_job" | "waiting_budget")
+                    })
                     .map(|entry| (key.clone(), entry.outcome.clone()))
             })
             .collect::<Vec<_>>();
@@ -1201,7 +1234,12 @@ impl MaintenanceLedger {
             self.entries.insert(
                 key,
                 MaintenanceLedgerEntry {
-                    outcome: "isolated_job".into(),
+                    outcome: if issue.failure_kind.as_deref() == Some("waiting_budget") {
+                        "waiting_budget"
+                    } else {
+                        "isolated_job"
+                    }
+                    .into(),
                     updated_at_unix_ms: now,
                     retry_after_unix_ms: retry_at,
                     automatic_attempts: issue.attempts,
@@ -2407,6 +2445,105 @@ mod tests {
         ledger.observe_writes(&fresh, &WriteTriggeredMaintenanceConfig::default());
         ledger.reconcile_job_issues(&fresh);
         assert!(ledger.eligible("topic_window:rev_new"));
+    }
+
+    #[tokio::test]
+    async fn admission_waits_survive_restart_without_consuming_failure_attempts() {
+        let root =
+            std::env::temp_dir().join(format!("pcp-budget-wait-ledger-{}", uuid::Uuid::new_v4()));
+        let path = root.join("state.json");
+        let key = "topic_window:rev_1";
+        let reason = super::super::failure::WorkerFailure::budget_wait().to_string();
+        let mut ledger = MaintenanceLedger::default();
+        for _ in 0..5 {
+            ledger.isolate_job(
+                key.into(),
+                "extract_topic",
+                vec!["rev_1".into()],
+                reason.clone(),
+                0,
+                300,
+            );
+            assert_eq!(ledger.job_issues[key].attempts, 0);
+            assert!(!ledger.automatic_retry_exhausted(key));
+        }
+        ledger.entries.get_mut(key).unwrap().retry_after_unix_ms = 0;
+        ledger.save(&path).await.unwrap();
+        let mut restored = MaintenanceLedger::load(&path).await.unwrap();
+        assert!(restored.eligible(key));
+        assert_eq!(
+            restored.job_issues[key].failure_kind.as_deref(),
+            Some("waiting_budget")
+        );
+        restored.defer_unselected_job_issues();
+        restored.save(&path).await.unwrap();
+        let mut restored = MaintenanceLedger::load(&path).await.unwrap();
+        assert_eq!(restored.entries[key].outcome, "waiting_budget");
+        assert!(!restored.automatic_retry_exhausted(key));
+        for _ in 0..3 {
+            restored.isolate_job(
+                key.into(),
+                "extract_topic",
+                vec!["rev_1".into()],
+                "execution outcome unknown".into(),
+                1,
+                300,
+            );
+        }
+        restored.isolate_job(
+            key.into(),
+            "extract_topic",
+            vec!["rev_1".into()],
+            reason,
+            0,
+            300,
+        );
+        assert_eq!(restored.job_issues[key].attempts, 3);
+        assert!(restored.automatic_retry_exhausted(key));
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_budget_classification_retains_counts_and_does_not_replay_unknown_execution() {
+        let root =
+            std::env::temp_dir().join(format!("pcp-legacy-budget-wait-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let path = root.join("state.json");
+        let mut ledger = MaintenanceLedger::default();
+        for (key, reason) in [
+            (
+                "budget",
+                "PCP total maintenance budget exhausted; waiting for rolling budget release",
+            ),
+            (
+                "unknown",
+                "maintenance response wait timed out; execution outcome unknown",
+            ),
+        ] {
+            ledger.isolate_job(
+                key.into(),
+                "extract_topic",
+                vec!["rev_1".into()],
+                reason.into(),
+                1,
+                300,
+            );
+            let entry = ledger.entries.get_mut(key).unwrap();
+            entry.outcome = "isolated_job".into();
+            entry.automatic_attempts = 0;
+            entry.retry_after_unix_ms = 0;
+            ledger.job_issues.get_mut(key).unwrap().failure_kind = Some("worker_failed".into());
+        }
+        tokio::fs::write(&path, serde_json::to_vec(&ledger).unwrap())
+            .await
+            .unwrap();
+        let restored = MaintenanceLedger::load(&path).await.unwrap();
+        assert!(restored.eligible("budget"));
+        assert_eq!(restored.job_issues["budget"].attempts, 1);
+        assert_eq!(restored.entries["budget"].automatic_attempts, 1);
+        assert!(!restored.eligible("unknown"));
+        assert_eq!(restored.job_issues["unknown"].attempts, 1);
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]

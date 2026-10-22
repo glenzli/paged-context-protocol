@@ -1,6 +1,6 @@
 //! Small, bounded operational state. Never stored in the Page database.
 use anyhow::{Context, Result, ensure};
-use pcp_client::context_hub::{CandidateInput, ClientContextPolicy};
+use pcp_client::context_hub::{ActivityStatus, CandidateInput, ClientContextPolicy};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
@@ -43,6 +43,14 @@ pub struct ActivityCard {
     pub scope: String,
     pub topic_key: String,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ActivityStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_topic_key: Option<String>,
     pub version: u64,
     pub updated_at: String,
     pub expires_at: String,

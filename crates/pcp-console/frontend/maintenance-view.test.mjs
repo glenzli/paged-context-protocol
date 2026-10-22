@@ -74,6 +74,43 @@ test("exhausted automatic failures wait for new evidence instead of showing anot
   assert.doesNotMatch(active.children[1].children[1].children[2].textContent, /obsolete|下次重试/);
 });
 
+test("budget waits are deduplicated separately and current allowance does not imply retry of unknown execution", () => {
+  const { context, container } = diagnosticView();
+  const reason = "Waiting for maintenance worker: PCP total maintenance budget exhausted; waiting for rolling budget release";
+  const jobIssues = Array.from({ length: 22 }, (_, i) => ({ operation:"assess_archive", reason, failureKind:"worker_failed", sourceRevisionIds:[`rev_${i}`], attempts:1, retryAt:"later" }));
+  jobIssues.push({operation:"topic",reason:"maintenance response wait timed out; outcome unknown",failureKind:"response_timeout",sourceRevisionIds:["rev_unknown"],attempts:3,automaticRetryExhausted:true});
+  const budget = {status:{total:{remainingCalls:215,maxCalls:360,remainingTokens:5635209}}};
+  context.renderMaintenanceJobIssues(container, { jobIssues }, budget);
+  assert.equal(container.children.length, 2);
+  const waiting = container.children[0], failures = container.children[1];
+  assert.match(waiting.children[0].textContent,/预算等待记录 22/);
+  assert.match(waiting.children[2].textContent,/当前剩余 215\/360 次调用.*5,635,209/);
+  assert.match(waiting.children[3].textContent,/当前仍有额度.*不代表此刻耗尽/);
+  const group = waiting.children[1];
+  assert.equal(group.children.filter(node=>node.textContent === reason).length,1);
+  assert.match(group.children[2].children[0].textContent,/预算准入等待/);
+  assert.doesNotMatch(group.children[2].children[0].textContent,/调用尝试/);
+  assert.match(failures.children[0].textContent,/等待新证据 1 项.*结果未确认/);
+  assert.match(failures.children[1].children[1].children[2].textContent,/自动重试已停止/);
+  waiting.open = true; waiting.children[0].focus();
+  context.renderMaintenanceJobIssues(container, { jobIssues }, {status:{total:{remainingCalls:0,maxCalls:360,remainingTokens:0}}});
+  assert.equal(container.children[0].open,true);
+  assert.equal(context.document.activeElement,container.children[0].children[0]);
+  assert.match(container.children[0].children[3].textContent,/当前额度等待释放/);
+});
+
+test("missing current budget remains unknown and stopped attempts retain their evidence gate", () => {
+  const { context, container } = diagnosticView();
+  context.renderMaintenanceJobIssues(container, {jobIssues:[{
+    operation:"topic",failureKind:"waiting_budget",reason:"local budget denial",sourceRevisionIds:["rev_wait"],
+    attempts:3,automaticRetryExhausted:true,retryAt:"must-not-retry",
+  }]});
+  assert.match(container.children[0].children[2].textContent,/当前预算未读取/);
+  const item = container.children[0].children[1].children[2];
+  assert.match(item.children[1].textContent,/等待新证据/);
+  assert.doesNotMatch(item.children[1].textContent,/must-not-retry|下次准入检查/);
+});
+
 test("maintenance work is separated into two accessible sub-tabs", () => {
   assert.match(INDEX_HTML, /class="maintenance-workspace-tabs" role="tablist"/);
   for (const [tab, panel] of [

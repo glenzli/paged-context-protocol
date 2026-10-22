@@ -7,6 +7,7 @@ pub(crate) enum FailureKind {
     ResponseTimeout,
     ExecutionInterrupted,
     InvalidOutput,
+    BudgetWait,
     WorkerFailed,
 }
 
@@ -17,6 +18,7 @@ impl FailureKind {
             Self::ResponseTimeout => "response_timeout",
             Self::ExecutionInterrupted => "execution_interrupted",
             Self::InvalidOutput => "invalid_model_output",
+            Self::BudgetWait => "waiting_budget",
             Self::WorkerFailed => "worker_failed",
         }
     }
@@ -37,6 +39,12 @@ impl FailureKind {
             || message.contains("decode strict PCP maintenance decision")
         {
             Self::InvalidOutput
+        } else if !message.contains("outcome unknown")
+            && (message.contains("PCP total maintenance budget exhausted")
+                || message.contains("Rolling review budget exhausted")
+                || message.contains("Another upgraded review has an unsettled reservation"))
+        {
+            Self::BudgetWait
         } else {
             Self::WorkerFailed
         }
@@ -48,6 +56,16 @@ impl FailureKind {
             .map(|e| e.kind)
             .unwrap_or_else(|| Self::from_message(&format!("{error:#}")))
     }
+}
+
+/// Only a typed local admission denial proves no inference was submitted.
+/// Legacy/provider text remains classifiable without granting this exemption.
+pub(crate) fn model_attempts_on_error(error: &anyhow::Error) -> u32 {
+    u32::from(
+        !error
+            .downcast_ref::<WorkerFailure>()
+            .is_some_and(|failure| failure.kind == FailureKind::BudgetWait),
+    )
 }
 
 #[derive(Debug)]
@@ -62,6 +80,13 @@ impl fmt::Display for WorkerFailure {
 }
 impl std::error::Error for WorkerFailure {}
 impl WorkerFailure {
+    pub(crate) fn budget_wait() -> Self {
+        Self {
+            kind: FailureKind::BudgetWait,
+            message: "PCP total maintenance budget exhausted; waiting for rolling budget release"
+                .into(),
+        }
+    }
     pub(crate) fn invalid_output() -> Self {
         Self {
             kind: FailureKind::InvalidOutput,
@@ -106,6 +131,29 @@ impl WorkerFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_typed_local_budget_denials_prove_no_model_attempt() {
+        let denied = anyhow::Error::new(WorkerFailure::budget_wait()).context("baseline admission");
+        assert_eq!(FailureKind::from_error(&denied), FailureKind::BudgetWait);
+        assert_eq!(model_attempts_on_error(&denied), 0);
+        let legacy = anyhow::anyhow!(
+            "PCP total maintenance budget exhausted; waiting for rolling budget release"
+        );
+        assert_eq!(FailureKind::from_error(&legacy), FailureKind::BudgetWait);
+        assert_eq!(model_attempts_on_error(&legacy), 1);
+        assert_eq!(
+            FailureKind::from_message(
+                "maintenance response wait timed out; outcome unknown; PCP total maintenance budget exhausted"
+            ),
+            FailureKind::ResponseTimeout
+        );
+        assert_eq!(
+            FailureKind::from_message(
+                "maintenance wait interrupted; PCP total maintenance budget exhausted"
+            ),
+            FailureKind::ExecutionInterrupted
+        );
+    }
     #[test]
     fn timeout_and_interruption_preserve_distinct_meanings() {
         let seconds = Duration::from_secs;

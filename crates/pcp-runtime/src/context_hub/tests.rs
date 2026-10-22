@@ -96,6 +96,10 @@ fn activity(topic: &str, summary: &str) -> ActivityInput {
         scope: "a".into(),
         topic_key: topic.into(),
         summary: summary.into(),
+        title: None,
+        status: None,
+        next_step: None,
+        parent_topic_key: None,
         expected_version: None,
         ttl_hours: None,
     }
@@ -408,7 +412,7 @@ async fn activity_has_bounded_slots_versions_expiry_and_query_bound_snapshot_tok
     a.context_hub(ContextHubRequest::PublishActivity(update))
         .await
         .unwrap();
-    for index in 0..12 {
+    for index in 0..11 {
         let key = format!("extra-{index}");
         a.context_hub(ContextHubRequest::PublishActivity(activity(
             &key,
@@ -422,16 +426,16 @@ async fn activity_has_bounded_slots_versions_expiry_and_query_bound_snapshot_tok
             .await
             .unwrap();
         assert_eq!(db.state.activity.len(), 12);
-        assert!(!db.state.activity.iter().any(|c| c.topic_key == "one"));
+        assert!(db.state.activity.iter().any(|c| c.topic_key == "one"));
     }
     let existing = a
         .context_hub(ContextHubRequest::ReadActivity(ActivityQuery {
-            query: Some("extra-11".into()),
+            query: Some("extra-10".into()),
             ..Default::default()
         }))
         .await
         .unwrap();
-    let mut update_at_capacity = activity("extra-11", "updated at capacity");
+    let mut update_at_capacity = activity("extra-10", "updated at capacity");
     update_at_capacity.expected_version = existing["items"][0]["version"].as_u64();
     a.context_hub(ContextHubRequest::PublishActivity(update_at_capacity))
         .await
@@ -788,22 +792,105 @@ async fn rpc_preserves_server_attested_identity_and_runtime_extension() {
     let remote = pcp_rpc::RemotePcpClient::connect_expected(&socket, "rpc-client")
         .await
         .unwrap();
-    remote
+    let candidate_receipt = remote
         .context_hub(ContextHubRequest::SubmitCandidate(candidate("rpc")))
         .await
         .unwrap();
-    assert!(
+    for index in 0..6 {
+        let mut input = activity(&format!("rpc-topic-{index}"), "original handoff evidence");
+        input.title = Some("Readable RPC topic".into());
+        input.status = Some(ActivityStatus::WaitingDependency);
+        input.next_step = Some("integrate the module".into());
+        input.parent_topic_key = Some("rpc-main-topic".into());
         remote
-            .context_hub(ContextHubRequest::Inspect)
+            .context_hub(ContextHubRequest::PublishActivity(input))
             .await
-            .is_err()
-    );
+            .unwrap();
+    }
+    let first = remote
+        .context_hub(ContextHubRequest::ReadActivity(ActivityQuery::default()))
+        .await
+        .unwrap();
+    assert_eq!(first["items"].as_array().unwrap().len(), 5);
+    assert_eq!(first["items"][0]["status"], "waiting_dependency");
+    assert_eq!(first["items"][0]["nextStep"], "integrate the module");
+    let second = remote
+        .context_hub(ContextHubRequest::ReadActivity(ActivityQuery {
+            page_cursor: first["nextCursor"].as_str().map(str::to_owned),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    assert_eq!(second["items"].as_array().unwrap().len(), 1);
+    assert_eq!(second["replace"], false);
+    for request in [
+        ContextHubRequest::Inspect,
+        ContextHubRequest::InspectActivity,
+        ContextHubRequest::InspectPolicies,
+        ContextHubRequest::InspectInbox,
+        ContextHubRequest::InspectCandidate {
+            candidate_id: "rpc-private-id".into(),
+        },
+        ContextHubRequest::InspectSynthesis {
+            synthesis_id: "rpc-private-id".into(),
+        },
+    ] {
+        assert!(remote.context_hub(request).await.is_err());
+    }
     let snapshot = r
         .admin
         .context_hub(ContextHubRequest::Inspect)
         .await
         .unwrap();
     assert_eq!(snapshot["candidates"][0]["clientId"], "rpc-client");
+    let operator_socket = std::env::temp_dir().join(format!(
+        "op{}.sock",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    ));
+    let operator_endpoint =
+        pcp_rpc::RunningRuntimeEndpoint::start(&operator_socket, r.admin.clone())
+            .await
+            .unwrap();
+    let operator = pcp_rpc::RemotePcpClient::connect_expected(&operator_socket, "operator:test")
+        .await
+        .unwrap();
+    let light = operator
+        .context_hub(ContextHubRequest::InspectActivity)
+        .await
+        .unwrap();
+    assert_eq!(light["activity"].as_array().unwrap().len(), 6);
+    assert!(light.get("candidates").is_none());
+    let policies = operator
+        .context_hub(ContextHubRequest::InspectPolicies)
+        .await
+        .unwrap();
+    assert!(
+        policies["policies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["clientId"] == "rpc-client")
+    );
+    let inbox = operator
+        .context_hub(ContextHubRequest::InspectInbox)
+        .await
+        .unwrap();
+    assert_eq!(inbox["candidates"][0]["summaryOnly"], true);
+    let detail = operator
+        .context_hub(ContextHubRequest::InspectCandidate {
+            candidate_id: candidate_receipt["candidateId"].as_str().unwrap().into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(detail["candidate"]["input"]["eventId"], "rpc");
+    let (_, synthesis_id) = inspection_contracts::inspection_fixture(&r).await;
+    let synthesis = operator
+        .context_hub(ContextHubRequest::InspectSynthesis { synthesis_id })
+        .await
+        .unwrap();
+    assert!(synthesis["synthesis"]["automaticReview"]["input"].is_object());
+    assert!(synthesis["synthesisContext"].is_array());
+    operator_endpoint.shutdown().await;
     endpoint.shutdown().await;
 }
 
@@ -880,7 +967,9 @@ async fn only_formal_promotion_notifies_the_page_maintenance_observer() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
+mod activity_contracts;
 mod experience;
+mod inspection_contracts;
 mod synthesis;
 
 mod automatic_review;

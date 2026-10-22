@@ -2953,7 +2953,7 @@ function renderAutomationStatus() {
     issueList = element("div", "maintenance-review-evidence"); issueList.id = "maintenance-job-issues";
     byId("maintenance-automation-detail").after(issueList);
   }
-  renderMaintenanceJobIssues(issueList, automation);
+  renderMaintenanceJobIssues(issueList, automation, status.reviewBudget);
   const completed = automation.lastCompletedAt;
   const started = automation.lastStartedAt;
   const nextWake = automation.nextWakeAt;
@@ -2987,10 +2987,10 @@ function groupMaintenanceJobIssues(issues) {
   return [...groups].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
 }
 
-function renderMaintenanceJobIssues(container, automation) {
+function renderMaintenanceJobIssues(container, automation, reviewBudget) {
   const active = automation.jobIssues || [];
   const history = automation.jobIssueHistory || [];
-  const signature = JSON.stringify([currentLanguage, active, history, automation.archivedJobIssueCount]);
+  const signature = JSON.stringify([currentLanguage, active, history, automation.archivedJobIssueCount, reviewBudget]);
   // Polling must not collapse an operator's open details or steal keyboard focus.
   if (container.dataset.signature === signature) return;
   const open = new Set([...container.querySelectorAll("details[open]")].map((node) => node.dataset.issueKey));
@@ -3012,18 +3012,23 @@ function renderMaintenanceJobIssues(container, automation) {
     const node = disclosure(key, title);
     for (const [kind, records] of groupMaintenanceJobIssues(issues)) {
       const group = disclosure(`${key}:${kind}`, `${label(kind)} · ${records.length}`);
+      if (kind === "waiting_budget") {
+        for (const reason of new Set(records.map(issue => issue.reason).filter(Boolean))) group.append(element("p", "", reason));
+      }
       for (const issue of records) {
         const ids = issue.sourceRevisionIds || [];
         const itemKey = `${key}:${issue.operation}:${[...ids].sort().join(",")}:${issue.closedAt || ""}`;
-        const item = disclosure(itemKey, zh
+        const item = disclosure(itemKey, kind === "waiting_budget" ? (zh
+          ? `${issue.operation} · ${ids.length} 个来源 · 预算准入等待`
+          : `${issue.operation} · ${ids.length} sources · budget admission wait`) : zh
           ? `${issue.operation} · ${ids.length} 个来源 · ${issue.attempts} 次调用尝试`
           : `${issue.operation} · ${ids.length} sources · ${issue.attempts} call attempts`);
-        item.append(element("p", "", issue.reason || ""));
+        if (kind !== "waiting_budget") item.append(element("p", "", issue.reason || ""));
         item.append(element("p", "", issue.closedAt
           ? `${zh ? "归档时间" : "Archived"}: ${formatTime(issue.closedAt)} · ${issue.disposition || ""}`
           : issue.automaticRetryExhausted
             ? (zh ? "自动重试已停止，等待新证据。" : "Automatic retries stopped; waiting for new evidence.")
-          : `${zh ? "下次重试检查" : "Next retry check"}: ${formatTime(issue.retryAt)}${issue.deferredChecks ? (zh ? " · 暂未选中，已延长检查间隔" : " · Not selected yet; checks backed off") : ""}`));
+          : `${kind === "waiting_budget" ? (zh ? "下次准入检查" : "Next admission check") : (zh ? "下次重试检查" : "Next retry check")}: ${formatTime(issue.retryAt)}${issue.deferredChecks ? (zh ? " · 暂未选中，已延长检查间隔" : " · Not selected yet; checks backed off") : ""}`));
         const sources = element("p", "", ids.join(", "));
         sources.style.overflowWrap = "anywhere";
         item.append(sources);
@@ -3034,14 +3039,32 @@ function renderMaintenanceJobIssues(container, automation) {
     return node;
   };
   const nodes = [];
-  if (active.length) {
-    const counts = groupMaintenanceJobIssues(active).map(([kind, issues]) => `${label(kind)} ${issues.length}`).join(" · ");
-    const stopped = active.filter(issue => issue.automaticRetryExhausted).length;
-    nodes.push(section(active, "active", stopped ? (zh
-      ? `等待重试 ${active.length - stopped} 项 · 等待新证据 ${stopped} 项 · ${counts}`
-      : `${active.length - stopped} awaiting retry · ${stopped} waiting for new evidence · ${counts}`) : (zh
-      ? `等待重试 ${active.length} 项 · ${counts}`
-      : `${active.length} awaiting retry · ${counts}`)));
+  const budgetWaits = active.filter(issue => maintenanceFailureKind(issue.reason, issue.failureKind) === "waiting_budget");
+  const failures = active.filter(issue => maintenanceFailureKind(issue.reason, issue.failureKind) !== "waiting_budget");
+  if (budgetWaits.length) {
+    const waiting = section(budgetWaits, "budget", zh ? `预算等待记录 ${budgetWaits.length} 项` : `${budgetWaits.length} budget admission waits`);
+    const total = reviewBudget?.status?.total;
+    const numeric = value => typeof value === "number" && Number.isFinite(value);
+    if (!reviewBudget?.error && numeric(total?.remainingCalls) && numeric(total?.remainingTokens)) {
+      const calls = numeric(total.maxCalls) ? `${total.remainingCalls}/${total.maxCalls}` : String(total.remainingCalls);
+      const remaining = total.remainingTokens.toLocaleString(zh ? "zh-CN" : "en-US");
+      waiting.append(element("p", "", zh ? `当前剩余 ${calls} 次调用 · ${remaining} tokens` : `Currently remaining: ${calls} calls · ${remaining} tokens`));
+      waiting.append(element("p", "muted", total.remainingCalls === 0 || total.remainingTokens === 0
+        ? (zh ? "当前额度等待释放；后续按调度检查准入。" : "Current allowance awaits release; admission will be checked on schedule.")
+        : (zh ? "当前仍有额度；这些记录不代表此刻耗尽。后续按调度及请求大小、档位和预占检查准入。" : "Allowance remains; these records do not establish current exhaustion. Scheduled admission also checks request size, tier and reservations.")));
+    } else {
+      waiting.append(element("p", "muted", zh ? "当前预算未读取；旧等待记录不代表此刻已耗尽。" : "Current budget is unavailable; earlier waits do not establish current exhaustion."));
+    }
+    nodes.push(waiting);
+  }
+  if (failures.length) {
+    const counts = groupMaintenanceJobIssues(failures).map(([kind, issues]) => `${label(kind)} ${issues.length}`).join(" · ");
+    const stopped = failures.filter(issue => issue.automaticRetryExhausted).length;
+    nodes.push(section(failures, "active", stopped ? (zh
+      ? `等待重试 ${failures.length - stopped} 项 · 等待新证据 ${stopped} 项 · ${counts}`
+      : `${failures.length - stopped} awaiting retry · ${stopped} waiting for new evidence · ${counts}`) : (zh
+      ? `等待重试 ${failures.length} 项 · ${counts}`
+      : `${failures.length} awaiting retry · ${counts}`)));
   }
   if (history.length) {
     const total = automation.archivedJobIssueCount || history.length;

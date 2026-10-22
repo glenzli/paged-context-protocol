@@ -33,11 +33,18 @@ user's memory Store. The script makes no API calls and adds no runtime dependenc
 
 ## Blind multi-turn continuation probes
 
-`conversation_eval.py` prepares blind multi-turn continuations from a **local** conversation
-dataset. This repository publishes the evaluator, tests and usage instructions, not that dataset.
-The default `integrations/memory-trigger-eval/conversations.json` is ignored by Git; use
-`--fixtures /path/to/local/conversations.json` to select another local file. Keep datasets,
-prepared prompts and raw model responses local. Nothing downloads or creates a dataset for you.
+`conversation_eval.py` prepares blind multi-turn continuations. The published
+`synthetic_conversations.json` contains ten newly authored fictional conversations, with only
+synthetic identities and projects. It covers discussion-only first snapshots, changed next steps,
+missing historical context, fresh context, small self-contained tasks, stable user preferences,
+uncertain project decisions, denied publication, project binding, and missing recent discussion.
+It contains no production transcripts or Store records.
+
+The default `integrations/memory-trigger-eval/conversations.json` remains an ignored **local**
+dataset. It is never read by the published tests or downloaded by these scripts. Use an explicit
+`--fixtures` path for the synthetic suite or a permitted local dataset. Keep private datasets,
+prepared prompts and raw model responses local; do not copy production conversations into the
+published synthetic file.
 
 The JSON file is a nonempty array with unique `id` values. Each entry supplies `session` facts,
 an `input` list of role/content messages, and an `expect` object with `required`, `arguments`,
@@ -45,13 +52,26 @@ and optional `allowed`/`absent` fields. Expectations and case IDs remain outside
 Use only data you are permitted to evaluate, and never execute proposed tools against the user's
 Store. A missing dataset produces a setup error explaining `--fixtures`, rather than a traceback.
 
-Export the actual binary's MCP `initialize.result.instructions` and `tools/list.result.tools`
-as `{"instructions":"...","tools":[...]}`. Then prepare with the **loaded** AGENTS guidance:
+Export the actual binary's MCP `initialize.result.instructions` and `tools/list.result.tools`.
+`export_catalog.py` performs only `initialize` and `tools/list` over stdio, including catalog
+pagination. It inherits the selected launcher's connection environment, does not call tools, and
+does not restart a running service:
+
+```sh
+python3 integrations/memory-trigger-eval/export_catalog.py \
+  --output /tmp/pcp-catalog.before.json -- integrations/chatgpt/launch-pcp-mcp
+```
+
+Preserve that catalog and a copy of the **loaded** AGENTS before edits. Build the changed MCP
+binary once, then set `PCP_MCP_BINARY` to that binary for a separate catalog export through the
+same launcher. Verify the exported schemas rather than inferring them from a version label.
+Prepare both runs with identical AGENTS, fixtures, provider, model and reasoning settings:
 
 ```sh
 python3 integrations/memory-trigger-eval/conversation_eval.py prepare \
-  --fixtures /path/to/local/conversations.json \
-  --catalog /tmp/pcp-catalog.json --agents /path/to/AGENTS.md --output /tmp/pcp-probes.json
+  --fixtures integrations/memory-trigger-eval/synthetic_conversations.json \
+  --catalog /tmp/pcp-catalog.before.json --agents /path/to/loaded-AGENTS.md \
+  --output /tmp/pcp-probes.before.json
 ```
 
 Each probe contains a Responses-shaped request (`instructions`, `input`, `tools`). Give the model
@@ -70,26 +90,32 @@ Save the raw response from each independent continuation as:
 
 ```sh
 python3 integrations/memory-trigger-eval/conversation_eval.py score \
-  --fixtures /path/to/local/conversations.json /tmp/pcp-probes.json /tmp/pcp-results.json
+  --fixtures integrations/memory-trigger-eval/synthetic_conversations.json \
+  /tmp/pcp-probes.before.json /tmp/pcp-results.before.json
 python3 -m unittest discover -s integrations/memory-trigger-eval -p 'test_*.py'
 ```
 
-Use the same local dataset for preparation and scoring. On a checkout without the default
-local dataset, the six conversation replay tests explicitly skip; MCP metadata and CLI setup
-tests still run. Place your permitted dataset at the ignored default path to run the replay
-tests. Do not commit datasets to make skipped tests pass.
+Use the same dataset for preparation and scoring. The published tests always use the synthetic
+suite, exercise positive and negative outcomes, and do not depend on the ignored local dataset.
+The catalog exporter has a fake stdio-server test verifying that it never sends `tools/call`.
+These tests prove preparation, result accounting, boundary arguments and metadata transport;
+they do not prove that a model invokes PCP more often.
 
-Scoring separates activity opportunities captured, unexpected writes and argument errors. It
+Scoring separates opportunities captured by route, unexpected writes and argument errors. It
 checks project routing, known topic/version reuse, first-card version omission and size limits;
 it rejects missing, duplicate, failed or stale-input results. Review summary meaning, uncertainty,
-project-qualified new topic keys and attribution separately. No string matcher proves semantics.
+project-qualified new topic keys and attribution separately. Each fixture's `expect.review`
+lists semantic checks for a human reviewer and never enters model input. No string matcher proves
+that a tentative explanation or attribution was preserved.
 
 These are blind **continuation probes**, not a full rolling host conversation: prior turns and
 receipts are supplied fixtures, tool results are not dynamically executed, and registration
 before/after are separate probes. They can expose conflicting instructions and missed opportunities,
 but cannot measure real host tool discovery, actual writes, long-dialogue recall or spontaneous
 invocation frequency. Record model/provider/settings and raw outputs; compare old/new catalog
-and AGENTS under the same conditions before attributing an improvement to guidance. Validate
+and AGENTS under the same conditions. If both schemas and wording change, the result compares
+the complete catalogs; it does not isolate a causal effect from wording alone. Ten probes are
+a bounded diagnostic set, not a population estimate of real missed opportunities. Validate
 write contracts in an isolated Runtime, and observe ordinary real conversations after refreshing
 host metadata. This suite does not implement host turn counters or lifecycle hooks.
 

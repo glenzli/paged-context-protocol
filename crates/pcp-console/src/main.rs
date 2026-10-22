@@ -400,6 +400,17 @@ fn router(state: AppState) -> Router {
             "/api/context-hub",
             get(context_hub::inspect).post(context_hub::mutate),
         )
+        .route("/api/context-hub/activity", get(context_hub::activity))
+        .route("/api/context-hub/policies", get(context_hub::policies))
+        .route("/api/context-hub/inbox", get(context_hub::inbox))
+        .route(
+            "/api/context-hub/candidate/{id}",
+            get(context_hub::candidate),
+        )
+        .route(
+            "/api/context-hub/synthesis/{id}",
+            get(context_hub::synthesis),
+        )
         .route(
             "/context-hub.js",
             get(|| async {
@@ -413,6 +424,15 @@ fn router(state: AppState) -> Router {
             "/context-hub.css",
             get(|| async {
                 static_asset("text/css; charset=utf-8", include_str!("context-hub.css"))
+            }),
+        )
+        .route(
+            "/context-activity.js",
+            get(|| async {
+                static_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("context-activity.js"),
+                )
             }),
         )
         .route("/", get(index))

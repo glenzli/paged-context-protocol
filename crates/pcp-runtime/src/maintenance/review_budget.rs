@@ -264,7 +264,7 @@ impl BudgetStore {
             let total = self.total_status(ledger, now);
             ensure!(
                 total.remaining_calls > 0 && total.remaining_tokens >= tokens,
-                "PCP total maintenance budget exhausted; waiting for rolling budget release"
+                super::failure::WorkerFailure::budget_wait()
             );
             ledger
                 .baseline_calls
@@ -639,7 +639,13 @@ mod tests {
         assert_eq!(total.actual_tokens, 30);
         assert_eq!(total.reserved_tokens, 80);
         assert_eq!(total.remaining_tokens, 90);
-        assert!(reopened.reserve_baseline(1).is_err());
+        let denied = reopened.reserve_baseline(1).unwrap_err();
+        assert_eq!(
+            super::super::failure::FailureKind::from_error(&denied),
+            super::super::failure::FailureKind::BudgetWait
+        );
+        assert_eq!(super::super::failure::model_attempts_on_error(&denied), 0);
+        assert_eq!(reopened.snapshot().unwrap().total.used_calls, 2);
         assert!(matches!(reserve(&reopened, "other"), Admission::Waiting(_)));
         assert!(matches!(
             reserve(&reopened, "upgrade"),

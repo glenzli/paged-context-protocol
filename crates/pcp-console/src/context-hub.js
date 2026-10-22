@@ -1,5 +1,6 @@
 import { maintenanceFailureKind, maintenanceFailureLabel } from "./maintenance-diagnostics.js";
 import { technicalDetails, scopeLabel } from "./console-presentation.js";
+import { createActivityView } from "./context-activity.js";
 // Bounded operational UI. Draft decisions are reversible until explicit submission.
 export function pendingCandidate(item) { return ["pending", "deferred"].includes(item.status); }
 export function candidateUsesIntakeSlot(item) {
@@ -7,6 +8,7 @@ export function candidateUsesIntakeSlot(item) {
     || (pendingCandidate(item) && item.organizedVersion !== item.version);
 }
 export function reviewDraft(items, action, {title, content, targetRevisionId} = {}) {
+  if (items.some(item => item.summaryOnly)) throw new Error("Load complete candidate evidence before reviewing it");
   if (!items.length || items.some((item) => !pendingCandidate(item))) throw new Error("Candidate is not reviewable");
   if (new Set(items.map((item) => item.candidateId)).size !== items.length) throw new Error("Duplicate candidate");
   if (new Set(items.map((item) => item.input.scope)).size !== 1) throw new Error("Candidates must share a Scope");
@@ -66,6 +68,7 @@ export function automaticReviewLabel(state, english = false) {
 }
 
 export function synthesisDraft(synthesis, items, outputs) {
+  if (synthesis.summaryOnly) throw new Error("Load the complete synthesis before reviewing it");
   if (synthesis.status !== "pending") throw new Error("Synthesis is not reviewable");
   const current = new Map(items.map(item => [item.candidateId, item]));
   if (synthesis.candidates.some(ref => current.get(ref.candidateId)?.version !== ref.version || !pendingCandidate(current.get(ref.candidateId) || {}))) throw new Error("Synthesis evidence changed");
@@ -93,14 +96,26 @@ export function reconcileDrafts(drafts, items, syntheses = []) {
 }
 
 export function createContextHub({root, request, mutate, confirmAction, icon, language, openPage, formatTime, scopeName = value => value, onCommitted = async () => {}}) {
-  let snapshot = null, clients = [], tab = "candidates", busy = false, error = "", progress = "", loading = false;
+  let snapshot = {candidates:[], syntheses:[], policies:[], activity:[]}, clients = [], tab = "candidates", busy = false, error = "", progress = "", loading = false;
   const drafts = new Map(), selected = new Set(), policyDrafts = new Map();
+  const loadedTabs = new Set(), pendingTabs = new Map(), epochs = new Map(), tabErrors = new Map();
+  const candidateDetails = new Map(), synthesisDetails = new Map(), detailRequests = new Map(), detailErrors = new Map();
+  const detailEpochs = new Map();
+  const disclosuresByTab = new Map(), knownDisclosuresByTab = new Map();
+  let renderedTab = tab;
   let newClientId = "";
   let editor = null;
   const text = (zh,en) => language() === "zh" ? zh : en;
   const node = (tag, className = "", value = "") => { const n = document.createElement(tag); n.className = className; n.textContent = value; return n; };
   const clientName = id => clients.find(item => item.client.principal.principalId === id)?.client.principal.displayName || id;
   const operation = (op, params) => mutate("/api/context-hub", {operation:op, params});
+  const activityView = createActivityView({node, button, text, language, scopeName, formatTime, rerender:render, onRemove:async item => {
+    if (!await confirmAction({title:text("移除这条近况？", "Remove this activity card?"), description:text("不会删除任何正式 Page。", "No durable Page is deleted."), confirmLabel:text("移除", "Remove")})) return;
+    busy = true; render();
+    try { await operation("remove_activity", {card_id:item.cardId, version:item.version}); }
+    finally { busy = false; }
+    await load("activity");
+  }});
   function button(label, action, glyph, primary = false) {
     const b = node("button", `context-button${primary ? " primary-button" : ""}`);
     b.type = "button"; b.disabled = busy || loading;
@@ -110,12 +125,8 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     b.addEventListener("click", () => Promise.resolve().then(action).catch(fail));
     return b;
   }
-  function fail(e) { error = e?.message || String(e); render(); }
-  async function load() {
-    if (busy || loading) return;
-    loading = true; render();
-    try {
-      snapshot = await request("/api/context-hub");
+  function fail(e) { error = e?.message || String(e); tabErrors.set(tab, error); render(); }
+  function reconcileInbox() {
       let stale = reconcileDrafts(drafts, snapshot.candidates, snapshot.syntheses || []);
       if (editor) {
         const refs = editor.synthesis?.candidates || editor.items.map(item => ({candidateId:item.candidateId, version:item.version}));
@@ -126,19 +137,121 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
       const completed = completedCandidateIds(snapshot.candidates, snapshot.syntheses || []);
       const ids = new Set(snapshot.candidates.filter(c => pendingCandidate(c) && !completed.has(c.candidateId)).map((c) => c.candidateId));
       for (const id of selected) if (!ids.has(id)) selected.delete(id);
-      try { clients = (await request("/api/enrollment")).result.registrations || []; } catch (_) { clients = []; }
-      error = stale ? text(`${stale} 项草稿因依据已变化或过期而失效，请重新审阅。`, `${stale} drafts expired or changed; review them again.`) : "";
-    } catch(e) { error = e.message || String(e); }
-    finally { loading = false; render(); }
+      return stale ? text(`${stale} 项草稿因依据已变化或过期而失效，请重新审阅。`, `${stale} drafts expired or changed; review them again.`) : "";
   }
-  function stage(items, action, fields = {}) {
+  async function load(lane = tab) {
+    if (busy) return;
+    if (pendingTabs.has(lane)) return pendingTabs.get(lane);
+    epochs.set(lane, (epochs.get(lane) || 0) + 1);
+    const task = Promise.resolve().then(async () => {
+      try {
+        const resultRequest = request(`/api/context-hub/${({candidates:"inbox", activity:"activity", policies:"policies"})[lane]}`);
+        // Candidate and permission views retain enrolled display names. Activity needs no enrollment data.
+        const registrations = lane === "activity" ? null : Promise.resolve().then(() => request("/api/enrollment"))
+          .then(result => result.result.registrations || []).catch(() => clients);
+        const result = await resultRequest;
+        let message = "";
+        if (lane === "candidates") {
+          for (const [id, item] of candidateDetails) if (!result.candidates.some(current => current.candidateId === id && cachedDetailMatches("candidate", current, item))) candidateDetails.delete(id);
+          for (const [id, detail] of synthesisDetails) if (!result.syntheses.some(current => current.synthesisId === id && cachedDetailMatches("synthesis", current, detail.synthesis))
+            || detail.candidates.some(item => !result.candidates.some(current => current.candidateId === item.candidateId && cachedDetailMatches("candidate", current, item)))) synthesisDetails.delete(id);
+          const contexts = Object.fromEntries([...synthesisDetails.values()].map(detail => [detail.synthesis.contextId, detail.synthesisContext || []]));
+          snapshot = {...snapshot, ...result, synthesisContexts:contexts, candidates:result.candidates.map(item => candidateDetails.get(item.candidateId) || {...item, summaryOnly:true})};
+          detailErrors.clear();
+          message = reconcileInbox();
+        } else if (lane === "activity") snapshot = {...snapshot, activity:result.activity || [], activityLimits:result.limits || {}};
+        else snapshot = {...snapshot, policies:result.policies || []};
+        if (registrations) clients = await registrations;
+        loadedTabs.add(lane); tabErrors.set(lane, message);
+        if (tab === lane) error = message;
+      } catch(e) {
+        const message = e.message || String(e); tabErrors.set(lane, message);
+        if (tab === lane) error = message;
+      }
+    });
+    pendingTabs.set(lane, task); render();
+    try { await task; } finally { pendingTabs.delete(lane); render(); }
+  }
+  function detailKey(kind, item) { return `${kind}:${item[`${kind}Id`]}:${item.version}:${item.detailToken || ""}`; }
+  function cachedDetailMatches(kind, item, cached) {
+    if (!cached || item.version !== cached.version || item.status !== cached.status) return false;
+    if (item.detailToken || cached.detailToken) return Boolean(item.detailToken && item.detailToken === cached.detailToken);
+    // An older inspector cannot identify in-version mutations. Reuse only within its current snapshot.
+    return detailEpochs.get(`${kind}:${item[`${kind}Id`]}`) === epochs.get("candidates");
+  }
+  function currentDetail(kind, item) {
+    return (kind === "candidate" ? snapshot.candidates : snapshot.syntheses).some(current => current[`${kind}Id`] === item[`${kind}Id`] && current.version === item.version && current.status === item.status && current.detailToken === item.detailToken);
+  }
+  async function loadDetail(kind, item, retry = false) {
+    const current = (kind === "candidate" ? snapshot.candidates : snapshot.syntheses).find(record => record[`${kind}Id`] === item[`${kind}Id`]);
+    if (!current || current.version !== item.version || current.status !== item.status) return null;
+    item = current;
+    const cache = kind === "candidate" ? candidateDetails : synthesisDetails;
+    const id = item[`${kind}Id`], cached = cache.get(id);
+    const cachedItem = kind === "candidate" ? cached : cached?.synthesis;
+    if (cachedDetailMatches(kind, item, cachedItem)) return cachedItem;
+    cache.delete(id);
+    const key = detailKey(kind, item);
+    if (detailRequests.has(key)) return detailRequests.get(key);
+    if (!retry && detailErrors.has(key)) return null;
+    const epoch = epochs.get("candidates");
+    const task = Promise.resolve().then(async () => {
+      try {
+        const result = await request(`/api/context-hub/${kind}/${encodeURIComponent(id)}`);
+        if ((!item.detailToken && epoch !== epochs.get("candidates")) || !currentDetail(kind, item)) return null;
+        const full = result[kind] && {...result[kind], detailToken:item.detailToken ? result.detailToken : undefined};
+        if (!full || full[`${kind}Id`] !== id || full.version !== item.version || full.status !== item.status
+          || (item.detailToken && result.detailToken !== item.detailToken)
+          || (kind === "synthesis" && result.candidates.some(source => !snapshot.candidates.some(current => current.candidateId === source.candidateId && current.version === source.version && current.status === source.status
+            && (!current.detailToken || result.candidateDetailTokens?.[source.candidateId] === current.detailToken))))) {
+          throw new Error(text("依据已变化，请刷新后重新审阅。", "Evidence changed. Refresh before reviewing again."));
+        }
+        if (kind === "candidate") {
+          candidateDetails.set(id, full);
+          detailEpochs.set(`candidate:${id}`, epochs.get("candidates"));
+          snapshot.candidates = snapshot.candidates.map(current => current.candidateId === id ? full : current);
+        } else {
+          const sources = result.candidates.map(source => ({...source, detailToken:snapshot.candidates.find(current => current.candidateId === source.candidateId)?.detailToken ? result.candidateDetailTokens?.[source.candidateId] : undefined}));
+          synthesisDetails.set(id, {...result, synthesis:full, candidates:sources});
+          detailEpochs.set(`synthesis:${id}`, epochs.get("candidates"));
+          for (const source of sources) {
+            candidateDetails.set(source.candidateId, source);
+            detailEpochs.set(`candidate:${source.candidateId}`, epochs.get("candidates"));
+            snapshot.candidates = snapshot.candidates.map(current => current.candidateId === source.candidateId ? source : current);
+          }
+          snapshot.synthesisContexts = {...snapshot.synthesisContexts, [full.contextId]:result.synthesisContext || []};
+        }
+        const previousError = detailErrors.get(key); detailErrors.delete(key);
+        if (previousError && tabErrors.get("candidates") === previousError) {tabErrors.delete("candidates"); if (tab === "candidates" && error === previousError) error = "";}
+        return full;
+      } catch(e) {
+        if ((item.detailToken || epoch === epochs.get("candidates")) && currentDetail(kind, item)) {
+          const message = e.message || String(e); detailErrors.set(key, message); tabErrors.set("candidates", message);
+          if (tab === "candidates") error = message;
+        }
+        return null;
+      }
+    });
+    detailRequests.set(key, task); render();
+    try { return await task; } finally { detailRequests.delete(key); render(); }
+  }
+  async function selectTab(key) {
+    tab = key; error = tabErrors.get(key) || ""; render();
+    root.querySelector(`#context-tab-${key}`)?.focus();
+    if (!loadedTabs.has(key)) await load(key);
+  }
+  async function stage(items, action, fields = {}) {
+    items = await Promise.all(items.map(item => loadDetail("candidate", item)));
+    if (items.some(item => !item)) return;
     const draft = reviewDraft(items, action, fields);
     for (const [key, previous] of drafts) if (previous.candidates.some((ref) => items.some((item) => item.candidateId === ref.candidateId))) drafts.delete(key);
     drafts.set(draft.candidates[0].candidateId, draft);
     for (const item of items) selected.delete(item.candidateId);
-    editor = null; error = ""; render();
+    editor = null; error = ""; tabErrors.delete("candidates"); render();
   }
-  function startEditor(items, action = "promote") {
+  async function startEditor(items, action = "promote") {
+    items = await Promise.all(items.map(item => loadDetail("candidate", item)));
+    if (items.some(item => !item)) return;
     if (new Set(items.map((i) => i.input.scope)).size !== 1) throw new Error(text("合并候选必须属于同一范围", "Merge candidates within one Scope"));
     editor = {items, action, title:items[0].input.title, content:items.map((i) => i.input.content).join("\n\n"), targetRevisionId:""};
     render();
@@ -176,7 +289,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
         catch (_) { if (!error) error = text("决定已提交，但页面统计刷新失败，可稍后刷新。", "Decisions submitted, but page counts could not refresh. Refresh later."); }
       }
       busy = false;
-      if (error) { const failure = error; await load(); error = failure; }
+      if (committed || error) { const failure = error; await load("candidates"); if (failure) {error = failure; tabErrors.set("candidates", failure);} }
       render();
     }
   }
@@ -190,6 +303,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
       : [["title",text("标题","Title"),false],["content",text("正式内容（请消除重复、保留不同观点）","Reviewed content (remove duplication, preserve differing claims)"),true]]) {
       const labelNode = node("label", "", label), input = node(multi ? "textarea" : "input");
       input.value = editor[field]; input.disabled = busy || loading; input.addEventListener("input", () => { editor[field] = input.value; });
+      input.dataset.focusKey = `candidate-editor:${field}`;
       labelNode.append(input); wrap.append(labelNode);
     }
     const actions = node("div", "context-actions");
@@ -234,7 +348,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
       if (!["promoted", "interrupted"].includes(synthesis.status) && synthesis.candidates.some(ref => consumed.has(ref.candidateId))) continue;
       if (synthesis.status === "pending" && synthesis.candidates.some(ref => !snapshot.candidates.some(c => c.candidateId === ref.candidateId && c.version === ref.version && pendingCandidate(c)))) continue;
       const lane = candidateReviewQueue(synthesis);
-      (lane === "completed" ? completed : lane === "waiting" ? waiting : current).append(renderSynthesis(synthesis));
+      (lane === "completed" ? completed : lane === "waiting" ? waiting : current).append(renderSynthesisRecord(synthesis));
       synthesis.candidates.forEach(ref => { if (!["promoted", "interrupted"].includes(synthesis.status) || !pendingCandidate(snapshot.candidates.find(c => c.candidateId === ref.candidateId) || {})) consumed.add(ref.candidateId); });
     }
     if (!snapshot.candidates.length) box.append(node("div", "context-empty", text("没有待留存候选", "No candidate memories")));
@@ -245,6 +359,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
       if (!pendingCandidate(item) && item.status !== "promoting") {
         card.append(node("strong", "", `${item.input.title} · ${actionLabel(item.status)}`));
         if (item.result?.pageId) card.append(button(text("打开 Page","Open Page"), () => openPage(item.result.pageId), "open"));
+        card.append(renderCandidateEvidence(item, true));
         completed.append(card); continue;
       }
       const heading = node("div", "context-select");
@@ -256,7 +371,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
       const meta = node("p", "context-meta");
       meta.append(node("span", "", `${clientName(item.clientId)} · `), scopeLabel(node, [item.input.scope], scopeName), node("span", "", ` · ${formatTime(item.createdAt)}`));
       card.append(meta, node("p", "", item.input.content));
-      if (item.experience) card.append(experienceEvidence(item.experience));
+      card.append(renderCandidateEvidence(item));
       if (item.snoozedUntil) card.append(node("p", "context-note", `${text("暂缓至","Deferred until")} ${formatTime(item.snoozedUntil)}`));
       const similar = snapshot.similarCandidates?.[item.candidateId] || [];
       if (similar.length) card.append(node("p", "context-note", text(`另有 ${similar.length} 条相似候选，可选择后合并审阅`, `${similar.length} similar candidates; select to review together`)));
@@ -270,7 +385,9 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
       const actions = node("div", "context-actions");
       if (item.status === "promoting") {
         actions.append(node("span", "context-note", text("提交结果待确认，请用原决定重试", "Submission outcome unknown; retry the exact decision")), button(text("重试","Retry"), async () => {
-          busy=true;render();try { await operation("review", item.promotionRequest); } finally {busy=false;} await load();
+          const full = await loadDetail("candidate", item); if (!full) return;
+          if (!full.promotionRequest) throw new Error(text("未找到原始审阅决定，请刷新并核对回执。", "The original review decision is unavailable. Refresh and inspect receipts."));
+          busy=true;render();try { await operation("review", full.promotionRequest); } finally {busy=false;} await load("candidates");
         }, "retry"));
       } else {
         actions.append(button(text("接受并编辑","Accept and edit"), () => startEditor([item]), "accept"),
@@ -320,6 +437,45 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     return box;
   }
 
+  function detailBody(kind, item, renderComplete) {
+    const key = detailKey(kind, item), cached = kind === "candidate" ? candidateDetails.get(item.candidateId) : synthesisDetails.get(item.synthesisId)?.synthesis;
+    if (cachedDetailMatches(kind, item, cached)) return renderComplete(cached);
+    const box = node("div", "context-detail-status");
+    if (detailErrors.has(key)) box.append(node("p", "context-error", detailErrors.get(key)), button(text("重试读取完整依据", "Retry loading complete evidence"), () => loadDetail(kind, item, true)));
+    else box.append(node("p", "context-note", text("展开时读取完整依据与回执…", "Complete evidence and receipts load when expanded…")));
+    return box;
+  }
+  function renderCandidateEvidence(item, includeContent = false) {
+    const details = node("details", "context-candidate-evidence");
+    details.dataset.disclosure = `candidate:${item.candidateId}:${item.version}`;
+    const summary = node("summary", "", text("完整候选依据与回执", "Complete candidate evidence and receipts")); summary.dataset.focusKey = details.dataset.disclosure;
+    details.append(summary, detailBody("candidate", item, full => {
+      const body = node("div");
+      if (includeContent) body.append(node("p", "", full.input.content), technicalDetails(node, text("来源与标识", "Sources and identifiers"), [
+        [text("候选标识", "Candidate ID"), full.candidateId], [text("客户端", "Client"), full.clientId], [text("范围标识", "Scope identifier"), full.input.scope],
+        [text("来源引用", "Source references"), JSON.stringify(full.input.sourceRefs || [])], [text("依据版本", "Evidence revisions"), full.input.basedOnRevisionIds?.join("\n")],
+      ]));
+      if (full.experience) body.append(experienceEvidence(full.experience));
+      else body.append(node("p", "context-note", text("此候选没有附加经验回执。", "No additional experience receipts.")));
+      return body;
+    }));
+    details.addEventListener("toggle", () => details.open ? loadDetail("candidate", item) : undefined);
+    return details;
+  }
+  function renderSynthesisRecord(synthesis) {
+    const details = node("details", "context-card context-synthesis context-synthesis-record");
+    details.dataset.disclosure = `synthesis:${synthesis.synthesisId}:${synthesis.version}`;
+    const summary = node("summary"), automatic = synthesis.automaticReview;
+    summary.dataset.focusKey = details.dataset.disclosure;
+    summary.append(node("strong", "", synthesis.title));
+    if (automatic) summary.append(node("span", "context-auto-review", automaticReviewLabel(automatic.state, language() !== "zh")));
+    else summary.append(node("span", "context-note", ["promoted", "interrupted"].includes(synthesis.status) ? text("已处理记录", "Processed record") : text("展开查看并审阅", "Expand to inspect and review")));
+    if (automatic?.reason) summary.append(node("span", "context-synthesis-reason", automatic.reason));
+    details.append(summary, detailBody("synthesis", synthesis, renderSynthesis));
+    details.addEventListener("toggle", () => details.open ? loadDetail("synthesis", synthesis) : undefined);
+    return details;
+  }
+
   function renderOrganization() {
     const box = node("details", "context-organization"), state = snapshot.organization || {};
     box.dataset.disclosure = "organization";
@@ -352,8 +508,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     toggle.disabled = busy || loading; box.append(toggle); return box;
   }
   function renderSynthesis(synthesis) {
-    const card = node("article", "context-card context-synthesis");
-    card.append(node("h3", "", synthesis.title));
+    const card = node("div", "context-synthesis-content");
     const terminal = ["promoted", "interrupted"].includes(synthesis.status), automatic = synthesis.automaticReview;
     if (automatic) {
       card.append(node("p", "context-auto-review", automaticReviewLabel(automatic.state, language() !== "zh")));
@@ -445,7 +600,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     editor.outputs.forEach((output, index) => {
       const part = node("section", "context-memory-output");
       for (const [field,label,multiline] of [["title",text("标题", "Title"),false],["content",text("正式内容", "Memory content"),true]]) {
-        const labelNode = node("label", "", label), input = node(multiline ? "textarea" : "input"); input.value = output[field]; input.disabled = busy || loading; input.addEventListener("input", () => {output[field] = input.value;}); labelNode.append(input); part.append(labelNode);
+        const labelNode = node("label", "", label), input = node(multiline ? "textarea" : "input"); input.value = output[field]; input.disabled = busy || loading; input.dataset.focusKey = `synthesis-editor:${index}:${field}`; input.addEventListener("input", () => {output[field] = input.value;}); labelNode.append(input); part.append(labelNode);
       }
       const actionLabel = node("label", "", text("如何写入", "Memory action")), select = node("select");
       for (const action of ["create", "update", "represented"]) { const option = node("option", "", memoryActionLabel(action)); option.value = action; option.selected = action === output.action; option.disabled = action === "update" && !synthesis.updateableRevisionIds?.length; select.append(option); }
@@ -469,37 +624,29 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     });
     const actions = node("div", "context-actions"), add = button(text("增加一条记忆", "Add a memory"), () => {editor.outputs.push({candidateIds:synthesis.candidates.map(c => c.candidateId),title:"",content:"",action:"create",targetRevisionId:null}); render();});
     add.disabled = busy || editor.outputs.length >= 4;
-    actions.append(add, button(text("暂存整理决定", "Stage synthesis review"), () => {
-      const draft = synthesisDraft(synthesis, snapshot.candidates, editor.outputs);
+    actions.append(add, button(text("暂存整理决定", "Stage synthesis review"), async () => {
+      const full = await loadDetail("synthesis", synthesis); if (!full || !editor) return;
+      editor.synthesis = full;
+      if (synthesis.detailToken && full.detailToken !== synthesis.detailToken) {
+        error = text("审核依据或回执已更新，编辑内容已保留；请检查后再次暂存。", "Review evidence or receipts changed. Your edits are retained; inspect them before staging again.");
+        tabErrors.set("candidates", error); render(); return;
+      }
+      const draft = synthesisDraft(full, snapshot.candidates, editor.outputs);
       for (const [key, previous] of drafts) if (previous.candidates.some(ref => draft.candidates.some(c => c.candidateId === ref.candidateId))) drafts.delete(key);
-      drafts.set(synthesis.synthesisId, draft); editor = null; render();
+      drafts.set(synthesis.synthesisId, draft); editor = null; error = ""; tabErrors.delete("candidates"); render();
     }, null, true), button(text("取消", "Cancel"), () => {editor = null; render();}));
     wrap.append(actions); return wrap;
   }
   function actionLabel(action) {
     return ({promote:text("收为正式 Page","Promote"),promoted:text("已收为 Page","Promoted"),represented:text("现有记录已涵盖","Already represented"),defer:text("暂缓","Defer"),deferred:text("已暂缓","Deferred"),reject:text("不保留","Reject"),rejected:text("已拒绝","Rejected")})[action] || action;
   }
-  function renderActivity() {
-    const box=node("div");box.append(node("p","context-note",text("可选的跨窗口近况，每客户端最多 12 个主题；不进入长期召回。没有更新不代表没有活动，过期不代表任务结束。", "Optional cross-window updates, up to 12 topics/client, excluded from durable recall. Silence is not inactivity; expiry is not completion.")));
-    if (!snapshot.activity.length) box.append(node("div","context-empty",text("当前没有共享近况","No current activity cards")));
-    for (const item of snapshot.activity) {
-      const card=node("article","context-card"), meta=node("p","context-meta");
-      meta.append(node("span","",`${clientName(item.clientId)} · ${text("更新","Updated")} ${formatTime(item.updatedAt)} · ${text("过期","Expires")} ${formatTime(item.expiresAt)}`));
-      const title=node("h3");title.append(scopeLabel(node,[item.scope],scopeName));
-      card.append(title,node("p","",item.summary),meta);
-      card.append(technicalDetails(node,text("来源与标识", "Sources and identifiers"),[[text("主题标识", "Topic key"),item.topicKey],[text("客户端", "Client"),item.clientId],[text("范围标识", "Scope identifier"),item.scope]]));
-      const actions=node("div","context-actions");actions.append(button(text("移除近况","Remove activity"),async()=>{
-        if (!await confirmAction({title:text("移除这条近况？","Remove this activity card?"),description:text("不会删除任何正式 Page。","No durable Page is deleted."),confirmLabel:text("移除","Remove")})) return;
-        busy=true;render();try { await operation("remove_activity",{card_id:item.cardId,version:item.version}); } finally {busy=false;} await load();
-      },"delete"));card.append(actions);box.append(card);
-    }return box;
-  }
+  function renderActivity() { return activityView.render(snapshot.activity, snapshot.activityLimits); }
   function renderPolicies() {
     const box=node("div");box.append(node("p","context-note",text("三个入口分别授权，默认关闭；仍受原 Scope 权限限制。允许发布意味着该范围内已获近况读取许可的客户端可以看到内容。", "Each capability is opt-in and still Scope-bound. Publishing shares cards with activity-enabled readers of that Scope.")));
     const identities=new Map(clients.map((c)=>[c.client.principal.principalId,c.client.principal.displayName]));
     snapshot.policies.forEach((p)=>{if(!identities.has(p.clientId))identities.set(p.clientId,p.clientId);});
     // Configured non-enrollment clients can be entered explicitly by the operator.
-    const form=node("form","context-card context-policy"), input=node("input");input.placeholder=text("客户端 Principal ID","Client Principal ID");input.setAttribute("aria-label",input.placeholder);input.disabled=busy || loading;input.value=newClientId;input.addEventListener("input",()=>{newClientId=input.value;});
+    const form=node("form","context-card context-policy"), input=node("input");input.placeholder=text("客户端 Principal ID","Client Principal ID");input.setAttribute("aria-label",input.placeholder);input.dataset.focusKey="policy-new-client";input.disabled=busy || loading;input.value=newClientId;input.addEventListener("input",()=>{newClientId=input.value;});
     const add=button(text("添加客户端","Add client"),()=>{},"access");add.type="submit";form.append(input,add);
     form.addEventListener("submit",(event)=>{event.preventDefault();if(!input.value.trim()||busy)return;savePolicy({clientId:input.value.trim()}).catch(fail);});box.append(form);
     for(const [id,name] of identities){
@@ -508,13 +655,13 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
       const own = snapshot.candidates.filter((candidate) => candidate.clientId === id);
       const intake = own.filter(candidateUsesIntakeSlot).length;
       const organized = own.filter((candidate) => pendingCandidate(candidate) && !candidateUsesIntakeSlot(candidate)).length;
-      card.append(node("p", "context-note", text(
+      if (loadedTabs.has("candidates")) card.append(node("p", "context-note", text(
         `候选入口 ${intake}/50 待整理或写入；已整理 ${organized} 条仍保留为未决证据，不占客户端入口额度。`,
         `Candidate intake ${intake}/50 awaiting organization or write; ${organized} organized unresolved records remain as evidence without using client intake slots.`,
       )));
       const options=node("div","context-policy");
       for(const [key,label] of [["submitCandidates",text("提交候选","Submit candidates")],["publishActivity",text("发布近况","Publish activity")],["readActivity",text("读取近况","Read activity")]]){
-        const labelNode=node("label","",label),check=node("input");check.type="checkbox";check.checked=p[key];check.disabled=busy || loading;check.addEventListener("change",()=>{p[key]=check.checked;policyDrafts.set(id,p);save.disabled=false;note.hidden=false;});labelNode.prepend(check);options.append(labelNode);
+        const labelNode=node("label","",label),check=node("input");check.type="checkbox";check.checked=p[key];check.dataset.focusKey=`policy:${id}:${key}`;check.disabled=busy || loading;check.addEventListener("change",()=>{p[key]=check.checked;policyDrafts.set(id,p);save.disabled=false;note.hidden=false;});labelNode.prepend(check);options.append(labelNode);
       }
       const save=button(text("保存权限","Save permissions"),()=>savePolicy(p),"accept");
       save.disabled=busy || loading || !policyDrafts.has(id);
@@ -526,27 +673,33 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
   }
   async function savePolicy(policy){busy=true;render();try{await operation("set_policy",policy);policyDrafts.delete(policy.clientId);if(newClientId.trim()===policy.clientId)newClientId="";}finally{busy=false;}await load();}
   function render(){
-    const openDisclosures = new Set([...root.querySelectorAll("details[data-disclosure][open]")].map(item => item.dataset.disclosure));
-    const focusedKey = root.contains(document.activeElement) ? document.activeElement?.dataset.focusKey : null;
+    loading = pendingTabs.has(tab) || (tab === "candidates" && detailRequests.size > 0);
+    disclosuresByTab.set(renderedTab, new Set([...root.querySelectorAll("details[data-disclosure][open]")].map(item => item.dataset.disclosure)));
+    const known = knownDisclosuresByTab.get(renderedTab) || new Set();
+    for (const detail of root.querySelectorAll("details[data-disclosure]")) known.add(detail.dataset.disclosure);
+    knownDisclosuresByTab.set(renderedTab, known);
+    const openDisclosures = disclosuresByTab.get(tab) || new Set(); renderedTab = tab;
+    const focused = root.contains(document.activeElement) ? document.activeElement : null, focusedKey = focused?.dataset.focusKey;
+    const selection = focused && Number.isInteger(focused.selectionStart) ? [focused.selectionStart, focused.selectionEnd] : null;
     root.replaceChildren();root.setAttribute("aria-busy",String(busy||loading));
     const heading=node("div","context-heading");heading.append(node("h2","",text("暂存与近况","Context inbox")),button(text("刷新","Refresh"),load,"refresh"));root.append(heading);
     if(error){const alert=node("p","context-error",error);alert.setAttribute("role","alert");root.append(alert);}
     if(loading)root.append(node("p","context-note",text("正在读取…","Loading…")));
-    if(!snapshot)return;
     const tabs=node("div","context-subtabs");tabs.setAttribute("role","tablist");
     for(const [key,label] of [["candidates",text("候选记忆","Candidates")],["activity",text("当前近况","Activity")],["policies",text("候选与近况权限","Candidate and activity permissions")]]){
-      const b=button(label,()=>{tab=key;render();root.querySelector(`#context-tab-${key}`)?.focus();});
+      const b=button(label,()=>selectTab(key)); b.disabled = busy;
+      b.dataset.focusKey = `context-tab:${key}`;
       b.id=`context-tab-${key}`;b.setAttribute("role","tab");b.setAttribute("aria-selected",String(tab===key));b.setAttribute("aria-controls", "context-panel");b.tabIndex=tab===key?0:-1;
       b.addEventListener("keydown",event=>{
         if(!["ArrowLeft","ArrowRight","Home","End"].includes(event.key))return;
         event.preventDefault();const keys=["candidates","activity","policies"], i=keys.indexOf(key);
-        tab=keys[event.key==="Home"?0:event.key==="End"?2:(i+(event.key==="ArrowRight"?1:2))%3];render();root.querySelector(`#context-tab-${tab}`)?.focus();
+        selectTab(keys[event.key==="Home"?0:event.key==="End"?2:(i+(event.key==="ArrowRight"?1:2))%3]).catch(fail);
       });tabs.append(b);
     }root.append(tabs);
-    const panel=tab==="candidates"?renderCandidates():tab==="activity"?renderActivity():renderPolicies();
+    const panel=!loadedTabs.has(tab)?node("div"):tab==="candidates"?renderCandidates():tab==="activity"?renderActivity():renderPolicies();
     panel.id="context-panel";panel.setAttribute("role","tabpanel");panel.setAttribute("aria-labelledby",`context-tab-${tab}`);root.append(panel);
-    for(const detail of root.querySelectorAll("details[data-disclosure]")) detail.open=openDisclosures.has(detail.dataset.disclosure);
-    if(focusedKey) for(const input of root.querySelectorAll("[data-focus-key]")) if(input.dataset.focusKey===focusedKey) input.focus({preventScroll:true});
+    for(const detail of root.querySelectorAll("details[data-disclosure]")) if (knownDisclosuresByTab.get(tab)?.has(detail.dataset.disclosure)) detail.open=openDisclosures.has(detail.dataset.disclosure);
+    if(focusedKey) for(const input of root.querySelectorAll("[data-focus-key]")) if(input.dataset.focusKey===focusedKey) {input.focus({preventScroll:true}); if (selection && input.setSelectionRange) input.setSelectionRange(...selection);}
   }
-  return {load,render,openPolicies:()=>{tab="policies";render();},hasUnsavedChanges:()=>Boolean(busy || drafts.size || editor || policyDrafts.size || newClientId.trim())};
+  return {load,render,openPolicies:()=>selectTab("policies"),openActivity:()=>selectTab("activity"),hasUnsavedChanges:()=>Boolean(busy || drafts.size || editor || policyDrafts.size || newClientId.trim())};
 }

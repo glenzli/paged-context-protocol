@@ -36,11 +36,32 @@ pub struct ActivityInput {
     pub scope: String,
     pub topic_key: String,
     pub summary: String,
+    /// Optional handoff metadata. Omission preserves a stored value on update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ActivityStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+    /// A grouping relation within this client's Scope, never merged evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_topic_key: Option<String>,
     #[serde(default)]
     pub expected_version: Option<u64>,
     /// Hours from the server's receipt time, 1..=168; omission means 48 hours.
     #[serde(default)]
     pub ttl_hours: Option<u32>,
+}
+
+/// Publisher-declared state. Missing state on a legacy card remains unknown.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityStatus {
+    Discussing,
+    InProgress,
+    WaitingUser,
+    WaitingDependency,
+    Completed,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -53,6 +74,10 @@ pub struct ActivityQuery {
     /// A snapshot token local to this consumer conversation and query.
     #[serde(default)]
     pub cursor: Option<String>,
+    /// Independent continuation token returned as nextCursor. Repeat the query
+    /// unchanged; permission or visible snapshot changes require a fresh first page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_cursor: Option<String>,
     #[serde(default)]
     pub limit: Option<u32>,
     /// Include this client's cards, including other windows sharing its identity.
@@ -71,6 +96,7 @@ impl Default for ActivityQuery {
             scopes: Vec::new(),
             query: None,
             cursor: None,
+            page_cursor: None,
             limit: None,
             include_own: include_same_client(),
         }
@@ -117,6 +143,16 @@ pub enum ContextHubRequest {
     PublishActivity(ActivityInput),
     ReadActivity(ActivityQuery),
     Inspect,
+    /// Lightweight operator read views; the complete legacy Inspect is retained.
+    InspectActivity,
+    InspectPolicies,
+    InspectInbox,
+    InspectCandidate {
+        candidate_id: String,
+    },
+    InspectSynthesis {
+        synthesis_id: String,
+    },
     SetPolicy(ClientContextPolicy),
     Review(CandidateReview),
     /// Queue bounded organization; no memory is approved by this operation.
@@ -170,4 +206,24 @@ pub struct SynthesisStop {
 #[async_trait]
 pub trait ContextHubService: Send + Sync {
     async fn execute(&self, access: &AccessSession, request: ContextHubRequest) -> Result<Value>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn omitted_activity_metadata_keeps_the_legacy_wire_shape() {
+        let legacy = json!({"scope":"a","topicKey":"work","summary":"current understanding",
+            "expectedVersion":null,"ttlHours":null});
+        let input: ActivityInput = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(input).unwrap(), legacy);
+        assert_eq!(
+            serde_json::to_value(ActivityQuery::default()).unwrap(),
+            json!({
+                "scopes":[],"query":null,"cursor":null,"limit":null,"includeOwn":true
+            })
+        );
+    }
 }
