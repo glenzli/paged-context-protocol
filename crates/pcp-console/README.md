@@ -17,14 +17,32 @@ and connection identifiers. Candidate/activity permissions link to their existin
 editor. Unchanged background polls preserve the open disclosure and keyboard
 focus; revocation asks for confirmation. The snapshot and enrollment actions
 are owned by `src/client-access-view.js`; the application wires navigation and
-the shared mutation/error helpers.
+the shared mutation helper. Failed actions stay visible inside the dialog.
+An unknown outcome freezes further permission actions until the operator
+explicitly refreshes and checks the current permissions; requests are not replayed.
+
+The overview starts with human review decisions, pending client approvals and
+blocked work, each linking to its existing editor. Automatic waits and completed
+history are excluded. Each source retains its own loading, unavailable and retry
+state. `src/overview-actions.js` owns these read-only checks; the workflow guide
+is a closed disclosure beneath them.
 
 The overview can filter projects and Scopes by name. Query activity diagnostics
-follow the results in a closed disclosure. Runtime restart is available from
+follow the results in a closed disclosure. Query results retain the executed
+query, Scope, method and timestamp. Changing the form marks retained results as
+belonging to earlier conditions. Runtime restart is available from
 the Runtime page, with its existing confirmation. Errors remain visible until
 dismissed so a failed action can be inspected. Maintenance diagnostics separate
 budget admission waits from failed calls and show current allowance alongside
 retained waits; an old wait does not establish current exhaustion.
+
+Settings opens the local General panel immediately. Automatic maintenance
+loads its remote configuration and model catalog on entry, with local retry.
+`src/maintenance-settings-session.js` owns the settings draft, stale-response
+checks and save recovery. Polls and language changes preserve edited controls.
+Close and Escape confirm discarding changed settings; an unknown save can be
+closed explicitly and checked later while the Console page remains open.
+Its draft stays frozen until a read-only check resolves the current state.
 
 ## Activity and candidate evidence
 
@@ -51,6 +69,9 @@ publishes a new Revision immediately, without a maintenance review or a reason
 form. Page identity, sources and facets stay unchanged. The editor reads the
 complete available payload and refuses truncated or structured Pack content.
 Concurrent changes reject the save and leave the draft in the editor.
+Page edits, candidate/synthesis edits and maintenance settings show unsaved
+status and confirm editor cancellation. Browser refresh or close protects their
+drafts and in-flight submissions. Theme and language apply immediately.
 
 **Delete Page** asks for one confirmation. It publishes a tombstone for that
 Page and retracts its incident relations; it does not delete other Pages or

@@ -20,16 +20,118 @@ export function contextValidityLabel(standing) {
   }[standing] || standing;
 }
 
-export function createQueryView({ request, byId, element, showError, t, formatNumber, openPage, openPageIcon, searchIcon, scopeName = value => value }) {
-  let method = "semantic_search";
+export function createQueryView({ request, byId, element, showError, t, formatNumber, openPage, openPageIcon, searchIcon, scopeName = value => value, formatTime = value => new Date(value).toLocaleString() }) {
   let busy = false;
   let busyStartedAt = null;
   let busyTimer = null;
   let scopeOptions = [];
   let result = null;
+  let resultSnapshot = null;
+  let pendingSnapshot = null;
+  let failure = null;
   let audit = null;
+  let auditScope = "";
+  let auditRequestId = 0;
+
+  function selectedMethod() {
+    return byId("context-query-method").value || "semantic_search";
+  }
+
+  function currentConditions() {
+    const method = selectedMethod();
+    return {
+      method,
+      payload: buildQueryRequest({
+        method,
+        query: byId("context-query-text").value.trim(),
+        scope: byId("context-query-scope").value || null,
+        topK: byId("context-query-top-k").value,
+        intentEffort: byId("context-query-effort").value,
+      }),
+    };
+  }
+
+  function sameConditions(left, right) {
+    return left.method === right.method && JSON.stringify(left.payload) === JSON.stringify(right.payload);
+  }
+
+  function methodLabel(method) {
+    return t(method === "match_intent" ? "Match intent" : "Semantic search");
+  }
+
+  function queryScopeLabel(scope) {
+    return scope ? scopeName(scope) : t("All authorized scopes");
+  }
+
+  function snapshotMetadata(snapshot) {
+    const scope = snapshot.payload.scopes[0];
+    const metadata = [
+      { label: t("Scope"), value: queryScopeLabel(scope), scope },
+      { label: t("Retrieval method"), value: methodLabel(snapshot.method) },
+      { label: t("Top results"), value: formatNumber(snapshot.payload.resultLimit) },
+    ];
+    if (snapshot.method === "match_intent") {
+      const effort = snapshot.payload.intentEffort;
+      metadata.push({ label: t("Retrieval effort"), value: t({ low: "Low", medium: "Medium", high: "High" }[effort] || effort) });
+    }
+    metadata.push({ label: t("Executed at"), value: formatTime(snapshot.executedAt), time: snapshot.executedAt });
+    return metadata;
+  }
+
+  function renderSnapshot() {
+    const snapshot = element("section", "context-query-snapshot");
+    snapshot.id = "context-query-snapshot";
+    snapshot.setAttribute("aria-labelledby", "context-query-snapshot-title");
+    const heading = element("h3", "", t("Executed query"));
+    heading.id = "context-query-snapshot-title";
+    const metadata = element("dl", "context-query-snapshot-meta");
+    snapshotMetadata(resultSnapshot).forEach(({ label, value, scope, time }) => {
+      const row = element("div", "");
+      const description = scope ? scopeLabel(element, [scope], scopeName, "dd") : element("dd", "", time ? "" : value);
+      if (scope) description.setAttribute("title", scope);
+      if (time) {
+        const timestamp = element("time", "", value);
+        timestamp.setAttribute("datetime", time);
+        description.append(timestamp);
+      }
+      row.append(element("dt", "", label), description);
+      metadata.append(row);
+    });
+    snapshot.append(heading, element("p", "context-query-snapshot-query", resultSnapshot.payload.query), metadata);
+    return snapshot;
+  }
+
+  function renderConditionStatus() {
+    let hint = byId("context-query-condition-status");
+    if (!hint) {
+      hint = element("p", "context-query-condition-status");
+      hint.id = "context-query-condition-status";
+      hint.setAttribute("role", "status");
+      hint.setAttribute("aria-live", "polite");
+      hint.setAttribute("aria-atomic", "true");
+      byId("context-query-form").append(hint);
+    }
+    const comparison = pendingSnapshot || resultSnapshot || failure?.snapshot;
+    const conditions = currentConditions();
+    const failedConditions = failure && sameConditions(failure.snapshot, conditions);
+    const changed = comparison && !sameConditions(comparison, conditions) && !failedConditions;
+    const messages = [];
+    if (changed) messages.push(t("Conditions changed; run the query again to update results."));
+    if (busy && result) {
+      messages.push(t("The current query is running; the previous completed results remain below."));
+    } else if (failure && result) {
+      messages.push(t("The latest query failed; the previous completed results remain below."));
+    } else if (result && !changed) {
+      messages.push(t("These results match the current conditions."));
+    }
+    const text = messages.join(" ");
+    if (hint.textContent !== text) hint.textContent = text;
+    hint.hidden = messages.length === 0;
+    hint.dataset.state = changed ? "changed" : busy ? "running" : failure ? "failed" : "current";
+  }
 
   function renderMethods() {
+    const method = selectedMethod();
     const methodSelect = byId("context-query-method");
     methodSelect.value = method;
     methodSelect.disabled = busy;
@@ -42,7 +144,7 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
       ? t("Intent matching lets the Router expand and review bounded candidates before it assembles a context pack.")
       : t("Semantic retrieval returns independently relevant pages; asserted structure only makes bounded ranking adjustments.");
     const submit = byId("context-query-submit");
-    const submitLabel = t(querySubmitLabel(method, busy));
+    const submitLabel = t(querySubmitLabel(pendingSnapshot?.method || method, busy));
     submit.disabled = busy;
     submit.replaceChildren(searchIcon(), element("span", "", submitLabel));
     submit.title = submitLabel;
@@ -55,11 +157,24 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
     const box = byId("context-query-error");
     box.hidden = true;
     byId("context-query-error-message").textContent = "";
+    byId("context-query-error-attempt")?.remove();
   }
 
-  function showQueryError(error) {
-    const message = error?.message || String(error);
-    byId("context-query-error-message").textContent = message;
+  function renderQueryError() {
+    if (!failure) {
+      clearQueryError();
+      return;
+    }
+    const { error, snapshot } = failure;
+    const message = byId("context-query-error-message");
+    message.textContent = error?.message || String(error);
+    let attempt = byId("context-query-error-attempt");
+    if (!attempt) {
+      attempt = element("span", "context-query-error-attempt");
+      attempt.id = "context-query-error-attempt";
+      message.parentElement.append(attempt);
+    }
+    attempt.textContent = `${t("Query intent")}: ${snapshot.payload.query} · ${snapshotMetadata(snapshot).map(({ label, value }) => `${label}: ${value}`).join(" · ")}`;
     byId("context-query-error").hidden = false;
   }
 
@@ -71,6 +186,7 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
       ...scopeOptions.map((scope) => new Option(scope.displayName || scope.namespace, scope.namespace)),
     );
     select.value = scopeOptions.some((scope) => scope.namespace === selected) ? selected : "";
+    return select.value !== selected;
   }
 
   function detailLabel(detail) {
@@ -138,9 +254,15 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
     }
     target.hidden = false;
     const heading = element("div", "context-query-audit-heading");
+    const context = element("span", "");
+    context.append(
+      document.createTextNode(`${t("Scope")}: `),
+      auditScope ? scopeLabel(element, [auditScope], scopeName) : element("span", "", t("All authorized scopes")),
+      document.createTextNode(` · ${formatNumber(audit.windowHours || 24)} ${t("hours")} · ${t("privacy-preserving")}`),
+    );
     heading.append(
       element("h3", "", t("Query activity")),
-      element("span", "", `${formatNumber(audit.windowHours || 24)} ${t("hours")} · ${t("privacy-preserving")}`),
+      context,
     );
     const usage = audit.routerUsage || {};
     const metrics = element("div", "context-query-audit-metrics");
@@ -169,15 +291,22 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
 
   async function loadAudit() {
     const scope = byId("context-query-scope").value;
+    const requestId = ++auditRequestId;
     const params = new URLSearchParams({ hours: "24" });
     if (scope) params.set("scope", scope);
+    audit = null;
+    renderAudit();
+    let next;
     try {
-      audit = await request(`/api/query/audit?${params}`);
+      next = await request(`/api/query/audit?${params}`);
     } catch (_) {
       // Query auditing is diagnostic. A client without Audit may still use
       // retrieval, and the main query surface must remain usable.
-      audit = null;
+      next = null;
     }
+    if (requestId !== auditRequestId || byId("context-query-scope").value !== scope) return;
+    audit = next;
+    auditScope = scope;
     renderAudit();
   }
 
@@ -187,12 +316,13 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
       target.replaceChildren(element("div", "empty", t("Run a query to inspect the ranked context pack.")));
       return;
     }
+    const snapshot = renderSnapshot();
     const entries = result.entries || [];
     if (!entries.length) {
-      target.replaceChildren(element("div", "empty", t("No results")));
+      target.replaceChildren(snapshot, element("div", "empty", t("No results")));
       return;
     }
-    target.replaceChildren(...entries.map((entry) => {
+    target.replaceChildren(snapshot, ...entries.map((entry) => {
       const article = element("article", "context-pack-entry");
       const header = element("div", "context-pack-entry-heading");
       const identity = element("div", "context-pack-entry-identity");
@@ -253,14 +383,14 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
     const elapsedSeconds = busyStartedAt == null
       ? 0
       : Math.floor((Date.now() - busyStartedAt) / 1000);
-    const action = method === "match_intent"
+    const action = pendingSnapshot?.method === "match_intent"
       ? t("Intent match in progress")
       : t("Semantic search in progress");
     return `${action} · ${formatNumber(elapsedSeconds)} ${t("seconds")}`;
   }
 
   function busyDetail() {
-    const action = method === "match_intent"
+    const action = pendingSnapshot?.method === "match_intent"
       ? t("The Router is retrieving and reviewing bounded candidates.")
       : t("Finding independently relevant pages.");
     const stability = result
@@ -302,10 +432,23 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
     }
     renderMethods();
     renderBusyPresentation();
+    renderConditionStatus();
+    updateStatus();
   }
 
   function updateStatus() {
-    if (!result) return;
+    if (busy) {
+      byId("query-status").textContent = busyMessage();
+      return;
+    }
+    if (failure) {
+      byId("query-status").textContent = t("Query failed");
+      return;
+    }
+    if (!result) {
+      byId("query-status").textContent = t("No query yet");
+      return;
+    }
     const visibility = result.visibility === "all_authorized"
       ? t("All authorized scopes")
       : (result.scopes || []).map(scopeName).join(" · ");
@@ -320,6 +463,8 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
     renderScopes();
     renderResult();
     renderModelContext();
+    renderQueryError();
+    renderConditionStatus();
     await loadAudit();
     updateStatus();
     renderBusyPresentation();
@@ -328,52 +473,61 @@ export function createQueryView({ request, byId, element, showError, t, formatNu
   async function submit(event) {
     event.preventDefault();
     if (busy) return;
-    const query = byId("context-query-text").value.trim();
-    if (!query) return;
-    clearQueryError();
+    const conditions = currentConditions();
+    if (!conditions.payload.query) return;
+    const snapshot = { ...conditions, executedAt: new Date(Date.now()).toISOString() };
+    pendingSnapshot = snapshot;
+    failure = null;
+    renderQueryError();
     setBusy(true);
     try {
-      const payload = buildQueryRequest({
-        method,
-        query,
-        scope: byId("context-query-scope").value || null,
-        topK: Number(byId("context-query-top-k").value),
-        intentEffort: byId("context-query-effort").value,
-      });
-      const endpoint = method === "match_intent"
+      const endpoint = snapshot.method === "match_intent"
         ? "/api/query/match-intent"
         : "/api/query/semantic-search";
       result = await request(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(snapshot.payload),
       });
+      resultSnapshot = snapshot;
       renderResult();
       renderModelContext();
-      updateStatus();
-      await loadAudit();
     } catch (error) {
-      showQueryError(error);
-      byId("query-status").textContent = t("Query failed");
+      failure = { error, snapshot };
+      renderQueryError();
     } finally {
+      pendingSnapshot = null;
       setBusy(false);
     }
+    // Diagnostics follow the current scope without delaying the completed query.
+    loadAudit().catch(showError);
   }
 
   byId("context-query-form").addEventListener("submit", (event) => submit(event).catch(showError));
-  byId("context-query-method").addEventListener("change", (event) => {
-    method = event.target.value;
-    clearQueryError();
+  byId("context-query-method").addEventListener("change", () => {
     renderMethods();
+    renderConditionStatus();
   });
-  byId("context-query-scope").addEventListener("change", () => loadAudit().catch(showError));
+  ["context-query-text", "context-query-top-k", "context-query-effort"].forEach((id) => {
+    byId(id).addEventListener("input", renderConditionStatus);
+    byId(id).addEventListener("change", renderConditionStatus);
+  });
+  byId("context-query-scope").addEventListener("change", () => {
+    renderConditionStatus();
+    loadAudit().catch(showError);
+  });
   byId("context-query-retry").addEventListener("click", () => {
     byId("context-query-form").requestSubmit();
   });
 
   return {
     async load(options) { await load(options); },
-    setScopes(value) { scopeOptions = value || []; renderScopes(); },
-    rerender() { renderMethods(); renderScopes(); renderResult(); renderModelContext(); renderAudit(); updateStatus(); renderBusyPresentation(); },
+    setScopes(value) {
+      scopeOptions = value || [];
+      const changed = renderScopes();
+      renderConditionStatus();
+      if (changed) loadAudit().catch(showError);
+    },
+    rerender() { renderMethods(); renderScopes(); renderResult(); renderModelContext(); renderQueryError(); renderConditionStatus(); renderAudit(); updateStatus(); renderBusyPresentation(); },
   };
 }

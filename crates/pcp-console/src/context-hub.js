@@ -104,7 +104,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
   const disclosuresByTab = new Map(), knownDisclosuresByTab = new Map();
   let renderedTab = tab;
   let newClientId = "";
-  let editor = null;
+  let editor = null, editorConfirming = false;
   const text = (zh,en) => language() === "zh" ? zh : en;
   const node = (tag, className = "", value = "") => { const n = document.createElement(tag); n.className = className; n.textContent = value; return n; };
   const clientName = id => clients.find(item => item.client.principal.principalId === id)?.client.principal.displayName || id;
@@ -240,7 +240,25 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     root.querySelector(`#context-tab-${key}`)?.focus();
     if (!loadedTabs.has(key)) await load(key);
   }
+  async function discardEditor() {
+    if (!editor) return true;
+    if (busy || loading || editorConfirming) return false;
+    const current = editor;
+    editorConfirming = true;
+    let confirmed;
+    try {
+      confirmed = await confirmAction({title:text("丢弃未保存的修改？", "Discard unsaved changes?"),
+        description:text("只会丢弃当前编辑内容；已暂存的审阅决定会保留。", "Only this editor's changes will be discarded. Staged review decisions are retained."),
+        confirmLabel:text("丢弃修改", "Discard changes")});
+    } finally { editorConfirming = false; }
+    if (!confirmed) return false;
+    if (editor !== current || busy) return false;
+    editor = null;
+    render();
+    return true;
+  }
   async function stage(items, action, fields = {}) {
+    if (editor && fields !== editor && !await discardEditor()) return;
     items = await Promise.all(items.map(item => loadDetail("candidate", item)));
     if (items.some(item => !item)) return;
     const draft = reviewDraft(items, action, fields);
@@ -250,6 +268,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     editor = null; error = ""; tabErrors.delete("candidates"); render();
   }
   async function startEditor(items, action = "promote") {
+    if (!await discardEditor()) return;
     items = await Promise.all(items.map(item => loadDetail("candidate", item)));
     if (items.some(item => !item)) return;
     if (new Set(items.map((i) => i.input.scope)).size !== 1) throw new Error(text("合并候选必须属于同一范围", "Merge candidates within one Scope"));
@@ -298,6 +317,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     if (editor.synthesis) return renderSynthesisEditor();
     const wrap = node("section", "context-card context-editor");
     wrap.append(node("h3", "", text(`审阅 ${editor.items.length} 条候选`, `Review ${editor.items.length} candidates`)));
+    const draftStatus = node("p", "context-note", text("有未保存更改", "Unsaved changes")); draftStatus.setAttribute("role", "status"); wrap.append(draftStatus);
     for (const [field,label,multi] of editor.action === "represented"
       ? [["targetRevisionId",text("现有 Page 的精确 Revision ID","Exact existing Revision ID"),false]]
       : [["title",text("标题","Title"),false],["content",text("正式内容（请消除重复、保留不同观点）","Reviewed content (remove duplication, preserve differing claims)"),true]]) {
@@ -308,7 +328,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
     }
     const actions = node("div", "context-actions");
     actions.append(button(text("暂存决定","Stage decision"), () => stage(editor.items, editor.action, editor), "accept", true),
-      button(text("取消","Cancel"), () => {editor=null;render();}, "end"));
+      button(text("取消","Cancel"), discardEditor, "end"));
     wrap.append(actions); return wrap;
   }
   function renderCandidates() {
@@ -585,7 +605,8 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
         busy = true; render(); try { await operation("stop_synthesis", {synthesisId:synthesis.synthesisId,version:synthesis.version}); } finally {busy = false;} await load();
       }));
     } else {
-      actions.append(button(text("编辑记忆草案", "Edit memory drafts"), () => {
+      actions.append(button(text("编辑记忆草案", "Edit memory drafts"), async () => {
+        if (!await discardEditor()) return;
         editor = {synthesis, outputs:structuredClone(synthesis.outputs.length ? synthesis.outputs : [{candidateIds:synthesis.candidates.map(c => c.candidateId),title:synthesis.title,content:synthesis.narrative,action:"create",targetRevisionId:null}])}; render();
       }, null, true));
       const items = snapshot.candidates.filter(c => synthesis.candidates.some(ref => ref.candidateId === c.candidateId));
@@ -597,6 +618,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
   function renderSynthesisEditor() {
     const wrap = node("section", "context-card context-editor"), synthesis = editor.synthesis;
     wrap.append(node("h3", "", text("编辑整理结果", "Edit synthesis outputs")), node("p", "context-note", text("每条输出分别选择依据；未被输出采用的候选会继续保留。更新现有记忆时，请保留原有的独立信息。", "Choose evidence for each output. Unused candidates remain available. Preserve independent information when updating an existing memory.")));
+    const draftStatus = node("p", "context-note", text("有未保存更改", "Unsaved changes")); draftStatus.setAttribute("role", "status"); wrap.append(draftStatus);
     editor.outputs.forEach((output, index) => {
       const part = node("section", "context-memory-output");
       for (const [field,label,multiline] of [["title",text("标题", "Title"),false],["content",text("正式内容", "Memory content"),true]]) {
@@ -634,7 +656,7 @@ export function createContextHub({root, request, mutate, confirmAction, icon, la
       const draft = synthesisDraft(full, snapshot.candidates, editor.outputs);
       for (const [key, previous] of drafts) if (previous.candidates.some(ref => draft.candidates.some(c => c.candidateId === ref.candidateId))) drafts.delete(key);
       drafts.set(synthesis.synthesisId, draft); editor = null; error = ""; tabErrors.delete("candidates"); render();
-    }, null, true), button(text("取消", "Cancel"), () => {editor = null; render();}));
+    }, null, true), button(text("取消", "Cancel"), discardEditor));
     wrap.append(actions); return wrap;
   }
   function actionLabel(action) {

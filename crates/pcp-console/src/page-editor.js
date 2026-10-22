@@ -40,6 +40,7 @@ export function createPageEditor({ request, mutate, confirmAction, t, onSaved, o
   const pane = byId("page-editor");
   const textarea = byId("page-editor-content");
   const notice = byId("page-action-notice");
+  const draftNotice = byId("page-editor-draft-status");
   const edit = byId("page-edit");
   const remove = byId("page-delete");
   const save = byId("page-save");
@@ -68,6 +69,8 @@ export function createPageEditor({ request, mutate, confirmAction, t, onSaved, o
     save.hidden = cancel.hidden = !editing;
     edit.disabled = remove.disabled = save.disabled = cancel.disabled = busy;
     save.disabled ||= !session.dirty;
+    draftNotice.hidden = !session.dirty;
+    draftNotice.textContent = t("Unsaved changes");
     textarea.readOnly = busy;
     byId("dialog-close").disabled = byId("dialog-back").disabled = busy;
     save.classList.toggle("is-loading", session.busy);
@@ -161,6 +164,8 @@ export function createPageEditor({ request, mutate, confirmAction, t, onSaved, o
   cancel.addEventListener("click", leave);
   return {
     leave, begin,
+    hasUnsavedChanges: () => session.dirty || session.busy || deleting,
+    rerender: render,
     attach(value) { page = value; editing = false; session.reset(); status(); render(); },
   };
 }

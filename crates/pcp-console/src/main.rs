@@ -450,6 +450,24 @@ fn router(state: AppState) -> Router {
         .route("/api/maintenance/models", get(maintenance_model_catalog))
         .route("/access-view.js", get(access_view_js))
         .route(
+            "/maintenance-settings-session.js",
+            get(|| async {
+                static_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("maintenance-settings-session.js"),
+                )
+            }),
+        )
+        .route(
+            "/overview-actions.js",
+            get(|| async {
+                static_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("overview-actions.js"),
+                )
+            }),
+        )
+        .route(
             "/client-access-view.js",
             get(|| async {
                 static_asset(

@@ -720,5 +720,5 @@ export function createPageInspector({ request, mutate, confirmAction, onMutation
     topicExtractionDialog.close();
   });
 
-  return { open, compareRelation, reviewTopic };
+  return { open, compareRelation, reviewTopic, hasUnsavedChanges: editor.hasUnsavedChanges, rerender: editor.rerender };
 }

@@ -7,8 +7,9 @@ const ACCESS_MODES = {
 };
 
 // Owns enrollment snapshots, permission disclosure and approval/revocation actions.
-export function createClientAccessView({ api, mutate, byId, element, t, scopeName, formatTime, showError, confirmAction }) {
-  let snapshot = null, signature = "", generation = 0, available = false, busy = false;
+export function createClientAccessView({ api, mutate, byId, element, t, scopeName, formatTime, confirmAction }) {
+  let snapshot = null, signature = "", generation = 0, available = false, busy = false, checking = false, uncertain = false, refreshRequired = false;
+  let feedback = null;
   const seenPending = new Set();
   const roots = () => [byId("enrollment-pending"), byId("enrollment-registered")];
   const name = scope => scope === "user:self" ? t("Personal memory") : scopeName(scope);
@@ -38,20 +39,41 @@ export function createClientAccessView({ api, mutate, byId, element, t, scopeNam
 
   function setBusy(value) {
     busy = value;
-    byId("enrollment-dialog").setAttribute("aria-busy", String(value));
-    for (const root of roots()) for (const button of root.querySelectorAll("button")) button.disabled = value;
+    byId("enrollment-dialog").setAttribute("aria-busy", String(value || checking));
+    for (const root of roots()) for (const button of root.querySelectorAll("button")) button.disabled = value || checking || uncertain || refreshRequired;
+    byId("enrollment-refresh").disabled = value || checking;
+    byId("enrollment-close").disabled = value;
+    byId("client-context-permissions").disabled = value;
+  }
+
+  function renderFeedback() {
+    const notice = byId("enrollment-error");
+    notice.hidden = !feedback;
+    byId("enrollment-error-message").textContent = feedback
+      ? `${feedback.unknown ? `${t("The action outcome is unknown. Refresh permissions and check the current state before another action.")}\n`
+        : refreshRequired ? `${t("The action completed, but permissions could not refresh. Refresh permissions before another action.")}\n` : ""}${feedback.error.message || String(feedback.error)}` : "";
+  }
+
+  function fail(error, unknown = false) {
+    feedback = { error, unknown };
+    renderFeedback();
+    byId("enrollment-error").focus({ preventScroll: false });
   }
 
   function action(label, style, id, path, body, confirmation) {
     const button = element("button", style, t(label)); button.type = "button";
-    button.disabled = busy; button.dataset.clientFocus = `${label}:${id}`;
+    button.disabled = busy || checking || uncertain || refreshRequired; button.dataset.clientFocus = `${label}:${id}`;
     button.addEventListener("click", async () => {
-      if (busy) return;
+      if (busy || checking || uncertain || refreshRequired) return;
       if (confirmation && !await confirmAction(confirmation)) return;
       // Invalidate a poll that started before this operator decision.
-      generation++; setBusy(true);
-      try { await mutate(path, body); await load({ autoOpen: false, force: true }); }
-      catch (error) { showError(error); }
+      generation++; feedback = null; renderFeedback(); setBusy(true);
+      try {
+        await mutate(path, body);
+        refreshRequired = true;
+        await load({ autoOpen: false, force: true, reconcile: true });
+      }
+      catch (error) { uncertain = error.mutationOutcome !== "not_applied"; fail(error, uncertain); }
       finally { setBusy(false); }
     });
     return button;
@@ -112,14 +134,15 @@ export function createClientAccessView({ api, mutate, byId, element, t, scopeNam
     signature = next;
   }
 
-  async function load({ autoOpen = true, force = false } = {}) {
-    if (busy && !force) return;
+  async function load({ autoOpen = true, force = false, reconcile = false } = {}) {
+    if ((busy || checking || uncertain || refreshRequired) && !force) return;
     const request = ++generation;
     try {
       const data = await api("/api/enrollment");
       if (request !== generation) return;
       if (data.result.status !== "snapshot") throw new Error("Unexpected enrollment response");
       snapshot = data.result; available = true;
+      if (reconcile) { uncertain = false; refreshRequired = false; feedback = null; renderFeedback(); }
       byId("enrollment-open").hidden = false;
       const pending = snapshot.pending || [], badge = byId("enrollment-badge");
       badge.textContent = String(pending.length); badge.hidden = !pending.length;
@@ -127,13 +150,21 @@ export function createClientAccessView({ api, mutate, byId, element, t, scopeNam
       render(force);
       if (autoOpen && pending.some(item => !seenPending.has(item.request_id)) && !document.querySelector("dialog[open]")) byId("enrollment-dialog").showModal();
       if (byId("enrollment-dialog").open) pending.forEach(item => seenPending.add(item.request_id));
+      setBusy(busy);
     } catch (error) {
       if (request !== generation) return;
       if (!available) byId("enrollment-open").hidden = true;
-      if (!autoOpen) showError(error);
+      if (!autoOpen) fail(error, uncertain);
     }
   }
 
-  function open() { byId("enrollment-dialog").showModal(); return load({ autoOpen: false }); }
-  return { load, open, rerender: () => render(true) };
+  byId("enrollment-refresh").addEventListener("click", async () => {
+    if (busy || checking) return;
+    checking = true; setBusy(busy);
+    try { await load({ autoOpen: false, force: true, reconcile: true }); }
+    finally { checking = false; setBusy(busy); }
+  });
+  byId("enrollment-dialog").addEventListener("cancel", event => { if (busy) event.preventDefault(); });
+  function open() { byId("enrollment-dialog").showModal(); renderFeedback(); return load({ autoOpen: false }); }
+  return { load, open, rerender: () => { render(true); renderFeedback(); }, hasPendingAction: () => busy || uncertain };
 }

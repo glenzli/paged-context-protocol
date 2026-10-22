@@ -93,3 +93,39 @@ test("revocation waits for explicit confirmation and polling cannot interrupt th
   assert.equal(loads,2);
   assert.ok(root.querySelectorAll("button").every(button=>!button.disabled));
 });
+
+test("failed client actions show a local error, preserve disclosures and never replay automatically", async () => {
+  let writes=0,reads=0;
+  const {view,byId,errors}=fixture({api:async()=>{reads++;return snapshot();},mutate:async()=>{writes++;throw new Error("connection lost");}});
+  await view.open();
+  const root=byId("enrollment-registered"),details=root.children[0].children[1].children[0];details.open=true;
+  const action=root.querySelectorAll("button").find(button=>button.textContent==="Disable project registration");
+  await action.handlers.click();
+  assert.equal(byId("enrollment-error").hidden,false);
+  assert.match(byId("enrollment-error-message").textContent,/outcome is unknown.*\nconnection lost/);
+  assert.equal(document.activeElement,byId("enrollment-error"));
+  assert.equal(details.open,true);assert.equal(errors.length,0);assert.equal(view.hasPendingAction(),true);
+  assert.ok(root.querySelectorAll("button").every(button=>button.disabled));
+  await action.handlers.click();await view.load();view.rerender();
+  assert.equal(writes,1);assert.equal(reads,1);
+  await byId("enrollment-refresh").handlers.click();
+  assert.equal(writes,1);assert.equal(reads,2);assert.equal(view.hasPendingAction(),false);
+  assert.equal(byId("enrollment-error").hidden,true);
+  assert.ok(root.querySelectorAll("button").every(button=>!button.disabled));
+});
+
+test("known rejected actions remain retryable and a successful action is not reported as unknown when refresh fails", async () => {
+  let failRead=false;
+  const {view,byId}=fixture({api:async()=>{if(failRead)throw new Error("read offline");return snapshot();},
+    mutate:async()=>{throw Object.assign(new Error("not permitted"),{mutationOutcome:"not_applied"});}});
+  await view.open();const root=byId("enrollment-registered");
+  await root.querySelectorAll("button")[0].handlers.click();
+  assert.equal(view.hasPendingAction(),false);assert.doesNotMatch(byId("enrollment-error-message").textContent,/unknown/);
+  assert.ok(root.querySelectorAll("button").every(button=>!button.disabled));
+  const successful=fixture({api:async()=>{if(failRead)throw new Error("read offline");return snapshot();},mutate:async()=>{failRead=true;}});
+  await successful.view.open();const buttons=successful.byId("enrollment-registered").querySelectorAll("button");
+  await buttons[0].handlers.click();
+  assert.match(successful.byId("enrollment-error-message").textContent,/action completed.*refresh/);
+  assert.doesNotMatch(successful.byId("enrollment-error-message").textContent,/unknown/);
+  assert.ok(buttons.every(button=>button.disabled));
+});

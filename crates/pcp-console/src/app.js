@@ -4,6 +4,8 @@ import { createConsoleNavigation } from "/console-navigation.js";
 import { createScopeMetadataRefresh } from "/scope-metadata.js";
 import { createAccessView } from "/access-view.js";
 import { createClientAccessView } from "/client-access-view.js";
+import { MaintenanceSettingsSession } from "/maintenance-settings-session.js";
+import { createOverviewActions } from "/overview-actions.js";
 import { createPageInspector } from "/page-inspector.js?v=20260823.1";
 import { pageListPreview, pageCount, pageJump, pageRecallBreakdown, PAGE_ROLE_LABELS, pageRoleBadge, appendPageFilters, pageBrowseOrder, pageTimeFields, pageListSnapshotKey } from "/page-list.js";
 import { compactQuantity } from "/quantity-format.js";
@@ -73,6 +75,29 @@ let pagesPoll = null;
 const PAGES_POLL_INTERVAL_MS = 15_000;
 let maintenanceConvergenceActive = false;
 const ZH_MESSAGES = {
+  "Unsaved changes": "有未保存更改",
+  "Refresh permissions": "刷新权限",
+  "The action outcome is unknown. Refresh permissions and check the current state before another action.": "操作结果待确认。请先刷新权限并核对当前状态，再进行其他操作。",
+  "The action completed, but permissions could not refresh. Refresh permissions before another action.": "操作已完成，但权限列表刷新失败。请先刷新权限，再进行其他操作。",
+  "Loading automatic maintenance settings…": "正在加载自动维护设置…",
+  "Automatic maintenance settings are unavailable for this Console.": "此 Console 无法修改自动维护设置。",
+  "Could not load automatic maintenance settings.": "无法加载自动维护设置。",
+  "Retry loading settings": "重新加载设置",
+  "Check saved settings": "核对已保存设置",
+  "Save outcome is unknown. Check saved settings before editing or saving again.": "保存结果待确认。请先核对已保存设置，再继续修改或保存。",
+  "Saved settings refreshed; your draft is kept. Review it before saving again.": "已刷新服务端设置，草稿已保留。请核对后再保存。",
+  "Current settings match your draft.": "当前已保存设置与草稿一致。",
+  "Your maintenance settings draft will be discarded.": "将丢弃尚未保存的维护设置草稿。",
+  "Close and check later?": "关闭并稍后核对？",
+  "Close and check later": "关闭并稍后核对",
+  "Your draft and unknown save outcome will be kept while this Console stays open. Check saved settings before saving again.": "只要此 Console 页面仍打开，草稿和待确认的保存状态就会保留。再次保存前请先核对已保存设置。",
+  "Executed query": "已执行的查询",
+  "Executed at": "执行时间",
+  "No results": "没有结果",
+  "Conditions changed; run the query again to update results.": "条件已修改，尚未重新查询。",
+  "The latest query failed; the previous completed results remain below.": "最近一次查询失败；下方保留上次完成的结果。",
+  "These results match the current conditions.": "这些结果对应当前查询条件。",
+  "The current query is running; the previous completed results remain below.": "正在查询；下方保留上次完成的结果。",
   "Context inbox": "暂存与近况",
   "24 hours": "24 小时",
   "7 days": "7 天",
@@ -1264,14 +1289,21 @@ function initializeConsolePreferences() {
   pageLimit = normalizedPageLimit(readPreference(PAGE_LIMIT_STORAGE_KEY, String(DEFAULT_PAGE_LIMIT)));
   byId("page-limit-setting").value = String(pageLimit);
   applyPreferences();
-  byId("preferences-open").addEventListener("click", () => openPreferences().catch(showError));
-  byId("preferences-close").addEventListener("click", () => byId("preferences-dialog").close());
-  byId("preferences-dialog").addEventListener("close", () => { clearInterval(modelCatalogPoll); modelCatalogPoll = null; });
+  byId("preferences-open").addEventListener("click", openPreferences);
+  byId("preferences-close").addEventListener("click", closePreferences);
+  byId("preferences-dialog").addEventListener("cancel", event => { event.preventDefault(); void closePreferences(); });
+  byId("preferences-dialog").addEventListener("close", () => {
+    clearInterval(modelCatalogPoll); modelCatalogPoll = null;
+    if (maintenanceSettingsSession.uncertain) maintenanceSettingsSession.suspend();
+    else maintenanceSettingsSession.close();
+  });
   byId("model-catalog-refresh").addEventListener("click", () => refreshModelCatalog(true));
   document.querySelectorAll("[data-preferences-tab]").forEach((button) => {
     button.addEventListener("click", () => {
       activePreferencesTab = button.dataset.preferencesTab;
       renderPreferencesTabs();
+      scheduleSettingsCatalogPoll();
+      if (activePreferencesTab === "maintenance") void loadMaintenancePreferences();
     });
   });
   document.querySelectorAll("[data-theme-setting]").forEach((button) => {
@@ -1626,6 +1658,7 @@ const queryView = createQueryView({
   showError,
   t,
   formatNumber,
+  formatTime,
   scopeName,
   searchIcon: () => icon("search"),
   openPageIcon: () => icon("open"),
@@ -1636,6 +1669,17 @@ const contextHub = createContextHub({ root: byId("view-context-hub"), request: a
   confirmAction, icon, formatTime, scopeName, onCommitted: loadOverview,
   language: () => currentLanguage, openPage: (id) => pageInspector.open(id) });
 const clientAccessView = createClientAccessView({ api, mutate: maintenanceMutation, byId, element, t, scopeName, formatTime, showError, confirmAction });
+const maintenanceSettingsSession = new MaintenanceSettingsSession({
+  request: api, mutate: maintenanceMutation, readDraft: readMaintenanceSettings,
+  populate: populateMaintenanceSettings, snapshotDraft: maintenanceSettingsFromStatus,
+  changed: renderMaintenanceSettingsState,
+});
+let preferencesConfirming = false;
+const overviewActions = createOverviewActions({
+  root: byId("overview-actions"), request: api, language: () => currentLanguage,
+  openView: view => activateView(view, { focus: true }),
+  openClientAccess: () => clientAccessView.open(), formatTime,
+});
 const retentionView = createRetentionView({
   request: api,
   showError,
@@ -3082,12 +3126,8 @@ function renderMaintenanceJobIssues(container, automation, reviewBudget) {
   if (focused) [...container.querySelectorAll("summary")].find((node) => node.dataset.issueKey === focused)?.focus();
 }
 
-function populateMaintenanceSettings() {
-  const status = state.maintenance.status;
+function populateMaintenanceSettings(status) {
   const configurable = Boolean(status?.configurable);
-  byId("maintenance-settings-section").hidden = !configurable;
-  byId("maintenance-settings-tab").hidden = !configurable;
-  if (!configurable && activePreferencesTab === "maintenance") activePreferencesTab = "general";
   if (!configurable) return;
   renderModelRoutingSettings(status.modelRouting);
   renderReviewBudgetSettings(status.reviewBudget);
@@ -3314,7 +3354,7 @@ function setModelDeploymentDisabled(select, disabled) {
 }
 
 function readModelRoutingSettings() {
-  if (!state.maintenance.status?.modelRouting) return null;
+  if (!maintenanceSettingsSession.snapshot?.modelRouting) return null;
   const groups = [...byId("model-routing-rows").children].map((card) => {
     const definition = MODEL_ROUTE_GROUPS.find((group) => group.id === card.dataset.group);
     const overrides = {};
@@ -3334,7 +3374,7 @@ function readModelRoutingSettings() {
       overrides,
     };
   });
-  const originalOverrides = state.maintenance.status.modelRouting.operation_overrides || {};
+  const originalOverrides = maintenanceSettingsSession.snapshot.modelRouting.operation_overrides || {};
   const operationOverrides = {};
   if (originalOverrides.review_candidate_synthesis) operationOverrides.review_candidate_synthesis = originalOverrides.review_candidate_synthesis;
   for (const group of groups) Object.assign(operationOverrides, group.overrides);
@@ -3388,7 +3428,7 @@ function renderReviewBudgetSettings(budget) {
 }
 
 function readReviewBudgetSettings() {
-  const previous = state.maintenance.status?.reviewBudget?.config;
+  const previous = maintenanceSettingsSession.snapshot?.reviewBudget?.config;
   if (!previous) return null;
   return { ...previous,
     enabled: byId("review-budget-enabled").checked,
@@ -3419,18 +3459,109 @@ function renderPreferencesTabs() {
   });
 }
 
-async function openPreferences() {
-  renderMaintenanceStatus(await api("/api/maintenance"));
-  populateMaintenanceSettings();
+function openPreferences() {
+  maintenanceSettingsSession.open();
   activePreferencesTab = "general";
   renderPreferencesTabs();
+  renderMaintenanceSettingsState();
   byId("preferences-dialog").showModal();
-  refreshModelCatalog();
+}
+
+async function closePreferences() {
+  if (maintenanceSettingsSession.saving || preferencesConfirming) return false;
+  if (maintenanceSettingsSession.uncertain || maintenanceSettingsSession.dirty) {
+    preferencesConfirming = true;
+    renderMaintenanceSettingsState();
+    let discard;
+    try {
+      discard = await confirmAction(maintenanceSettingsSession.uncertain
+        ? { title: t("Close and check later?"), description: t("Your draft and unknown save outcome will be kept while this Console stays open. Check saved settings before saving again."), confirmLabel: t("Close and check later") }
+        : { title: t("Discard unsaved changes?"), description: t("Your maintenance settings draft will be discarded."), confirmLabel: t("Discard changes") });
+    } finally { preferencesConfirming = false; renderMaintenanceSettingsState(); }
+    if (!discard) return false;
+  }
+  byId("preferences-dialog").close();
+  return true;
+}
+
+function scheduleSettingsCatalogPoll() {
   clearInterval(modelCatalogPoll);
-  modelCatalogPoll = setInterval(() => refreshModelCatalog(), 60_000);
+  modelCatalogPoll = activePreferencesTab === "maintenance" && byId("preferences-dialog").open
+    ? setInterval(() => { if (!document.hidden) void refreshModelCatalog(); }, 60_000) : null;
+}
+
+async function loadMaintenancePreferences({ reconcile = false } = {}) {
+  if (!maintenanceSettingsSession.active) return;
+  const settings = (!maintenanceSettingsSession.uncertain && (!maintenanceSettingsSession.loaded || (maintenanceSettingsSession.error && !maintenanceSettingsSession.dirty))) || reconcile
+    ? maintenanceSettingsSession.load({ reconcile }) : Promise.resolve(maintenanceSettingsSession.snapshot);
+  await Promise.all([settings, refreshModelCatalog()]);
+}
+
+function renderMaintenanceSettingsState() {
+  const session = maintenanceSettingsSession;
+  const configurable = session.loaded && Boolean(session.snapshot.configurable);
+  byId("preferences-dialog").setAttribute("aria-busy", String(session.saving || session.loading));
+  byId("preferences-close").disabled = session.saving || preferencesConfirming;
+  byId("maintenance-settings-load").hidden = configurable;
+  byId("maintenance-settings-load-message").textContent = session.loading
+    ? t("Loading automatic maintenance settings…")
+    : session.error && !session.loaded ? t("Could not load automatic maintenance settings.")
+    : session.loaded ? t("Automatic maintenance settings are unavailable for this Console.") : "";
+  byId("maintenance-settings-retry").hidden = session.loading || !session.error;
+  byId("maintenance-settings-form").hidden = !configurable;
+  byId("maintenance-settings-fields").disabled = session.saving || session.loading || session.uncertain || preferencesConfirming;
+  byId("maintenance-settings-save").disabled = !configurable || !session.dirty || session.saving || session.loading || session.uncertain;
+  byId("maintenance-settings-save").classList.toggle("is-loading", session.saving);
+  byId("maintenance-settings-draft-status").hidden = !session.dirty;
+  byId("maintenance-settings-draft-status").textContent = t("Unsaved changes");
+  byId("maintenance-settings-notice").hidden = !session.notice;
+  byId("maintenance-settings-notice").textContent = t(session.notice);
+  byId("maintenance-settings-error").hidden = !session.error && !session.uncertain;
+  byId("maintenance-settings-error-message").textContent = `${session.uncertain ? `${t("Save outcome is unknown. Check saved settings before editing or saving again.")}\n` : ""}${session.error ? session.error.message || String(session.error) : ""}`;
+  byId("maintenance-settings-check").hidden = !session.uncertain;
+  byId("maintenance-settings-check").disabled = session.loading;
+}
+
+function maintenanceSettingsFromStatus(status) {
+  if (!status || typeof status.configurable !== "boolean") throw new Error("Unexpected maintenance settings response");
+  if (!status.configurable) return null;
+  const trigger = status.writeTrigger || {}, routing = status.modelRouting;
+  let modelRouting = null;
+  if (routing) {
+    const groups = summarizeModelRouteGroups(routing.routes || {}, routing.route_groups || {}, routing.operation_overrides || {}).filter(group => group.defaultRoute);
+    const operationOverrides = {};
+    if (routing.operation_overrides?.review_candidate_synthesis) operationOverrides.review_candidate_synthesis = routing.operation_overrides.review_candidate_synthesis;
+    for (const group of groups) Object.assign(operationOverrides, group.overrides);
+    modelRouting = {
+      route_groups: Object.fromEntries(groups.map(group => [group.id, group.defaultRoute])),
+      operation_overrides: operationOverrides,
+      escalation_operations: routing.escalation_operations || [],
+      timeout_seconds: routing.timeout_seconds,
+    };
+  }
+  return {
+    enabled: Boolean(status.enabled), mode: status.mode || "observe",
+    minNewPages: trigger.minNewPages || 8,
+    quietPeriodSeconds: Math.max(1, Math.round((trigger.quietPeriodSeconds || 600) / 60)) * 60,
+    maxWaitSeconds: Math.max(1, Math.round((trigger.maxWaitSeconds || 3600) / 60)) * 60,
+    modelRouting, reviewBudget: status.reviewBudget?.config || null,
+  };
+}
+
+function readMaintenanceSettings() {
+  if (!maintenanceSettingsSession.snapshot?.configurable) return null;
+  return {
+    enabled: byId("maintenance-settings-enabled").checked,
+    mode: byId("maintenance-settings-mode").value,
+    minNewPages: Number(byId("maintenance-settings-min-pages").value),
+    quietPeriodSeconds: Number(byId("maintenance-settings-quiet").value) * 60,
+    maxWaitSeconds: Number(byId("maintenance-settings-max-wait").value) * 60,
+    modelRouting: readModelRoutingSettings(), reviewBudget: readReviewBudgetSettings(),
+  };
 }
 
 async function refreshModelCatalog(force = false) {
+  if (!byId("preferences-dialog").open || activePreferencesTab !== "maintenance") return;
   const button = byId("model-catalog-refresh");
   button.disabled = true;
   byId("model-catalog-status").textContent = currentLanguage === "zh" ? "正在更新模型列表…" : "Updating model list…";
@@ -3439,8 +3570,9 @@ async function refreshModelCatalog(force = false) {
 }
 
 function refreshModelPickers(catalog) {
-  if (!byId("preferences-dialog").open) return;
-  for (const select of byId("preferences-dialog").querySelectorAll(".model-deployment-picker select")) {
+  if (!byId("preferences-dialog").open || activePreferencesTab !== "maintenance") return;
+  // Catalog polls update availability without replacing a draft's controls.
+  if (!maintenanceSettingsSession.protected) for (const select of byId("preferences-dialog").querySelectorAll(".model-deployment-picker select")) {
     const value = select.value === CUSTOM_MODEL_DEPLOYMENT ? "" : select.value;
     const changed = select.modelDeploymentChanged;
     populateModelDeploymentPicker(select, value, changed);
@@ -3455,31 +3587,23 @@ function refreshModelPickers(catalog) {
 
 async function saveMaintenanceSettings(event) {
   event.preventDefault();
+  if (maintenanceSettingsSession.saving || maintenanceSettingsSession.uncertain || maintenanceSettingsSession.loading) return;
   const minNewPages = Number(byId("maintenance-settings-min-pages").value);
   const quietPeriodSeconds = Number(byId("maintenance-settings-quiet").value) * 60;
   const maxWaitSeconds = Number(byId("maintenance-settings-max-wait").value) * 60;
   if (!Number.isInteger(minNewPages) || minNewPages < 1 || !Number.isInteger(quietPeriodSeconds) || quietPeriodSeconds < 60 || !Number.isInteger(maxWaitSeconds) || maxWaitSeconds < quietPeriodSeconds) {
-    showError(new Error(t("Maximum wait must be at least the quiet period, and all values must be positive.")));
+    maintenanceSettingsSession.error = new Error(t("Maximum wait must be at least the quiet period, and all values must be positive."));
+    renderMaintenanceSettingsState();
+    byId("maintenance-settings-error").focus();
     return;
   }
-  const save = byId("maintenance-settings-save");
-  save.disabled = true;
-  try {
-    await maintenanceMutation("/api/maintenance/settings", {
-      enabled: byId("maintenance-settings-enabled").checked,
-      mode: byId("maintenance-settings-mode").value,
-      minNewPages,
-      quietPeriodSeconds,
-      maxWaitSeconds,
-      modelRouting: readModelRoutingSettings(),
-      reviewBudget: readReviewBudgetSettings(),
-    });
+  if (await maintenanceSettingsSession.save()) {
     byId("preferences-dialog").close();
     await refresh();
-  } catch (error) {
-    showError(error);
-  } finally {
-    save.disabled = false;
+  } else if (maintenanceSettingsSession.error) {
+    activePreferencesTab = "maintenance";
+    renderPreferencesTabs();
+    byId("maintenance-settings-error").focus();
   }
 }
 
@@ -6150,6 +6274,7 @@ async function runMaintenancePrimaryAction() {
 async function activateView(name, { reload = false, history = true, focus = false } = {}) {
   name = navigation.select(name, { history, focus });
   state.activeView = name;
+  overviewActions.setActive(name === "overview");
   scheduleMaintenanceStatusPoll();
   schedulePagesPoll();
   if (name === "pages" && (!state.pages.loaded || byId("query").value.trim() === state.pages.appliedQuery)) {
@@ -6175,7 +6300,7 @@ async function openScope(namespace) {
 async function refresh() {
   const name = state.activeView;
   try {
-    await Promise.all([loadRuntimeControl(), loadOverview(), (async () => {
+    await Promise.all([loadRuntimeControl(), loadOverview(), overviewActions.load({ force: true }), (async () => {
       if (name === "pages") { resetPages(); await loadPages(); }
       if (name === "query") await queryView.load({ reload: true });
       if (name === "maintenance") await loadMaintenance({ reload: true });
@@ -6191,6 +6316,10 @@ async function refresh() {
 
 function rerenderForLocale() {
   clientAccessView.rerender();
+  pageInspector.rerender();
+  overviewActions.render();
+  renderMaintenanceSettingsState();
+  if (maintenanceSettingsSession.loaded) updateMaintenanceSettingsSummaries();
   accessView.render();
   contextHub.render();
   if (state.overview) renderOverview(state.overview);
@@ -6255,6 +6384,7 @@ const navigation = createConsoleNavigation({
   host: window, onNavigate: activateView, onError: showError,
 });
 state.activeView = navigation.select(navigation.locationView(), { history: false });
+overviewActions.setActive(state.activeView === "overview");
 schedulePagesPoll();
 document.addEventListener("visibilitychange", () => {
   schedulePagesPoll();
@@ -6272,7 +6402,9 @@ byId("maintenance-review-jump").addEventListener("click", () => {
   section.scrollIntoView({ behavior: "smooth", block: "start" });
 });
 window.addEventListener("beforeunload", event => {
-  if (contextHub.hasUnsavedChanges() || state.maintenance.reviewCommitBusy) {
+  if (contextHub.hasUnsavedChanges() || pageInspector.hasUnsavedChanges() || maintenanceSettingsSession.protected
+      || clientAccessView.hasPendingAction() || state.maintenance.reviewCommitBusy
+      || state.maintenance.reviewDecisions.size || state.maintenance.consolidationDrafts.size) {
     event.preventDefault(); event.returnValue = "";
   }
 });
@@ -6393,14 +6525,18 @@ byId("archive-apply").addEventListener("click", () => applyArchiveSelection().ca
 byId("archive-rescan").addEventListener("click", () => scanArchiveCandidates().catch(showError));
 byId("archive-finish").addEventListener("click", () => finishArchiveSession().catch(showError));
 byId("archive-start-new").addEventListener("click", () => startArchiveSession().catch(showError));
-byId("maintenance-settings-form").addEventListener("submit", (event) => saveMaintenanceSettings(event).catch(showError));
+byId("maintenance-settings-form").addEventListener("submit", saveMaintenanceSettings);
 byId("maintenance-settings-form").addEventListener("invalid", (event) => {
   for (let parent = event.target.parentElement; parent; parent = parent.parentElement) {
     if (parent.tagName === "DETAILS") parent.open = true;
   }
+  maintenanceSettingsSession.error = new Error(event.target.validationMessage);
+  renderMaintenanceSettingsState();
 }, true);
-byId("maintenance-settings-form").addEventListener("input", updateMaintenanceSettingsSummaries);
-byId("maintenance-settings-form").addEventListener("change", updateMaintenanceSettingsSummaries);
+byId("maintenance-settings-form").addEventListener("input", () => { updateMaintenanceSettingsSummaries(); maintenanceSettingsSession.touch(); });
+byId("maintenance-settings-form").addEventListener("change", () => { updateMaintenanceSettingsSummaries(); maintenanceSettingsSession.touch(); });
+byId("maintenance-settings-retry").addEventListener("click", () => loadMaintenancePreferences());
+byId("maintenance-settings-check").addEventListener("click", () => loadMaintenancePreferences({ reconcile: true }));
 const accessView = createAccessView({ api, byId, element, t, formatTime, formatNumber, showError, scopeName });
 byId("health-window").addEventListener("change", () => healthView.load({ reload: true }).catch(showError));
 setMaintenanceWorkspaceTab(state.maintenance.workspaceTab);

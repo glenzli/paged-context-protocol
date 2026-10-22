@@ -221,6 +221,34 @@ test("candidate refresh retains edits only while their evidence version is curre
   assert.equal(f.view.hasUnsavedChanges(),false);assert.match(f.root.textContent,/依据已变化/);assert.equal(f.calls.length,0);
 });
 
+test("canceling candidate edits confirms discard while keeping staged decisions and performing no writes", async () => {
+  let discard=false;const prompts=[];
+  const f=hubFixture({confirmAction:async options=>{prompts.push(options);return discard;}});
+  await f.view.load();await f.find("BUTTON","接受并编辑").fire("click");
+  let input=f.root.all().find(item=>item.dataset.focusKey==="candidate-editor:title");
+  input.value="Preserved draft";await input.fire("input");
+  assert.match(f.root.textContent,/有未保存更改/);
+  await f.find("BUTTON","取消").fire("click");
+  input=f.root.all().find(item=>item.dataset.focusKey==="candidate-editor:title");
+  assert.equal(input.value,"Preserved draft");assert.equal(f.view.hasUnsavedChanges(),true);
+  assert.match(prompts[0].description,/已暂存/);
+  discard=true;await f.find("BUTTON","取消").fire("click");
+  assert.equal(f.view.hasUnsavedChanges(),false);assert.equal(f.calls.length,0);
+});
+
+test("canceling a synthesis editor uses the same retained-draft confirmation", async () => {
+  let discard=false;
+  const f=hubFixture({confirmAction:async()=>discard});
+  f.snapshot.syntheses=[completeSynthesis()];await f.view.load();await f.expand("synthesis:s1:1");
+  await f.find("BUTTON","编辑记忆草案").fire("click");
+  let content=f.root.all().find(item=>item.dataset.focusKey==="synthesis-editor:0:content");
+  content.value="Human synthesis draft";await content.fire("input");
+  await f.find("BUTTON","取消").fire("click");
+  assert.equal(f.root.all().find(item=>item.dataset.focusKey==="synthesis-editor:0:content").value,"Human synthesis draft");
+  discard=true;await f.find("BUTTON","取消").fire("click");
+  assert.equal(f.view.hasUnsavedChanges(),false);assert.equal(f.calls.length,0);
+});
+
 test("summary projections cannot be staged as complete review evidence",()=>{
   assert.throws(()=>reviewDraft([{...candidate("a"),summaryOnly:true}],"reject"),/complete candidate evidence/);
   assert.throws(()=>synthesisDraft({...synthesis(),summaryOnly:true},[candidate("a"),candidate("b")],[memory()]),/complete synthesis/);
