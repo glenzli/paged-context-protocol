@@ -57,6 +57,7 @@ const CONSOLE_STATIC_CACHE_CONTROL: &str = "no-store";
 mod context_hub;
 mod diagnostic_log;
 mod graph_view;
+mod local_clients;
 mod managed;
 mod model_catalog;
 mod page_actions;
@@ -68,6 +69,7 @@ struct AppState {
     runtime: Option<Arc<managed::ManagedRuntime>>,
     runtime_config: Option<PathBuf>,
     model_catalog: Arc<model_catalog::ModelCatalog>,
+    local_clients: Arc<local_clients::LocalClients>,
 }
 
 #[derive(Deserialize)]
@@ -383,6 +385,7 @@ async fn run_console(options: Option<managed::ManagedOptions>) -> Result<()> {
             runtime: runtime.clone(),
             runtime_config,
             model_catalog: Arc::default(),
+            local_clients: Arc::default(),
         }),
     )
     .with_graceful_shutdown(shutdown_signal())
@@ -396,6 +399,29 @@ async fn run_console(options: Option<managed::ManagedOptions>) -> Result<()> {
 
 fn router(state: AppState) -> Router {
     Router::new()
+        .route(
+            "/api/local-clients",
+            get(local_clients::list).post(local_clients::create),
+        )
+        .route("/api/local-clients/{id}", get(local_clients::inspect))
+        .route(
+            "/api/local-clients/{id}/approve",
+            post(local_clients::approve),
+        )
+        .route(
+            "/api/local-clients/{id}/revoke",
+            post(local_clients::revoke),
+        )
+        .route("/api/local-clients/{id}/config", get(local_clients::config))
+        .route(
+            "/local-client-setup.js",
+            get(|| async {
+                static_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("local-client-setup.js"),
+                )
+            }),
+        )
         .route(
             "/api/context-hub",
             get(context_hub::inspect).post(context_hub::mutate),

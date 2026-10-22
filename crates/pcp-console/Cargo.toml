@@ -12,6 +12,7 @@ infer-runtime-client = { git = "https://github.com/glenzli/infer-runtime.git", r
 libc = "0.2"
 pcp-client = { path = "../pcp-client" }
 pcp-core = { path = "../pcp-core" }
+pcp-mcp = { path = "../pcp-mcp" }
 pcp-rpc = { path = "../pcp-rpc" }
 pcp-runtime = { path = "../pcp-runtime" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

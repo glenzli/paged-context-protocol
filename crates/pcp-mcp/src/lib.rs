@@ -4,6 +4,7 @@ use chrono::{SecondsFormat, Utc};
 use pcp_client::model_context::{self, ContextBudget, ContextView};
 use pcp_client::{LEGACY_RUNTIME_CONTEXT_HUB_FEATURE, PcpApi, RUNTIME_CONTEXT_INBOX_FEATURE};
 mod context_tools;
+pub mod enrollment;
 mod project_scope;
 use project_scope::{EnsureProjectScopeParams, ProjectScopeReply};
 mod tool_surface;

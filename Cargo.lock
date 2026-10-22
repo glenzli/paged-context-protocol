@@ -905,6 +905,7 @@ dependencies = [
  "libc",
  "pcp-client",
  "pcp-core",
+ "pcp-mcp",
  "pcp-rpc",
  "pcp-runtime",
  "reqwest",

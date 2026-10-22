@@ -4,6 +4,7 @@ import { createConsoleNavigation } from "/console-navigation.js";
 import { createScopeMetadataRefresh } from "/scope-metadata.js";
 import { createAccessView } from "/access-view.js";
 import { createClientAccessView } from "/client-access-view.js";
+import { createLocalClientSetup } from "/local-client-setup.js";
 import { MaintenanceSettingsSession } from "/maintenance-settings-session.js";
 import { createOverviewActions } from "/overview-actions.js";
 import { createPageInspector } from "/page-inspector.js?v=20260823.1";
@@ -77,6 +78,57 @@ let maintenanceConvergenceActive = false;
 const ZH_MESSAGES = {
   "Unsaved changes": "有未保存更改",
   "Refresh permissions": "刷新权限",
+  "Add local agent": "添加本机 Agent",
+  "Check local setup": "核对本机接入",
+  "Local agents": "本机 Agent",
+  "Local agent setup": "本机 Agent 接入",
+  "Give this agent its own identity and an explicit set of scopes.": "为此 Agent 建立独立身份，并明确指定可访问的范围。",
+  "Agent name": "Agent 名称",
+  "e.g. Research assistant": "例如：研究助手",
+  "Read and contribute": "读取并贡献记忆",
+  "Read memories in the selected scopes.": "读取所选范围内的记忆。",
+  "Read memories and contribute to the selected scopes.": "读取所选范围内的记忆，并向这些范围贡献内容。",
+  "Selected scopes": "所选范围",
+  "Choose each scope explicitly. Other scopes are not included.": "请逐项选择授权范围，其他范围不会自动加入。",
+  "Find a scope": "查找范围",
+  "{count} scopes selected": "已选择 {count} 个范围",
+  "No scopes are available for this Console.": "此 Console 没有可供授权的范围。",
+  "Candidate and activity permissions are configured separately.": "候选提交和近况发布权限需单独配置。",
+  "Register agent": "登记 Agent",
+  "Resume registration": "继续登记",
+  "Review permissions": "核对权限",
+  "Authorize agent": "授权此 Agent",
+  "Awaiting approval": "待授权",
+  "Ready to connect": "可开始连接",
+  "Access revoked": "访问已撤销",
+  "Registration rejected": "登记已拒绝",
+  "State unavailable": "状态暂不可用",
+  "Outcome unknown": "结果待确认",
+  "View setup": "查看接入",
+  "This agent is awaiting approval. Review these permissions before authorizing it.": "此 Agent 正在等待授权。请核对以下权限，再批准接入。",
+  "MCP configuration": "MCP 配置",
+  "Copy this complete JSON into your agent's MCP settings. The values are ready to use; no environment variables need to be filled in.": "将这份完整 JSON 复制到 Agent 的 MCP 设置中即可使用，无需手动填写环境变量。",
+  "Credentials stay in a local file. This configuration refers to that file and works on this computer.": "凭据保存在本机文件中。此配置只引用该文件，供这台电脑使用。",
+  "Copy configuration": "复制配置",
+  "Download JSON": "下载 JSON",
+  "Connection not verified. Start your agent with this configuration to connect.": "尚未验证 Agent 的实际连接。使用此配置启动 Agent 后即可接入。",
+  "Connection not verified": "实际连接尚未验证",
+  "Runtime session last opened": "Runtime 会话最近开启时间",
+  "Check current state": "核对当前状态",
+  "Checking local agent…": "正在核对本机 Agent…",
+  "Local agent setup is unavailable.": "本机 Agent 接入暂不可用。",
+  "Unexpected local agent response.": "本机 Agent 服务返回了无法识别的结果。",
+  "The setup outcome is unknown. Check the current state before another action.": "接入操作结果待确认。请先核对当前状态，再进行其他操作。",
+  "Enter an agent name and choose at least one available scope.": "请填写 Agent 名称，并至少选择一个可用范围。",
+  "Agent name is too long.": "Agent 名称过长，请缩短后重试。",
+  "The saved permissions differ from this setup. Check the permissions in Client access before proceeding.": "已保存的权限与本次接入不一致。请先在客户端权限中核对当前状态。",
+  "No registration was found. Your draft is kept; review it before registering again.": "未找到登记记录。草稿已保留，请核对后再重新登记。",
+  "The unknown setup outcome is kept while this Console stays open. Check the current state before authorizing again.": "只要此 Console 页面仍打开，待确认的接入状态就会保留。再次授权前请先核对当前状态。",
+  "Discard local agent draft?": "丢弃本机 Agent 草稿？",
+  "Your unregistered local agent draft will be discarded.": "将丢弃尚未登记的本机 Agent 草稿。",
+  "Discard draft": "丢弃草稿",
+  "MCP configuration copied.": "MCP 配置已复制。",
+  "Could not copy the configuration. Select and copy the JSON below.": "无法自动复制。请选中下方 JSON 后手动复制。",
   "The action outcome is unknown. Refresh permissions and check the current state before another action.": "操作结果待确认。请先刷新权限并核对当前状态，再进行其他操作。",
   "The action completed, but permissions could not refresh. Refresh permissions before another action.": "操作已完成，但权限列表刷新失败。请先刷新权限，再进行其他操作。",
   "Loading automatic maintenance settings…": "正在加载自动维护设置…",
@@ -434,6 +486,7 @@ const ZH_MESSAGES = {
   "Enable project registration": "允许自动登记项目",
   "Disable project registration": "停止登记新项目",
   "Approved clients": "已批准客户端",
+  "Other approved clients": "其他已批准客户端",
   "Registered at": "登记时间",
   "Last connected": "最近连接",
   "Registration ID": "授权编号",
@@ -445,6 +498,7 @@ const ZH_MESSAGES = {
   "Revoke": "撤销授权",
   "No pending requests": "暂无待批准请求",
   "No approved clients": "暂无已批准客户端",
+  "No other approved clients": "暂无其他已批准客户端",
   "Auto": "自动",
   "Back": "返回",
   "Candidates": "候选项",
@@ -1610,9 +1664,12 @@ async function api(path, options = {}) {
     let payload;
     try { payload = await response.json(); message = payload.error || message; } catch (_) {}
     const error = new Error(message);
+    error.status = response.status;
     // Only this explicit pre-write response proves this attempt made no change.
     // Generic HTTP errors and broken/lost responses remain ambiguous.
     if (response.status === 422 && payload?.code === "consolidation_validation_failed"
+        && payload?.mutationOutcome === "not_applied") error.mutationOutcome = "not_applied";
+    if ([403, 409, 422].includes(response.status) && ["local_client_validation_failed", "local_client_operation_conflict", "local_client_mutation_header_required"].includes(payload?.code)
         && payload?.mutationOutcome === "not_applied") error.mutationOutcome = "not_applied";
     throw error;
   }
@@ -1668,7 +1725,11 @@ const healthView = createHealthView({ request: api, showError, formatNumber, t, 
 const contextHub = createContextHub({ root: byId("view-context-hub"), request: api, mutate: maintenanceMutation,
   confirmAction, icon, formatTime, scopeName, onCommitted: loadOverview,
   language: () => currentLanguage, openPage: (id) => pageInspector.open(id) });
-const clientAccessView = createClientAccessView({ api, mutate: maintenanceMutation, byId, element, t, scopeName, formatTime, showError, confirmAction });
+const localClientSetup = createLocalClientSetup({ api, mutate: maintenanceMutation, byId, element, t, scopeName, confirmAction,
+  changed: () => clientAccessView.rerender(),
+  committed: () => clientAccessView.load({ autoOpen: false, force: true }),
+});
+const clientAccessView = createClientAccessView({ api, mutate: maintenanceMutation, byId, element, t, scopeName, formatTime, showError, confirmAction, localSetup: localClientSetup });
 const maintenanceSettingsSession = new MaintenanceSettingsSession({
   request: api, mutate: maintenanceMutation, readDraft: readMaintenanceSettings,
   populate: populateMaintenanceSettings, snapshotDraft: maintenanceSettingsFromStatus,
@@ -6315,6 +6376,7 @@ async function refresh() {
 }
 
 function rerenderForLocale() {
+  localClientSetup.rerender();
   clientAccessView.rerender();
   pageInspector.rerender();
   overviewActions.render();

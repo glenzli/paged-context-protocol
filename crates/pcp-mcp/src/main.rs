@@ -8,13 +8,11 @@ use std::{
 use anyhow::{Context, Result};
 use pcp_client::{AccessMode, EmbeddedPcpClient, PcpApi};
 use pcp_core::{AccessPrincipal, AccessPrincipalType};
-use pcp_mcp::{PcpMcpServer, PcpMcpSurface, PcpMcpToolset};
+use pcp_mcp::{PcpMcpServer, PcpMcpSurface, PcpMcpToolset, enrollment};
 use pcp_rpc::RemotePcpClient;
 use pcp_sqlite::SqlitePcpStore;
 use pcp_store::PcpStore;
 use rmcp::{ServiceExt, transport::stdio};
-
-mod enrollment;
 
 #[tokio::main]
 async fn main() -> Result<()> {

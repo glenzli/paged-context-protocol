@@ -44,6 +44,160 @@ struct McpEnrollmentState {
     registration_id: Option<String>,
 }
 
+/// Non-secret enrollment metadata for local setup interfaces. Credentials stay
+/// inside this module and its private enrollment file.
+#[derive(Clone, Debug)]
+pub struct LocalEnrollmentInfo {
+    pub principal_id: String,
+    pub principal_name: Option<String>,
+    pub requested_access: RequestedAccess,
+    pub identity_id: String,
+    pub request_id: Option<String>,
+    pub registration_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum LocalEnrollmentProgress {
+    Pending {
+        request_id: String,
+        expires_at: String,
+    },
+    Active {
+        registration_id: String,
+    },
+    Rejected {
+        request_id: String,
+    },
+}
+
+impl McpEnrollmentState {
+    fn public_info(&self) -> LocalEnrollmentInfo {
+        LocalEnrollmentInfo {
+            principal_id: self.principal_id.clone(),
+            principal_name: self.principal_name.clone(),
+            requested_access: self.requested_access.clone(),
+            identity_id: self.identity_id.clone(),
+            request_id: self.request_id.clone(),
+            registration_id: self.registration_id.clone(),
+        }
+    }
+}
+
+/// Prepare one independent model Principal without submitting or approving it.
+/// Callers own the private directory and serialize creation of this fixed path.
+pub fn prepare_local_enrollment(
+    state_path: &Path,
+    principal_name: String,
+    requested_access: RequestedAccess,
+    discovery_manifest_path: PathBuf,
+    expected_identity: &str,
+) -> Result<LocalEnrollmentInfo> {
+    anyhow::ensure!(
+        fs::symlink_metadata(state_path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+        "PCP enrollment state already exists"
+    );
+    anyhow::ensure!(
+        !principal_name.trim().is_empty() && principal_name.len() <= 128,
+        "invalid local client name"
+    );
+    anyhow::ensure!(
+        matches!(
+            requested_access.mode,
+            RequestedAccessMode::Read | RequestedAccessMode::Contribute
+        ) && !requested_access.read_all_scopes
+            && !requested_access.allow_cross_scope_derivation
+            && !requested_access.scopes.is_empty()
+            && requested_access.scopes.len() <= 16
+            && requested_access
+                .scopes
+                .iter()
+                .all(|scope| !scope.trim().is_empty() && scope.len() <= 128)
+            && requested_access
+                .scopes
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                == requested_access.scopes.len(),
+        "local clients require read or contribute access to explicit distinct Scopes"
+    );
+    let state = McpEnrollmentState {
+        schema: STATE_SCHEMA.to_owned(),
+        schema_version: STATE_SCHEMA_VERSION.to_owned(),
+        principal_id: format!("client:local:{}", &random_credential()?[..32]),
+        principal_name: Some(principal_name),
+        requested_access,
+        credential: random_credential()?,
+        discovery_manifest_path,
+        identity_id: expected_identity.to_owned(),
+        request_id: None,
+        registration_id: None,
+    };
+    select_endpoint(&state)?;
+    write_state(state_path, &state)?;
+    Ok(state.public_info())
+}
+
+pub fn inspect_local_enrollment(state_path: &Path) -> Result<LocalEnrollmentInfo> {
+    Ok(read_state(state_path)?.public_info())
+}
+
+/// Check the exact Runtime Discovery identity and enrollment endpoint before
+/// advertising local setup. This does not contact or mutate enrollment.
+pub fn validate_local_discovery(manifest: &Path, expected_identity: &str) -> Result<()> {
+    select_manifest_endpoint(manifest, expected_identity).map(|_| ())
+}
+
+/// Only an explicit local setup mutation calls this. Replaying it reuses the
+/// existing credential and Runtime's idempotent enrollment request.
+pub async fn submit_local_enrollment(state_path: &Path) -> Result<LocalEnrollmentProgress> {
+    let mut state = read_state(state_path)?;
+    advance_enrollment(state_path, &mut state).await
+}
+
+/// Read an existing request without ever submitting a replacement request.
+pub async fn local_enrollment_decision(state_path: &Path) -> Result<LocalEnrollmentProgress> {
+    let mut state = read_state(state_path)?;
+    anyhow::ensure!(
+        state.request_id.is_some(),
+        "local enrollment request was not submitted"
+    );
+    advance_enrollment(state_path, &mut state).await
+}
+
+/// Recover an approved registration through its own credential, including when
+/// the Console lost the approval response. Never approves or creates a grant.
+pub async fn activate_local_enrollment(
+    state_path: &Path,
+    registration_id: &str,
+) -> Result<LocalEnrollmentInfo> {
+    let mut state = read_state(state_path)?;
+    if let Some(existing) = &state.registration_id {
+        anyhow::ensure!(
+            existing == registration_id,
+            "PCP enrollment registration mismatch"
+        );
+    }
+    let selected = select_endpoint(&state)?;
+    let response = EnrollmentClient::new(&selected.public_socket)
+        .open_session(OpenEnrollmentSessionParams {
+            registration_id: registration_id.to_owned(),
+            credential: state.credential.clone(),
+        })
+        .await?;
+    let EnrollmentResult::Active { session } = response.result else {
+        anyhow::bail!("PCP enrollment is not active");
+    };
+    // Exercise the same identity, binding and effective-access checks used by
+    // the launched MCP process, before marking the local profile ready.
+    connect_session(&selected, registration_id, &state.principal_id, session).await?;
+    if state.registration_id.as_deref() != Some(registration_id) {
+        state.registration_id = Some(registration_id.to_owned());
+        write_state(state_path, &state)?;
+    }
+    Ok(state.public_info())
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct DiscoveryRegistration {
     schema: String,
@@ -77,13 +231,29 @@ pub async fn run_command(command: Option<&str>) -> Result<()> {
             );
             let mut state = state_from_env()?;
             write_state(&state_path, &state)?;
-            advance_enrollment(&state_path, &mut state).await?;
+            print_progress(advance_enrollment(&state_path, &mut state).await?)?;
         }
         "status" => {
             let mut state = read_state(&state_path)?;
-            advance_enrollment(&state_path, &mut state).await?;
+            print_progress(advance_enrollment(&state_path, &mut state).await?)?;
         }
         other => anyhow::bail!("unsupported enrollment command `{other}`; use begin or status"),
+    }
+    Ok(())
+}
+
+fn print_progress(progress: LocalEnrollmentProgress) -> Result<()> {
+    match progress {
+        LocalEnrollmentProgress::Pending {
+            request_id,
+            expires_at,
+        } => println!("PCP enrollment request {request_id} is pending approval until {expires_at}"),
+        LocalEnrollmentProgress::Active { registration_id } => {
+            println!("PCP enrollment {registration_id} is active")
+        }
+        LocalEnrollmentProgress::Rejected { request_id } => {
+            anyhow::bail!("PCP enrollment request {request_id} was rejected")
+        }
     }
     Ok(())
 }
@@ -161,7 +331,11 @@ async fn open_session(state_path: &Path, expected_principal: &str) -> Result<Rem
         state.principal_id
     );
     if state.registration_id.is_none() {
-        advance_enrollment(state_path, &mut state).await?;
+        if let LocalEnrollmentProgress::Rejected { .. } =
+            advance_enrollment(state_path, &mut state).await?
+        {
+            anyhow::bail!("PCP enrollment was rejected or revoked");
+        }
     }
     let registration_id = state
         .registration_id
@@ -225,7 +399,10 @@ async fn connect_session(
     Ok(remote)
 }
 
-async fn advance_enrollment(state_path: &Path, state: &mut McpEnrollmentState) -> Result<()> {
+async fn advance_enrollment(
+    state_path: &Path,
+    state: &mut McpEnrollmentState,
+) -> Result<LocalEnrollmentProgress> {
     let selected = select_endpoint(state)?;
     let client = EnrollmentClient::new(&selected.public_socket);
     let response = if let Some(request_id) = state.request_id.clone() {
@@ -260,7 +437,10 @@ async fn advance_enrollment(state_path: &Path, state: &mut McpEnrollmentState) -
         } => {
             state.request_id = Some(request_id.clone());
             write_state(state_path, state)?;
-            println!("PCP enrollment request {request_id} is pending approval until {expires_at}");
+            Ok(LocalEnrollmentProgress::Pending {
+                request_id,
+                expires_at,
+            })
         }
         EnrollmentResult::Active { session } => {
             anyhow::ensure!(
@@ -273,14 +453,15 @@ async fn advance_enrollment(state_path: &Path, state: &mut McpEnrollmentState) -
             );
             state.registration_id = Some(session.registration_id.clone());
             write_state(state_path, state)?;
-            println!("PCP enrollment {} is active", session.registration_id);
+            Ok(LocalEnrollmentProgress::Active {
+                registration_id: session.registration_id,
+            })
         }
         EnrollmentResult::ProjectReady { .. } => anyhow::bail!("unexpected project response"),
         EnrollmentResult::Rejected { request_id } => {
-            anyhow::bail!("PCP enrollment request {request_id} was rejected")
+            Ok(LocalEnrollmentProgress::Rejected { request_id })
         }
     }
-    Ok(())
 }
 
 fn state_from_env() -> Result<McpEnrollmentState> {
@@ -350,7 +531,14 @@ fn requested_scope_list(name: &str, required: bool) -> Result<Vec<String>> {
 }
 
 fn select_endpoint(state: &McpEnrollmentState) -> Result<SelectedEnrollmentEndpoint> {
-    let registration = read_manifest(&state.discovery_manifest_path)?;
+    select_manifest_endpoint(&state.discovery_manifest_path, &state.identity_id)
+}
+
+fn select_manifest_endpoint(
+    manifest_path: &Path,
+    expected_identity: &str,
+) -> Result<SelectedEnrollmentEndpoint> {
+    let registration = read_manifest(manifest_path)?;
     anyhow::ensure!(
         registration.schema == DISCOVERY_SCHEMA,
         "unsupported Infra Discovery schema"
@@ -364,7 +552,7 @@ fn select_endpoint(state: &McpEnrollmentState) -> Result<SelectedEnrollmentEndpo
         "discovery manifest is not PCP"
     );
     anyhow::ensure!(
-        registration.service.instance_id == state.identity_id,
+        registration.service.instance_id == expected_identity,
         "PCP discovery identity does not match enrollment state"
     );
     let offer = registration
@@ -379,8 +567,7 @@ fn select_endpoint(state: &McpEnrollmentState) -> Result<SelectedEnrollmentEndpo
                 && offer.binding == LOCAL_UNIX_SOCKET_BINDING
         })
         .context("PCP discovery manifest has no compatible enrollment offer")?;
-    let runtime_root = state
-        .discovery_manifest_path
+    let runtime_root = manifest_path
         .parent()
         .and_then(Path::parent)
         .context("PCP discovery manifest is not inside a runtime registration directory")?
@@ -566,8 +753,159 @@ fn validate_credential(value: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_endpoint;
-    use std::path::Path;
+    use super::*;
+    use std::os::unix::{fs::symlink, net::UnixListener};
+
+    fn fixture() -> (PathBuf, PathBuf, UnixListener) {
+        let root = Path::new("/tmp").join(format!(
+            "pcp-mcp-enrollment-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        fs::create_dir(root.join("registrations")).unwrap();
+        fs::create_dir(root.join("sockets")).unwrap();
+        let socket = root.join("sockets/TEST123.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let manifest = root.join("registrations/pcp-test.json");
+        fs::write(&manifest, serde_json::to_vec(&serde_json::json!({
+            "schema":DISCOVERY_SCHEMA,"schema_version":DISCOVERY_VERSION,
+            "service":{"kind":"pcp","instance_id":"test-identity","generation":"test-generation"},
+            "offers":[{"protocol":PCP_ENROLLMENT_PROTOCOL_ID,"protocol_versions":[PCP_ENROLLMENT_PROTOCOL_VERSION],"binding":LOCAL_UNIX_SOCKET_BINDING,"endpoint":"sockets/TEST123.sock"}]
+        })).unwrap()).unwrap();
+        fs::set_permissions(&manifest, fs::Permissions::from_mode(0o600)).unwrap();
+        (root, manifest, listener)
+    }
+
+    fn read_access() -> RequestedAccess {
+        RequestedAccess {
+            mode: RequestedAccessMode::Read,
+            scopes: vec!["user:self".to_owned()],
+            read_all_scopes: false,
+            allow_cross_scope_derivation: false,
+        }
+    }
+
+    #[test]
+    fn local_preparation_creates_independent_private_credentials_without_submission() {
+        let (root, manifest, _listener) = fixture();
+        let first_path = root.join("clients/first.json");
+        let second_path = root.join("clients/second.json");
+        let first = prepare_local_enrollment(
+            &first_path,
+            "Other agent".to_owned(),
+            read_access(),
+            manifest.clone(),
+            "test-identity",
+        )
+        .unwrap();
+        let second = prepare_local_enrollment(
+            &second_path,
+            "Another agent".to_owned(),
+            read_access(),
+            manifest,
+            "test-identity",
+        )
+        .unwrap();
+        assert_ne!(first.principal_id, second.principal_id);
+        assert!(first.principal_id.starts_with("client:local:"));
+        assert!(first.request_id.is_none() && first.registration_id.is_none());
+        let state = read_state(&first_path).unwrap();
+        let second_state = read_state(&second_path).unwrap();
+        assert_ne!(state.credential, second_state.credential);
+        assert!(!format!("{first:?}").contains(&state.credential));
+        assert_eq!(state.requested_access, read_access());
+        assert_eq!(
+            fs::metadata(first_path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&first_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        symlink(&first_path, root.join("state-link.json")).unwrap();
+        assert!(inspect_local_enrollment(&root.join("state-link.json")).is_err());
+        fs::set_permissions(&first_path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(inspect_local_enrollment(&first_path).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_preparation_rejects_broader_grants_and_other_runtime_identities() {
+        let (root, manifest, _listener) = fixture();
+        let path = root.join("clients/rejected.json");
+        for access in [
+            RequestedAccess {
+                mode: RequestedAccessMode::Admin,
+                ..read_access()
+            },
+            RequestedAccess {
+                read_all_scopes: true,
+                ..read_access()
+            },
+            RequestedAccess {
+                allow_cross_scope_derivation: true,
+                ..read_access()
+            },
+            RequestedAccess {
+                scopes: vec![],
+                ..read_access()
+            },
+            RequestedAccess {
+                scopes: vec!["user:self".to_owned(); 2],
+                ..read_access()
+            },
+        ] {
+            assert!(
+                prepare_local_enrollment(
+                    &path,
+                    "agent".to_owned(),
+                    access,
+                    manifest.clone(),
+                    "test-identity"
+                )
+                .is_err()
+            );
+            assert!(!path.exists());
+        }
+        assert!(
+            prepare_local_enrollment(
+                &path,
+                "agent".to_owned(),
+                read_access(),
+                manifest,
+                "another-identity"
+            )
+            .is_err()
+        );
+        assert!(!path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_status_does_not_begin_an_unsubmitted_request() {
+        let (root, manifest, _listener) = fixture();
+        let path = root.join("clients/unsubmitted.json");
+        prepare_local_enrollment(
+            &path,
+            "agent".to_owned(),
+            read_access(),
+            manifest,
+            "test-identity",
+        )
+        .unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(local_enrollment_decision(&path).await.is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn enrollment_endpoint_is_bounded_to_runtime_sockets() {

@@ -21,6 +21,37 @@ the shared mutation helper. Failed actions stay visible inside the dialog.
 An unknown outcome freezes further permission actions until the operator
 explicitly refreshes and checks the current permissions; requests are not replayed.
 
+### Local agent setup
+
+In **Client access**, choose **Add local agent**, enter a name, select **Read
+memories** or **Read and contribute**, and choose each permitted Scope. Read is
+the default and no Scope is selected initially. The Scope list supports search.
+**Register agent** creates an independent identity awaiting approval; review
+its displayed permissions and choose **Authorize agent** before using it.
+Candidate/activity opt-ins and new-project registration retain their separate
+controls.
+
+An approved local agent offers a complete generic MCP JSON configuration to
+copy or download. Its command and local enrollment-file reference are already
+filled in. Credentials remain in the managed local file and are never sent to
+the browser. Each configuration uses its own server key; the Console does not
+edit another application's files or install software. Keep this configuration
+on the computer where it was generated. The MCP format must be accepted by the
+agent's own configuration UI.
+
+Local profiles remain listed after reload, including revoked registrations.
+**Ready to connect** means the configuration and grant are available; it does
+not prove an agent has connected. Runtime session timestamps also include
+Console activity. Unknown writes freeze further permission changes and expose
+a read-only **Check current state** action. An authoritative missing registration
+returns to the retained draft; it never silently creates another identity or
+approves a request. If a fresh check confirms an interrupted registration can
+resume, **Resume registration** explicitly retries that original identity and
+immutable grant. It does not approve it. Draft cancellation, Escape and browser
+close protect unsubmitted work. `src/local-client-setup.js` owns this workflow and configuration
+recovery; `src/client-access-view.js` combines local profiles with existing
+permissions without duplicating their rows.
+
 The overview starts with human review decisions, pending client approvals and
 blocked work, each linking to its existing editor. Automatic waits and completed
 history are excluded. Each source retains its own loading, unavailable and retry

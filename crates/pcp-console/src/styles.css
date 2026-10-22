@@ -1080,6 +1080,44 @@ html.relation-comparison-open body { position: fixed; top: var(--relation-compar
   .enrollment-metadata { grid-template-columns: minmax(0, 1fr); }
 }
 .enrollment-empty { border: 0; }
+.enrollment-toolbar { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 14px; }
+.local-client-dialog { width: min(640px, calc(100vw - 32px)); }
+.local-client-content, .local-client-form, .local-client-profile { display: grid; min-width: 0; gap: 16px; }
+.local-client-content { padding: 16px; }
+.local-client-content p { margin: 0; line-height: 1.55; }
+.local-client-field { display: grid; min-width: 0; gap: 6px; font-size: 13px; }
+.local-client-field > span { font-weight: 650; }
+.local-client-field input, .local-client-field select { width: 100%; min-width: 0; }
+.local-client-scopes { display: grid; min-width: 0; gap: 10px; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: var(--card-radius); }
+.local-client-scopes legend { padding: 0 5px; font-size: 13px; font-weight: 650; }
+.local-client-scopes > input { width: 100%; min-width: 0; }
+.local-client-scopes p, .local-client-policy { font-size: 12px; }
+.local-client-scope-options { display: grid; max-height: min(240px, 32vh); gap: 1px; overflow: auto; overscroll-behavior: contain; }
+.local-client-scope-option { display: flex; align-items: flex-start; gap: 9px; min-width: 0; padding: 8px 5px; border-radius: var(--control-radius); cursor: pointer; }
+.local-client-scope-option:hover { background: var(--surface-subtle); }
+.local-client-scope-option input { flex: none; width: 16px; min-height: 16px; height: 16px; margin: 2px 0 0; }
+.local-client-scope-option > span { min-width: 0; overflow-wrap: anywhere; font-size: 13px; line-height: 1.45; }
+.local-client-scope-option strong { font-weight: 500; }
+.local-client-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+.local-client-actions .draft-status { margin-right: auto; }
+.local-client-profile-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 14px; overflow-wrap: anywhere; }
+.local-client-profile-heading > strong { font-size: 17px; }
+.local-client-status { color: var(--muted); font-size: 12px; }
+.local-client-grant { margin: 0; font-size: 13px; }
+.local-client-grant dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.local-client-grant ul { margin: 0; padding-left: 18px; }
+.local-client-grant li + li { margin-top: 4px; }
+.local-client-scope-summary { font-size: 12px; }
+.local-client-config-section { display: grid; min-width: 0; gap: 10px; padding-top: 15px; border-top: 1px solid var(--line); }
+.local-client-config-section h2 { font-size: 14px; }
+.local-client-config-section p { font-size: 13px; }
+.local-client-config-section textarea { display: block; width: 100%; min-width: 0; max-height: 300px; resize: vertical; padding: 11px; border: 1px solid var(--strong-line); border-radius: var(--control-radius); background: var(--surface-subtle); color: var(--text); font-size: 11px; line-height: 1.55; white-space: pre; overflow: auto; }
+@media (max-width: 480px) {
+  .local-client-content { padding: 13px; }
+  .local-client-actions button, .enrollment-toolbar button { max-width: 100%; white-space: normal; }
+  .local-client-grant { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .local-client-grant dd + dt { margin-top: 7px; }
+}
 .dialog-header { position: sticky; z-index: 2; top: 0; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 13px 15px; border-bottom: 1px solid var(--line); background: var(--surface); }
 .dialog-header > div { min-width: 0; overflow-wrap: anywhere; }
 .dialog-header > button { flex: 0 0 auto; }

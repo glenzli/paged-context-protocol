@@ -157,6 +157,27 @@ impl ManagedRuntime {
         &self.paths.runtime_config
     }
 
+    pub(super) fn home(&self) -> &Path {
+        &self.paths.home
+    }
+
+    pub(super) fn mcp_binary_candidates(&self) -> Vec<PathBuf> {
+        let mut candidates = vec![self.paths.home.join("bin/pcp-mcp")];
+        if let Some(parent) = self.runtime_binary.parent() {
+            candidates.push(parent.join("pcp-mcp"));
+        }
+        if let Ok(executable) = std::env::current_exe()
+            && let Some(parent) = executable.parent()
+        {
+            candidates.push(parent.join("pcp-mcp"));
+        }
+        candidates
+    }
+
+    pub(super) async fn discovery_manifest(&self) -> Option<PathBuf> {
+        self.discovery_manifest.lock().await.clone()
+    }
+
     pub(super) async fn restart(&self) -> Result<ManagedRuntimeStatus> {
         let mut child = self.child.lock().await;
         if let Some(previous) = child.take() {

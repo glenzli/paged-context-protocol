@@ -21,11 +21,11 @@ class Node {
 const text=node=>[node.textContent,...node.children.map(text)].join(" ");
 const client=(overrides={})=>({registration_id:"reg_one",client:{principal:{principalId:"client:one",displayName:"Client One"}},approved_access:{mode:"contribute",scopes:["user:self"],read_all_scopes:true,allow_cross_scope_derivation:false},project_scopes:["project:a","project:b"],allow_project_registration:true,created_at:"2026-10-01",last_opened_at:"2026-10-20",...overrides});
 const snapshot=(registrations=[client()],pending=[])=>({result:{status:"snapshot",registrations,pending}});
-function fixture({api=async()=>snapshot(),mutate=async()=>{},confirmAction=async()=>false}={}) {
+function fixture({api=async()=>snapshot(),mutate=async()=>{},confirmAction=async()=>false,localSetup}={}) {
   const nodes=new Map(),errors=[];
   const byId=id=>{if(!nodes.has(id))nodes.set(id,new Node());return nodes.get(id);};
   globalThis.document={activeElement:null,querySelector:()=>byId("enrollment-dialog").open?byId("enrollment-dialog"):null};
-  const view=createClientAccessView({api,mutate,confirmAction,byId,element:(tag,cls,value)=>Object.assign(new Node(tag,value),{className:cls}),t:value=>value,scopeName:scope=>({"project:a":"Project A","project:b":"Project B"})[scope]||scope,formatTime:String,showError:error=>errors.push(error)});
+  const view=createClientAccessView({api,mutate,confirmAction,byId,element:(tag,cls,value)=>Object.assign(new Node(tag,value),{className:cls}),t:value=>value,scopeName:scope=>({"project:a":"Project A","project:b":"Project B"})[scope]||scope,formatTime:String,showError:error=>errors.push(error),localSetup});
   return {view,byId,errors};
 }
 
@@ -41,6 +41,65 @@ test("client configuration separates permission policy and named projects from c
   assert.match(text(permissions),/Project A.*Project B/);
   assert.match(text(permissions),/Cross-scope derivation.*Not allowed/);
   assert.match(text(row.children[1].children[1]),/client:one.*reg_one/);
+});
+
+function localFixture(clients, overrides = {}) {
+  return { load: async () => {}, snapshot: () => ({ available: true, clients }), setExternalBusy() {},
+    blocksMutation: () => false, isMutating: () => false, hasPendingAction: () => false,
+    statusLabel: value => ({ ready: "Ready to connect", pending: "Awaiting approval", revoked: "Access revoked" })[value.status],
+    canOpenProfile: () => true, openProfile: async () => {}, ...overrides };
+}
+
+test("local profiles appear once, preserve existing permission controls and keep revoked setup discoverable", async () => {
+  const local = { id: "local_one", displayName: "Local One", mode: "contribute", scopes: ["user:self"], status: "ready", registrationId: "reg_one" };
+  const pending = { request_id: "req_local", client: { principal: { principalId: "client:local-two", displayName: "Local Two" } }, requested_access: { mode: "read", scopes: ["project:a"], read_all_scopes: false }, requested_at: "2026-10-22", expires_at: "2026-10-23" };
+  const clients = [local, { id: "local_two", displayName: "Local Two", mode: "read", scopes: ["project:a"], status: "pending", requestId: "req_local" },
+    { id: "local_old", displayName: "Old Local", mode: "read", scopes: ["project:a"], status: "revoked" }];
+  const opened = [], localSetup = localFixture(clients, { openProfile: async id => opened.push(id) });
+  const { view, byId } = fixture({ api: async () => snapshot([client({ client: { principal: { principalId: "client:local-one", displayName: "Local One" } } })], [pending]), localSetup });
+  await view.load();
+  assert.equal(byId("enrollment-local").children.length, 3);
+  assert.equal(byId("enrollment-registered-title").textContent, "Other approved clients");
+  assert.equal(byId("enrollment-registered-title").dataset.i18n, "Other approved clients");
+  assert.equal(text(byId("enrollment-registered")).trim(), "No other approved clients");
+  assert.doesNotMatch(text(byId("enrollment-registered")), /Local One/);
+  assert.doesNotMatch(text(byId("enrollment-pending")), /Local Two/);
+  const ready = byId("enrollment-local").children[0];
+  assert.match(text(ready), /Ready to connect.*Permissions and scopes/s);
+  assert.match(text(ready), /Disable project registration.*Revoke.*MCP configuration/s);
+  assert.match(text(ready), /Runtime session last opened/); assert.doesNotMatch(text(ready), /Last connected/);
+  await ready.querySelectorAll("button").find(button => button.textContent === "MCP configuration").handlers.click();
+  assert.deepEqual(opened, ["local_one"]);
+  const review = byId("enrollment-local").children[1];
+  assert.match(text(review), /Requested permissions.*Review permissions/s);
+  assert.ok(!review.querySelectorAll("button").some(button => button.textContent === "Approve"));
+  assert.match(text(byId("enrollment-local").children[2]), /Old Local.*Access revoked.*View setup/s);
+});
+
+test("local setup unavailability leaves existing enrollment controls usable", async () => {
+  const localSetup = localFixture([], { snapshot: () => ({ available: false, clients: [], reason: "managed configuration unavailable" }) });
+  const { view, byId } = fixture({ localSetup }); await view.load();
+  assert.equal(byId("enrollment-local-section").hidden, true);
+  assert.equal(byId("enrollment-registered-title").textContent, "Approved clients");
+  assert.ok(byId("enrollment-registered").querySelectorAll("button").every(button => !button.disabled));
+  assert.equal(view.hasPendingAction(), false);
+});
+
+test("a fresh empty Console retains its approved-client empty state before any local profiles exist", async () => {
+  const { view, byId } = fixture({ api: async () => snapshot([]), localSetup: localFixture([]) });
+  await view.load();
+  assert.equal(byId("enrollment-registered-title").textContent, "Approved clients");
+  assert.equal(text(byId("enrollment-registered")).trim(), "No approved clients");
+});
+
+test("unknown local writes freeze permission mutations while their read-only setup remains accessible", async () => {
+  const clients = [{ id: "local_one", displayName: "Local One", mode: "contribute", scopes: ["user:self"], status: "ready", registrationId: "reg_one" }];
+  const localSetup = localFixture(clients, { blocksMutation: () => true, hasPendingAction: () => true });
+  const { view, byId } = fixture({ localSetup }); await view.load();
+  const buttons = byId("enrollment-local").querySelectorAll("button");
+  assert.ok(buttons.find(button => button.textContent === "Revoke").disabled);
+  assert.equal(buttons.find(button => button.textContent === "MCP configuration").disabled, false);
+  assert.equal(byId("enrollment-refresh").disabled, false); assert.equal(view.hasPendingAction(), true);
 });
 
 test("pending requests expose their requested authority and do not imply global read access",async()=>{
