@@ -23,10 +23,11 @@ export function createClientAccessView({ api, mutate, byId, element, t, scopeNam
     const fields = element("dl", "details-grid client-permission-fields");
     const field = (label, value) => fields.append(element("dt", "", t(label)), typeof value === "object" ? value : element("dd", "", value));
     field("Access mode", t(ACCESS_MODES[access.mode] || access.mode));
-    field("Scope policy", access.read_all_scopes ? t("Read all scopes; other permissions remain scoped") : t("Permissions apply to listed scopes"));
+    field("Scope policy", access.all_scopes ? t("Includes every current and future scope. Access follows the selected mode.")
+      : access.read_all_scopes ? t("Read all scopes; other permissions remain scoped") : t("Permissions apply to listed scopes"));
     const fixed = element("dd"); fixed.append(scopeLabel(element, access.scopes || [], name, "span", "", {"user:self": t("Personal memory")}));
-    field("Configured scopes", access.scopes?.length ? fixed : t("None"));
-    if (item.project_scopes?.length) {
+    field("Scope access", access.all_scopes ? t("All scopes") : access.scopes?.length ? fixed : t("None"));
+    if (!access.all_scopes && item.project_scopes?.length) {
       const projects = element("dd"), list = element("ul", "client-project-list");
       for (const scope of item.project_scopes) { const row = element("li"); row.append(scopeLabel(element, [scope], name)); list.append(row); }
       projects.append(list); field("Writable projects", projects);
@@ -98,8 +99,8 @@ export function createClientAccessView({ api, mutate, byId, element, t, scopeNam
     const row = element("article", "enrollment-row");
     const identity = element("div", "enrollment-identity");
     identity.append(element("strong", "", clientName), element("span", "muted", t(ACCESS_MODES[access.mode] || access.mode)));
-    const summary = access.read_all_scopes ? t("Reads all scopes") : t("{count} configured scopes").replace("{count}", access.scopes?.length || 0);
-    identity.append(element("span", "muted", `${summary}${item.project_scopes?.length ? ` · ${t("{count} writable projects").replace("{count}", item.project_scopes.length)}` : ""}`));
+    const summary = access.all_scopes ? t("All scopes") : access.read_all_scopes ? t("Reads all scopes") : t("{count} configured scopes").replace("{count}", access.scopes?.length || 0);
+    identity.append(element("span", "muted", `${summary}${!access.all_scopes && item.project_scopes?.length ? ` · ${t("{count} writable projects").replace("{count}", item.project_scopes.length)}` : ""}`));
     if (local) identity.append(element("span", "local-client-status", localSetup.statusLabel(local)));
     const actions = element("div", "enrollment-actions");
     if (pending) {
@@ -141,7 +142,7 @@ export function createClientAccessView({ api, mutate, byId, element, t, scopeNam
     identity.append(element("strong", "", profile.displayName), element("span", "muted", t(ACCESS_MODES[profile.mode] || profile.mode)),
       element("span", "local-client-status", localSetup.statusLabel(profile)));
     const scopes = element("div", "local-client-scope-summary");
-    scopes.append(scopeLabel(element, profile.scopes || [], name, "span", "", {"user:self": t("Personal memory")}));
+    scopes.append(profile.allScopes ? element("span", "", t("All scopes")) : scopeLabel(element, profile.scopes || [], name, "span", "", {"user:self": t("Personal memory")}));
     identity.append(scopes);
     if (profile.reason) identity.append(element("span", "muted", profile.reason));
     const actions = element("div", "enrollment-actions"); actions.append(localAction(profile));

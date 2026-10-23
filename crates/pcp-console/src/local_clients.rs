@@ -55,6 +55,8 @@ pub(super) struct CreateInput {
     display_name: String,
     #[serde(default)]
     mode: LocalMode,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    all_scopes: bool,
     scopes: Vec<String>,
 }
 
@@ -70,9 +72,11 @@ impl CreateInput {
                 "Use a readable client name of at most 120 UTF-8 bytes.",
             ));
         }
-        if self.scopes.is_empty() || self.scopes.len() > 16 {
+        if (self.all_scopes && !self.scopes.is_empty())
+            || (!self.all_scopes && (self.scopes.is_empty() || self.scopes.len() > 16))
+        {
             return Err(LocalError::validation(
-                "Choose between one and 16 explicit Scopes.",
+                "Choose all Scopes or between one and 16 explicit Scopes.",
             ));
         }
         if self.scopes.iter().any(|scope| {
@@ -97,6 +101,7 @@ impl CreateInput {
                 LocalMode::Contribute => RequestedAccessMode::Contribute,
             },
             scopes: self.scopes.clone(),
+            all_scopes: self.all_scopes,
             read_all_scopes: false,
             allow_cross_scope_derivation: false,
         }
@@ -117,6 +122,7 @@ pub(super) struct LocalClientView {
     display_name: String,
     principal_id: String,
     mode: LocalMode,
+    all_scopes: bool,
     scopes: Vec<String>,
     status: &'static str,
     can_resume_registration: bool,
@@ -137,6 +143,7 @@ impl LocalClientView {
             display_name: input.display_name.clone(),
             principal_id: String::new(),
             mode: input.mode.clone(),
+            all_scopes: input.all_scopes,
             scopes: input.scopes.clone(),
             status: "unavailable",
             can_resume_registration: false,
@@ -987,6 +994,7 @@ mod tests {
             operation_id: "cf990fd7-50d3-42a0-837f-9ce1972ab06c".to_owned(),
             display_name: "Other agent".to_owned(),
             mode: LocalMode::Read,
+            all_scopes: false,
             scopes: vec!["user:self".to_owned()],
         }
     }
@@ -1037,6 +1045,47 @@ mod tests {
         ] {
             assert!(!valid_id(id));
         }
+    }
+
+    #[test]
+    fn all_scope_profiles_persist_without_upgrading_legacy_records() {
+        let all = CreateInput {
+            all_scopes: true,
+            scopes: Vec::new(),
+            ..input()
+        }
+        .normalized()
+        .unwrap();
+        assert!(all.access().all_scopes);
+        assert!(all.access().scopes.is_empty());
+        assert!(!all.access().read_all_scopes);
+        let stored = serde_json::to_value(ProfileRecord {
+            version: RECORD_VERSION,
+            input: all.clone(),
+        })
+        .unwrap();
+        assert_eq!(stored["input"]["allScopes"], true);
+        assert_eq!(
+            serde_json::from_value::<ProfileRecord>(stored)
+                .unwrap()
+                .input,
+            all
+        );
+        let old = serde_json::to_value(input()).unwrap();
+        assert!(old.get("allScopes").is_none());
+        assert!(
+            !serde_json::from_value::<CreateInput>(old)
+                .unwrap()
+                .all_scopes
+        );
+        assert!(
+            CreateInput {
+                all_scopes: true,
+                ..input()
+            }
+            .normalized()
+            .is_err()
+        );
     }
 
     #[test]

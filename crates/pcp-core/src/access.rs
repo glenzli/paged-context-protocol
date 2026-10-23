@@ -132,9 +132,9 @@ pub struct AccessSession {
     pub grants: Vec<ScopeGrant>,
     /// Permissions that apply to every current and future Scope in this Store.
     ///
-    /// Ordinary tenant sessions leave this empty. Runtime may inject it for a
-    /// same-user local operator endpoint after validating that endpoint as an
-    /// administrative service.
+    /// Runtime may attest these for a validated local operator endpoint or an
+    /// explicitly approved all-Scope read/contribute enrollment. The latter
+    /// contains only its selected mode's permissions, never operator authority.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub store_permissions: Vec<AccessPermission>,
 }

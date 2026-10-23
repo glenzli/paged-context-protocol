@@ -1,34 +1,50 @@
+import { LOCAL_CLIENT_TARGETS, localClientTarget, renderLocalClientConfiguration, localClientVerificationPrompt, localClientUsageGuidance } from "./local-client-config.js";
+
 const MODES = { read: "Read memories", contribute: "Read and contribute" };
 const STATUSES = {
   pending: "Awaiting approval", ready: "Ready to connect", revoked: "Access revoked",
   rejected: "Registration rejected", unavailable: "State unavailable",
 };
 
-function saveConfiguration(value, filename) {
-  const url = URL.createObjectURL(new Blob([value], { type: "application/json" }));
+function saveConfiguration(value, filename, mimeType = "application/json") {
+  const url = URL.createObjectURL(new Blob([value], { type: mimeType }));
   const link = document.createElement("a"); link.href = url; link.download = filename;
   document.body.append(link); link.click(); link.remove(); URL.revokeObjectURL(url);
 }
 
+const clientSelection = {
+  get(id) { try { return localStorage.getItem(`pcp-console.local-client-target.${id}`); } catch { return null; } },
+  set(id, value) { try { localStorage.setItem(`pcp-console.local-client-target.${id}`, value); } catch { /* Optional browser preference. */ } },
+};
+
 // Owns the local profile inventory, unsubmitted draft, explicit grant and read-only recovery.
 export function createLocalClientSetup({ api, mutate, byId, element, t, scopeName, confirmAction,
   changed = () => {}, committed = async () => {}, operationId = () => crypto.randomUUID(),
-  copy = value => navigator.clipboard.writeText(value), download = saveConfiguration }) {
+  copy = value => navigator.clipboard.writeText(value), download = saveConfiguration, selection = clientSelection }) {
   let inventory = null, inventoryGeneration = 0, generation = 0;
-  let draft = { displayName: "", mode: "read", scopes: [] }, profile = null, operation = null, config = null;
+  const newDraft = () => ({ displayName: "", mode: "read", allScopes: true, scopes: [] });
+  let draft = newDraft(), profile = null, operation = null, config = null;
+  let targetId = "generic";
   let stage = "edit", busy = false, loading = false, uncertain = false, resumable = false, externalBusy = false, feedback = null, notice = "", scopeQuery = "";
   const dialog = byId("local-client-dialog");
+  const targetSelect = byId("local-client-target");
+  targetSelect.replaceChildren(...LOCAL_CLIENT_TARGETS.map(target => {
+    const option = element("option", "", t(target.name)); option.value = target.id; return option;
+  }));
+  const exportValue = () => renderLocalClientConfiguration(config, targetId);
   const name = namespace => namespace === "user:self" ? t("Personal memory")
     : inventory?.scopeOptions?.find(item => item.namespace === namespace)?.displayName || scopeName(namespace);
   const path = id => `/api/local-clients/${encodeURIComponent(id)}`;
-  const descriptor = value => ({ displayName: value.displayName, mode: value.mode, scopes: [...value.scopes].sort() });
+  const descriptor = value => ({ displayName: value.displayName, mode: value.mode, allScopes: value.allScopes === true, scopes: value.allScopes ? [] : [...value.scopes].sort() });
   const sameGrant = (left, right) => JSON.stringify(descriptor(left)) === JSON.stringify(descriptor(right));
-  const dirty = () => stage === "edit" && (draft.displayName.trim() !== "" || draft.mode !== "read" || draft.scopes.length > 0);
+  const dirty = () => stage === "edit" && (draft.displayName.trim() !== "" || draft.mode !== "read" || !draft.allScopes);
   const editable = () => stage === "edit" && !busy && !loading && !uncertain && !externalBusy;
   const statusLabel = value => t(STATUSES[value.status] || "State unavailable");
 
   function validateProfile(value, expectedId) {
     if (!value || value.id !== expectedId || !MODES[value.mode] || !Array.isArray(value.scopes)
+        || (value.allScopes !== undefined && typeof value.allScopes !== "boolean")
+        || (value.allScopes === true && value.scopes.length !== 0)
         || !Object.hasOwn(STATUSES, value.status)) throw new Error(t("Unexpected local agent response."));
     return value;
   }
@@ -71,7 +87,13 @@ export function createLocalClientSetup({ api, mutate, byId, element, t, scopeNam
     byId("local-client-profile").hidden = stage === "edit";
     byId("local-client-name").disabled = !editable();
     byId("local-client-mode").disabled = !editable();
-    byId("local-client-scope-search").disabled = !editable();
+    byId("local-client-scope-mode").disabled = !editable();
+    byId("local-client-scope-mode").value = draft.allScopes ? "all" : "selected";
+    byId("local-client-selected-scopes").hidden = draft.allScopes;
+    byId("local-client-scope-search").disabled = !editable() || draft.allScopes;
+    byId("local-client-scope-help").textContent = t(draft.allScopes
+      ? "Includes every current and future scope. Access follows the selected mode."
+      : "Choose each scope explicitly. Other scopes are not included.");
     byId("local-client-mode-description").textContent = t(draft.mode === "contribute"
       ? "Read memories and contribute to the selected scopes." : "Read memories in the selected scopes.");
     byId("local-client-draft-status").hidden = !dirty();
@@ -98,16 +120,37 @@ export function createLocalClientSetup({ api, mutate, byId, element, t, scopeNam
       byId("local-client-profile-name").textContent = value.displayName;
       byId("local-client-profile-mode").textContent = t(MODES[value.mode]);
       const scopes = byId("local-client-profile-scopes");
-      scopes.replaceChildren(...value.scopes.map(namespace => element("li", "", name(namespace))));
+      scopes.replaceChildren(...(value.allScopes ? [element("li", "", t("All scopes"))]
+        : value.scopes.map(namespace => element("li", "", name(namespace)))));
       byId("local-client-profile-status").textContent = uncertain ? t("Outcome unknown") : profile ? statusLabel(profile) : t("Outcome unknown");
       byId("local-client-profile-reason").hidden = !profile?.reason;
       byId("local-client-profile-reason").textContent = profile?.reason || "";
     }
     const ready = profile?.status === "ready" && !uncertain;
+    targetSelect.disabled = busy || loading || uncertain;
+    targetSelect.value = targetId;
+    for (const option of targetSelect.children) option.textContent = t(localClientTarget(option.value).name);
+    const target = localClientTarget(targetId);
+    byId("local-client-location").textContent = t(target.location);
+    byId("local-client-steps").replaceChildren(...target.steps.map(step => element("li", "", t(step))));
+    const guide = byId("local-client-docs"); guide.href = target.docs;
     byId("local-client-config-section").hidden = !ready;
-    byId("local-client-config").value = config ? JSON.stringify(config, null, 2) : "";
-    byId("local-client-copy").disabled = !ready || !config || busy || loading;
-    byId("local-client-download").disabled = !ready || !config || busy || loading;
+    let exported = null, exportError = "";
+    if (config) try { exported = exportValue(); } catch { exportError = t("Unexpected local agent response."); }
+    byId("local-client-config-error").hidden = !exportError;
+    byId("local-client-config-error").textContent = exportError;
+    const texts = {
+      "local-client-config": exported?.text || "",
+      "local-client-install-command": exported?.installCommand || "",
+      "local-client-verification": exported && profile ? localClientVerificationPrompt(exported.serverName, profile, t) : "",
+      "local-client-guidance": profile ? localClientUsageGuidance(profile.mode, t) : "",
+    };
+    for (const [id, text] of Object.entries(texts)) if (byId(id).value !== text) byId(id).value = text;
+    byId("local-client-command-section").hidden = !exported?.installCommand;
+    byId("local-client-expected-identity").textContent = profile?.principalId || "";
+    for (const id of ["local-client-copy", "local-client-download", "local-client-copy-command", "local-client-copy-verification", "local-client-copy-guidance"])
+      byId(id).disabled = !ready || !exported || busy || loading;
+    byId("local-client-copy-command").disabled ||= !exported?.installCommand;
   }
 
   async function load() {
@@ -174,6 +217,7 @@ export function createLocalClientSetup({ api, mutate, byId, element, t, scopeNam
       if (request !== generation) return;
       if (!sameGrant(value, operation)) throw new Error(t("Unexpected local agent response."));
       profile = value; operation = null; stage = "profile"; config = null; uncertain = false;
+      selection.set(profile.id, targetId);
       await load(); await committed();
     } catch (failure) {
       if (request !== generation) return;
@@ -189,10 +233,10 @@ export function createLocalClientSetup({ api, mutate, byId, element, t, scopeNam
     draft.displayName = byId("local-client-name").value.trim();
     const availableScopes = new Set(inventory.scopeOptions.map(value => value.namespace));
     if (new TextEncoder().encode(draft.displayName).length > 120) { error(new Error(t("Agent name is too long."))); return; }
-    if (!draft.displayName || !draft.scopes.length || draft.scopes.some(scope => !availableScopes.has(scope))) {
+    if (!draft.displayName || (!draft.allScopes && (!draft.scopes.length || draft.scopes.some(scope => !availableScopes.has(scope))))) {
       error(new Error(t("Enter an agent name and choose at least one available scope."))); return;
     }
-    return submitRegistration({ operationId: operationId(), displayName: draft.displayName, mode: draft.mode, scopes: [...draft.scopes] });
+    return submitRegistration({ operationId: operationId(), ...descriptor(draft) });
   }
 
   async function resume() {
@@ -230,7 +274,7 @@ export function createLocalClientSetup({ api, mutate, byId, element, t, scopeNam
         confirmLabel: t("Close and check later") })) return false;
     } else if (dirty()) {
       if (!await confirmAction({ title: t("Discard local agent draft?"), description: t("Your unregistered local agent draft will be discarded."), confirmLabel: t("Discard draft") })) return false;
-      draft = { displayName: "", mode: "read", scopes: [] };
+      draft = newDraft();
     }
     generation++; loading = false; dialog.close(); changed(); return true;
   }
@@ -238,7 +282,8 @@ export function createLocalClientSetup({ api, mutate, byId, element, t, scopeNam
   async function openNew() {
     if (busy || externalBusy) return;
     if (!uncertain && !dirty()) {
-      draft = { displayName: "", mode: "read", scopes: [] }; stage = "edit"; profile = null; operation = null; config = null; resumable = false; feedback = null; notice = "";
+      targetId = "generic";
+      draft = newDraft(); stage = "edit"; profile = null; operation = null; config = null; resumable = false; feedback = null; notice = "";
       scopeQuery = ""; byId("local-client-scope-search").value = "";
       byId("local-client-name").value = ""; byId("local-client-mode").value = "read";
     }
@@ -249,11 +294,17 @@ export function createLocalClientSetup({ api, mutate, byId, element, t, scopeNam
 
   async function openProfile(id) {
     if (busy || (uncertain && id !== (profile?.id || operation?.operationId))) return;
-    if (!uncertain) { profile = inventory?.clients?.find(value => value.id === id) || null; operation = profile ? null : { operationId: id }; config = null; resumable = false; stage = "profile"; feedback = null; notice = ""; }
+    if (!uncertain) { targetId = localClientTarget(selection.get(id)).id; profile = inventory?.clients?.find(value => value.id === id) || null; operation = profile ? null : { operationId: id }; config = null; resumable = false; stage = "profile"; feedback = null; notice = ""; }
     render(); if (!dialog.open) dialog.showModal();
     await check();
   }
 
+  targetSelect.addEventListener("change", () => {
+    if (busy || loading || uncertain) return;
+    targetId = localClientTarget(targetSelect.value).id;
+    if (profile) selection.set(profile.id, targetId);
+    notice = ""; render(false);
+  });
   byId("local-client-add").addEventListener("click", openNew);
   byId("local-client-form").addEventListener("submit", register);
   byId("local-client-name").addEventListener("input", () => {
@@ -268,19 +319,37 @@ export function createLocalClientSetup({ api, mutate, byId, element, t, scopeNam
   byId("local-client-scope-search").addEventListener("input", () => {
     scopeQuery = byId("local-client-scope-search").value.trim(); renderScopeOptions();
   });
+  byId("local-client-scope-mode").addEventListener("change", () => {
+    if (!editable()) return;
+    draft.allScopes = byId("local-client-scope-mode").value === "all";
+    feedback = null; render(); changed();
+  });
   byId("local-client-approve").addEventListener("click", approve);
   byId("local-client-resume").addEventListener("click", resume);
   byId("local-client-check").addEventListener("click", check);
   byId("local-client-close").addEventListener("click", close);
   dialog.addEventListener("cancel", event => { event.preventDefault(); void close(); });
-  byId("local-client-copy").addEventListener("click", async () => {
-    if (!config || busy || loading || uncertain || profile?.status !== "ready") return;
-    try { await copy(JSON.stringify(config, null, 2)); notice = "MCP configuration copied."; feedback = null; render(false); }
-    catch (failure) { error(new Error(`${t("Could not copy the configuration. Select and copy the JSON below.")} ${failure.message || failure}`)); }
-  });
+  function copyText(buttonId, textId, message) {
+    byId(buttonId).addEventListener("click", async () => {
+      if (!config || busy || loading || uncertain || profile?.status !== "ready" || byId(buttonId).disabled) return;
+      const request = generation;
+      try {
+        await copy(byId(textId).value);
+        if (request !== generation) return;
+        notice = message; feedback = null; render(false);
+      } catch (failure) {
+        if (request !== generation) return;
+        error(new Error(`${t("Could not copy. Select and copy the text below.")} ${failure.message || failure}`));
+      }
+    });
+  }
+  copyText("local-client-copy", "local-client-config", "MCP configuration copied.");
+  copyText("local-client-copy-command", "local-client-install-command", "Install command copied.");
+  copyText("local-client-copy-verification", "local-client-verification", "Verification prompt copied.");
+  copyText("local-client-copy-guidance", "local-client-guidance", "Usage guidance copied.");
   byId("local-client-download").addEventListener("click", () => {
-    if (!config || busy || loading || uncertain || profile?.status !== "ready") return;
-    try { download(JSON.stringify(config, null, 2) + "\n", `pcp-${profile.id}.json`); }
+    if (!config || busy || loading || uncertain || profile?.status !== "ready" || byId("local-client-download").disabled) return;
+    try { const value = exportValue(); download(value.text, value.filename, value.mimeType); }
     catch (failure) { error(failure); }
   });
 

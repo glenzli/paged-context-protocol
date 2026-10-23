@@ -73,8 +73,9 @@ impl AccessMode {
     /// current and future Scope in one Store.
     ///
     /// Callers must enforce the deployment boundary before selecting this
-    /// constructor. Runtime configuration restricts it to administrative
-    /// service endpoints; tenant enrollment never uses it.
+    /// constructor. Runtime configuration restricts service endpoints to
+    /// administrative services. Enrollment permits only explicitly approved
+    /// all-Scope read/contribute modes, without extra permissions.
     pub fn store_wide_session(
         self,
         principal: AccessPrincipal,

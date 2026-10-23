@@ -43,10 +43,50 @@ pub enum RequestedAccessMode {
 pub struct RequestedAccess {
     pub mode: RequestedAccessMode,
     pub scopes: Vec<String>,
+    /// Apply the selected read/contribute mode to all current and future Scopes.
+    /// Omission preserves the historical explicit-scope and read-all policies.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub all_scopes: bool,
     #[serde(default)]
     pub read_all_scopes: bool,
     #[serde(default)]
     pub allow_cross_scope_derivation: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+impl RequestedAccess {
+    pub fn validate_scopes(&self) -> Result<()> {
+        if self.all_scopes {
+            anyhow::ensure!(
+                matches!(
+                    self.mode,
+                    RequestedAccessMode::Read | RequestedAccessMode::Contribute
+                ) && self.scopes.is_empty()
+                    && !self.read_all_scopes
+                    && !self.allow_cross_scope_derivation,
+                "all-scope enrollment requires read or contribute with no explicit scopes or extra permissions"
+            );
+        } else {
+            anyhow::ensure!(
+                !self.scopes.is_empty()
+                    && self.scopes.len() <= 16
+                    && self
+                        .scopes
+                        .iter()
+                        .all(|scope| !scope.trim().is_empty() && scope.len() <= 128),
+                "requested scopes are invalid"
+            );
+            let unique = self.scopes.iter().collect::<std::collections::HashSet<_>>();
+            anyhow::ensure!(
+                unique.len() == self.scopes.len(),
+                "requested scopes contain duplicates"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -592,6 +632,7 @@ mod tests {
             requested_access: RequestedAccess {
                 mode: RequestedAccessMode::Contribute,
                 scopes: vec!["user:self".to_owned()],
+                all_scopes: false,
                 read_all_scopes: true,
                 allow_cross_scope_derivation: false,
             },
@@ -643,6 +684,62 @@ mod tests {
         let encoded = serde_json::to_vec(&response).unwrap();
         let decoded: EnrollmentResponse = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn all_scope_policy_is_explicit_bounded_and_backward_compatible() {
+        let legacy = serde_json::json!({"mode":"contribute","scopes":["user:self"],"read_all_scopes":true,"allow_cross_scope_derivation":false});
+        let old: RequestedAccess = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(!old.all_scopes);
+        assert_eq!(serde_json::to_value(&old).unwrap(), legacy);
+        old.validate_scopes().unwrap();
+        let all: RequestedAccess = serde_json::from_value(
+            serde_json::json!({"mode":"read","scopes":[],"all_scopes":true}),
+        )
+        .unwrap();
+        all.validate_scopes().unwrap();
+        RequestedAccess {
+            mode: RequestedAccessMode::Contribute,
+            ..all.clone()
+        }
+        .validate_scopes()
+        .unwrap();
+        for mode in [
+            RequestedAccessMode::Observe,
+            RequestedAccessMode::Audit,
+            RequestedAccessMode::Write,
+            RequestedAccessMode::Repair,
+            RequestedAccessMode::Admin,
+        ] {
+            assert!(
+                RequestedAccess {
+                    mode,
+                    ..all.clone()
+                }
+                .validate_scopes()
+                .is_err()
+            );
+        }
+        for invalid in [
+            RequestedAccess {
+                scopes: vec!["user:self".into()],
+                ..all.clone()
+            },
+            RequestedAccess {
+                read_all_scopes: true,
+                ..all.clone()
+            },
+            RequestedAccess {
+                allow_cross_scope_derivation: true,
+                ..all.clone()
+            },
+            RequestedAccess {
+                all_scopes: false,
+                ..all
+            },
+        ] {
+            assert!(invalid.validate_scopes().is_err());
+        }
     }
 
     #[test]

@@ -612,10 +612,11 @@ impl EnrollmentHandler {
         &self,
         approved_access: &pcp_rpc::RequestedAccess,
     ) -> std::result::Result<(), ProtocolError> {
-        if !approved_access
-            .scopes
-            .iter()
-            .any(|scope| scope == "user:self")
+        if !approved_access.all_scopes
+            && !approved_access
+                .scopes
+                .iter()
+                .any(|scope| scope == "user:self")
         {
             return Ok(());
         }
@@ -768,12 +769,20 @@ fn access_session(
         display_name: registration.client.principal.display_name.clone(),
     };
     let session_id = format!("enrolled:{}:{generation}", registration.registration_id);
-    let mut access = mode.session(
-        principal.clone(),
-        session_id.clone(),
-        scopes,
-        registration.approved_access.allow_cross_scope_derivation,
-    );
+    let mut access = if registration.approved_access.all_scopes {
+        registration
+            .approved_access
+            .validate_scopes()
+            .map_err(|_| ProtocolError::invalid("invalid all-scope enrollment"))?;
+        mode.store_wide_session(principal.clone(), session_id.clone(), scopes, false)
+    } else {
+        mode.session(
+            principal.clone(),
+            session_id.clone(),
+            scopes,
+            registration.approved_access.allow_cross_scope_derivation,
+        )
+    };
     for scope in &registration.project_scopes {
         if !access.allows(scope, pcp_core::AccessPermission::Ingest) {
             access.grants.extend(
@@ -839,20 +848,7 @@ fn validate_client_access(
     {
         anyhow::bail!("display_name has invalid length");
     }
-    if access.scopes.is_empty()
-        || access.scopes.len() > 16
-        || access
-            .scopes
-            .iter()
-            .any(|scope| scope.trim().is_empty() || scope.len() > 128)
-    {
-        anyhow::bail!("requested scopes are invalid");
-    }
-    let unique_scopes = access.scopes.iter().collect::<HashSet<_>>();
-    anyhow::ensure!(
-        unique_scopes.len() == access.scopes.len(),
-        "requested scopes contain duplicates"
-    );
+    access.validate_scopes()?;
     Ok(())
 }
 

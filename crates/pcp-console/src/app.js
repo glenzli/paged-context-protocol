@@ -1,3 +1,4 @@
+import { LOCAL_CLIENT_CONFIG_MESSAGES } from "/local-client-config.js";
 import { maintenanceFailureKind, maintenanceFailureLabel } from "/maintenance-diagnostics.js";
 import { kindLabel, technicalDetails, scopeLabel, refreshScopeLabels } from "/console-presentation.js";
 import { createConsoleNavigation } from "/console-navigation.js";
@@ -76,6 +77,7 @@ let pagesPoll = null;
 const PAGES_POLL_INTERVAL_MS = 15_000;
 let maintenanceConvergenceActive = false;
 const ZH_MESSAGES = {
+  ...LOCAL_CLIENT_CONFIG_MESSAGES,
   "Unsaved changes": "有未保存更改",
   "Refresh permissions": "刷新权限",
   "Add local agent": "添加本机 Agent",
@@ -88,7 +90,7 @@ const ZH_MESSAGES = {
   "Read and contribute": "读取并贡献记忆",
   "Read memories in the selected scopes.": "读取所选范围内的记忆。",
   "Read memories and contribute to the selected scopes.": "读取所选范围内的记忆，并向这些范围贡献内容。",
-  "Selected scopes": "所选范围",
+  "Selected scopes": "指定范围",
   "Choose each scope explicitly. Other scopes are not included.": "请逐项选择授权范围，其他范围不会自动加入。",
   "Find a scope": "查找范围",
   "{count} scopes selected": "已选择 {count} 个范围",
@@ -107,7 +109,6 @@ const ZH_MESSAGES = {
   "View setup": "查看接入",
   "This agent is awaiting approval. Review these permissions before authorizing it.": "此 Agent 正在等待授权。请核对以下权限，再批准接入。",
   "MCP configuration": "MCP 配置",
-  "Copy this complete JSON into your agent's MCP settings. The values are ready to use; no environment variables need to be filled in.": "将这份完整 JSON 复制到 Agent 的 MCP 设置中即可使用，无需手动填写环境变量。",
   "Credentials stay in a local file. This configuration refers to that file and works on this computer.": "凭据保存在本机文件中。此配置只引用该文件，供这台电脑使用。",
   "Copy configuration": "复制配置",
   "Download JSON": "下载 JSON",
@@ -128,7 +129,6 @@ const ZH_MESSAGES = {
   "Your unregistered local agent draft will be discarded.": "将丢弃尚未登记的本机 Agent 草稿。",
   "Discard draft": "丢弃草稿",
   "MCP configuration copied.": "MCP 配置已复制。",
-  "Could not copy the configuration. Select and copy the JSON below.": "无法自动复制。请选中下方 JSON 后手动复制。",
   "The action outcome is unknown. Refresh permissions and check the current state before another action.": "操作结果待确认。请先刷新权限并核对当前状态，再进行其他操作。",
   "The action completed, but permissions could not refresh. Refresh permissions before another action.": "操作已完成，但权限列表刷新失败。请先刷新权限，再进行其他操作。",
   "Loading automatic maintenance settings…": "正在加载自动维护设置…",
@@ -191,6 +191,9 @@ const ZH_MESSAGES = {
   "Requested permissions": "请求的权限",
   "Access mode": "访问方式",
   "Scope policy": "范围规则",
+  "Scope access": "授权范围",
+  "Give this agent its own identity and choose its scope access.": "为此 Agent 建立独立身份，并选择可访问的范围。",
+  "Includes every current and future scope. Access follows the selected mode.": "包含当前和以后新增的所有范围，按所选访问方式生效。",
   "Read all scopes; other permissions remain scoped": "可读取所有当前与未来范围；其他权限仍受指定范围限制",
   "Permissions apply to listed scopes": "权限仅用于下列范围",
   "Configured scopes": "指定范围",

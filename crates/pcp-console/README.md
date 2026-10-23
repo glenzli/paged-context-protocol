@@ -24,20 +24,68 @@ explicitly refreshes and checks the current permissions; requests are not replay
 ### Local agent setup
 
 In **Client access**, choose **Add local agent**, enter a name, select **Read
-memories** or **Read and contribute**, and choose each permitted Scope. Read is
-the default and no Scope is selected initially. The Scope list supports search.
+memories** or **Read and contribute**, and choose **All scopes** or **Selected scopes**. Read and All scopes are
+the defaults. All scopes applies that mode to current and future Scopes;
+Selected scopes shows a searchable checklist. Existing registrations keep their
+previous grants; the new default never upgrades them.
 **Register agent** creates an independent identity awaiting approval; review
 its displayed permissions and choose **Authorize agent** before using it.
 Candidate/activity opt-ins and new-project registration retain their separate
 controls.
 
-An approved local agent offers a complete generic MCP JSON configuration to
-copy or download. Its command and local enrollment-file reference are already
-filled in. Credentials remain in the managed local file and are never sent to
-the browser. Each configuration uses its own server key; the Console does not
-edit another application's files or install software. Keep this configuration
-on the computer where it was generated. The MCP format must be accepted by the
-agent's own configuration UI.
+Choose **Target client** before or after registration. An approved agent offers
+ready-to-use configuration, client-specific installation steps, an official guide,
+and copy/download actions. This is an export choice, not a new permission grant;
+the browser remembers it per local profile. Each independent agent should have
+its own registration. The process command and enrollment-file reference are filled
+in. Credentials stay in the managed local file and never reach the browser. These
+exports work on the computer and user account that can access that file.
+
+| Client | Export and installation |
+| --- | --- |
+| Claude Code | `mcpServers` JSON plus a safely quoted `claude mcp add-json --scope user` command; project `.mcp.json` is an alternative. |
+| Claude Desktop | `mcpServers` JSON; open **Settings → Developer → Edit Config**. |
+| Codex | TOML tables for `~/.codex/config.toml`. |
+| Cursor | `mcpServers` JSON for user or project `mcp.json`. |
+| VS Code / GitHub Copilot | `servers` JSON with `type: stdio` for MCP User Configuration or `.vscode/mcp.json`. |
+| Gemini CLI | `mcpServers` JSON merged into `settings.json`. |
+| Antigravity | `mcpServers` JSON; open the installed version's MCP config from its settings. |
+| DeepSeek Harness (DSH) | A complete Cordis `insert` overlay for `@deepseek-ai/dsh-mcp-client`, plus `dsh web --patch` instructions. |
+| OpenCode 1.x / 2.x | Separate exports for `mcp.<name>` and `mcp.servers.<name>`, using command arrays and `environment`. |
+| Cline / Roo Code | `mcpServers` JSON merged from the extension's MCP configuration editor. |
+| Windsurf / Cascade | `mcpServers` JSON for Cascade; the newer Devin Local agent has separate configuration. |
+| Generic Agent | Generic `mcpServers` JSON and a standard STDIO MCP client SDK workflow. |
+
+The Console does not install clients, edit their settings, or change their tool
+approval defaults. Merge entries without replacing existing settings. Claude's
+install command is for a local POSIX shell. DSH's command runs from the directory
+containing its downloaded YAML. Its server namespace is a lossless base-36 UUID
+to fit DSH's 32-character limit; the PCP Principal and credential stay unchanged.
+
+**Verify in the target agent** provides a copyable read-only prompt with the
+expected Principal and scopes. A successful config export or Console session is
+not proof that a target agent connected: check that agent's real `pcp_whoami`,
+`pcp_list_scopes`, and read/search results. **PCP usage guidance** supplies optional
+persistent instructions for focused recall; write guidance follows the granted
+mode and keeps candidate/activity opt-ins separate.
+
+`src/local-client-config.js` owns the client catalog, formats, installation text,
+verification prompts and their Chinese translations. It projects the existing
+approved launch specification without changing the backend API or stored profiles.
+The catalog links the official format sources checked on 2026-10-23. A catalog
+entry denotes an available export, not an assertion that every client/version has
+been run. Regenerate against the relevant official guide when a client changes.
+
+Configuration validation combines `frontend/local-client-config.test.mjs` and
+`frontend/local-client-setup.test.mjs` with `scripts/test_console_client_exports.py`.
+The integration script uses real JSON/TOML/YAML parsers and isolated PCP processes,
+reads a synthetic Page and checks read-only denial for every export.
+`scripts/test_console_all_scopes.py` also keeps real MCP processes connected
+while new project Scopes are created, verifies read/contribute modes before and
+after a Runtime restart, proves selected legacy grants stay bounded, and checks
+that revocation invalidates running all-scope connections. Optional
+installed-client parser checks use fresh homes and no model calls. They are
+reported separately from an end-to-end conversation in that branded client.
 
 Local profiles remain listed after reload, including revoked registrations.
 **Ready to connect** means the configuration and grant are available; it does
@@ -47,7 +95,10 @@ a read-only **Check current state** action. An authoritative missing registratio
 returns to the retained draft; it never silently creates another identity or
 approves a request. If a fresh check confirms an interrupted registration can
 resume, **Resume registration** explicitly retries that original identity and
-immutable grant. It does not approve it. Draft cancellation, Escape and browser
+immutable grant. It does not approve it. The immutable request includes the
+all/selected scope policy; all-scope grants are summarized as **All scopes**
+instead of enumerating the Store. All-scope contribution grants ingest, without
+revision, administration or cross-scope derivation authority. Draft cancellation, Escape and browser
 close protect unsubmitted work. `src/local-client-setup.js` owns this workflow and configuration
 recovery; `src/client-access-view.js` combines local profiles with existing
 permissions without duplicating their rows.

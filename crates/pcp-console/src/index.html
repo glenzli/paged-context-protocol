@@ -658,22 +658,26 @@
 
   <dialog id="local-client-dialog" class="local-client-dialog" aria-labelledby="local-client-title">
     <header class="dialog-header">
-      <div><strong id="local-client-title" data-i18n="Local agent setup">Local agent setup</strong><div class="muted" data-i18n="Give this agent its own identity and an explicit set of scopes.">Give this agent its own identity and an explicit set of scopes.</div></div>
+      <div><strong id="local-client-title" data-i18n="Local agent setup">Local agent setup</strong><div class="muted" data-i18n="Give this agent its own identity and choose its scope access.">Give this agent its own identity and choose its scope access.</div></div>
       <button id="local-client-close" class="icon-button dialog-close-button" type="button" aria-label="Close" title="Close" data-i18n-aria-label="Close" data-i18n-title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
     </header>
     <div class="local-client-content">
       <div id="local-client-error" class="dialog-feedback" role="alert" tabindex="-1" hidden><span id="local-client-error-message"></span></div>
       <p id="local-client-notice" class="muted" role="status" aria-live="polite" hidden></p>
+      <label class="local-client-field"><span data-i18n="Target client">Target client</span><select id="local-client-target" aria-describedby="local-client-target-help"></select><small id="local-client-target-help" class="muted" data-i18n="Choose a client to get its configuration format and setup steps.">Choose a client to get its configuration format and setup steps.</small></label>
       <form id="local-client-form" class="local-client-form">
         <label class="local-client-field"><span data-i18n="Agent name">Agent name</span><input id="local-client-name" type="text" maxlength="120" autocomplete="off" required placeholder="e.g. Research assistant" data-i18n-placeholder="e.g. Research assistant"></label>
         <label class="local-client-field"><span data-i18n="Access mode">Access mode</span><select id="local-client-mode" aria-describedby="local-client-mode-description"><option value="read" data-i18n="Read memories">Read memories</option><option value="contribute" data-i18n="Read and contribute">Read and contribute</option></select><small id="local-client-mode-description" class="muted"></small></label>
         <fieldset class="local-client-scopes">
-          <legend data-i18n="Selected scopes">Selected scopes</legend>
-          <p class="muted" data-i18n="Choose each scope explicitly. Other scopes are not included.">Choose each scope explicitly. Other scopes are not included.</p>
-          <input id="local-client-scope-search" type="search" placeholder="Find a scope" aria-label="Find a scope" data-i18n-placeholder="Find a scope" data-i18n-aria-label="Find a scope">
-          <div id="local-client-scope-options" class="local-client-scope-options"></div>
-          <p id="local-client-no-scopes" class="muted" data-i18n="No scopes are available for this Console." hidden>No scopes are available for this Console.</p>
-          <p id="local-client-scope-count" class="muted" role="status" aria-live="polite"></p>
+          <legend data-i18n="Scope access">Scope access</legend>
+          <label class="local-client-field"><select aria-label="Scope access" data-i18n-aria-label="Scope access" id="local-client-scope-mode" aria-describedby="local-client-scope-help"><option value="all" data-i18n="All scopes" selected>All scopes</option><option value="selected" data-i18n="Selected scopes">Selected scopes</option></select></label>
+          <p id="local-client-scope-help" class="muted"></p>
+          <div id="local-client-selected-scopes" class="local-client-field" hidden>
+            <input id="local-client-scope-search" type="search" placeholder="Find a scope" aria-label="Find a scope" data-i18n-placeholder="Find a scope" data-i18n-aria-label="Find a scope">
+            <div id="local-client-scope-options" class="local-client-scope-options"></div>
+            <p id="local-client-no-scopes" class="muted" data-i18n="No scopes are available for this Console." hidden>No scopes are available for this Console.</p>
+            <p id="local-client-scope-count" class="muted" role="status" aria-live="polite"></p>
+          </div>
         </fieldset>
         <p class="muted local-client-policy" data-i18n="Candidate and activity permissions are configured separately.">Candidate and activity permissions are configured separately.</p>
         <footer class="local-client-actions"><span id="local-client-draft-status" class="draft-status" data-i18n="Unsaved changes" hidden>Unsaved changes</span><button id="local-client-register" class="primary-button" type="submit" data-i18n="Register agent">Register agent</button></footer>
@@ -681,16 +685,37 @@
       <section id="local-client-profile" class="local-client-profile" hidden>
         <div class="local-client-profile-heading"><strong id="local-client-profile-name"></strong><span id="local-client-profile-status" class="local-client-status" role="status" aria-live="polite"></span></div>
         <p id="local-client-review-note" data-i18n="This agent is awaiting approval. Review these permissions before authorizing it." hidden>This agent is awaiting approval. Review these permissions before authorizing it.</p>
-        <dl class="details-grid local-client-grant"><dt data-i18n="Access mode">Access mode</dt><dd id="local-client-profile-mode"></dd><dt data-i18n="Selected scopes">Selected scopes</dt><dd><ul id="local-client-profile-scopes"></ul></dd></dl>
+        <dl class="details-grid local-client-grant"><dt data-i18n="Access mode">Access mode</dt><dd id="local-client-profile-mode"></dd><dt data-i18n="Scope access">Scope access</dt><dd><ul id="local-client-profile-scopes"></ul></dd></dl>
         <p class="muted local-client-policy" data-i18n="Candidate and activity permissions are configured separately.">Candidate and activity permissions are configured separately.</p>
         <p id="local-client-profile-reason" class="muted" hidden></p>
         <div id="local-client-config-section" class="local-client-config-section" hidden>
-          <h2 data-i18n="MCP configuration">MCP configuration</h2>
-          <p data-i18n="Copy this complete JSON into your agent's MCP settings. The values are ready to use; no environment variables need to be filled in.">Copy this complete JSON into your agent's MCP settings. The values are ready to use; no environment variables need to be filled in.</p>
+          <h2 data-i18n="Install in your agent">Install in your agent</h2>
+          <p class="muted" data-i18n="Keep existing settings when merging. All PCP values are filled in; no shell environment setup is needed.">Keep existing settings when merging. All PCP values are filled in; no shell environment setup is needed.</p>
+          <div class="local-client-install-location"><strong data-i18n="Configuration location">Configuration location</strong><span id="local-client-location"></span><a id="local-client-docs" target="_blank" rel="noopener noreferrer" data-i18n="Official setup guide">Official setup guide</a></div>
+          <ol id="local-client-steps" class="local-client-steps"></ol>
+          <p id="local-client-config-error" class="dialog-feedback" role="alert" hidden></p>
+          <section id="local-client-command-section" class="local-client-guide" hidden>
+            <h3 data-i18n="Install command">Install command</h3>
+            <p class="muted" data-i18n="Run in a local macOS/Linux terminal.">Run in a local macOS/Linux terminal.</p>
+            <textarea id="local-client-install-command" class="mono local-client-command" readonly rows="3" spellcheck="false" aria-label="Install command" data-i18n-aria-label="Install command"></textarea>
+            <div class="local-client-actions"><button id="local-client-copy-command" type="button" class="secondary-button" data-i18n="Copy install command">Copy install command</button></div>
+          </section>
+          <details class="local-client-config-preview"><summary data-i18n="Configuration preview">Configuration preview</summary><textarea id="local-client-config" class="mono" readonly rows="10" spellcheck="false" aria-label="MCP configuration" data-i18n-aria-label="MCP configuration"></textarea></details>
+          <div class="local-client-actions"><button id="local-client-copy" class="primary-button" type="button" data-i18n="Copy configuration">Copy configuration</button><button id="local-client-download" class="secondary-button" type="button" data-i18n="Download configuration">Download configuration</button></div>
           <p class="muted" data-i18n="Credentials stay in a local file. This configuration refers to that file and works on this computer.">Credentials stay in a local file. This configuration refers to that file and works on this computer.</p>
-          <textarea id="local-client-config" class="mono" readonly rows="12" spellcheck="false" aria-label="MCP configuration" data-i18n-aria-label="MCP configuration"></textarea>
-          <div class="local-client-actions"><button id="local-client-copy" class="primary-button" type="button" data-i18n="Copy configuration">Copy configuration</button><button id="local-client-download" class="secondary-button" type="button" data-i18n="Download JSON">Download JSON</button></div>
-          <p class="muted" data-i18n="Connection not verified. Start your agent with this configuration to connect.">Connection not verified. Start your agent with this configuration to connect.</p>
+          <p class="muted" data-i18n="Use a separate registration for each agent that needs its own permissions and access history.">Use a separate registration for each agent that needs its own permissions and access history.</p>
+          <section class="local-client-guide">
+            <h3 data-i18n="Verify in the target agent">Verify in the target agent</h3>
+            <p class="muted" data-i18n="Configuration is ready. Connection is confirmed only after the target agent successfully calls PCP and reports the expected identity and scopes.">Configuration is ready. Connection is confirmed only after the target agent successfully calls PCP and reports the expected identity and scopes.</p>
+            <p class="local-client-identity"><span data-i18n="Expected identity">Expected identity</span>: <code id="local-client-expected-identity"></code></p>
+            <textarea id="local-client-verification" readonly rows="4" aria-label="Verify in the target agent" data-i18n-aria-label="Verify in the target agent"></textarea>
+            <div class="local-client-actions"><button id="local-client-copy-verification" type="button" class="secondary-button" data-i18n="Copy verification prompt">Copy verification prompt</button></div>
+          </section>
+          <details class="local-client-guide"><summary data-i18n="PCP usage guidance">PCP usage guidance</summary>
+            <p class="muted" data-i18n="Add this guidance to the agent's persistent instructions if you want it to recall relevant context proactively.">Add this guidance to the agent's persistent instructions if you want it to recall relevant context proactively.</p>
+            <textarea id="local-client-guidance" readonly rows="6" aria-label="PCP usage guidance" data-i18n-aria-label="PCP usage guidance"></textarea>
+            <div class="local-client-actions"><button id="local-client-copy-guidance" type="button" class="secondary-button" data-i18n="Copy usage guidance">Copy usage guidance</button></div>
+          </details>
         </div>
       </section>
       <footer class="local-client-actions"><button id="local-client-check" class="secondary-button" type="button" data-i18n="Check current state" hidden>Check current state</button><button id="local-client-resume" class="primary-button" type="button" data-i18n="Resume registration" hidden>Resume registration</button><button id="local-client-approve" class="primary-button" type="button" data-i18n="Authorize agent" hidden>Authorize agent</button></footer>

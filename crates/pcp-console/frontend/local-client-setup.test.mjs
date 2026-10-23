@@ -20,13 +20,14 @@ const scopes = [{ namespace: "user:self", displayName: "My memory" }, { namespac
 const configuration = { mcpServers: { [`pcp-${id}`]: { command: "/opt/pcp/bin/pcp-mcp", args: [], env: { PCP_CLIENT_ID: "client:local-helper", PCP_ENROLLMENT_FILE: `/Users/test/.pcp/local-clients/${id}/credentials.json`, PCP_MCP_SURFACE: "generic", PCP_MCP_TOOLSET: "context" } } } };
 const text = node => [node.textContent, ...node.children.map(text)].join(" ");
 
-function fixture({ request, write, confirmation = false } = {}) {
+function fixture({ request, write, confirmation = false, preferences = new Map() } = {}) {
   let current = profile(), language = "en";
   const nodes = new Map(), reads = [], writes = [], copied = [], downloaded = [], confirmations = [];
   const byId = name => { if (!nodes.has(name)) nodes.set(name, new Node()); return nodes.get(name); };
   globalThis.document = { activeElement: null };
   const view = createLocalClientSetup({ byId, element: (tag, cls, value) => Object.assign(new Node(tag, value), { className: cls }),
     t: value => language === "zh" ? `中:${value}` : value, scopeName: namespace => namespace,
+    selection: { get: id => preferences.get(id), set: (id, value) => preferences.set(id, value) },
     operationId: () => id, copy: async value => copied.push(value), download: (...args) => downloaded.push(args),
     confirmAction: async value => { confirmations.push(value); return typeof confirmation === "function" ? confirmation() : confirmation; },
     api: async path => {
@@ -42,24 +43,60 @@ function fixture({ request, write, confirmation = false } = {}) {
     },
   });
   const name = async value => { byId("local-client-name").value = value; await byId("local-client-name").handlers.input(); };
+  const scopeMode = async value => { byId("local-client-scope-mode").value = value; await byId("local-client-scope-mode").handlers.change(); };
   const choose = async (namespace, checked = true) => {
+    if (byId("local-client-scope-mode").value !== "selected") await scopeMode("selected");
     const input = byId("local-client-scope-options").querySelectorAll("input").find(node => node.value === namespace);
     assert.ok(input); input.checked = checked; await input.handlers.change();
   };
   const register = () => byId("local-client-form").handlers.submit({ preventDefault() {} });
-  return { view, byId, reads, writes, copied, downloaded, confirmations, name, choose, register,
+  return { view, byId, reads, writes, copied, downloaded, confirmations, name, choose, scopeMode, register,
     setCurrent: value => { current = value; }, language: value => { language = value; } };
 }
 
-test("a new local agent defaults to read and requires an explicit scope before registration", async () => {
+test("new registrations default to persistent all scopes without an implicit approval", async () => {
+  const f = fixture(); await f.view.load(); await f.view.openNew();
+  assert.equal(f.byId("local-client-target").children[0].textContent, "Generic Agent");
+  assert.equal(f.byId("local-client-mode").value, "read");
+  assert.equal(f.byId("local-client-scope-mode").value, "all");
+  assert.equal(f.byId("local-client-selected-scopes").hidden, true);
+  assert.equal(f.view.hasPendingAction(), false);
+  await f.name("All scope reader"); await f.register();
+  assert.deepEqual(f.writes, [["/api/local-clients", { operationId: id, displayName: "All scope reader", mode: "read", allScopes: true, scopes: [] }]]);
+  assert.equal(text(f.byId("local-client-profile-scopes")).trim(), "All scopes");
+  assert.equal(f.byId("local-client-approve").hidden, false);
+  assert.equal(f.byId("local-client-config-section").hidden, true);
+});
+
+test("switching all/selected retains the checklist but only submits the active scope policy", async () => {
+  const f = fixture(); await f.view.load(); await f.view.openNew(); await f.name("Contributor");
+  await f.choose("project:one"); await f.scopeMode("all");
+  assert.equal(f.byId("local-client-selected-scopes").hidden, true);
+  await f.scopeMode("selected");
+  assert.ok(f.byId("local-client-scope-options").querySelectorAll("input").some(node => node.value === "project:one" && node.checked));
+  await f.scopeMode("all");
+  f.byId("local-client-mode").value = "contribute"; await f.byId("local-client-mode").handlers.change();
+  await f.register();
+  assert.equal(f.writes[0][1].allScopes, true); assert.deepEqual(f.writes[0][1].scopes, []);
+  assert.equal(f.writes[0][1].mode, "contribute");
+});
+
+test("recovery refuses a changed scope policy even with the same identity and empty scopes", async () => {
+  const f = fixture({write: async (path, body) => profile({...body, id, allScopes: false})});
+  await f.view.load(); await f.view.openNew(); await f.name("All reader"); await f.register();
+  assert.equal(f.view.blocksMutation(), true);
+  assert.equal(f.byId("local-client-config-section").hidden, true);
+});
+
+test("selected-scope registration requires an explicit scope and shows only its grant", async () => {
   const f = fixture(); await f.view.load(); await f.view.openNew();
   assert.equal(f.byId("local-client-mode").value, "read");
   assert.ok(f.byId("local-client-scope-options").querySelectorAll("input").every(input => !input.checked));
-  await f.name("Research helper"); await f.register();
+  await f.scopeMode("selected"); await f.name("Research helper"); await f.register();
   assert.equal(f.writes.length, 0);
   assert.match(f.byId("local-client-error-message").textContent, /choose at least one/);
   await f.choose("project:one"); await f.register();
-  assert.deepEqual(f.writes, [["/api/local-clients", { operationId: id, displayName: "Research helper", mode: "read", scopes: ["project:one"] }]]);
+  assert.deepEqual(f.writes, [["/api/local-clients", { operationId: id, displayName: "Research helper", mode: "read", allScopes: false, scopes: ["project:one"] }]]);
   assert.equal(f.byId("local-client-form").hidden, true);
   assert.equal(f.byId("local-client-approve").hidden, false);
   assert.match(text(f.byId("local-client-profile-scopes")), /Project One/);
@@ -93,7 +130,7 @@ test("scope search retains selections outside the filtered list and language cha
   f.byId("local-client-scope-search").value = ""; await f.byId("local-client-scope-search").handlers.input();
   assert.match(text(f.byId("local-client-scope-options")), /中:Personal memory/);
   assert.deepEqual(f.byId("local-client-scope-options").querySelectorAll("input").filter(input => input.checked).map(input => input.value), ["user:self", "project:two"]);
-  await f.register(); assert.deepEqual(f.writes[0][1].scopes, ["user:self", "project:two"]);
+  await f.register(); assert.deepEqual(f.writes[0][1].scopes, ["project:two", "user:self"]);
 });
 
 test("an unknown registration is never replayed and read-only recovery still requires explicit authorization", async () => {
@@ -152,7 +189,7 @@ test("a reloaded interrupted profile can resume with its saved descriptor while 
   await f.view.load(); assert.equal(f.byId("local-client-resume").hidden, true);
   await f.view.openProfile(id); assert.equal(f.byId("local-client-resume").hidden, false);
   await f.byId("local-client-resume").handlers.click();
-  assert.deepEqual(f.writes[0], ["/api/local-clients", { operationId: id, displayName: "Research helper", mode: "read", scopes: ["project:one"] }]);
+  assert.deepEqual(f.writes[0], ["/api/local-clients", { operationId: id, displayName: "Research helper", mode: "read", allScopes: false, scopes: ["project:one"] }]);
   const unavailable = fixture(); unavailable.setCurrent(profile({ status: "unavailable", reason: "Retry the registration" }));
   await unavailable.view.load(); await unavailable.view.openProfile(id);
   assert.equal(unavailable.byId("local-client-resume").hidden, true); assert.equal(unavailable.writes.length, 0);
@@ -226,4 +263,77 @@ test("a failed current-state read cannot leave stale approval or configuration c
   assert.equal(f.byId("local-client-profile-status").textContent, "State unavailable");
   assert.equal(f.byId("local-client-approve").hidden, true); assert.equal(f.byId("local-client-copy").disabled, true);
   assert.equal(f.view.blocksMutation(), false); assert.equal(f.writes.length, 0);
+});
+
+
+test("target selection survives approval, reload and locale changes without modifying grants", async () => {
+  const preferences = new Map(), f = fixture({ preferences });
+  await f.view.load(); await f.view.openNew();
+  assert.equal(f.byId("local-client-target").children.length, 14);
+  f.byId("local-client-target").value = "dsh"; await f.byId("local-client-target").handlers.change();
+  await f.name("DSH helper"); await f.choose("project:one"); await f.register();
+  await f.byId("local-client-approve").handlers.click();
+  assert.match(f.byId("local-client-config").value, /^- insert:/);
+  assert.match(f.byId("local-client-install-command").value, /^dsh web --patch /);
+  assert.equal(f.byId("local-client-command-section").hidden, false);
+  assert.equal(preferences.get(id), "dsh");
+  f.language("zh"); f.view.rerender();
+  assert.equal(f.byId("local-client-target").value, "dsh");
+  assert.match(f.byId("local-client-verification").value, /^中:/);
+  await f.byId("local-client-copy").handlers.click(); await f.byId("local-client-download").handlers.click();
+  assert.equal(f.copied[0], f.downloaded[0][0]);
+  assert.match(f.downloaded[0][1], /-dsh.cordis.yml$/);
+  assert.equal(f.downloaded[0][2], "application/yaml");
+  assert.equal(f.writes.length, 2);
+  assert.equal(Object.hasOwn(f.writes[0][1], "target"), false);
+  await f.view.close();
+  const next = fixture({ preferences }); next.setCurrent(profile({ status: "ready" }));
+  await next.view.load(); await next.view.openProfile(id);
+  assert.equal(next.byId("local-client-target").value, "dsh");
+  assert.equal(next.writes.length, 0);
+});
+
+test("switching formats changes all exports and verification namespace but retains the independent identity", async () => {
+  const f = fixture(); f.setCurrent(profile({ status: "ready" }));
+  await f.view.load(); await f.view.openProfile(id);
+  for (const [target, starts] of [["claude-code", "{"], ["codex", "[mcp_servers."], ["dsh", "- insert:"], ["vscode", "{"]]) {
+    f.byId("local-client-target").value = target; await f.byId("local-client-target").handlers.change();
+    assert.ok(f.byId("local-client-config").value.startsWith(starts));
+    assert.equal(f.byId("local-client-expected-identity").textContent, "client:local-helper");
+    await f.byId("local-client-copy-verification").handlers.click();
+    assert.ok(f.copied.at(-1).includes("client:local-helper"));
+    assert.ok(f.copied.at(-1).includes("project:one"));
+    if (target === "dsh") assert.match(f.copied.at(-1), /pcp_[a-z0-9]+/);
+    assert.match(f.byId("local-client-guidance").value, /read-only/);
+  }
+  assert.deepEqual(f.writes, []);
+  assert.equal(f.byId("local-client-command-section").hidden, true);
+  assert.equal(f.byId("local-client-install-command").value, "");
+  assert.equal(f.byId("local-client-profile-status").textContent, "Ready to connect");
+});
+
+test("failed reads and revoked grants disable every export and verification action", async () => {
+  const f = fixture(); f.setCurrent(profile({ status: "ready" }));
+  await f.view.load(); await f.view.openProfile(id);
+  f.setCurrent(profile({ status: "revoked" })); await f.byId("local-client-check").handlers.click();
+  for (const action of ["copy", "download", "copy-command", "copy-verification", "copy-guidance"]) {
+    assert.equal(f.byId("local-client-" + action).disabled, true);
+    await f.byId("local-client-" + action).handlers.click();
+  }
+  assert.deepEqual(f.copied, []); assert.deepEqual(f.downloaded, []);
+  assert.equal(f.byId("local-client-config").value, "");
+  assert.equal(f.byId("local-client-config-section").hidden, true);
+});
+
+test("an unknown saved target falls back to generic, and malformed exports never copy", async () => {
+  const f = fixture({ preferences: new Map([[id, "removed-client"]]), request: async path => {
+    if (path.endsWith("/config")) return { client: profile({ status: "ready" }), config: { mcpServers: {} } };
+    if (path === "/api/local-clients") return { available: true, clients: [], scopeOptions: scopes };
+    return profile({ status: "ready" });
+  } });
+  await f.view.load(); await f.view.openProfile(id);
+  assert.equal(f.byId("local-client-target").value, "generic");
+  assert.equal(f.byId("local-client-config-error").hidden, false);
+  assert.equal(f.byId("local-client-copy").disabled, true);
+  await f.byId("local-client-copy").handlers.click(); assert.deepEqual(f.copied, []);
 });

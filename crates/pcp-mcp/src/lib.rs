@@ -1679,10 +1679,9 @@ async fn operation_scope(
         .access_snapshot()
         .await
         .map_err(|e| operation_error("read current Scope grants", e))?;
-    let scopes = access.scopes_with_permissions(&[permission]);
     if let Some(requested) = requested {
-        return scopes
-            .contains(&requested.to_owned())
+        return access
+            .allows(requested, permission)
             .then(|| requested.to_owned())
             .ok_or_else(|| {
                 McpError::invalid_params(
@@ -1691,6 +1690,15 @@ async fn operation_scope(
                 )
             });
     }
+    if access.store_permissions.contains(&permission) {
+        return Err(McpError::invalid_params(
+            format!(
+                "scope is required when this PCP session is authorized for {operation} across all Scopes"
+            ),
+            None,
+        ));
+    }
+    let scopes = access.scopes_with_permissions(&[permission]);
     match scopes.as_slice() {
         [only] => Ok(only.clone()),
         [] => Err(McpError::invalid_params(
@@ -1806,6 +1814,73 @@ mod tests {
         assert_eq!("chatgpt".parse(), Ok(PcpMcpSurface::ChatGpt));
         assert_eq!("mcp".parse(), Ok(PcpMcpSurface::Generic));
         assert!("browser".parse::<PcpMcpSurface>().is_err());
+    }
+
+    #[tokio::test]
+    async fn all_scope_capture_accepts_explicit_future_scope_without_extra_authority() {
+        let root = std::env::temp_dir().join(format!(
+            "pcp-mcp-all-{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Arc::new(
+            SqlitePcpStore::open(root.join("context.sqlite3"))
+                .await
+                .unwrap(),
+        );
+        let principal = AccessPrincipal {
+            principal_id: "client:all".into(),
+            principal_type: AccessPrincipalType::ModelClient,
+            display_name: None,
+        };
+        let contributor = PcpMcpServer::new(Arc::new(EmbeddedPcpClient::new(
+            store.clone(),
+            AccessMode::Contribute.store_wide_session(principal.clone(), "all", Vec::new(), false),
+        )));
+        let namespace = "project:future";
+        let operator = AccessSession::store_wide_full_control(principal.clone(), "fixture");
+        PcpStore::create_scope(
+            &*store,
+            &operator,
+            CreateScopeRequest {
+                namespace: namespace.into(),
+                display_name: "Future".into(),
+                description: None,
+                parent_namespace: None,
+            },
+        )
+        .await
+        .unwrap();
+        let params = serde_json::json!({"scope":namespace,"category":"verified_finding","title":"Future scope","content":"Synthetic MCP all-scope test.","retentionRationale":"Verify the capture boundary."});
+        contributor
+            .pcp_capture(Parameters(serde_json::from_value(params.clone()).unwrap()))
+            .await
+            .unwrap();
+        let mut implicit = params.clone();
+        implicit.as_object_mut().unwrap().remove("scope");
+        assert!(
+            contributor
+                .pcp_capture(Parameters(serde_json::from_value(implicit).unwrap()))
+                .await
+                .err()
+                .unwrap()
+                .message
+                .contains("scope is required")
+        );
+        let reader = PcpMcpServer::new(Arc::new(EmbeddedPcpClient::new(
+            store,
+            AccessMode::Read.store_wide_session(principal, "read", Vec::new(), false),
+        )));
+        assert!(
+            reader
+                .pcp_capture(Parameters(serde_json::from_value(params).unwrap()))
+                .await
+                .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

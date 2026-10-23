@@ -414,6 +414,15 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/local-clients/{id}/config", get(local_clients::config))
         .route(
+            "/local-client-config.js",
+            get(|| async {
+                static_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("local-client-config.js"),
+                )
+            }),
+        )
+        .route(
             "/local-client-setup.js",
             get(|| async {
                 static_asset(

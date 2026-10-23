@@ -43,6 +43,17 @@ test("client configuration separates permission policy and named projects from c
   assert.match(text(row.children[1].children[1]),/client:one.*reg_one/);
 });
 
+test("persistent all-scope grants show All scopes and preserve legacy read-all semantics", async () => {
+  const all = client({registration_id:"reg_all", approved_access:{mode:"read",scopes:[],all_scopes:true,read_all_scopes:false,allow_cross_scope_derivation:false},project_scopes:["project:a"],allow_project_registration:false});
+  const {view,byId}=fixture({api:async()=>snapshot([all,client()])}); await view.load();
+  const rows=byId("enrollment-registered").children;
+  assert.match(text(rows[0].children[0]),/Read memories.*All scopes/);
+  assert.doesNotMatch(text(rows[0]),/0 configured scopes|Scope access None|writable projects|Project A/);
+  assert.match(text(rows[0]),/Includes every current and future scope/);
+  assert.match(text(rows[1]),/Read all scopes; other permissions remain scoped/);
+  assert.match(text(rows[1]),/Personal memory/);
+});
+
 function localFixture(clients, overrides = {}) {
   return { load: async () => {}, snapshot: () => ({ available: true, clients }), setExternalBusy() {},
     blocksMutation: () => false, isMutating: () => false, hasPendingAction: () => false,

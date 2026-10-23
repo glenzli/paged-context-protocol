@@ -681,6 +681,7 @@ fn begin_params(credential: &str) -> BeginEnrollmentParams {
         requested_access: RequestedAccess {
             mode: RequestedAccessMode::Contribute,
             scopes: vec!["user:self".to_owned()],
+            all_scopes: false,
             read_all_scopes: true,
             allow_cross_scope_derivation: false,
         },
@@ -701,3 +702,6 @@ fn test_root(label: &str) -> std::path::PathBuf {
 
 #[path = "tests/projects.rs"]
 mod projects;
+
+#[path = "tests/all_scopes.rs"]
+mod all_scopes;

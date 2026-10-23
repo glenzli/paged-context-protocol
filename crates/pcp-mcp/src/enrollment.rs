@@ -107,19 +107,8 @@ pub fn prepare_local_enrollment(
             RequestedAccessMode::Read | RequestedAccessMode::Contribute
         ) && !requested_access.read_all_scopes
             && !requested_access.allow_cross_scope_derivation
-            && !requested_access.scopes.is_empty()
-            && requested_access.scopes.len() <= 16
-            && requested_access
-                .scopes
-                .iter()
-                .all(|scope| !scope.trim().is_empty() && scope.len() <= 128)
-            && requested_access
-                .scopes
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len()
-                == requested_access.scopes.len(),
-        "local clients require read or contribute access to explicit distinct Scopes"
+            && requested_access.validate_scopes().is_ok(),
+        "local clients require read or contribute access to all or explicit distinct Scopes"
     );
     let state = McpEnrollmentState {
         schema: STATE_SCHEMA.to_owned(),
@@ -479,6 +468,7 @@ fn state_from_env() -> Result<McpEnrollmentState> {
             }
         },
         scopes: requested_scopes()?,
+        all_scopes: false,
         read_all_scopes: requested_read_all_scopes()?,
         allow_cross_scope_derivation: false,
     };
@@ -784,6 +774,7 @@ mod tests {
         RequestedAccess {
             mode: RequestedAccessMode::Read,
             scopes: vec!["user:self".to_owned()],
+            all_scopes: false,
             read_all_scopes: false,
             allow_cross_scope_derivation: false,
         }
@@ -886,6 +877,34 @@ mod tests {
             .is_err()
         );
         assert!(!path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_preparation_preserves_the_explicit_all_scope_mode() {
+        let (root, manifest, _listener) = fixture();
+        for (name, mode) in [
+            ("reader", RequestedAccessMode::Read),
+            ("contributor", RequestedAccessMode::Contribute),
+        ] {
+            let path = root.join(format!("clients/{name}.json"));
+            let access = RequestedAccess {
+                mode,
+                all_scopes: true,
+                scopes: Vec::new(),
+                ..read_access()
+            };
+            let prepared = prepare_local_enrollment(
+                &path,
+                name.into(),
+                access.clone(),
+                manifest.clone(),
+                "test-identity",
+            )
+            .unwrap();
+            assert_eq!(prepared.requested_access, access);
+            assert_eq!(read_state(&path).unwrap().requested_access, access);
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
